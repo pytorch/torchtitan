@@ -10,27 +10,37 @@ from dataclasses import dataclass
 import pytest
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.context_parallel import validate_cp_backend
+from torchtitan.distributed.context_parallel import validate_context_parallel
 from torchtitan.protocols.module import Module
 
 
-class TestValidateCpBackend(unittest.TestCase):
-    """``validate_cp_backend`` gates CP on the backend that implements it."""
+class _NoAttentionModel(Module):
+    """A model with no ``BaseAttention`` configs, as Flux has."""
 
-    @staticmethod
-    def _parallelism(*, spmd_backend: str, cp: int) -> ParallelismConfig:
-        return ParallelismConfig(spmd_backend=spmd_backend, context_parallel_degree=cp)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+
+class TestBackendGate(unittest.TestCase):
+    """CP requires the backend that implements it, whatever the model holds."""
+
+    def _validate(self, *, spmd_backend: str, cp: int) -> None:
+        validate_context_parallel(
+            _NoAttentionModel.Config(),
+            ParallelismConfig(spmd_backend=spmd_backend, context_parallel_degree=cp),
+        )
 
     def test_rejects_cp_on_partial_dtensor(self):
         with self.assertRaisesRegex(ValueError, "spmd_backend='spmd_types'"):
-            validate_cp_backend(self._parallelism(spmd_backend="partial_dtensor", cp=2))
+            self._validate(spmd_backend="partial_dtensor", cp=2)
 
     def test_allows_cp_on_spmd_types(self):
-        validate_cp_backend(self._parallelism(spmd_backend="spmd_types", cp=2))
+        self._validate(spmd_backend="spmd_types", cp=2)
 
     def test_allows_partial_dtensor_without_cp(self):
         # Only CP is gated; partial_dtensor stays valid for FSDP/TP/EP runs.
-        validate_cp_backend(self._parallelism(spmd_backend="partial_dtensor", cp=1))
+        self._validate(spmd_backend="partial_dtensor", cp=1)
 
 
 class TestDecoderConfigCpValidation(unittest.TestCase):
@@ -102,7 +112,127 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             config.model_spec.model.update_from_config(config=config)
 
 
+class TestUlyssesConfigValidation(unittest.TestCase):
+    """Ulysses moves the CP shard onto the heads, which constrains the config."""
+
+    @staticmethod
+    def _config(
+        *,
+        cp: int = 2,
+        tp: int = 1,
+        load_balancer: str | None = None,
+        n_heads: int | None = None,
+        n_kv_heads: int | None = None,
+    ):
+        from torchtitan.models.common.cp_attention import (
+            UlyssesCPFlexAttention,
+            use_cp_kernel,
+        )
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+
+        config = llama3_debugmodel()
+        attention = config.model_spec.model.layers[0].attention
+        if n_heads is not None:
+            attention.n_heads = n_heads
+        if n_kv_heads is not None:
+            attention.n_kv_heads = n_kv_heads
+        use_cp_kernel(config, UlyssesCPFlexAttention)
+        config.parallelism.context_parallel_degree = cp
+        config.parallelism.tensor_parallel_degree = tp
+        config.parallelism.context_parallel_load_balancer = load_balancer
+        config.training.max_context_length = 512
+        return config
+
+    def test_rejects_the_default_load_balancer(self):
+        """The default reorders tokens, which the global Ulysses mask cannot follow."""
+        default = ParallelismConfig().context_parallel_load_balancer
+        self.assertIsNotNone(default, "the default must stay a reordering balancer")
+        config = self._config(load_balancer=default)
+        with self.assertRaisesRegex(ValueError, "load_balancer must be"):
+            config.model_spec.model.update_from_config(config=config)
+
+    def test_allows_load_balancing_disabled(self):
+        config = self._config(load_balancer=None)
+        config.model_spec.model.update_from_config(config=config)
+
+    def test_rejects_kv_heads_indivisible_by_cp(self):
+        config = self._config(cp=4, tp=1, n_heads=8, n_kv_heads=2)
+        with self.assertRaisesRegex(ValueError, r"n_kv_heads \(2\)"):
+            config.model_spec.model.update_from_config(config=config)
+
+    def test_rejects_heads_indivisible_by_tp_times_cp(self):
+        config = self._config(cp=8, tp=2, n_heads=8, n_kv_heads=8)
+        with self.assertRaisesRegex(ValueError, r"n_heads \(8\)"):
+            config.model_spec.model.update_from_config(config=config)
+
+    def test_allows_heads_divisible_by_tp_times_cp(self):
+        config = self._config(cp=4, tp=2, n_heads=8, n_kv_heads=8)
+        config.model_spec.model.update_from_config(config=config)
+
+    def test_rejects_kernels_that_disagree_on_mask_sharding(self):
+        """One mask is built for the whole model, so every layer must want it."""
+        from dataclasses import fields
+
+        from torchtitan.models.common.cp_attention import (
+            AllGatherCPFlexAttention,
+            UlyssesCPFlexAttention,
+        )
+
+        config = self._config(cp=2, tp=1)
+        layer = config.model_spec.model.layers[1]
+        existing = layer.attention.inner_attention
+        self.assertIsInstance(existing, UlyssesCPFlexAttention.Config)
+        layer.attention.inner_attention = AllGatherCPFlexAttention.Config(
+            **{f.name: getattr(existing, f.name) for f in fields(existing)}
+        )
+        with self.assertRaisesRegex(ValueError, "disagree on whether"):
+            config.model_spec.model.update_from_config(config=config)
+
+
+class TestHeadDivisibility(unittest.TestCase):
+    """TP always divides the head counts; CP joins only for head-sharding kernels."""
+
+    @staticmethod
+    def _config(
+        *, kernel=None, cp: int = 1, tp: int = 1, n_heads: int, n_kv_heads: int
+    ):
+        from torchtitan.models.common.cp_attention import use_cp_kernel
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+
+        config = llama3_debugmodel()
+        attention = config.model_spec.model.layers[0].attention
+        attention.n_heads = n_heads
+        attention.n_kv_heads = n_kv_heads
+        if kernel is not None:
+            use_cp_kernel(config, kernel)
+        config.parallelism.context_parallel_degree = cp
+        config.parallelism.tensor_parallel_degree = tp
+        config.parallelism.context_parallel_load_balancer = None
+        config.training.max_context_length = 512
+        return config
+
+    def test_rejects_heads_indivisible_by_tp_without_cp(self):
+        config = self._config(tp=3, n_heads=8, n_kv_heads=8)
+        with self.assertRaisesRegex(ValueError, r"n_heads \(8\)"):
+            config.model_spec.model.update_from_config(config=config)
+
+    def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
+        """All-gather CP shards tokens, so the head counts need not divide by CP."""
+        from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
+
+        config = self._config(
+            kernel=AllGatherCPFlexAttention, cp=4, tp=1, n_heads=2, n_kv_heads=2
+        )
+        config.model_spec.model.update_from_config(config=config)
+
+
 class TestShippedCpRecipe(unittest.TestCase):
+    def test_ulysses_recipe_passes_the_gate(self):
+        from torchtitan_recipes.tests.features import llama3_debugmodel_ulysses_cp2
+
+        config = llama3_debugmodel_ulysses_cp2()
+        config.model_spec.model.update_from_config(config=config)
+
     def test_muse_glimmer_cp_recipe_passes_the_gate(self):
         from torchtitan_recipes.muse_glimmer import muse_glimmer_30b_allgather_cp8
 

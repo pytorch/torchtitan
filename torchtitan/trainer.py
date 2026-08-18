@@ -712,8 +712,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # maskless backend (e.g. the SDPA config used by the graph_trainer
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
-        if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            attention_backend = self.model_config.first_full_attention_backend
+        attention_backend = (
+            self.model_config.first_full_attention_backend
+            if isinstance(self.model_config, Decoder.Config)
+            else None
+        )
+
+        if attention_backend is not None and positions is not None:
             if isinstance(
                 attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -731,6 +736,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.device,
                 self.config.parallelism.context_parallel_load_balancer,
                 self.config.parallelism.context_parallel_ptrr_mask_key,
+                shard_attention_mask=getattr(
+                    attention_backend, "shard_attention_mask", True
+                ),
             )
 
         # Accumulate after CP sharding so labels.numel() reflects the actual

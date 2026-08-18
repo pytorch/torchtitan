@@ -7,7 +7,6 @@
 import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
@@ -152,7 +151,9 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
+            from torchtitan.distributed.context_parallel import (
+                validate_context_parallel,
+            )
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -170,47 +171,7 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            from torchtitan.models.common.cp_attention import ContextParallelKernel
-
-            cp_enabled = parallelism.context_parallel_degree > 1
-            if cp_enabled:
-                validate_cp_backend(parallelism)
-            for fqn, traversed, _, _ in self.traverse(BaseAttention.Config):
-                # traverse returns the base config type.
-                attention = cast(BaseAttention.Config, traversed)
-                kernel = attention.inner_attention._owner
-                is_cp_kernel = kernel is not None and issubclass(
-                    kernel, ContextParallelKernel
-                )
-                if is_cp_kernel == cp_enabled:
-                    continue
-                if cp_enabled:
-                    raise ValueError(
-                        f"{fqn}.inner_attention must use a ContextParallelKernel, "
-                        "such as AllGatherCPFlexAttention, when the context "
-                        "parallel degree is larger than 1. See an example in "
-                        "torchtitan_recipes/muse_glimmer.py."
-                    )
-                raise ValueError(
-                    f"{fqn}.inner_attention is a ContextParallelKernel but the "
-                    "context parallel degree is 1. Select a non-CP kernel."
-                )
-
-            tp = parallelism.tensor_parallel_degree
-            attention = self.first_attention
-            if tp > 1 and attention is not None:
-                n_heads = attention.n_heads
-                n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_kv_heads ({n_kv_heads})."
-                    )
+            validate_context_parallel(self, parallelism)
 
             ep = parallelism.expert_parallel_degree
             for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
@@ -230,7 +191,7 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.max_context_length
-                rope_cfg = getattr(attention, "rope", None)
+                rope_cfg = getattr(self.first_attention, "rope", None)
                 if rope_cfg is not None:
                     max_context_length = self.max_context_length
                     if seq_len > max_context_length:

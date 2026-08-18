@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, cast
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
@@ -17,21 +17,6 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import AttentionMasksType
 
-if TYPE_CHECKING:
-    from torchtitan.config import ParallelismConfig
-
-
-def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
-    """Validate CP backend compatibility for ShardingConfig-based models."""
-    if (
-        parallelism.context_parallel_degree > 1
-        and parallelism.spmd_backend != "spmd_types"
-    ):
-        raise ValueError(
-            "Context Parallel requires parallelism.spmd_backend='spmd_types', "
-            f"got '{parallelism.spmd_backend}'."
-        )
-
 
 def prepare_context_parallel_input(
     inputs: torch.Tensor,
@@ -41,6 +26,8 @@ def prepare_context_parallel_input(
     device: torch.device,
     load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
+    *,
+    shard_attention_mask: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Shard inputs, labels, positions, and attention masks for Context Parallel.
@@ -61,6 +48,9 @@ def prepare_context_parallel_input(
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
             masks are a dict[str, BlockMask], selects which mask the
             PTRRLoadBalancer is built from. Ignored otherwise.
+        shard_attention_mask: Whether to shard the masks along with the inputs.
+            False for a kernel that attends to the whole sequence and so needs
+            the mask global. Read off the attention kernel by the caller.
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -77,6 +67,7 @@ def prepare_context_parallel_input(
         attention_masks,
         load_balancer_type,
         ptrr_mask_key=ptrr_mask_key,
+        shard_attention_mask=shard_attention_mask,
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -92,6 +83,8 @@ def cp_shard(
     load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 0,
     ptrr_mask_key: str | None = None,
+    *,
+    shard_attention_mask: bool = True,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -119,6 +112,9 @@ def cp_shard(
             the dict the PTRRLoadBalancer is built from. The resulting balancer
             is used to shard every mask in the dict as well as the inputs.
             Required (must be a valid key) in that case; ignored otherwise.
+        shard_attention_mask: Whether to shard ``attention_masks`` along with
+            the inputs. False for a kernel that attends to the whole sequence
+            and so needs the mask global; the masks are returned unchanged.
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -194,9 +190,10 @@ def cp_shard(
     )
 
     # BlockMask, has shape, [B, H, Q, KV], and we can only shard
-    # on the Q seq dimension, not KV.
+    # on the Q seq dimension, not KV. A kernel that attends to the whole
+    # sequence keeps its mask global instead.
     MASK_Q_SEQ_DIM = 2
-    if attention_masks is not None:
+    if attention_masks is not None and shard_attention_mask:
         assert isinstance(attention_masks, (BlockMask, dict))
         masks: list[BlockMask] = []
         for mask in (

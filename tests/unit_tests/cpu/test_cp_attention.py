@@ -20,6 +20,7 @@ from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     AllGatherCPFlexAttention,
     ContextParallelKernel,
+    UlyssesCPFlexAttention,
 )
 
 
@@ -221,6 +222,18 @@ class TestAllGatherCollective(unittest.TestCase):
     def test_float32_kv_reach_the_reducing_backward(self):
         for _, grad in self._gather_and_backward(torch.float32):
             self.assertEqual(torch.float32, grad.dtype)
+
+
+class TestUlysses(unittest.TestCase):
+    def test_is_still_a_flex_kernel(self):
+        self.assertIsInstance(UlyssesCPFlexAttention.Config(), FlexAttention.Config)
+
+    def test_is_not_an_attention_backend(self):
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            get_attention_config("ulysses_cp_flex")
+
+    def test_keeps_its_mask_global(self):
+        self.assertFalse(UlyssesCPFlexAttention.Config().shard_attention_mask)
 
 
 if __name__ == "__main__":

@@ -63,10 +63,12 @@ class FluxModel(BaseModel):
         single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            from torchtitan.distributed.context_parallel import validate_cp_backend
+            from torchtitan.distributed.context_parallel import (
+                validate_context_parallel,
+            )
             from torchtitan.models.flux.sharding import set_flux_sharding_config
 
-            validate_cp_backend(config.parallelism)
+            validate_context_parallel(self, config.parallelism)
             set_flux_sharding_config(self)
 
         def get_nparams_and_flops(

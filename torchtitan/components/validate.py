@@ -185,8 +185,13 @@ class Validator(BaseValidator):
         # which is where get_attention_masks is defined. A maskless backend (the
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
-        if isinstance(model_config, Decoder.Config) and positions is not None:
-            attention_backend = model_config.first_full_attention_backend
+        attention_backend = (
+            model_config.first_full_attention_backend
+            if isinstance(model_config, Decoder.Config)
+            else None
+        )
+
+        if attention_backend is not None and positions is not None:
             if isinstance(
                 attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
@@ -204,6 +209,9 @@ class Validator(BaseValidator):
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
                 self.parallelism.context_parallel_ptrr_mask_key,
+                shard_attention_mask=getattr(
+                    attention_backend, "shard_attention_mask", True
+                ),
             )
 
         return inputs, labels, extra_kwargs

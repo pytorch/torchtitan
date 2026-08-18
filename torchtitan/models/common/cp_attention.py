@@ -10,7 +10,7 @@ Tensor suffix: ``TNH`` = tokens, heads, head dimension.
 """
 
 from dataclasses import dataclass, fields
-from typing import cast, Literal, TYPE_CHECKING
+from typing import cast, ClassVar, Literal, TYPE_CHECKING
 
 import spmd_types as spmd
 
@@ -29,10 +29,12 @@ if TYPE_CHECKING:
 __all__ = [
     "ContextParallelKernel",
     "AllGatherCPFlexAttention",
+    "UlyssesCPFlexAttention",
     "use_cp_kernel",
 ]
 
 _SEQ_DIM = 0
+_HEAD_DIM = 1
 
 
 def use_cp_kernel(config: "Trainer.Config", kernel: type[Module]) -> None:
@@ -111,3 +113,41 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
             for x_TNH in (k_TNH, v_TNH)
         )
         return super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
+
+
+class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
+    """DeepSpeed-Ulysses style CP: an all-to-all trades sequence for heads."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexAttention.Config):
+        shard_attention_mask: ClassVar[bool] = False
+        """The kernel sees the whole sequence, so its mask must stay global."""
+
+    @staticmethod
+    def _reshard(
+        x: torch.Tensor, cp_group: dist.ProcessGroup, *, src: int, dst: int
+    ) -> torch.Tensor:
+        """Move the CP sharding of ``x`` from tensor dim ``src`` to ``dst``."""
+        return spmd.redistribute(
+            x.contiguous(),
+            cp_group,
+            src=spmd.S(src),
+            dst=spmd.S(dst),
+        )
+
+    def forward(
+        self,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        cp_group = self.cp_group
+        # (T/cp, N, H) -> (T, N/cp, H)
+        q_TNH, k_TNH, v_TNH = (
+            self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)
+            for x in (q_TNH, k_TNH, v_TNH)
+        )
+        out_TNH = super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
+        # (T, N/cp, H) -> (T/cp, N, H)
+        return self._reshard(out_TNH, cp_group, src=_HEAD_DIM, dst=_SEQ_DIM)
