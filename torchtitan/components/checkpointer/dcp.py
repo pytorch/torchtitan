@@ -771,8 +771,14 @@ class CheckpointManager(BaseCheckpointManager):
         if self.last_save_model_only:
             states = self.states[MODEL].state_dict()
 
-            if self.export_dtype != torch.float32:
-                states = {k: v.to(self.export_dtype) for k, v in states.items()}
+            states = {
+                k: v.to(self.export_dtype)
+                if isinstance(v, torch.Tensor)
+                and v.is_floating_point()
+                and v.dtype != self.export_dtype
+                else v
+                for k, v in states.items()
+            }
             logger.info(
                 f"Saving a model only checkpoint in {self.export_dtype} "
                 f"at last step, step {curr_step}."
