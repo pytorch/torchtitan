@@ -270,7 +270,15 @@ def _with_sync_save(
 
 
 class TorchCheckpointingManager(BaseCheckpointManager):
-    """TorchTitan checkpoint manager backed by ``torch_checkpointing``."""
+    """TorchTitan checkpoint manager backed by ``torch_checkpointing``.
+
+    Args:
+        storage_config: Backend storage for reading and writing checkpoints.
+            Defaults to the local filesystem. An init parameter rather than a
+            ``Config`` field because ``Configurable.Config`` is Tyro-parsed and
+            a backend storage object is not a command-line surface; callers that
+            need remote storage pass it programmatically.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
