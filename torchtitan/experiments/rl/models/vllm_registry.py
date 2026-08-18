@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
