@@ -66,7 +66,7 @@ jobs:
         python -m pip install --force-reinstall --pre \
           "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
 
-        python -m pip install --pre --no-deps torchvision --index-url ${{ matrix.index-url }}
+        python -m pip install --force-reinstall --pre --no-deps torchvision --index-url ${{ matrix.index-url }}
 
         HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
         if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
