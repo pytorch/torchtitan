@@ -110,15 +110,18 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_mtp",
+                    "--module deepseek_v3 --config "
+                    "deepseek_v3_debugmodel_minimal_async_ep",
                     "--override.imports torchtitan.overrides.fused_mla.fused_mla,"
-                    "torchtitan.overrides.fused_swiglu.fused_swiglu",
+                    "torchtitan.overrides.fused_swiglu.fused_swiglu,"
+                    "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
+                    "activation-checkpoint:full",
                 ],
             ],
-            "DeepSeek V3 MTP fused MLA+SwiGLU FSDP+EP",
-            "deepseek_v3_mtp_fused_mla_swiglu_fsdp+ep",
+            "DeepSeek V3 fused MLA+SwiGLU FSDP+MinimalAsyncEP",
+            "deepseek_v3_fused_mla_swiglu_fsdp+minimal_async_ep",
             ngpu=4,
             skip_rocm_test=True,
         ),
