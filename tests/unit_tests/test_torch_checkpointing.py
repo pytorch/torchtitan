@@ -7,26 +7,32 @@
 import dataclasses
 import json
 import logging
+import os
 import queue
+import tempfile
 import unittest
 from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
+import torch
 import torch.nn as nn
 
 import torchtitan.components.checkpointer.torch_checkpointing as manager_module
 from torch.distributed.checkpoint.stateful import Stateful
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
+from torch_checkpointing.checkpoint_layout import SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
 )
+from torch_checkpointing.checkpoint_writer import _temp_dir_path, CheckpointWriterConfig
 from torch_checkpointing.config import (
     AsyncCheckpointSaverConfig,
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.dtensor_resharder import DTensorResharder
+from torch_checkpointing.schema import ItemSpec
 from torchtitan.components.checkpointer import (
     BaseCheckpointManager,
     CheckpointManager,
@@ -73,6 +79,16 @@ class _Stateful(Stateful):
 
     def load_state_dict(self, state_dict) -> None:
         self.value = state_dict["value"]
+
+
+class _StateDictAdapter:
+    def __init__(self) -> None:
+        self.fqn_to_index_mapping = {"hf_weight": 1}
+        self.to_hf_calls = []
+
+    def to_hf(self, state_dict):
+        self.to_hf_calls.append(state_dict)
+        return {"hf_weight": state_dict["weight"]}
 
 
 class TorchCheckpointingManagerTest(unittest.TestCase):
@@ -503,6 +519,37 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertIsNone(sync_config.pre_finalize_callback)
         manager.close()
 
+    def test_hf_consolidation_uses_the_path_the_backend_supplies(self) -> None:
+        """Drive a real backend save and check what pre_finalize_callback gets.
+
+        Every other test here mocks the backend, so they cannot catch the
+        callback's path contract changing underneath us -- which it has. This
+        asserts against the installed torch_checkpointing: whatever directory
+        the writer names, that is where the shards are, so the callback must
+        consolidate from it verbatim.
+        """
+        received: list[str] = []
+        with tempfile.TemporaryDirectory() as root:
+            checkpoint_id = os.path.join(root, "step-1", "sharded")
+            config = BackendCheckpointManager.Config(
+                default=ItemSpec(requires_copy=False),
+                save=SyncCheckpointSaverConfig(
+                    writer_config=CheckpointWriterConfig(barrier_config=None)
+                ),
+                pre_finalize_callback=lambda path, _logger: received.append(path),
+            )
+            manager = config.build()
+            try:
+                manager.save(checkpoint_id, {MODEL: torch.ones(2)})
+            finally:
+                manager.close()
+
+            self.assertEqual(1, len(received))
+            self.assertTrue(
+                os.listdir(received[0]),
+                f"callback was handed {received[0]!r}, which holds no shards",
+            )
+
     def test_subprocess_logging_initializes_and_delegates(self) -> None:
         init_fn = mock.Mock()
         with (
@@ -591,5 +638,90 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertEqual(
             ("/tmp", original_init_fn, ("argument",)),
             manager._manager_config.subprocess_init_args,
+        )
+        manager.close()
+
+    @mock.patch.object(
+        manager_module,
+        "consolidate_hf_safetensors_checkpoint",
+        create=True,
+    )
+    def test_hf_final_save_converts_and_consolidates_before_commit(
+        self,
+        consolidate,
+    ) -> None:
+        adapter = _StateDictAdapter()
+        config = TorchCheckpointingManager.Config(
+            enable=True,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+            last_save_model_only=True,
+            last_save_in_hf=True,
+        )
+        storage_config = mock.Mock()
+        storage_config.create_storage.return_value = mock.Mock()
+        backend_config = _default_backend_config()
+        backend_config.storage_config = storage_config
+        backend_manager = _BackendManager()
+        sync_manager = _BackendManager()
+        sync_manager.save_result = None
+        with (
+            mock.patch.object(
+                manager_module,
+                "_default_backend_config",
+                return_value=backend_config,
+            ),
+            mock.patch.object(
+                BackendCheckpointManager.Config,
+                "build",
+                autospec=True,
+                side_effect=[backend_manager, sync_manager],
+            ) as build,
+        ):
+            manager = config.build(
+                dataloader=None,
+                model_parts=[nn.Linear(2, 2)],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                states={"train_state": _Stateful("train")},
+                sd_adapter=adapter,
+                base_folder="/tmp",
+            )
+            self.assertTrue(manager.save(curr_step=5, last_step=True))
+
+        sync_config = build.call_args_list[1].args[0]
+        self.assertEqual(
+            "/tmp/checkpoint/step-5/sharded",
+            sync_manager.save_calls[0][0],
+        )
+        checkpoint = sync_manager.save_calls[0][1]
+        self.assertEqual({MODEL}, set(checkpoint))
+        self.assertEqual({"hf_weight"}, set(checkpoint[MODEL]))
+        torch.testing.assert_close(
+            checkpoint[MODEL]["hf_weight"],
+            manager.states[MODEL].state_dict()["weight"],
+        )
+        model_spec = sync_config.items[MODEL]
+        self.assertIsInstance(
+            model_spec.layout.serialization_format,
+            SafetensorsSerialization,
+        )
+        self.assertEqual(f"{MODEL}_{{rank}}.safetensors", model_spec.layout.file_path)
+
+        # The backend hands the callback the directory the shards were actually
+        # written to -- its staging directory when a barrier is configured. Feed
+        # that in and assert it is consolidated as given, with no derivation.
+        self.assertIsNotNone(sync_config.save.writer_config.barrier_config)
+        staged = _temp_dir_path(
+            Path(sync_manager.save_calls[0][0]),
+            sync_config.save.writer_config.temp_dir_prefix,
+        )
+        sync_config.pre_finalize_callback(str(staged), mock.Mock())
+        consolidate.assert_called_once_with(
+            "/tmp/checkpoint/step-5/tmp_sharded",
+            output_dir="/tmp/checkpoint/step-5",
+            item_key=MODEL,
+            fqn_to_index_mapping=adapter.fqn_to_index_mapping,
+            storage_config=storage_config,
         )
         manager.close()
