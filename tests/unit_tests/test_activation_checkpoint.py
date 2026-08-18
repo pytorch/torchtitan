@@ -53,15 +53,14 @@ class TransformerBlock(Module):
 
 
 class TestApplyAC(unittest.TestCase):
-    def test_forward_mutation_ops_allow_clean_import_order(self):
+    def test_forward_mutation_op_is_registered_with_activation_checkpointing(self):
         code = """
-from torchtitan.distributed.activation_checkpoint import (
-    _registered_forward_mutation_ops,
-    _save_routing_and_forward_mutations,
-)
+import torch
+from torchtitan.distributed.activation_checkpoint import _FORWARD_MUTATION_OPS
 
-assert not _registered_forward_mutation_ops()
-_save_routing_and_forward_mutations()
+assert _FORWARD_MUTATION_OPS == {
+    torch.ops.torchtitan.accumulate_tensor_statistics.default,
+}
 """
         subprocess.run([sys.executable, "-c", code], check=True)
 

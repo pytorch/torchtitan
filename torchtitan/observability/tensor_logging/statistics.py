@@ -147,14 +147,44 @@ def accumulate_tensor_statistics(
     sum_statistics: torch.Tensor,
     maximum: torch.Tensor,
     enabled: torch.Tensor,
+    slot_index: torch.Tensor,
 ) -> None:
-    """Accumulate one tensor through an opaque, compile-safe operation.
+    """Add one tensor observation to one preallocated buffer row.
+
+    PyTorch represents this function as one node in the compiled graph. The
+    custom-op declaration tells PyTorch that the node changes `sum_statistics`
+    and `maximum` in place.
+
+    While PyTorch builds a graph, FakeTensors contain shapes and dtypes but no
+    real values. The fake implementation therefore returns `None` without
+    scanning a tensor or changing a buffer.
+
+    During training, if `enabled` is 0, it returns without changing the row.
+    Because `enabled` is a tensor, changing cadence does not require a different compiled graph.
 
     Example:
 
-        # The output tensors are one preallocated metric slot.
-        accumulate_tensor_statistics(value, sum_statistics, maximum, enabled)
+        value = torch.tensor([0.0, 1.0, -2.0, 3.0])
+        sum_statistics = torch.zeros(1, 7)
+        maximum = torch.full((1,), -torch.inf)
+        enabled = torch.ones((), dtype=torch.int32)
+        slot_index = torch.tensor(0)
+
+        accumulate_tensor_statistics(
+            value,
+            sum_statistics,
+            maximum,
+            enabled,
+            slot_index,
+        )
+
+        assert sum_statistics[0].tolist() == [4, 0, 1, 1, 6, 14, 98]
+        assert maximum[0].item() == 3
     """
+
+    row = int(slot_index.item())
+    sum_statistics_row = sum_statistics[row]
+    maximum_row = maximum[row]
 
     if value.is_cuda:
         from .statistics_triton import accumulate_contiguous_tensor_statistics
@@ -166,8 +196,8 @@ def accumulate_tensor_statistics(
             value = value.contiguous()
         accumulate_contiguous_tensor_statistics(
             value,
-            sum_statistics,
-            maximum,
+            sum_statistics_row,
+            maximum_row,
             enabled,
         )
         return
@@ -176,29 +206,33 @@ def accumulate_tensor_statistics(
         if not bool(enabled):
             return
         value = value.detach()
-        sum_statistics[OBSERVATION_COUNT_INDEX].add_(1)
+
+        # One `log_stats()` call is one observation, including an empty tensor.
+        sum_statistics_row[OBSERVATION_COUNT_INDEX].add_(1)
         if value.numel() == 0:
             return
 
+        # Nonfinite values count toward `numel` and `nonfinite_count`, but not
+        # zero counts, moments, or the finite absolute maximum.
         finite = torch.isfinite(value)
         value_fp32 = value.to(torch.float32)
         finite_value = torch.where(finite, value_fp32, 0.0)
         absolute = finite_value.abs()
         square = finite_value.square()
 
-        sum_statistics[NUMEL_INDEX].add_(value.numel())
-        sum_statistics[NONFINITE_COUNT_INDEX].add_(torch.count_nonzero(~finite))
-        sum_statistics[ZERO_COUNT_INDEX].add_(
+        sum_statistics_row[NUMEL_INDEX].add_(value.numel())
+        sum_statistics_row[NONFINITE_COUNT_INDEX].add_(torch.count_nonzero(~finite))
+        sum_statistics_row[ZERO_COUNT_INDEX].add_(
             torch.count_nonzero(finite & (value == 0))
         )
 
-        sum_statistics[ABS_SUM_INDEX].add_(absolute.sum())
-        sum_statistics[SQUARE_SUM_INDEX].add_(square.sum())
-        sum_statistics[FOURTH_MOMENT_SUM_INDEX].add_(square.square().sum())
+        sum_statistics_row[ABS_SUM_INDEX].add_(absolute.sum())
+        sum_statistics_row[SQUARE_SUM_INDEX].add_(square.sum())
+        sum_statistics_row[FOURTH_MOMENT_SUM_INDEX].add_(square.square().sum())
 
         finite_absolute = torch.where(finite, value_fp32.abs(), -torch.inf)
-        updated_maximum = torch.maximum(maximum, finite_absolute.amax())
-        maximum.copy_(updated_maximum)
+        updated_maximum = torch.maximum(maximum_row, finite_absolute.amax())
+        maximum_row.copy_(updated_maximum)
 
 
 @accumulate_tensor_statistics.register_fake
@@ -207,5 +241,6 @@ def _(
     sum_statistics: torch.Tensor,
     maximum: torch.Tensor,
     enabled: torch.Tensor,
+    slot_index: torch.Tensor,
 ) -> None:
     return None

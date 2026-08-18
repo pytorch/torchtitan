@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_gemm import AllGatherFusedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
@@ -27,6 +28,7 @@ from torchtitan.models.deepseek_v3.model import (
     Attention as DeepSeekAttention,
     DeepSeekV3Model,
 )
+from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.flux import model_registry as flux_model_registry
 from torchtitan.models.gpt_oss.config_registry import (
     model_registry as gpt_oss_model_registry,
@@ -46,6 +48,7 @@ from torchtitan.models.qwen3_5.config_registry import (
 )
 from torchtitan.models.qwen3_5.model import GatedDeltaNet, Qwen35Attention, Qwen35Model
 from torchtitan.observability.tensor_logging import init, register_fwd_bwd, set_enabled
+from torchtitan.overrides.fused_swiglu import FusedSwiGLU
 
 
 class _IdentityRope(nn.Module):
@@ -109,6 +112,16 @@ class _VisionEncoderStub(nn.Module):
 
     def forward(self, pixel_values, *, grid_thw):
         return pixel_values
+
+
+class _DecoderLayerStub(nn.Module):
+    def forward(self, hidden, *_args):
+        return hidden * 1.1
+
+
+class _MTPLayerStub(nn.Module):
+    def forward(self, input_embed, previous_hidden, *_args):
+        return input_embed + previous_hidden
 
 
 def _initialize_parameters(module: nn.Module) -> None:
@@ -392,6 +405,168 @@ def test_shared_vision_padding_is_included_in_raw_statistics() -> None:
         runtime.close()
 
 
+@pytest.mark.parametrize("family", ["qwen35", "kimi", "muse"])
+@pytest.mark.parametrize("skip_lm_head", [False, True])
+def test_custom_decoders_record_inherited_input_and_head_metrics(
+    family: str,
+    skip_lm_head: bool,
+) -> None:
+    dim = 8
+
+    def initialize_decoder_base(self, _config) -> None:
+        nn.Module.__init__(self)
+        register_fwd_bwd(self, ["input"])
+
+    if family == "qwen35":
+        config = SimpleNamespace(
+            vision_encoder=_Builds(
+                _VisionEncoderStub(dim),
+                spatial_merge_size=1,
+            )
+        )
+        with mock.patch.object(Decoder, "__init__", initialize_decoder_base):
+            model = Qwen35Model(config)
+        forward = lambda tokens: model(
+            tokens,
+            positions=torch.arange(tokens.shape[1]).unsqueeze(0),
+            special_tokens={"image_id": 9, "video_id": 10},
+        )
+    elif family == "kimi":
+        config = SimpleNamespace(vision_encoder=None)
+        with mock.patch.object(
+            DeepSeekV3Model,
+            "__init__",
+            initialize_decoder_base,
+        ):
+            model = KimiK25Model(config)
+        forward = lambda tokens: model(tokens, positions=None, special_tokens={})
+    else:
+        config = SimpleNamespace(
+            vision_projection=None,
+            perception_emb_norm=None,
+            vision_encoder=None,
+            vision_adapter=None,
+        )
+        with mock.patch.object(Decoder, "__init__", initialize_decoder_base):
+            model = MuseGlimmerModel(config)
+        forward = lambda tokens: model(tokens)
+
+    model.tok_embeddings = nn.Embedding(16, dim)
+    model.layers = nn.ModuleDict()
+    model.norm = nn.Identity()
+    model.lm_head = nn.Linear(dim, 16, bias=False)
+    register_fwd_bwd(model.lm_head, ["output"])
+    model._skip_lm_head = skip_lm_head
+
+    runtime = init(model, device=torch.device("cpu"))
+    try:
+        with set_enabled(True):
+            output = forward(torch.tensor([[1, 2, 3]]))
+            output.float().sum().backward()
+
+        snapshot = runtime.snapshot_unreduced_statistics()
+        assert snapshot["input.x"]["counts"][3].item() == 1
+        assert snapshot["input.dx"]["counts"][3].item() == 1
+        expected_head_count = 0 if skip_lm_head else 1
+        assert snapshot["lm_head.output.x"]["counts"][3].item() == expected_head_count
+        assert snapshot["lm_head.output.dx"]["counts"][3].item() == expected_head_count
+    finally:
+        runtime.close()
+
+
+def test_mtp_decoder_records_every_head_prediction() -> None:
+    dim = 8
+    model = MTPDecoder.__new__(MTPDecoder)
+    nn.Module.__init__(model)
+    register_fwd_bwd(model, ["input"])
+    model.tok_embeddings = nn.Embedding(16, dim)
+    model.layers = nn.ModuleDict({"0": _DecoderLayerStub()})
+    model.norm = nn.Identity()
+    model.mtp_layers = nn.ModuleList([_MTPLayerStub(), _MTPLayerStub()])
+    model.lm_head = nn.Linear(dim, 16, bias=False)
+    register_fwd_bwd(model.lm_head, ["output"])
+    model._skip_lm_head = False
+
+    runtime = init(model, device=torch.device("cpu"))
+    try:
+        with set_enabled(True):
+            outputs = model(torch.tensor([[1, 2, 3, 4]]))
+            sum(output.float().sum() for output in outputs).backward()
+
+        snapshot = runtime.snapshot_unreduced_statistics()
+        assert snapshot["input.x"]["counts"][3].item() == 1
+        assert snapshot["input.dx"]["counts"][3].item() == 1
+        assert snapshot["lm_head.output.x"]["counts"][3].item() == 3
+        assert snapshot["lm_head.output.dx"]["counts"][3].item() == 3
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("implementation", ["dist_gemm", "fused_swiglu"])
+def test_feed_forward_overrides_record_activation_forward_and_backward(
+    implementation: str,
+) -> None:
+    dim = 8
+    hidden_dim = 16
+    config_type = (
+        AllGatherFusedFeedForward.Config
+        if implementation == "dist_gemm"
+        else FusedSwiGLU.Config
+    )
+    module = config_type(
+        w1=Linear.Config(in_features=dim, out_features=hidden_dim, bias=False),
+        w2=Linear.Config(in_features=hidden_dim, out_features=dim, bias=False),
+        w3=Linear.Config(in_features=dim, out_features=hidden_dim, bias=False),
+    ).build()
+    _initialize_parameters(module)
+    hidden = torch.randn(2, 3, dim, requires_grad=True)
+
+    if implementation == "dist_gemm":
+        tp_group = SimpleNamespace(group_name="tp")
+
+        def gather(input_value, gate_weight, up_weight, *_args):
+            return input_value @ gate_weight.T, input_value @ up_weight.T
+
+        def reduce_scatter(input_value, weight, bias, *_args):
+            output = input_value @ weight.T
+            return output if bias is None else output + bias
+
+        contexts = (
+            mock.patch(
+                "torchtitan.models.common.dist_gemm._tp_group_from_context",
+                return_value=tp_group,
+            ),
+            mock.patch(
+                "torchtitan.models.common.dist_gemm.AllGatherLinearMulti.apply",
+                side_effect=gather,
+            ),
+            mock.patch(
+                "torchtitan.models.common.dist_gemm.LinearReduceScatter.apply",
+                side_effect=reduce_scatter,
+            ),
+        )
+    else:
+        contexts = (
+            mock.patch(
+                "torchtitan.overrides.fused_swiglu._fused_silu_and_mul",
+                side_effect=lambda gate, up: torch.nn.functional.silu(gate) * up,
+            ),
+        )
+
+    with contexts[0]:
+        if len(contexts) == 1:
+            _assert_forward_backward_counts(
+                module, lambda: module(hidden), ("act_out",)
+            )
+        else:
+            with contexts[1], contexts[2]:
+                _assert_forward_backward_counts(
+                    module,
+                    lambda: module(hidden),
+                    ("act_out",),
+                )
+
+
 @pytest.mark.parametrize("stream", ["double", "single"])
 def test_flux_blocks_record_architecture_honest_boundaries(stream: str) -> None:
     model_config = flux_model_registry("flux-debug").model
@@ -399,17 +574,17 @@ def test_flux_blocks_record_architecture_honest_boundaries(stream: str) -> None:
         block = model_config.double_blocks[0].build()
         expected_names = (
             "img_attn_stream",
-            "img_attn_out",
+            "img_attn_branch",
             "img_ffn_stream",
-            "img_ffn_out",
+            "img_ffn_branch",
             "txt_attn_stream",
-            "txt_attn_out",
+            "txt_attn_branch",
             "txt_ffn_stream",
-            "txt_ffn_out",
+            "txt_ffn_branch",
         )
     else:
         block = model_config.single_blocks[0].build()
-        expected_names = ("stream", "parallel_branch_out")
+        expected_names = ("stream", "parallel_branch")
 
     block.inner_attention = _AllInputsAttention()
     _initialize_parameters(block)

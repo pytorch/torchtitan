@@ -26,39 +26,39 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import Configurable
+from torchtitan.observability.tensor_logging.statistics import (
+    accumulate_tensor_statistics,
+)
 from torchtitan.tools.logging import logger
 
 
-_FORWARD_MUTATION_OP_NAMES = ("accumulate_tensor_statistics",)
+_FORWARD_MUTATION_OPS = {accumulate_tensor_statistics._opoverload}
 _in_activation_checkpoint_recompute = False
 
 
-def _registered_forward_mutation_ops() -> set[torch._ops.OpOverload]:
-    # Resolve feature-owned mutation ops without depending on module import order.
-    # An absent custom op cannot appear in this model's checkpointed graph.
-    ops = set()
-    for name in _FORWARD_MUTATION_OP_NAMES:
-        packet = getattr(torch.ops.torchtitan, name, None)
-        if packet is not None:
-            ops.add(packet.default)
-    return ops
+# ================= Tensor logging under activation checkpointing =================
+#
+# Full activation checkpointing runs each block twice:
+#
+#     original forward -> discard activations -> recompute forward -> backward
+#
+# Tensor logging updates statistic buffers during forward. The recompute must
+# not record the same observation a second time.
+#
+# Eager FullAC:
+#     `_mark_activation_checkpoint_recompute()` wraps only the recomputed
+#     forward and sets the recompute flag to True. `log_stats()` and
+#     `log_fwd_bwd_stats()` check the flag first and return before adding the
+#     recomputed tensor a second time.
+#
+# Compiled FullAC:
+#     Python state cannot control code already inside the compiled graph. The
+#     checkpoint policy marks `accumulate_tensor_statistics` as MUST_SAVE, so
+#     checkpoint recomputation does not execute that buffer update a second time.
 
 
 def _is_activation_checkpoint_recompute() -> bool:
     return _in_activation_checkpoint_recompute
-
-
-@contextlib.contextmanager
-def _activation_checkpoint_recompute():
-    """Mark the recompute half of an eager activation checkpoint."""
-
-    global _in_activation_checkpoint_recompute
-    previous = _in_activation_checkpoint_recompute
-    _in_activation_checkpoint_recompute = True
-    try:
-        yield
-    finally:
-        _in_activation_checkpoint_recompute = previous
 
 
 def _mark_activation_checkpoint_recompute(contexts):
@@ -71,8 +71,14 @@ def _mark_activation_checkpoint_recompute(contexts):
 
     @contextlib.contextmanager
     def recompute():
-        with recompute_context, _activation_checkpoint_recompute():
-            yield
+        global _in_activation_checkpoint_recompute
+        previous = _in_activation_checkpoint_recompute
+        _in_activation_checkpoint_recompute = True
+        try:
+            with recompute_context:
+                yield
+        finally:
+            _in_activation_checkpoint_recompute = previous
 
     return forward_context, recompute()
 
@@ -80,7 +86,9 @@ def _mark_activation_checkpoint_recompute(contexts):
 def _save_routing_and_forward_mutations():
     """Save nondeterministic routing and metric mutations during recomputation."""
 
-    must_save = _registered_forward_mutation_ops() | {torch.ops.aten.topk.default}
+    # `topk` can choose different experts during recompute. Reuse the choices
+    # made by the original forward.
+    must_save = _FORWARD_MUTATION_OPS | {torch.ops.aten.topk.default}
 
     def policy_fn(_context, op, *args, **kwargs):
         if op in must_save:
@@ -109,6 +117,9 @@ def _full_ac_contexts():
     return _mark_activation_checkpoint_recompute(
         (contextlib.nullcontext(), contextlib.nullcontext())
     )
+
+
+# ========================== End of tensor logging utils ==========================
 
 
 def _get_default_save_ops() -> set:
@@ -174,7 +185,7 @@ def _get_default_save_ops() -> set:
     }
     save_ops.update(_resolve_ops(compute_ops))
     save_ops.update(_resolve_ops(comm_ops))
-    save_ops.update(_registered_forward_mutation_ops())
+    save_ops.update(_FORWARD_MUTATION_OPS)
     return save_ops
 
 
@@ -303,7 +314,7 @@ class SelectiveAC(ActivationCheckpointing):
         config = cast("SelectiveAC.Config", self.config)
         save_ops = self.get_save_ops()
         # Preserve forward mutations even when a subclass replaces the save set.
-        save_ops.update(_registered_forward_mutation_ops())
+        save_ops.update(_FORWARD_MUTATION_OPS)
 
         # Collect weight shapes to force-recompute, stored as mm RHS shape
         # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup

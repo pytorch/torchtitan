@@ -109,7 +109,7 @@ class Attention(BaseAttention):
 
         q, k = self.rope(q, k, positions)
 
-        head_out = self.inner_attention(
+        output = self.inner_attention(
             q,
             k,
             v,
@@ -118,10 +118,10 @@ class Attention(BaseAttention):
             enable_gqa=self.enable_gqa,
             out_transform=self._apply_sinks,
         )
-        tensor_logging.log_fwd_bwd_stats(self, head_out=head_out)
+        tensor_logging.log_fwd_bwd_stats(self, head_out=output)
 
         # Reshape and project output
-        output = head_out.reshape(
+        output = output.reshape(
             bsz, seqlen, -1
         ).contiguous()  # (bsz, seqlen, n_heads * v_head_dim)
         output = self.wo(output)  # (bsz, seqlen, dim)

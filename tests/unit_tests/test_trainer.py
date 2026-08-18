@@ -218,13 +218,25 @@ def test_train_scopes_complete_steps_with_tensor_logging_cadence() -> None:
     assert trainer.train_step.call_count == 2
 
 
-def test_tensor_logging_rejects_custom_pipeline_schedule_before_model_setup() -> None:
+@pytest.mark.parametrize(
+    ("schedule", "schedule_csv"),
+    [
+        ("ZBVZeroBubble", ""),
+        ("DualPipeV", ""),
+        ("UnknownSchedule", ""),
+        ("1F1B", "tests/assets/custom_schedule.csv"),
+    ],
+)
+def test_tensor_logging_rejects_unsupported_pipeline_schedule_before_model_setup(
+    schedule: str,
+    schedule_csv: str,
+) -> None:
     config = SimpleNamespace(
         model_spec=object(),
         metrics=SimpleNamespace(tensor_logging=SimpleNamespace(enabled=True)),
         parallelism=SimpleNamespace(
-            pipeline_parallel_schedule="1F1B",
-            pipeline_parallel_schedule_csv="tests/assets/custom_schedule.csv",
+            pipeline_parallel_schedule=schedule,
+            pipeline_parallel_schedule_csv=schedule_csv,
         ),
     )
     parallel_dims = SimpleNamespace(pp_enabled=True)

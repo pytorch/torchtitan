@@ -19,10 +19,6 @@ import torch.distributed as dist
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.activation_checkpoint import (
-    _is_activation_checkpoint_recompute,
-)
-
 from .statistics import (
     ABS_SUM_INDEX,
     accumulate_tensor_statistics,
@@ -39,8 +35,16 @@ from .statistics import (
 MetricSource: TypeAlias = nn.Module | nn.Parameter
 ReducedBuffers: TypeAlias = tuple[torch.Tensor, torch.Tensor]
 
+# `register()` stores short names on the module or parameter itself.
+# Example: attention -> ["xq.x", "xq.dx"].
 _REGISTERED_METRIC_NAMES_ATTR = "_tensor_logging_registered_metric_names"
+
+# `init()` records which shared-buffer row belongs to each short name.
+# Example: attention["xq.x"] -> sum_statistics[17], maxima[17].
 _STATISTIC_BUFFER_SLOTS_ATTR = "_tensor_logging_statistic_buffer_slots"
+
+# One tensor-logging run can be active in this process. `_enabled` controls
+# eager logging calls; `StatisticBuffers.enabled` controls device writes.
 _active_state: TensorLoggingState | None = None
 _enabled = False
 _include_tensor_logging_calls = False
@@ -49,8 +53,6 @@ _include_tensor_logging_calls = False
 class StatisticBufferSlot(NamedTuple):
     """The shared-buffer row used by one registered metric name."""
 
-    sum_statistics: torch.Tensor  # sum_statistics[row], shape [7]
-    maximum: torch.Tensor  # maxima[row], scalar
     slot_index: torch.Tensor  # CPU scalar row used by the backward hook
 
 
@@ -77,8 +79,15 @@ def _get_statistic_buffer_slots(
 
     Example:
 
-        _get_statistic_buffer_slots(attention)["xq.x"]
-        # -> StatisticBufferSlot(..., slot_index=torch.tensor(17))
+        _get_statistic_buffer_slots(attention)
+        # -> {
+        #     "xq.x": StatisticBufferSlot(
+        #         slot_index=torch.tensor(17),
+        #     ),
+        #     "xq.dx": StatisticBufferSlot(
+        #         slot_index=torch.tensor(18),
+        #     ),
+        # }
     """
 
     slots = metric_source.__dict__.get(_STATISTIC_BUFFER_SLOTS_ATTR)
@@ -324,16 +333,40 @@ def _derive_metrics_from_statistics(
     sum_statistics: Sequence[float],
     maximum: float,
 ) -> dict[str, int | float]:
-    """Derive one metric's scalars from its reduced sufficient statistics.
+    """Build one metric's scalar fields from its reduced buffer row.
+
+    `sum_statistics` has this fixed field order:
+
+        0: numel
+        1: nonfinite_count
+        2: zero_count
+        3: observation_count
+        4: abs_sum
+        5: square_sum
+        6: fourth_moment_sum
 
     Example:
 
-        # Recorded tensor: [0, 1, -2, 3]
+        value = torch.tensor([0.0, 1.0, -2.0, 3.0])
+
+        # Recording `value` once and reducing its row produces:
         sum_statistics = [4, 0, 1, 1, 6, 14, 98]
         maximum = 3
 
-        # Adds numel=4, zero_frac=0.25, abs_mean=1.5,
-        # square_mean=3.5, kurtosis=-1, and abs_max=3.
+        _derive_metrics_from_statistics("scores", sum_statistics, maximum)
+        # {
+        #     "scores.numel": 4,
+        #     "scores.nonfinite_count": 0,
+        #     "scores.observation_count": 1,
+        #     "scores.zero_count": 1,
+        #     "scores.zero_frac": 0.25,
+        #     "scores.abs_sum": 6,
+        #     "scores.abs_mean": 1.5,
+        #     "scores.square_mean": 3.5,
+        #     "scores.rms": 3.5**0.5,
+        #     "scores.kurtosis": -1.0,
+        #     "scores.abs_max": 3,
+        # }
     """
 
     metrics: dict[str, int | float] = {}
@@ -383,9 +416,14 @@ class TensorLoggingState:
         # If attention is `layers.3.attention`, init may assign:
         #   layers.3.attention.xq.x  -> row 17
         #   layers.3.attention.xq.dx -> row 18
+        #
+        # Shared buffer shapes:
+        #   sum_statistics [number_of_metrics, 7]
+        #   maxima         [number_of_metrics]
         with set_enabled(True):
             log_fwd_bwd_stats(attention, xq=xq)
 
+        # Forward updates row 17. Backward updates row 18.
         metrics = state.collect()
         state.close()
 
@@ -438,8 +476,6 @@ class TensorLoggingState:
             source_slots = slots_by_source.setdefault(metric_source, {})
             row = slot_index_by_full_name[full_name]
             source_slots[registered_name] = StatisticBufferSlot(
-                sum_statistics=self.statistic_buffers.sum_statistics[row],
-                maximum=self.statistic_buffers.maxima[row],
                 slot_index=self._slot_indices[row],
             )
 
@@ -465,9 +501,10 @@ class TensorLoggingState:
         with spmd.no_typecheck():
             accumulate_tensor_statistics(
                 _local_tensor(value),
-                slot.sum_statistics,
-                slot.maximum,
+                self.statistic_buffers.sum_statistics,
+                self.statistic_buffers.maxima,
                 self.statistic_buffers.enabled,
+                slot.slot_index,
             )
 
     def _clear_buffers(self) -> None:
@@ -613,25 +650,29 @@ def _record_tensor_statistics_cotangent(
     value: torch.Tensor,
     slot_index: torch.Tensor,
 ) -> None:
-    """Add one backward cotangent's statistics to its shared-buffer row.
+    """Add one backward cotangent's statistics to its buffer row.
 
-    Example:
+    `slot_index` is a CPU scalar containing the row number. For example, if
+    `layers.3.attention.xq.dx` uses row 18, this call updates
+    `sum_statistics[18]` and `maxima[18]`.
 
-        # `layers.3.attention.xq.dx` was assigned row 18 during init().
-        _record_tensor_statistics_cotangent(cotangent, torch.tensor(18))
-        # Updates sum_statistics[18] and maxima[18].
+    The autograd hook passes only the cotangent and the row number. This custom
+    op finds the active logging buffers, updates that row, and returns no tensor
+    for autograd to differentiate.
     """
 
     state = _get_state()
-    index = int(slot_index.item())
     buffers = (
-        state.statistic_buffers.sum_statistics[index],
-        state.statistic_buffers.maxima[index],
+        state.statistic_buffers.sum_statistics,
+        state.statistic_buffers.maxima,
         state.statistic_buffers.enabled,
+        slot_index,
     )
     accumulate_tensor_statistics(value, *buffers)
 
 
+# FakeTensor tracing needs only the input/output contract. The real op returns
+# no tensor, so this fake version returns `None` without touching buffers.
 @_record_tensor_statistics_cotangent.register_fake
 def _(
     value: torch.Tensor,
@@ -643,6 +684,16 @@ def _(
 # Backward hooks can update the same slot. Preserve their program order under
 # compile so this effectful, output-free call is not dropped or reordered.
 _record_tensor_statistics_cotangent.register_effect(torch.library.EffectType.ORDERED)
+
+
+def _is_activation_checkpoint_recompute() -> bool:
+    """Read the eager activation-checkpoint recompute state lazily."""
+
+    from torchtitan.distributed.activation_checkpoint import (
+        _is_activation_checkpoint_recompute as is_recompute,
+    )
+
+    return is_recompute()
 
 
 def log_stats(

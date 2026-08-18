@@ -274,7 +274,15 @@ class TensorLoggingConfig(Configurable.Config):
     """Whether to record registered model-tensor statistics."""
 
     freq: int = 5
-    """Requested step interval; regular publication follows its LCM with `log_freq`."""
+    """Requested step interval; regular publication follows its least common multiple
+    with `log_freq`.
+
+    Eager non-logging steps skip tensor-statistic calls. Compiled and captured
+    graphs retain the calls, but a device gate skips reading the tensor and updating
+    statistic buffers. Code that prepares an optional logged value can still run.
+    Cross-rank reduction runs only on logging steps, outside the compiled or captured
+    graph.
+    """
 
     publish_filter_regex: str = (
         r"\.(?:numel|nonfinite_count|abs_mean|square_mean|abs_max)$"
@@ -283,7 +291,9 @@ class TensorLoggingConfig(Configurable.Config):
 
     Possible suffixes are `numel`, `nonfinite_count`, `observation_count`,
     `zero_count`, `zero_frac`, `abs_sum`, `abs_mean`, `square_mean`, `rms`,
-    `kurtosis`, and `abs_max`. Filtering changes only what is published.
+    `kurtosis`, and `abs_max`.
+
+    The regex runs after collection and derivation. It changes only what is published.
     """
 
     def __post_init__(self) -> None:

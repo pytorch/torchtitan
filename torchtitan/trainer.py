@@ -663,7 +663,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if not config.training.disable_cuda_graphs:
             if self.tensor_logging is not None:
                 # Warmup and capture may happen on a non-logging step. Keep the
-                # operations in the graph; set_enabled() still controls writes.
+                # logging operations in the CUDA graph. The existing
+                # `set_enabled()` scope still decides whether this step writes
+                # statistics.
                 self.fwd_bwd_fn = _wrap_fwd_bwd_for_tensor_logging_capture(
                     self.fwd_bwd_fn
                 )

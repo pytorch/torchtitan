@@ -163,6 +163,8 @@ class VisionTransformerBlock(Module):
         self.norm2 = config.norm2.build()
         self.attn = config.attn.build()
         self.mlp = config.mlp.build()
+        # Record each normalized input, branch output, and post-residual stream.
+        # A residual sum's statistics cannot be reconstructed from its operands.
         tensor_logging.register_fwd_bwd(
             self,
             [

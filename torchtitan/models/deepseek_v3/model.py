@@ -144,11 +144,12 @@ class Attention(BaseAttention):
                     )
 
         tensor_logging.log_fwd_bwd_stats(self, xq=q, xk=k, xv=v)
-        head_out = self.inner_attention(
+        output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
         ).contiguous()
-        tensor_logging.log_fwd_bwd_stats(self, head_out=head_out)
-        return self.wo(head_out.view(bsz, seqlen, -1))
+        tensor_logging.log_fwd_bwd_stats(self, head_out=output)
+        output = output.view(bsz, seqlen, -1)
+        return self.wo(output)
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

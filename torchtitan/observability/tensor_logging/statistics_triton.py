@@ -148,12 +148,14 @@ def accumulate_contiguous_tensor_statistics(
     maximum: torch.Tensor,
     enabled: torch.Tensor,
 ) -> None:
-    """Launch the bounded-grid accumulator for one contiguous tensor."""
+    """Launch the accumulator for one contiguous tensor."""
 
     ideal_program_count = max(
         1,
         (value.numel() + _BLOCK_SIZE - 1) // _BLOCK_SIZE,
     )
+    # Cap the launch size. When the tensor needs more blocks than programs,
+    # each program advances through multiple blocks in the kernel loop.
     program_count = min(_MAX_PROGRAMS, ideal_program_count)
     needs_loop = ideal_program_count > program_count
     _accumulate_tensor_statistics_triton[(program_count,)](

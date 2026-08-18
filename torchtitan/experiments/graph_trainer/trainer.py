@@ -116,15 +116,6 @@ class GraphTrainer(Trainer):
             raise NotImplementedError(
                 "tensor logging does not yet support GraphPP forward statistics"
             )
-        if (
-            config.metrics.tensor_logging.enabled
-            and config.compile.precompile_artifact_dir
-        ):
-            # TODO: create tensor-logging buffers while producing the artifact
-            # and reconnect the loaded graph to the training process's buffers.
-            raise NotImplementedError(
-                "tensor logging does not yet support Graph Trainer precompiled artifacts"
-            )
         super().__init__(config)
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)

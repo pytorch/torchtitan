@@ -285,17 +285,6 @@ def test_graph_trainer_rejects_pipeline_tensor_logging_before_setup() -> None:
         GraphTrainer(config)
 
 
-def test_graph_trainer_rejects_precompiled_tensor_logging_before_setup() -> None:
-    config = SimpleNamespace(
-        metrics=SimpleNamespace(tensor_logging=SimpleNamespace(enabled=True)),
-        parallelism=SimpleNamespace(pipeline_parallel_degree=1),
-        compile=SimpleNamespace(precompile_artifact_dir="/tmp/artifact"),
-    )
-
-    with pytest.raises(NotImplementedError, match="precompiled artifacts"):
-        GraphTrainer(config)
-
-
 def test_same_owner_duplicate_registration_raises() -> None:
     root = nn.Module()
     register(root, ["value", "value"])
@@ -676,14 +665,21 @@ def test_cuda_statistics_support_64_bit_indexing(monkeypatch) -> None:
     value = torch.zeros(4097, dtype=torch.bfloat16, device="cuda")
     value[0] = 2
     value[-1] = 3
-    sum_statistics = torch.zeros(7, dtype=torch.float32, device="cuda")
-    maximum = torch.full((), -torch.inf, dtype=torch.float32, device="cuda")
+    sum_statistics = torch.zeros(1, 7, dtype=torch.float32, device="cuda")
+    maximum = torch.full((1,), -torch.inf, dtype=torch.float32, device="cuda")
     enabled = torch.ones((), dtype=torch.int32, device="cuda")
+    slot_index = torch.tensor(0)
 
-    accumulate_tensor_statistics(value, sum_statistics, maximum, enabled)
+    accumulate_tensor_statistics(
+        value,
+        sum_statistics,
+        maximum,
+        enabled,
+        slot_index,
+    )
 
-    assert sum_statistics.tolist() == [4097, 0, 4095, 1, 5.0, 13.0, 97.0]
-    assert maximum.item() == 3.0
+    assert sum_statistics[0].tolist() == [4097, 0, 4095, 1, 5.0, 13.0, 97.0]
+    assert maximum[0].item() == 3.0
 
 
 def test_metrics_filter_matches_name_and_statistic() -> None:
@@ -937,6 +933,39 @@ def test_graph_trainer_trace_remat_replay_and_cadence_are_exact(
             buffer.data_ptr() for buffer in runtime.statistic_buffers.buffers()
         ) == (buffer_addresses)
         assert all("_tensor_logging_state" not in key for key in module.state_dict())
+    finally:
+        runtime.close()
+
+
+def test_graph_trainer_precompiled_artifact_uses_live_logging_buffers(tmp_path) -> None:
+    from torchtitan.experiments.graph_trainer.precompile import (
+        precompile_fx_trace_load,
+        precompile_fx_trace_save,
+    )
+    from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+
+    module = TinyStatsModule(width=4, track_forward_calls=False)
+    value = torch.randn(3, 4)
+    runtime = init(module)
+    try:
+        with set_enabled(True):
+            traced = _trace_forward_backward_step(module, value)
+
+        storage = DiskStorageAdapter(str(tmp_path))
+        precompile_fx_trace_save(traced, storage)
+        loaded = precompile_fx_trace_load(storage, expected_fingerprint="")
+
+        assert any(
+            name.startswith("_tensor_logging_state.") for name in loaded.state_fqns
+        )
+        runtime.collect()
+        with set_enabled(True):
+            run_traced(loaded, module=module)(value)
+
+        snapshot = runtime.snapshot_unreduced_statistics()
+        assert snapshot["hidden"]["counts"].tolist() == [12, 0, 0, 1]
+        assert snapshot["output.x"]["counts"].tolist() == [12, 0, 0, 1]
+        assert snapshot["output.dx"]["counts"].tolist() == [12, 0, 0, 1]
     finally:
         runtime.close()
 
@@ -1268,3 +1297,37 @@ class TestPipelineMetricReduction(DTensorTestBase):
             }
         finally:
             runtime.close()
+
+    @with_comms
+    def test_pipeline_part_layouts_keep_global_metric_names(self) -> None:
+        rank = dist.get_rank()
+        part_layouts = (
+            ((0,), (7,)),
+            ((0, 2), (1, 3)),
+        )
+
+        for layers_by_rank in part_layouts:
+            parts = []
+            for layer_id in layers_by_rank[rank]:
+                part = nn.Module()
+                part.layers = nn.ModuleDict({str(layer_id): nn.Identity()})
+                register(part.layers[str(layer_id)], ["hidden"])
+                parts.append(part)
+
+            runtime = tensor_logging_init(
+                parts,
+                device=torch.device(self.device_type),
+                pp_enabled=True,
+            )
+            try:
+                expected_names = sorted(
+                    f"layers.{layer_id}.hidden"
+                    for rank_layers in layers_by_rank
+                    for layer_id in rank_layers
+                )
+                assert runtime.full_metric_names == expected_names
+                assert all(
+                    not name.startswith("model_parts.") for name in expected_names
+                )
+            finally:
+                runtime.close()
