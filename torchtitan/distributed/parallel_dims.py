@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 import spmd_types as spmd
@@ -26,12 +26,6 @@ __all__ = [
     "unfold_dp_axis",
     "unfold_dp_axes",
 ]
-
-
-class StrEnum(str, Enum):
-    """str + Enum for Python < 3.11 compatibility."""
-
-    pass
 
 
 class MeshAxisName(StrEnum):
