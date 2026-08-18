@@ -142,7 +142,8 @@ class FluxValidator(Validator):
         model.eval()
 
         assert isinstance(self.config, FluxValidator.Config)
-        save_img_count = self.config.save_img_count
+        max_saved_images = self.config.save_img_count
+        image_idx = 0
 
         parallel_dims = self.parallel_dims
 
@@ -166,7 +167,7 @@ class FluxValidator(Validator):
                 prompt = [prompt]
             for p in prompt:
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
-                if save_img_count != -1 and save_img_count <= 0:
+                if max_saved_images != -1 and image_idx >= max_saved_images:
                     break
                 img_size = (
                     self.config.dataloader.img_size  # pyrefly: ignore [missing-attribute]
@@ -190,7 +191,10 @@ class FluxValidator(Validator):
                 )
 
                 save_image(
-                    name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
+                    name=(
+                        f"image_rank{torch.distributed.get_rank()}_step{step}_"
+                        f"{image_idx:06d}.png"
+                    ),
                     output_dir=os.path.join(
                         self.dump_folder,
                         self.config.save_img_folder,
@@ -199,7 +203,7 @@ class FluxValidator(Validator):
                     add_sampling_metadata=True,
                     prompt=p,
                 )
-                save_img_count -= 1
+                image_idx += 1
 
             # generate t5 and clip embeddings
             input_dict["image"] = labels
