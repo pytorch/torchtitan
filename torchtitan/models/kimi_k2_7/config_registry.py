@@ -21,10 +21,9 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
+    BlockShard,
     BucketConfig,
     ComputeLayout,
-    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -213,42 +212,46 @@ def _dist_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Owned(),
-            },
-        )
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Owned(),
+        },
     )
-    per_head = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-        ),
-        compute_view=AttentionPerHeadComputeView(
-            num_heads=attention.n_heads,
-        ),
+    per_query_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+            )
+        },
     )
-    per_expert = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-                MeshAxisName.EFSDP.value: Shard(0),
-                MeshAxisName.EP.value: Shard(0),
-            },
-        )
+    per_key_value_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+            )
+        },
     )
-    query_shardings: dict[str, MuonComputeShardingConfig] = (
+    per_expert = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Shard(0),
+            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EP.value: Shard(0),
+        },
+    )
+    query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
-            "wq_b": per_head,
+            "wq_b": per_query_head,
         }
         if attention.q_lora_rank
-        else {"wq": per_head}
+        else {"wq": per_query_head}
     )
     attention_shardings = {
         **query_shardings,
         "wkv_a": owned,
-        "wkv_b": per_head,
+        "wkv_b": per_key_value_head,
         "wo": owned,
     }
     num_layers = len(model_config.layers)
@@ -271,7 +274,7 @@ def _dist_muon_optimizer(
 
     def compute_shardings_for_layer(
         layer_id: int,
-    ) -> dict[str, MuonComputeShardingConfig]:
+    ) -> dict[str, ComputeLayout]:
         prefix = f"layers.{layer_id}"
         shardings = {
             f"{prefix}.attention.{projection}.weight": compute_sharding
