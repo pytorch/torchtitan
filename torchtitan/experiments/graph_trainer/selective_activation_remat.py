@@ -184,14 +184,16 @@ def selective_activation_remat_pass(
 
     # Map original forward must_recompute node -> its recomputed duplicate.
     recomputed_nodes: dict[fx.Node, fx.Node] = {}
-    # CPU offload: track which bwd target each reload-chain node was last
-    # hoisted before, so we can re-hoist if an earlier dup needs it later.
-    moved_offload: dict[fx.Node, fx.Node] = {}
+    # CPU offload: track the anchors used for the two parts of a reload
+    # chain. The async reload and its backward dependencies are prefetched
+    # early, while the nodes after reload stay close to the first consumer
+    # that needs the reloaded value.
+    moved_prefetch: dict[fx.Node, fx.Node] = {}
+    moved_wait: dict[fx.Node, fx.Node] = {}
 
-    # Build offloaded_fwd -> bwd_wait map by walking the offload op pattern
-    # (apply_cpu_offload_pass emits: F -> ao.offload -> ao.wait_tensor ->
-    # ao.reload -> ao.wait_tensor). Used to redirect a recompute dup that
-    # consumes an offloaded fwd to read from the bwd-region GPU value.
+    # Build offloaded_fwd -> bwd_wait from the canonical offload pattern
+    # emitted by apply_cpu_offload_pass: F -> ao.offload -> ao.wait_tensor ->
+    # ao.reload -> ao.wait_tensor.
     offloaded_fwd_to_bwd_wait: dict[fx.Node, fx.Node] = {}
     for node in gm.graph.find_nodes(
         op="call_function", target=torch.ops.ao.offload.default
@@ -222,7 +224,7 @@ def selective_activation_remat_pass(
         offloaded_fwd_to_bwd_wait[offloaded_fwd] = bwd_wait
 
     def ensure_offload_chain_before(reload_node: fx.Node, target: fx.Node) -> None:
-        """Move ``reload_node`` and its bwd-region deps in front of ``target``.
+        """Prefetch reload early and put its wait immediately before ``target``.
 
         A recompute dup consuming an offloaded forward node must read from
         the reload chain on GPU, not from F's freed storage. The offload
@@ -259,45 +261,62 @@ def selective_activation_remat_pass(
         violation. We move the chain in front of ``target`` (here: the
         first bwd_node of layer K+1's backward).
 
-        ``moved_offload`` keeps moves idempotent and ensures the chain
-        ends up before the earliest target across repeated calls.
+        The reload and wait are deliberately split: moving both adjacent to
+        ``target`` would serialize the H2D transfer with the recompute.
         """
-        # ``bwd_reload_chain`` is the set of backward-region nodes that
-        # need to relocate together: ``reload_node`` (typically the
-        # ``ao.wait_tensor`` whose value the dup will read) plus every
-        # backward-region node it transitively depends on (typically the
-        # ``ao.reload`` op feeding it). Forward-region deps stop the walk —
-        # they're already before any backward target.
+        # Collect backward-region dependencies of wait_tensor. Forward-region
+        # dependencies already precede the backward region and stay put.
         bwd_reload_chain: set[fx.Node] = set()
         stack = [reload_node]
         while stack:
             n = stack.pop()
             if n in bwd_reload_chain or not _is_backward_node(n):
                 continue
-            # Skip if n is already in front of ``target``: either previously
-            # hoisted before an earlier-or-equal target, or sitting at its
-            # original (offload-pass) position which already precedes target.
-            # Re-hoisting in either case would collapse the prefetch gap the
-            # offload pass set up, killing async H2D overlap.
-            prev = moved_offload.get(n)
-            anchor_pos = order[prev] if prev is not None else order[n]
-            if anchor_pos <= order[target]:
-                continue
             bwd_reload_chain.add(n)
             stack.extend(n.all_input_nodes)
 
-        # TODO: when we DO move (chain is currently behind target), all
-        # chain members get prepended adjacent to ``target`` — collapsing
-        # the prefetch gap between ``reload`` and ``wait_tensor`` to ~0
-        # and serializing the H2D against compute. If this becomes a
-        # measurable regression we should place ``reload`` early in the
-        # bwd region and ``wait_tensor`` just before ``target`` to restore
-        # overlap.
-        # Prepend in graph (topological) order so deps land before dependents.
-        for n in sorted(bwd_reload_chain, key=order.__getitem__):
-            target.prepend(n)
-            moved_offload[n] = target
-            log.debug("moved %s before %s", n.name, target.name)
+        reload_ops = {
+            n
+            for n in bwd_reload_chain
+            if n.target is torch.ops.ao.reload.default
+        }
+
+        # A reload cannot be prefetched before any of its backward-region
+        # dependencies. Keep every such dependency with the reload, rather
+        # than assuming the chain contains only reload and wait_tensor.
+        prefetch_chain: set[fx.Node] = set()
+        stack = list(reload_ops)
+        while stack:
+            n = stack.pop()
+            if n in prefetch_chain or n not in bwd_reload_chain:
+                continue
+            prefetch_chain.add(n)
+            stack.extend(n.all_input_nodes)
+
+        # The remaining nodes are not prerequisites of a reload. Keep them
+        # late so that H2D can overlap with backward compute.
+        wait_chain = bwd_reload_chain - prefetch_chain
+
+        # Start H2D at the beginning of the backward region. Inserting nodes
+        # in topological order preserves dependencies among the prefetch nodes.
+        prefetch_anchor = bwd_nodes[0]
+        for n in sorted(prefetch_chain, key=order.__getitem__):
+            prev = moved_prefetch.get(n)
+            anchor_pos = order[prev] if prev is not None else order[n]
+            if anchor_pos > order[prefetch_anchor]:
+                prefetch_anchor.prepend(n)
+                moved_prefetch[n] = prefetch_anchor
+                log.debug("prefetched %s before %s", n.name, prefetch_anchor.name)
+
+        # Keep the nodes after reload as late as possible, immediately before
+        # the new consumer, while preserving their topological order.
+        for n in sorted(wait_chain, key=order.__getitem__):
+            prev = moved_wait.get(n)
+            anchor_pos = order[prev] if prev is not None else order[n]
+            if anchor_pos > order[target]:
+                target.prepend(n)
+                moved_wait[n] = target
+                log.debug("moved %s before %s", n.name, target.name)
 
     def remat_input(x: object) -> object:
         """Arg-transform: redirect must_recompute originals to their dups, and
