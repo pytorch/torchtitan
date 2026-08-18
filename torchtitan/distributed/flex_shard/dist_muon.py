@@ -63,11 +63,14 @@ def build_dist_muon(
 ) -> DistMuon:
     """Construct a DistMuon optimizer with FlexShard redistribution.
 
-    For DistMuon, ``BlockShard(dim=0, block_size=R)`` interprets a parameter
-    stored as ``[M * R, C]`` as ``M`` independent matrices ``[M, R, C]`` for
-    local Muon compute. A native 3D ``[M, R, C]`` parameter can use
-    ``Shard(0)`` to distribute complete matrices. A 2D parameter without
-    ``BlockShard`` must use whole-matrix compute such as ``Owned``.
+    DistMuon's ``BlockShard`` path accepts only a 2D parameter stored as
+    ``[M * R, C]`` with contiguous local DTensor storage. The placement must
+    target tensor dimension 0 with ``block_size=R``; the leading dimension
+    must be nonzero and divisible by ``R``. Each consecutive ``R`` rows forms
+    one independent ``[R, C]`` matrix for local Muon compute. A native
+    batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
+    complete matrices. A single 2D matrix without ``BlockShard`` uses
+    whole-matrix compute such as ``Owned``.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -137,6 +140,11 @@ def _matrix_batch_view_from_compute_layout(
     if not block_shards:
         return None
 
+    if len(storage_shape) != 2:
+        raise ValueError(
+            f"Muon parameter {fqn!r} BlockShard currently requires a "
+            f"2D [M * R, C] parameter; got shape {tuple(storage_shape)}"
+        )
     normalized_dims = tuple(
         _normalize_dim(block_shard.dim, len(storage_shape))
         for block_shard in block_shards
