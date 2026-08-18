@@ -212,18 +212,17 @@ class CheckpointManager(BaseCheckpointManager):
     def __del__(self):
         self.close()
 
-    def close(self):
-        if hasattr(self, "enable") and self.enable:
-            if (
-                hasattr(self, "purge_thread")
-                and self.purge_thread
-                and self.purge_thread.is_alive()
-            ):
-                self.purge_queue.put(None)
-                self.purge_thread.join()
+    def _close(self):
+        if (
+            hasattr(self, "purge_thread")
+            and self.purge_thread
+            and self.purge_thread.is_alive()
+        ):
+            self.purge_queue.put(None)
+            self.purge_thread.join()
 
-            if self.stager is not None:
-                self.stager.close()
+        if self.stager is not None:
+            self.stager.close()
 
     @torch.no_grad()
     def dcp_save(
@@ -379,7 +378,7 @@ class CheckpointManager(BaseCheckpointManager):
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
-    def save(self, curr_step: int, last_step: bool = False) -> bool:
+    def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
         This function manages the checkpointing lifecycle for the current step.
@@ -474,7 +473,7 @@ class CheckpointManager(BaseCheckpointManager):
 
     @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
-    def load(self, step: int = -1) -> bool:
+    def _load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.
 
         This function orchestrates the states loading process.
@@ -491,9 +490,6 @@ class CheckpointManager(BaseCheckpointManager):
         Returns:
             bool: Whether the checkpoint was successfully located and loaded.
         """
-
-        if not self.enable:
-            return False
 
         model_only = False
         from_hf = False
@@ -589,7 +585,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         return True
 
-    def maybe_wait_for_staging(self) -> None:
+    def _maybe_wait_for_staging(self) -> None:
         """Wait for the staging process to complete if it is active.
 
         In `ASYNC_WITH_PINNED_MEM` mode, the checkpoint data is first staged from
@@ -606,7 +602,7 @@ class CheckpointManager(BaseCheckpointManager):
                 isn't ASYNC_WITH_PINNED_MEM.
         """
 
-        if not self.enable or self.staging_future is None:
+        if self.staging_future is None:
             return
 
         if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -618,7 +614,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.staging_future.result()
         self.staging_future = None
 
-    def maybe_wait_for_saving(self) -> None:
+    def _wait_for_saving(self) -> None:
         """Wait for any async background checkpoint saving operation to complete.
 
         This is a blocking call that ensures all checkpoint data has been fully
@@ -630,14 +626,14 @@ class CheckpointManager(BaseCheckpointManager):
                 is DISABLED.
         """
 
-        if not self.enable or self.save_future is None:
-            return
-
         if self.async_mode == AsyncMode.DISABLED:
             raise RuntimeError(
                 "self.save_future is not None, but self.async_mode is DISABLED."
             )
 
+        # Narrowing for the type checker: maybe_wait_for_saving only dispatches
+        # here when save_future is set.
+        assert self.save_future is not None
         self.save_future.result()
         self.save_future = None
 
