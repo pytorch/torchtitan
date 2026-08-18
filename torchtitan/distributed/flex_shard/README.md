@@ -10,17 +10,34 @@ optimizer work. DistMuon is its initial consumer.
 The public API is exported from `torchtitan.distributed.flex_shard`:
 
 - `ComputeLayout` describes temporary optimizer-compute sharding on named
-  `DeviceMesh` axes using PyTorch DTensor placements or `Owned`.
+  `DeviceMesh` axes using PyTorch DTensor placements, `BlockShard`, or `Owned`.
+- `BlockShard` shards complete fixed-size blocks along one tensor dimension. It
+  preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `MuonComputeShardingConfig` associates a parameter with its `ComputeLayout`
-  and an optional logical compute view.
-- `AttentionPerHeadComputeView` treats a flattened attention projection as a
-  batch of independent per-head matrices for Muon.
-- `build_dist_muon` validates named DTensor parameters, plans their
-  storage-to-compute transitions, and constructs the optimizer.
+- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
+  values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
+  only a 2D parameter `[M * R, C]` with contiguous local DTensor storage. The
+  placement must target tensor dimension 0 with `block_size=R`; the leading
+  dimension must be nonzero and divisible by `R`. Each consecutive `R` rows
+  forms one independent `[R, C]` matrix. FlexShard routes the flat 2D compute
+  tensor, and DistMuon applies a zero-copy local `[M_local, R, C]` view
+  immediately before Muon compute. A native batch-first 3D `[M, R, C]`
+  parameter uses `Shard(0)` to distribute complete matrices. A single 2D
+  matrix without `BlockShard` uses whole-matrix compute such as `Owned`. The
+  builder validates named DTensor parameters and plans their storage-to-compute
+  transitions.
+
+Storage placements describe persistent ownership only; they do not define
+Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
+most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
+`Replicate`; every other non-unit storage mesh axis must be replicated.
+
+Compute sharding is construction-time configuration. It is validated and
+frozen when the optimizer is built, but is not stored in its state dict;
+checkpoint restore must rebuild the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 
