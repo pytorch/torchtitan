@@ -8,10 +8,10 @@ from typing import cast
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     default_adamw,
+    LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
 )

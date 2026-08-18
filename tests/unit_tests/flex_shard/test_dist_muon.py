@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# @lint-ignore-every CITRINE
+
 import unittest
 
 import torch
@@ -21,19 +23,19 @@ from torchtitan.components.checkpoint_utils import (
 from torchtitan.distributed.flex_shard import (
     AttentionPerHeadComputeView,
     BucketConfig,
-    build_distributed_muon,
+    build_dist_muon,
     ComputeLayout,
     MuonComputeShardingConfig,
     Owned,
 )
-from torchtitan.distributed.flex_shard.distributed_muon import (
+from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
-    DistributedMuon,
+    DistMuon,
 )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
-class TestDistributedMuon(DTensorTestBase):
+class TestDistMuon(DTensorTestBase):
     @property
     def world_size(self):
         return 2
@@ -65,7 +67,7 @@ class TestDistributedMuon(DTensorTestBase):
         ):
             redistributed_fqn = "layers.0.redistributed"
             local_blocks_fqn = "layers.0.local_blocks"
-            return build_distributed_muon(
+            return build_dist_muon(
                 [
                     {
                         "params": [redistributed, local_blocks],
@@ -111,7 +113,7 @@ class TestDistributedMuon(DTensorTestBase):
         redistributed = make_parameter(redistributed_value)
         local_blocks = make_parameter(local_blocks_value)
         optimizer = make_optimizer(redistributed, local_blocks)
-        self.assertIs(type(optimizer), DistributedMuon)
+        self.assertIs(type(optimizer), DistMuon)
         with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
             optimizer.add_param_group({"params": []})
 
@@ -224,7 +226,7 @@ class TestDistributedMuon(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
-class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
+class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
     @property
     def world_size(self):
         return 4
@@ -259,7 +261,7 @@ class TestDistributedMuonInitialExpertStorageContract(DTensorTestBase):
             "preserving Shard\\(0\\) storage on mesh axis 'ep'.*"
             "orthogonal-shard redistribution is not implemented",
         ):
-            build_distributed_muon(
+            build_dist_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
                     fqn: MuonComputeShardingConfig(

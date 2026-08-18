@@ -25,6 +25,7 @@ class OverrideDefinitions:
     disabled: bool = False
     skip_rocm_test: bool = False
     timeout: int | None = None
+    supports_spmd_types: bool = True
 
     def __repr__(self):
         return self.test_descr

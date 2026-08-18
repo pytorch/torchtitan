@@ -13,6 +13,9 @@ dependencies = [
     # Stateful Dataloader
     "torchdata>=0.8.0",
 
+    # Checkpointing
+    "torch_checkpointing>=0.1.0",
+
     # Hugging Face integrations
     "datasets>=3.6.0,<4.8.0",
     "tokenizers>=0.15.0",
@@ -41,8 +44,8 @@ dev = [
     "expecttest", # test_tokenizer
     "pyrefly==0.45.1",
 ]
-torch-checkpointing = [
-    "torch_checkpointing>=0.1.0",
+remat = [
+    "torch_remat>=0.2.0",
 ]
 
 [tool.setuptools.dynamic]
@@ -59,7 +62,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = [""]
-include = ["torchtitan*"]
+# torchtitan_recipes is a second top-level package, listed so that
+# tightening the first pattern to "torchtitan.*" cannot silently drop it.
+include = ["torchtitan*", "torchtitan_recipes*"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
