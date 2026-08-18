@@ -50,13 +50,15 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention(model, parallel_dims)
-
     annotate_llama(model)
 
-    if parallel_dims.tp_enabled:
+    if parallelism.spmd_backend == "spmd_types":
         model.parallelize(parallel_dims)
+    else:
+        if parallel_dims.cp_enabled:
+            apply_cp_to_attention(model, parallel_dims)
+        if parallel_dims.tp_enabled:
+            model.parallelize(parallel_dims)
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that

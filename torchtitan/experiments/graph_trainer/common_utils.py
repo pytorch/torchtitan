@@ -421,7 +421,7 @@ def apply_simple_fsdp(
     """
     fsdp_axis = "dp_shard" if parallel_dims.spmd_backend == "spmd_types" else "fsdp"
     dense_non_dp_mesh = (
-        parallel_dims.spmd_dense_mesh()["tp"]
+        parallel_dims.get_activated_mesh(["cp", "tp"])
         if parallel_dims.spmd_backend == "spmd_types"
         else None
     )

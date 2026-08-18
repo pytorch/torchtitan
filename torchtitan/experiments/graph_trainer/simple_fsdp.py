@@ -54,10 +54,13 @@ def _spmd_local_tensor_to_dtensor(
     non_dp_mesh: DeviceMesh | None,
 ) -> torch.Tensor:
     """Reconstruct model-parallel DTensor metadata from an SPMD local tensor."""
-    if get_spmd_backend() != "spmd_types" or not has_local_type(tensor):
+    if (
+        get_spmd_backend() != "spmd_types"
+        or not has_local_type(tensor)
+        or non_dp_mesh is None
+    ):
         return tensor
 
-    assert non_dp_mesh is not None
     assert non_dp_mesh.mesh_dim_names is not None
     partition_spec = get_partition_spec(tensor)
     with spmd.set_current_mesh(non_dp_mesh):
