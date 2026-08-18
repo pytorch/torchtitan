@@ -17,8 +17,8 @@ To validate the correctness of a distributed training technique, one should try 
 ```
 training.num_tokens_per_microbatch_per_dp_rank
 * parallelism.num_pp_microbatches
-* training.num_gradient_accumulation_steps
 * data-parallel degree
+* derived gradient accumulation steps
 ```
 
 When PP is disabled, its effective number of microbatches is one.

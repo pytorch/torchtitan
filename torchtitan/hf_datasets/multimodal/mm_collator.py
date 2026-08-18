@@ -19,7 +19,6 @@ import torch
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.tools.logging import logger
 from .utils.image import vision_to_patches
 
 
@@ -32,7 +31,7 @@ class MultiModalCollator:
     """
 
     num_tokens_per_batch: int
-    max_images_per_batch: int
+    max_context_length: int
     patch_size: int
     temporal_patch_size: int
     spatial_merge_size: int
@@ -100,7 +99,13 @@ class MultiModalCollator:
             label_ids = torch.nn.functional.pad(
                 label_ids, (0, pad_len), value=IGNORE_INDEX
             )
-            position_ids = torch.cat([position_ids, torch.arange(pad_len)])
+            padding_positions = (
+                torch.arange(
+                    pad_len, dtype=position_ids.dtype, device=position_ids.device
+                )
+                % self.max_context_length
+            )
+            position_ids = torch.cat([position_ids, padding_positions])
 
         return input_ids, label_ids, position_ids
 
@@ -246,23 +251,6 @@ class MultiModalCollator:
         self, batch: list[dict[str, Any]]
     ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
         """Collate batch with patch-based approach."""
-        images_per_sample: list[int] = []
-        for sample in batch:
-            num_images = len(sample.get("pixel_values", []))
-            for vid in sample.get("pixel_values_videos", []):
-                num_images += vid.shape[0] // self.temporal_patch_size
-            images_per_sample.append(num_images)
-
-        total_images = sum(images_per_sample)
-        while total_images > self.max_images_per_batch and batch:
-            removed_images = images_per_sample.pop()
-            total_images -= removed_images
-            batch.pop()
-            logger.warning(
-                f"Removed sample with {removed_images} vision entries to keep "
-                f"total <= {self.max_images_per_batch}"
-            )
-
         all_images = [
             img
             for sample in batch

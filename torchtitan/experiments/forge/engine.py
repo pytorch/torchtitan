@@ -187,13 +187,32 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
         self.num_pp_microbatches = num_pp_microbatches
-        self.gradient_accumulation_steps = (
-            config.training.num_gradient_accumulation_steps
-        )
-        self.num_tokens_per_train_step = (
+        self.num_tokens_per_train_step = config.training.num_tokens_per_train_step
+        if self.num_tokens_per_train_step < 0:
+            self.num_tokens_per_train_step = (
+                config.training.num_tokens_per_microbatch_per_dp_rank
+                * self.num_pp_microbatches
+                * dp_degree
+            )
+        if (
+            self.num_tokens_per_train_step
+            % (
+                config.training.num_tokens_per_microbatch_per_dp_rank
+                * self.num_pp_microbatches
+                * dp_degree
+            )
+            != 0
+        ):
+            raise ValueError(
+                "training.num_tokens_per_train_step "
+                f"({self.num_tokens_per_train_step}) must be divisible by the "
+                "number of tokens processed globally in one gradient accumulation "
+                "iteration "
+                f"({config.training.num_tokens_per_microbatch_per_dp_rank * self.num_pp_microbatches * dp_degree})."
+            )
+        self.gradient_accumulation_steps = self.num_tokens_per_train_step // (
             config.training.num_tokens_per_microbatch_per_dp_rank
             * self.num_pp_microbatches
-            * self.gradient_accumulation_steps
             * dp_degree
         )
 

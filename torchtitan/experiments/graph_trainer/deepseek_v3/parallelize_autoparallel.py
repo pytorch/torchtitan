@@ -162,11 +162,11 @@ def parallelize_autoparallel_deepseekv3(
 
     def input_fn():
         dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-        num_tokens_per_train_step = (
-            training.num_tokens_per_microbatch_per_dp_rank
-            * training.num_gradient_accumulation_steps
-            * dp_degree
-        )
+        num_tokens_per_train_step = training.num_tokens_per_train_step
+        if num_tokens_per_train_step < 0:
+            num_tokens_per_train_step = (
+                training.num_tokens_per_microbatch_per_dp_rank * dp_degree
+            )
         tokens = torch.randint(
             0,
             ap_model.model_args.vocab_size,

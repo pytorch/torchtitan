@@ -70,7 +70,7 @@ We look forward to your contributions!
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
 11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
-12. Gradient accumulation, configured with `--training.num_gradient_accumulation_steps`
+12. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
 13. Flexible learning rate scheduler (warmup-stable-decay)
 14. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage
 15. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)

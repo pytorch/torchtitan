@@ -32,9 +32,12 @@ class TrainingConfig:
     forward, before context or tensor parallel sharding.
     """
 
-    num_gradient_accumulation_steps: int = 1
+    num_tokens_per_train_step: int = -1
     """
-    Number of gradient accumulation iterations per train step.
+    Global number of input-token slots across data-parallel ranks, pipeline
+    microbatches, and gradient accumulation steps. Defaults to
+    `training.num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches *
+    data-parallel degree`.
     """
 
     max_context_length: int = 2048
@@ -45,8 +48,8 @@ class TrainingConfig:
             raise ValueError(
                 "num_tokens_per_microbatch_per_dp_rank must be greater than 0."
             )
-        if self.num_gradient_accumulation_steps <= 0:
-            raise ValueError("num_gradient_accumulation_steps must be greater than 0.")
+        if self.num_tokens_per_train_step != -1 and self.num_tokens_per_train_step <= 0:
+            raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""

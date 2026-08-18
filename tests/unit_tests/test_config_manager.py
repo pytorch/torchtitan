@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 import pytest
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigManager, TrainingConfig
 
 
 class TestConfigManager(unittest.TestCase):
@@ -95,15 +95,15 @@ class TestConfigManager(unittest.TestCase):
                 "5",
                 "--training.num_tokens_per_microbatch_per_dp_rank",
                 "4096",
-                "--training.num_gradient_accumulation_steps",
-                "2",
+                "--training.num_tokens_per_train_step",
+                "8192",
                 "--training.max_context_length",
                 "1024",
             ]
         )
         assert config.training.steps == 5
         assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
-        assert config.training.num_gradient_accumulation_steps == 2
+        assert config.training.num_tokens_per_train_step == 8192
         assert config.training.max_context_length == 1024
 
     def test_num_tokens_per_microbatch_must_be_positive(self):
@@ -119,6 +119,10 @@ class TestConfigManager(unittest.TestCase):
                     "0",
                 ]
             )
+
+    def test_num_tokens_per_train_step_must_be_positive_or_unset(self):
+        with pytest.raises(ValueError, match="must be -1 or greater than 0"):
+            TrainingConfig(num_tokens_per_train_step=0)
 
     def test_num_pp_microbatches_does_not_constrain_non_pp_training(self):
         config_manager = ConfigManager()

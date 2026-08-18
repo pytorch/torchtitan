@@ -325,6 +325,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         resize_fn: Callable[..., tuple[int, int, int, int]],
         max_patches: int,
         max_patches_per_side: int,
+        max_images_per_batch: int,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -361,6 +362,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self.resize_fn = resize_fn
         self.max_patches = max_patches
         self.max_patches_per_side = max_patches_per_side
+        self.max_images_per_batch = max_images_per_batch
         self.video_dir = video_dir
         self.video_fps = video_fps
         self.video_min_frames = video_min_frames
@@ -376,6 +378,20 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self._hf_state_restored = False
         self._batch_samples: list[dict[str, Any]] = []
         self._num_batch_tokens = 0
+        self._num_batch_images = 0
+
+    def _get_num_vision_entries(self, sample: dict[str, Any]) -> int:
+        num_images = len(sample.get("pixel_values", []))
+        for video in sample.get("pixel_values_videos", []):
+            num_images += video.shape[0] // self.temporal_patch_size
+        return num_images
+
+    def _take_batch(self) -> list[dict[str, Any]]:
+        batch = self._batch_samples
+        self._batch_samples = []
+        self._num_batch_tokens = 0
+        self._num_batch_images = 0
+        return batch
 
     def _append_to_batch(self, sample: dict[str, Any]):
         """Add one whole sample and yield completed token-budget batches."""
@@ -389,31 +405,42 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
                 self.max_context_length,
             )
             return
+        num_sample_images = self._get_num_vision_entries(sample)
+        if num_sample_images > self.max_images_per_batch:
+            logger.warning(
+                "Sample has %d vision entries, exceeding max_images_per_batch=%d. "
+                "Skipping.",
+                num_sample_images,
+                self.max_images_per_batch,
+            )
+            return
 
-        if (
-            self._batch_samples
-            and self._num_batch_tokens + num_sample_tokens > self.num_tokens_per_batch
+        if self._batch_samples and (
+            self._num_batch_tokens + num_sample_tokens > self.num_tokens_per_batch
+            or self._num_batch_images + num_sample_images > self.max_images_per_batch
         ):
-            batch = self._batch_samples
+            batch = self._take_batch()
             # Record the already-consumed sample as the next batch state before
             # yielding so a checkpoint taken at the yield boundary cannot lose it.
             self._batch_samples = [sample]
             self._num_batch_tokens = num_sample_tokens
+            self._num_batch_images = num_sample_images
             yield batch
-            if self._num_batch_tokens == self.num_tokens_per_batch:
-                batch = self._batch_samples
-                self._batch_samples = []
-                self._num_batch_tokens = 0
-                yield batch
+            if (
+                self._num_batch_tokens == self.num_tokens_per_batch
+                or self._num_batch_images == self.max_images_per_batch
+            ):
+                yield self._take_batch()
             return
 
         self._batch_samples.append(sample)
         self._num_batch_tokens += num_sample_tokens
-        if self._num_batch_tokens == self.num_tokens_per_batch:
-            batch = self._batch_samples
-            self._batch_samples = []
-            self._num_batch_tokens = 0
-            yield batch
+        self._num_batch_images += num_sample_images
+        if (
+            self._num_batch_tokens == self.num_tokens_per_batch
+            or self._num_batch_images == self.max_images_per_batch
+        ):
+            yield self._take_batch()
 
     def _drain_packed_samples(self):
         while self.packer.packed_samples:
@@ -468,10 +495,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
 
             if not self.infinite:
                 if self._batch_samples:
-                    batch = self._batch_samples
-                    self._batch_samples = []
-                    self._num_batch_tokens = 0
-                    yield batch
+                    yield self._take_batch()
                 break
             else:
                 self._sample_idx = 0
@@ -507,9 +531,11 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
         self._batch_samples = state_dict.get("batch_samples", [])
-        self._num_batch_tokens = state_dict.get(
-            "num_batch_tokens",
-            sum(sample["input_ids"].shape[0] - 1 for sample in self._batch_samples),
+        self._num_batch_tokens = sum(
+            sample["input_ids"].shape[0] - 1 for sample in self._batch_samples
+        )
+        self._num_batch_images = sum(
+            self._get_num_vision_entries(sample) for sample in self._batch_samples
         )
 
         # Restore HF dataset state if available, enabling fast resume
@@ -531,7 +557,6 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         state = {
             "sample_idx": self._sample_idx,
             "batch_samples": self._batch_samples,
-            "num_batch_tokens": self._num_batch_tokens,
         }
 
         # Save HF dataset state for fast resume if supported
@@ -661,6 +686,7 @@ class MMDataLoader(ParallelAwareDataloader):
             resize_fn=config.resize_fn,
             max_patches=config.max_patches,
             max_patches_per_side=config.max_patches_per_side,
+            max_images_per_batch=config.max_images_per_batch,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             infinite=config.infinite,
@@ -673,7 +699,7 @@ class MMDataLoader(ParallelAwareDataloader):
 
         collate_fn = MultiModalCollator(
             num_tokens_per_batch=num_tokens_per_batch,
-            max_images_per_batch=config.max_images_per_batch,
+            max_context_length=max_context_length,
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
             spatial_merge_size=config.spatial_merge_size,

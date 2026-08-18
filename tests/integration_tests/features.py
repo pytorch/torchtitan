@@ -557,7 +557,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--training.num_tokens_per_microbatch_per_dp_rank 16384",
-                    "--training.num_gradient_accumulation_steps 2",
+                    "--training.num_tokens_per_train_step 65536",
                 ],
             ],
             "Gradient accumulation",

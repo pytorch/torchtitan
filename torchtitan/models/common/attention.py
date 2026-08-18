@@ -341,10 +341,8 @@ class FlexAttention(Module):
 class ScaledDotProductAttention(Module):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
-    ``forward()`` adapts ``(T, N, H)`` to the kernel's ``(1, N, T, H)`` layout
-    and converts the result back to ``(T, N, H)``. The singleton kernel batch
-    is required because PyTorch context parallelism expects sequence dimension
-    2 for SDPA inputs.
+    ``forward()`` adapts ``(B, L, N, H)`` to the kernel's ``(B, N, L, H)``
+    layout and converts the result back to ``(B, L, N, H)``.
 
     Note:
         The forward function must have q, k, v as the first three arguments to be
@@ -370,9 +368,9 @@ class ScaledDotProductAttention(Module):
 
     def forward(
         self,
-        q_TNH: torch.Tensor,
-        k_TNH: torch.Tensor,
-        v_TNH: torch.Tensor,
+        q_BLNH: torch.Tensor,
+        k_BLNH: torch.Tensor,
+        v_BLNH: torch.Tensor,
         *,
         attention_masks: AttentionMasksType | None = None,
         scale: float | None = None,
@@ -385,21 +383,21 @@ class ScaledDotProductAttention(Module):
                 "ScaledDotProductAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
-        q_BNTH, k_BNTH, v_BNTH = (
-            q_TNH.transpose(0, 1).unsqueeze(0),
-            k_TNH.transpose(0, 1).unsqueeze(0),
-            v_TNH.transpose(0, 1).unsqueeze(0),
+        q_BNLH, k_BNLH, v_BNLH = (
+            q_BLNH.transpose(1, 2),
+            k_BLNH.transpose(1, 2),
+            v_BLNH.transpose(1, 2),
         )
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            out_BNTH = F.scaled_dot_product_attention(
-                q_BNTH,
-                k_BNTH,
-                v_BNTH,
+            out_BNLH = F.scaled_dot_product_attention(
+                q_BNLH,
+                k_BNLH,
+                v_BNLH,
                 scale=scale,
                 is_causal=is_causal,
                 enable_gqa=enable_gqa,
             )
-        return out_BNTH.squeeze(0).transpose(0, 1)
+        return out_BNLH.transpose(1, 2)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

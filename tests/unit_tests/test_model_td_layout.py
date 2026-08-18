@@ -9,6 +9,9 @@ import unittest
 import torch
 import torch.nn as nn
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    GraphTrainerScaledDotProductAttention,
+)
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.gpt_oss import gptoss_configs
@@ -30,8 +33,18 @@ class _AttentionOutput(nn.Module):
 
 
 class TestModelTDLayout(unittest.TestCase):
-    def test_sdpa_preserves_tnh_shape(self):
+    def test_sdpa_preserves_blnh_shape(self):
         attention = ScaledDotProductAttention.Config().build()
+        q_BLNH = torch.randn(2, 8, 4, 16)
+        k_BLNH = torch.randn(2, 8, 2, 16)
+        v_BLNH = torch.randn(2, 8, 2, 16)
+
+        out_BLNH = attention(q_BLNH, k_BLNH, v_BLNH, enable_gqa=True)
+
+        self.assertEqual(out_BLNH.shape, q_BLNH.shape)
+
+    def test_graph_trainer_sdpa_preserves_tnh_shape(self):
+        attention = GraphTrainerScaledDotProductAttention.Config().build()
         q_TNH = torch.randn(8, 4, 16)
         k_TNH = torch.randn(8, 2, 16)
         v_TNH = torch.randn(8, 2, 16)

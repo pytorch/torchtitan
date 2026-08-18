@@ -251,7 +251,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--module gpt_oss --config gpt_oss_debugmodel",
                     "--training.num_tokens_per_microbatch_per_dp_rank 1024",
-                    "--training.num_gradient_accumulation_steps 4",
+                    "--training.num_tokens_per_train_step 131072",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",

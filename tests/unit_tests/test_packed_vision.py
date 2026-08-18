@@ -11,7 +11,9 @@ import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import create_mask
 
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import HuggingFaceMultiModalDataset
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import scatter_vision_embeds
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -29,11 +31,39 @@ from torchtitan.models.qwen3_5.vision_encoder import (
 
 
 class TestPackedVision(unittest.TestCase):
+    def test_dataset_carries_sample_across_image_limit(self) -> None:
+        dataset = object.__new__(HuggingFaceMultiModalDataset)
+        dataset.max_context_length = 8
+        dataset.num_tokens_per_batch = 16
+        dataset.max_images_per_batch = 3
+        dataset.temporal_patch_size = 1
+        dataset._batch_samples = []
+        dataset._num_batch_tokens = 0
+        dataset._num_batch_images = 0
+
+        def sample(token: int, num_images: int) -> dict:
+            return {
+                "input_ids": torch.tensor([token, token + 1]),
+                "pixel_values": [torch.empty(0)] * num_images,
+            }
+
+        sample_0 = sample(0, 2)
+        sample_1 = sample(2, 2)
+        sample_2 = sample(4, 1)
+
+        self.assertEqual(list(dataset._append_to_batch(sample_0)), [])
+        self.assertEqual(list(dataset._append_to_batch(sample_1)), [[sample_0]])
+        self.assertEqual(dataset._batch_samples, [sample_1])
+        self.assertEqual(
+            list(dataset._append_to_batch(sample_2)), [[sample_1, sample_2]]
+        )
+        self.assertEqual(dataset._batch_samples, [])
+
     def test_collator_flattens_text_segments(self) -> None:
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         collator = MultiModalCollator(
             num_tokens_per_batch=8,
-            max_images_per_batch=0,
+            max_context_length=4,
             patch_size=1,
             temporal_patch_size=1,
             spatial_merge_size=1,
@@ -61,6 +91,32 @@ class TestPackedVision(unittest.TestCase):
         )
         torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 0, 1, 0, 1]))
 
+    def test_collator_resets_long_padding_positions(self) -> None:
+        tokenizer = type("Tokenizer", (), {"pad_id": 99})()
+        collator = MultiModalCollator(
+            num_tokens_per_batch=10,
+            max_context_length=4,
+            patch_size=1,
+            temporal_patch_size=1,
+            spatial_merge_size=1,
+            tokenizer=tokenizer,  # type: ignore[arg-type]
+            build_mrope_positions=False,
+        )
+        batch = [
+            {
+                "input_ids": torch.tensor([1, 2, 3]),
+                "labels": torch.tensor([1, 2, 3]),
+                "positions": torch.tensor([0, 1, 2]),
+            }
+        ]
+
+        _, labels, positions = collator.collate_text(batch)
+
+        torch.testing.assert_close(labels[2:], torch.full((8,), IGNORE_INDEX))
+        torch.testing.assert_close(
+            positions, torch.tensor([0, 1, 0, 1, 2, 3, 0, 1, 2, 3])
+        )
+
     def test_collator_concatenates_patches(self) -> None:
         patches_0 = torch.arange(12).view(3, 4)
         patches_1 = torch.arange(8).view(2, 4) + 20
@@ -68,7 +124,7 @@ class TestPackedVision(unittest.TestCase):
         grid_1 = torch.tensor([1, 1, 2])
         collator = MultiModalCollator(
             num_tokens_per_batch=8,
-            max_images_per_batch=2,
+            max_context_length=4,
             patch_size=1,
             temporal_patch_size=1,
             spatial_merge_size=1,

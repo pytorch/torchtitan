@@ -8,6 +8,7 @@ import fnmatch
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 import torch
@@ -23,6 +24,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
 
@@ -30,6 +32,29 @@ from torchtitan.tools.logging import logger
 BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
 LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
 AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
+
+
+class GraphTrainerScaledDotProductAttention(ScaledDotProductAttention):
+    """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ScaledDotProductAttention.Config):
+        pass
+
+    def forward(
+        self,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        out_BLNH = super().forward(
+            q_TNH.unsqueeze(0),
+            k_TNH.unsqueeze(0),
+            v_TNH.unsqueeze(0),
+            **kwargs,
+        )
+        return out_BLNH.squeeze(0)
 
 
 @contextmanager
@@ -56,18 +81,18 @@ def build_decoder_config_for_backend(
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``ScaledDotProductAttention.Config()``. Production code
-    never reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no
-    model registry can construct an SDPA language model outside these tests.
+    ``inner_attention`` to ``GraphTrainerScaledDotProductAttention.Config()``.
+    The adapter adds a singleton batch around the flat graph-trainer inputs and
+    delegates to the common batched SDPA implementation. Production code never
+    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
+    registry can construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
         return config_builder(attn_backend=attn_backend, **builder_kwargs)
 
-    from torchtitan.models.common.attention import ScaledDotProductAttention
-
     config = config_builder(attn_backend="flex", **builder_kwargs)
     for layer in config.layers:
-        layer.attention.inner_attention = ScaledDotProductAttention.Config()
+        layer.attention.inner_attention = GraphTrainerScaledDotProductAttention.Config()
     return config
 
 

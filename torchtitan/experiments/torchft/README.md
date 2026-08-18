@@ -61,8 +61,9 @@ the replica groups can synchronize weights every N steps.
 
 **Note on Token Counts**: For DiLoCo, there is an important distinction in token-count terminology:
 
-`--training.num_gradient_accumulation_steps` controls how many forward/backward
-iterations are accumulated before each optimizer step.
+`--training.num_tokens_per_train_step` controls the global token budget. The
+number of forward/backward iterations accumulated before each optimizer step is
+derived from that budget.
 
 - **Tokens per step**: The total token count across all DiLoCo islands/replica groups
 - **Inner tokens per step**: The token count within each individual DiLoCo island. This is determined by dividing tokens per step by the number of replica groups.

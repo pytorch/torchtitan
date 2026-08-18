@@ -248,9 +248,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.parallel_dims = parallel_dims = self.init_distributed()
 
         # Validate dense activation token-count evenness.
-        num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
-        )
         num_tokens_per_pp_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -366,15 +363,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-        self.gradient_accumulation_steps = (
-            config.training.num_gradient_accumulation_steps
-        )
         num_tokens_per_dp_rank = (
             config.training.num_tokens_per_microbatch_per_dp_rank
             * self.num_pp_microbatches
         )
-        num_tokens_per_train_step = (
-            num_tokens_per_dp_rank * self.gradient_accumulation_steps * batch_degree
+        num_tokens_per_train_step = config.training.num_tokens_per_train_step
+        if num_tokens_per_train_step < 0:
+            num_tokens_per_train_step = num_tokens_per_dp_rank * batch_degree
+        if num_tokens_per_train_step % (num_tokens_per_dp_rank * batch_degree) != 0:
+            raise ValueError(
+                "training.num_tokens_per_train_step "
+                f"({num_tokens_per_train_step}) must be divisible by the number "
+                "of tokens processed globally in one gradient accumulation "
+                f"iteration ({num_tokens_per_dp_rank * batch_degree})."
+            )
+        self.gradient_accumulation_steps = num_tokens_per_train_step // (
+            num_tokens_per_dp_rank * batch_degree
         )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
