@@ -82,7 +82,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
-    VarlenMetadata,
 )
 from torchtitan.tools import utils
 
@@ -315,25 +314,6 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_padded_varlen_metadata(batch_size, max_len, device):
-    """Build VarlenMetadata for a padded (batch_size, max_len) tensor.
-
-    VarlenAttention reshapes (batch_size, max_len) -> (batch_size * max_len,)
-    so each row boundary is at multiples of max_len. Causal masking prevents
-    padding tokens from affecting valid positions.
-    """
-    cu_seqs = torch.arange(
-        0, (batch_size + 1) * max_len, max_len, dtype=torch.int32, device=device
-    )
-    return VarlenMetadata(
-        cu_seq_q=cu_seqs,
-        cu_seq_k=cu_seqs,
-        max_q=max_len,
-        max_k=max_len,
-        cu_seq_q_host=tuple(range(0, (batch_size + 1) * max_len, max_len)),
-    )
-
-
 def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     """Compute per-sequence logprobs using flex attention with packed sequences.
 
@@ -405,13 +385,13 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     for i, t in enumerate(input_tensors):
         padded[i, : t.shape[0]] = t
 
-    attention_masks = _build_padded_varlen_metadata(len(input_tensors), max_len, device)
-
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
     positions = (
         torch.arange(max_len, device=device).unsqueeze(0).expand(len(input_tensors), -1)
     )
+    # Hybrid models may require different metadata for each attention type.
+    attention_masks = model.get_attention_masks(positions)
 
     logits = model(padded, attention_masks=attention_masks, positions=positions)
 
