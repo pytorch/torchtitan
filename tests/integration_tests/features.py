@@ -183,7 +183,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module qwen3 --config qwen3_debugmodel_moe",
+                    "--module qwen3 --config qwen3_moe_debug",
                     "--metrics.enable_tensorboard",
                     "--metrics.log-freq 2",
                     "--metrics.tensor-logging.enabled",
