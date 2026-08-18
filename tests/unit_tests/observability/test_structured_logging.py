@@ -14,7 +14,10 @@ import time
 from unittest import mock
 
 import pytest
-from torchtitan.observability.structured_logger import step_state
+from torchtitan.observability.structured_logger import (
+    install_forwarding_structured_logging_handler,
+    step_state,
+)
 from torchtitan.observability.structured_logger.gantt_generator import (
     generate_gantt_trace,
 )
@@ -73,14 +76,24 @@ def structured_logger_fixture():
     import torchtitan.observability.structured_logger.structured_logging as sl_mod
 
     tl = _structured_logger
-    orig = (tl.handlers[:], tl.level, tl.propagate)
+    orig = (tl.handlers[:], tl.level, tl.propagate, sl_mod._disabled)
     # Reset the module-level init sentinel so init_structured_logger re-runs
     # for each test (otherwise the second call short-circuits as "already
     # initialized").
     sl_mod._is_initialized = False
+    sl_mod._disabled = False
     yield tl
-    tl.handlers, tl.level, tl.propagate = orig
+    tl.handlers, tl.level, tl.propagate, sl_mod._disabled = orig
     sl_mod._is_initialized = False
+
+
+@pytest.fixture
+def external_logger():
+    source_logger = logging.getLogger("external_library")
+    orig = (source_logger.handlers[:], source_logger.level, source_logger.propagate)
+    source_logger.handlers = []
+    yield source_logger
+    source_logger.handlers, source_logger.level, source_logger.propagate = orig
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +519,64 @@ class TestTraceJsonlFormatter:
         assert "time_us" in parsed
         assert isinstance(parsed["time_us"], int)
 
+    def test_checkpoint_context_fields(self):
+        fmt = TraceJsonlFormatter(rank=0, source="test")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="test",
+            args=None,
+            exc_info=None,
+        )
+        for key, value in event_extra("log_metric").items():
+            setattr(record, key, value)
+        record.context = ["source:test"]
+        record.measured_from_start_time_ms = 123456
+
+        parsed = json.loads(fmt.format(record))
+
+        assert parsed["context"] == ["source:test"]
+        assert parsed["measured_from_start_time_ms"] == 123456
+
+    def test_omits_missing_context(self):
+        fmt = TraceJsonlFormatter(rank=0, source="test")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="test",
+            args=None,
+            exc_info=None,
+        )
+        for key, value in event_extra("log_metric").items():
+            setattr(record, key, value)
+
+        parsed = json.loads(fmt.format(record))
+
+        assert "context" not in parsed
+
+    def test_preserves_empty_context(self):
+        fmt = TraceJsonlFormatter(rank=0, source="test")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="test",
+            args=None,
+            exc_info=None,
+        )
+        for key, value in event_extra("log_metric").items():
+            setattr(record, key, value)
+        record.context = []
+
+        parsed = json.loads(fmt.format(record))
+
+        assert parsed["context"] == []
+
 
 # ---------------------------------------------------------------------------
 # TraceEventsOnlyFilter
@@ -644,6 +715,110 @@ class TestFactoryMechanism:
         assert not any(
             isinstance(h, TraceJsonlHandler) for h in structured_logger_fixture.handlers
         )
+
+
+# ---------------------------------------------------------------------------
+# External structured logging
+# ---------------------------------------------------------------------------
+
+
+class TestInstallForwardingStructuredLoggingHandler:
+    def test_forwards_structured_records_to_jsonl(
+        self, tmp_path, structured_logger_fixture, external_logger
+    ):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        external_logger.setLevel(logging.INFO)
+
+        assert install_forwarding_structured_logging_handler("external_library") is True
+        logging.getLogger("external_library.worker").info(
+            "external metric",
+            extra={
+                "log_type": "event",
+                "log_type_name": "log_metric",
+                "event_name": "train.step.e2e.latency_ms",
+                "step": 7,
+                "value": 12.5,
+                "context": ["source:test"],
+            },
+        )
+
+        for handler in structured_logger_fixture.handlers:
+            handler.flush()
+        trace_dir = os.path.join(str(tmp_path), "structured_logs")
+        jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
+        with open(os.path.join(trace_dir, jsonl_files[0])) as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+
+        assert len(lines) == 1
+        assert lines[0]["logger_name"] == "external_library.worker"
+        assert lines[0]["log_type_name"] == "log_metric"
+        assert lines[0]["event_name"] == "train.step.e2e.latency_ms"
+        assert lines[0]["step"] == 7
+        assert lines[0]["value"] == 12.5
+        assert lines[0]["context"] == ["source:test"]
+
+    def test_preserves_explicit_source_logger_level(
+        self, tmp_path, structured_logger_fixture, external_logger
+    ):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        external_logger.setLevel(logging.WARNING)
+
+        assert install_forwarding_structured_logging_handler("external_library") is True
+
+        assert external_logger.level == logging.WARNING
+
+    def test_preserves_inherited_source_logger_level(
+        self, tmp_path, structured_logger_fixture, external_logger, caplog
+    ):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        external_logger.setLevel(logging.NOTSET)
+
+        with caplog.at_level(logging.DEBUG):
+            inherited_level = external_logger.getEffectiveLevel()
+
+            assert (
+                install_forwarding_structured_logging_handler("external_library")
+                is True
+            )
+
+            assert external_logger.level == logging.NOTSET
+            assert external_logger.getEffectiveLevel() == inherited_level
+
+    def test_ignores_plain_text_records(
+        self, tmp_path, structured_logger_fixture, external_logger
+    ):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        external_logger.setLevel(logging.INFO)
+
+        assert install_forwarding_structured_logging_handler("external_library") is True
+        logging.getLogger("external_library.worker").info("plain text")
+
+        for handler in structured_logger_fixture.handlers:
+            handler.flush()
+        trace_dir = os.path.join(str(tmp_path), "structured_logs")
+        jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
+        with open(os.path.join(trace_dir, jsonl_files[0])) as f:
+            lines = [line for line in f if line.strip()]
+
+        assert lines == []
+
+    def test_installs_once(self, tmp_path, structured_logger_fixture, external_logger):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+
+        assert install_forwarding_structured_logging_handler("external_library") is True
+        assert install_forwarding_structured_logging_handler("external_library") is True
+
+        assert len(external_logger.handlers) == 1
+
+    def test_returns_false_without_structured_logger_handlers(
+        self, structured_logger_fixture, external_logger
+    ):
+        structured_logger_fixture.handlers = []
+
+        assert (
+            install_forwarding_structured_logging_handler("external_library") is False
+        )
+        assert external_logger.handlers == []
 
 
 # ---------------------------------------------------------------------------
