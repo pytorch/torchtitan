@@ -81,6 +81,17 @@ def validate_context_parallel(
                     "for every attention layer."
                 )
 
+            # A windowed layer is only caught at runtime otherwise, deep in
+            # the kernel, after the model has already been built.
+            if getattr(kernel.Config, "requires_causal_mask", False):
+                window = getattr(attention.inner_attention, "window_size", (-1, 0))
+                if window != (-1, 0):
+                    raise ValueError(
+                        f"{fqn}.inner_attention uses {kernel.__qualname__}, "
+                        "which only supports causal masking under context "
+                        f"parallel (window_size=(-1, 0)); got {window}."
+                    )
+
             shards_heads = not shards_mask
             if shards_heads and parallelism.context_parallel_load_balancer is not None:
                 raise ValueError(

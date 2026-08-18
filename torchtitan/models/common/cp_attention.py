@@ -24,6 +24,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttention,
     VarlenAttention,
+    VarlenMetadata,
 )
 from torchtitan.protocols.module import Module
 
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ContextParallelKernel",
     "AllGatherCPFlexAttention",
+    "AllGatherCPVarlenAttention",
     "UlyssesCPKernel",
     "UlyssesCPFlexAttention",
     "UlyssesCPVarlenAttention",
@@ -86,6 +88,30 @@ class ContextParallelKernel:
         return cp_group
 
 
+def _all_gather_kv(
+    k_TNH: torch.Tensor,
+    v_TNH: torch.Tensor,
+    cp_group: dist.ProcessGroup,
+    reduce_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather K and V over the token dim; the backward reduce-scatters.
+
+    ``reduce_dtype`` picks the dtype of that reduction; None keeps the input
+    dtype.
+    """
+    k_TNH, v_TNH = (
+        spmd.redistribute(
+            x_TNH,
+            cp_group,
+            src=spmd.S(_SEQ_DIM),
+            dst=spmd.R,
+            backward_options={"op_dtype": reduce_dtype or x_TNH.dtype},
+        )
+        for x_TNH in (k_TNH, v_TNH)
+    )
+    return k_TNH, v_TNH
+
+
 class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
     """FlexAttention with sharded Q and all-gathered K/V."""
 
@@ -107,17 +133,71 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
         v_TNH: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = self.cp_group
-        k_TNH, v_TNH = (
-            spmd.redistribute(
-                x_TNH,
-                cp_group,
-                src=spmd.S(_SEQ_DIM),
-                dst=spmd.R,
-                backward_options={"op_dtype": self.reduce_dtype or x_TNH.dtype},
-            )
-            for x_TNH in (k_TNH, v_TNH)
+        k_TNH, v_TNH = _all_gather_kv(k_TNH, v_TNH, self.cp_group, self.reduce_dtype)
+        return super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
+
+
+class AllGatherCPVarlenAttention(ContextParallelKernel, VarlenAttention):
+    """VarlenAttention with K/V all-gathered across the context-parallel mesh.
+
+    Same shape as the Flex kernel above: Q stays sequence-sharded and the
+    kernel sees every key and value. Varlen packs documents into one sequence,
+    so gathering is not enough -- the gathered K/V still carry the other ranks'
+    query regions, which this rank must not attend to. ``CPVarlenMetadata``
+    carries a gather index that picks out the visible region, and the selection
+    happens after the packed reshape, where the index applies.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenAttention.Config):
+        requires_causal_mask: ClassVar[bool] = True
+        """CPVarlenMetadata's right-aligned construction only holds for causal."""
+
+        reduce_dtype: Literal["float32", "bfloat16"] | None = None
+        """Dtype of the backward reduce-scatter. None keeps the input dtype."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = (
+            TORCH_DTYPE_MAP[config.reduce_dtype] if config.reduce_dtype else None
         )
+
+    def _select_visible_kv(
+        self,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        attention_masks: VarlenMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from torchtitan.distributed.context_parallel.varlen_cp import CPVarlenMetadata
+
+        if not isinstance(attention_masks, CPVarlenMetadata):
+            raise ValueError(
+                f"{type(self).__name__} needs CPVarlenMetadata, which cp_shard "
+                f"builds from the global VarlenMetadata; got "
+                f"{type(attention_masks).__name__}."
+            )
+        # The right-aligned causal construction in CPVarlenMetadata only holds
+        # for causal masks.
+        if self.window_size != (-1, 0):
+            raise ValueError(
+                "Varlen attention under context parallel only supports causal "
+                f"masking (window_size=(-1, 0)); got {self.window_size}."
+            )
+        # A rank-identical local re-pack: the index carries no mesh type, so
+        # shield it from the spmd_types checker like the varlen_attn call it
+        # feeds. The output is re-typed from Q on the way out.
+        with spmd.no_typecheck():
+            indices = attention_masks.k_global_gather_indices
+            return k_TNH.index_select(0, indices), v_TNH.index_select(0, indices)
+
+    def forward(
+        self,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_TNH, v_TNH = _all_gather_kv(k_TNH, v_TNH, self.cp_group, self.reduce_dtype)
         return super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
 
 

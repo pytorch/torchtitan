@@ -13,11 +13,12 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch.utils._pytree as pytree
 from spmd_types.runtime import get_partition_spec
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
@@ -67,10 +68,15 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
+@dataclass(frozen=True, eq=False, kw_only=True)
+class VarlenMetadata:
+    """Cumulative sequence positions for queries and keys/values.
 
+    A frozen dataclass rather than a NamedTuple so a context-parallel variant
+    can extend it; ``kw_only`` so the extra field may be required even though
+    the last field here has a default. ``eq=False`` because the generated
+    ``__eq__`` would compare the tensor fields elementwise and raise on
+    multi-element tensors.
     """
 
     cu_seq_q: torch.Tensor
@@ -78,6 +84,13 @@ class VarlenMetadata(NamedTuple):
     max_q: int
     max_k: int
     cu_seq_q_host: tuple[int, ...] | None = None
+
+
+# Registered so pytree sees the fields instead of one opaque leaf. CUDA graph
+# input handling flattens its auxiliary inputs: an unregistered object lands in
+# the non-tensor inputs, which are compared with ``!=`` between steps, and with
+# ``eq=False`` that is identity, so rebuilt metadata would look changed.
+pytree.register_dataclass(VarlenMetadata)
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
@@ -134,6 +147,20 @@ class VarlenAttention(Module):
         ):
             activate_flash_attention_impl(flash_attention_impl)
 
+    def _select_visible_kv(
+        self,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        attention_masks: VarlenMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Narrow K and V to the region the packed queries attend to.
+
+        Plain varlen already receives exactly that region, so this returns them
+        unchanged. A context-parallel kernel holds the whole sequence after its
+        collective and overrides this to select from it.
+        """
+        return k_TNH, v_TNH
+
     def forward(
         self,
         q_TNH: torch.Tensor,
@@ -156,6 +183,7 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
+        k_TNH, v_TNH = self._select_visible_kv(k_TNH, v_TNH, attention_masks)
         varlen_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
@@ -203,6 +231,9 @@ class VarlenAttention(Module):
             assert isinstance(result, torch.Tensor)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 q_local = spmd.get_local_type(q_TNH)
+                # varlen_attn, and any K/V selection before it, run untyped, so
+                # re-establish the output type here: attention preserves Q's
+                # token layout, so the result carries q_TNH's partition spec.
                 q_ps = get_partition_spec(q_TNH)
                 spmd.assert_type(result, q_local, q_ps)
             return result.to(q_TNH.dtype)

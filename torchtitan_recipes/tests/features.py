@@ -12,6 +12,7 @@ from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 
 from torchtitan.models.common.cp_attention import (
     AllGatherCPFlexAttention,
+    AllGatherCPVarlenAttention,
     UlyssesCPFlexAttention,
     UlyssesCPVarlenAttention,
     use_cp_kernel,
@@ -432,6 +433,20 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
     config.training.disable_cuda_graphs = True
+    return config
+
+
+def llama3_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
+    """Varlen attention under context parallel.
+
+    Type checking stays off because the packed varlen metadata is not
+    SPMD-annotated yet.
+    """
+    config = llama3_debugmodel_varlen_attn()
+    _use_spmd_types(config, typechecking=False)
+    use_cp_kernel(config, AllGatherCPVarlenAttention)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
     return config
 
 

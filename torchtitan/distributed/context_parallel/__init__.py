@@ -18,8 +18,10 @@ from a model config's ``update_from_config``.
 
 from .api import cp_shard, prepare_context_parallel_input
 from .validation import validate_context_parallel
+from .varlen_cp import CPVarlenMetadata
 
 __all__ = [
+    "CPVarlenMetadata",
     "cp_shard",
     "prepare_context_parallel_input",
     "validate_context_parallel",

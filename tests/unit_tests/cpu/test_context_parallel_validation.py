@@ -269,6 +269,52 @@ class TestGptOssRejectsUlysses(unittest.TestCase):
             self._parallelize(gpt_oss_debugmodel, UlyssesCPVarlenAttention)
 
 
+class TestVarlenCpCausalOnly(unittest.TestCase):
+    """The all-gather varlen kernel needs causal masks; Ulysses does not.
+
+    ``CPVarlenMetadata`` builds a right-aligned gather index that only holds
+    for causal masking. Ulysses keeps the metadata global and builds no index,
+    so a windowed layer is fine there.
+    """
+
+    @staticmethod
+    def _config(*, kernel, window):
+        from torchtitan.models.common.cp_attention import use_cp_kernel
+        from torchtitan.models.llama3.config_registry import (
+            llama3_debugmodel_varlen_attn,
+        )
+
+        config = llama3_debugmodel_varlen_attn()
+        for layer in config.model_spec.model.layers:
+            layer.attention.inner_attention.window_size = window
+        use_cp_kernel(config, kernel)
+        config.parallelism.spmd_backend = "spmd_types"
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = None
+        config.training.max_context_length = 512
+        return config
+
+    def test_rejects_a_window_at_config_time(self):
+        """Otherwise this only surfaces at runtime, after the model is built."""
+        from torchtitan.models.common.cp_attention import AllGatherCPVarlenAttention
+
+        config = self._config(kernel=AllGatherCPVarlenAttention, window=(255, 0))
+        with self.assertRaisesRegex(ValueError, "only supports causal masking"):
+            config.model_spec.model.update_from_config(config=config)
+
+    def test_allows_causal(self):
+        from torchtitan.models.common.cp_attention import AllGatherCPVarlenAttention
+
+        config = self._config(kernel=AllGatherCPVarlenAttention, window=(-1, 0))
+        config.model_spec.model.update_from_config(config=config)
+
+    def test_ulysses_varlen_allows_a_window(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPVarlenAttention
+
+        config = self._config(kernel=UlyssesCPVarlenAttention, window=(255, 0))
+        config.model_spec.model.update_from_config(config=config)
+
+
 class TestShippedCpRecipe(unittest.TestCase):
     def test_ulysses_recipe_passes_the_gate(self):
         from torchtitan_recipes.tests.features import llama3_debugmodel_ulysses_cp2

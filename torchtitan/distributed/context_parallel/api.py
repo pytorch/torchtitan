@@ -15,7 +15,9 @@ from torch.distributed.tensor.experimental._attention import (
 )
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
+
+from .varlen_cp import CPVarlenMetadata
 
 
 def prepare_context_parallel_input(
@@ -194,32 +196,45 @@ def cp_shard(
     # sequence keeps its mask global instead.
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None and shard_attention_mask:
-        assert isinstance(attention_masks, (BlockMask, dict))
-        masks: list[BlockMask] = []
-        for mask in (
-            [attention_masks]
-            if isinstance(attention_masks, BlockMask)
-            else attention_masks.values()
-        ):
-            if not isinstance(mask, BlockMask):
-                raise ValueError(
-                    "Context parallelism can only shard BlockMask attention "
-                    f"masks, got {type(mask).__name__} in the mask dict."
-                )
-            masks.append(mask)
-        sharded_masks = _context_parallel_shard(
-            mesh=cp_mesh,
-            buffers=masks,
-            seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
-            load_balancer=load_balancer,
-        )
-        attention_masks = cast(
-            (BlockMask | dict[str, BlockMask]),
-            (
-                sharded_masks[0]
+        if isinstance(attention_masks, VarlenMetadata):
+            # Varlen metadata is packed, not a [B, H, Q, KV] mask, so it is
+            # rebuilt for this rank's shard rather than sliced.
+            attention_masks = CPVarlenMetadata.from_global(
+                attention_masks,
+                device_mesh=cp_mesh,
+                # The batch dimension is folded into the token dimension, so
+                # the packed input is one row of seq_len tokens.
+                batch_size=1,
+                seq_length=seq_len,
+                load_balancer=load_balancer,
+            )
+        else:
+            assert isinstance(attention_masks, (BlockMask, dict))
+            masks: list[BlockMask] = []
+            for mask in (
+                [attention_masks]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), sharded_masks)}
-            ),
-        )
+                else attention_masks.values()
+            ):
+                if not isinstance(mask, BlockMask):
+                    raise ValueError(
+                        "Context parallelism can only shard BlockMask attention "
+                        f"masks, got {type(mask).__name__} in the mask dict."
+                    )
+                masks.append(mask)
+            sharded_masks = _context_parallel_shard(
+                mesh=cp_mesh,
+                buffers=masks,
+                seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
+                load_balancer=load_balancer,
+            )
+            attention_masks = cast(
+                (BlockMask | dict[str, BlockMask]),
+                (
+                    sharded_masks[0]
+                    if isinstance(attention_masks, BlockMask)
+                    else {k: v for k, v in zip(attention_masks.keys(), sharded_masks)}
+                ),
+            )
 
     return inputs, attention_masks
