@@ -1,0 +1,60 @@
+name: Test Time Budget POC
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/test_time_budget_poc.yaml'
+      - 'scripts/ci/check_new_test_time_budget.py'
+      - 'tests/unit_tests/test_ci_time_budget_probe.py'
+
+permissions:
+  contents: read
+
+jobs:
+  probe-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - run: python -m pip install pytest
+
+      - name: Run probe tests once
+        run: |
+          mkdir -p test-timings
+          python -m pytest tests/unit_tests/test_ci_time_budget_probe.py \
+            --junitxml=test-timings/cpu-unit-tests.xml \
+            -vv
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: poc-cpu-unit-test-timings
+          path: test-timings/cpu-unit-tests.xml
+
+  test-time-budget:
+    name: Expected P90 budget failure
+    needs: probe-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: poc-cpu-unit-test-timings
+          path: test-timings
+
+      - name: Check added test time
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/ci/check_new_test_time_budget.py \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --junit-xml test-timings/cpu-unit-tests.xml \
+            --threshold-seconds 11.1
