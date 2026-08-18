@@ -12,6 +12,12 @@ set -ex
 # LOG_RANK=0,1 NGPU=4 ./torchtitan/models/flux/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
+# MODEL is the old name for MODULE, kept working so existing callers do not
+# silently fall back to flux.
+if [ -n "${MODEL:-}" ] && [ -z "${MODULE:-}" ]; then
+    echo "run_infer.sh: MODEL is deprecated, use MODULE instead" >&2
+    MODULE=${MODEL}
+fi
 MODULE=${MODULE:-"flux"}
 CONFIG=${CONFIG:-"flux_debugmodel"}
 

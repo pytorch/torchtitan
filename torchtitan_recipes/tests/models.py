@@ -174,15 +174,11 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
 
 
 def kimi_k2_5_debugmodel_muon_fsdp4_ep2() -> Trainer.Config:
-    """Multimodal pixel tensors from the dataloader are not SPMD-annotated yet,
-    so the backend runs without type checking.
-
-    DistributedMuon rejects tensor parallel: it produces _StridedShard storage.
-    """
+    """DistMuon rejects tensor parallel: it produces _StridedShard storage."""
     from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
 
     config = kimi_k2_5_debugmodel()
-    _use_spmd_types(config, typechecking=False)
+    _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
     config.training.steps = 1
