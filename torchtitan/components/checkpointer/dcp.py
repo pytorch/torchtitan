@@ -659,11 +659,12 @@ class CheckpointManager(BaseCheckpointManager):
         self.save_future.result()
         self.save_future = None
 
-    def _parse_step(self, filename: str) -> int | None:
-        # Deliberately unanchored, matching what this manager has always
-        # accepted.
+    def _parse_step(self, filename: str) -> tuple[int, bool] | None:
+        # This manager writes each checkpoint straight to its published name, so
+        # it has no staging directories and never reports one. The match is
+        # deliberately unanchored, matching what it has always accepted.
         match = re.search(r"step-(\d+)", filename)
-        return None if match is None else int(match.group(1))
+        return None if match is None else (int(match.group(1)), False)
 
     def _is_valid_checkpoint(self, checkpoint_id: str) -> bool:
         # Either format DCP can read: a native DCP checkpoint or a HuggingFace
