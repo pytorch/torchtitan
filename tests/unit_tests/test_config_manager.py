@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 import pytest
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigManager, ParallelismConfig
 
 
 class TestConfigManager(unittest.TestCase):
@@ -115,6 +115,23 @@ class TestConfigManager(unittest.TestCase):
                     "3",
                 ]
             )
+
+    def test_pipeline_max_active_stages_cli_override(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--parallelism.pipeline-parallel-max-active-stages",
+                "4",
+            ]
+        )
+        assert config.parallelism.pipeline_parallel_max_active_stages == 4
+
+    def test_pipeline_max_active_stages_must_be_positive(self):
+        with pytest.raises(ValueError, match="must be at least 1"):
+            ParallelismConfig(pipeline_parallel_max_active_stages=0)
 
     def test_cuda_graphs_reject_pipeline_parallelism(self):
         config_manager = ConfigManager()

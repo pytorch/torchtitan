@@ -219,6 +219,14 @@ class ParallelismConfig:
     `training.local_batch_size` must be evenly divisible by this value.
     """
 
+    pipeline_parallel_max_active_stages: int = 3
+    """
+    Maximum number of pipeline stage parameter sets that may remain unsharded
+    during schedule execution. Higher values reduce repeated FSDP all-gathers
+    at the cost of additional device memory. This only applies to schedules
+    that use runtime communication lowering.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -249,6 +257,10 @@ class ParallelismConfig:
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
                 "Use None to disable load balancing."
+            )
+        if self.pipeline_parallel_max_active_stages < 1:
+            raise ValueError(
+                "parallelism.pipeline_parallel_max_active_stages must be at least 1"
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()

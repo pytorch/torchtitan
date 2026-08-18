@@ -328,14 +328,33 @@ def _build_pipeline_schedule(
         loss, _ = loss_fn(*args, **kwargs)
         return loss
 
-    if looped_schedule:
-        schedule = schedule_class(
-            stages,  # pyrefly: ignore [bad-argument-type]
-            n_microbatches=n_microbatches,
-            loss_fn=_scalar_loss_fn,
-            scale_grads=False,
-            backward_requires_autograd=backward_requires_autograd,
+    runtime_schedule = issubclass(schedule_class, _PipelineScheduleRuntime)
+    if not runtime_schedule and parallelism.pipeline_parallel_max_active_stages != 3:
+        logger.warning(
+            "parallelism.pipeline_parallel_max_active_stages only applies to "
+            "pipeline schedules that use runtime communication lowering; ignoring it "
+            "for %s",
+            parallelism.pipeline_parallel_schedule,
         )
+
+    if looped_schedule:
+        if runtime_schedule:
+            schedule = schedule_class(
+                stages,  # pyrefly: ignore [bad-argument-type]
+                n_microbatches=n_microbatches,
+                loss_fn=_scalar_loss_fn,
+                scale_grads=False,
+                backward_requires_autograd=backward_requires_autograd,
+                max_active_stages=parallelism.pipeline_parallel_max_active_stages,
+            )
+        else:
+            schedule = schedule_class(
+                stages,  # pyrefly: ignore [bad-argument-type]
+                n_microbatches=n_microbatches,
+                loss_fn=_scalar_loss_fn,
+                scale_grads=False,
+                backward_requires_autograd=backward_requires_autograd,
+            )
     else:
         schedule = schedule_class(
             stages[0],
