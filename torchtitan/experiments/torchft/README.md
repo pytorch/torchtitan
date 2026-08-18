@@ -50,6 +50,7 @@ NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 MODULE=torchft.llama3 CONFIG=llama3_torchft_
 * `--fault_tolerance.enable` enables TorchFT functionality.
 * `--fault_tolerance.group_size=2` tells TorchTitan that there are two replica groups.
 * `--fault_tolerance.replica_id=1` tells TorchTitan that the replica ID of this instance is 1.
+* `--fault_tolerance.no-init-sync` skips the initial cross-replica weight synchronization. Use it only when corresponding ranks in every replica initialize identical model states.
 * Note that the alive replica group with the smallest replica ID will perform checkpointing saving.
 
 In a real-world scenario, `torchft_lighthouse` would likely be on a different machine. The `TORCHFT_LIGHTHOUSE` environment variable is used to tell TorchFT how to communicate with `torchft_lighthouse`. The default value is `http://localhost:29510`.

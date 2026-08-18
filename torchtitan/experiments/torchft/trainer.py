@@ -16,8 +16,9 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.dataloader import DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config.override import apply_overrides
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
@@ -107,10 +108,7 @@ class FaultTolerantTrainer(Trainer):
 
         # build model (using meta init)
         model_config = model_spec.model
-        # set the model args from training job configs
-        model_config.update_from_config(
-            config=config,
-        )
+        self._update_model_config(model_config)
         self.model_config = model_config
 
         logger.info(
@@ -255,6 +253,8 @@ class FaultTolerantTrainer(Trainer):
 
             self.model_parts = [model]
 
+        self._set_chunked_loss_lm_head()
+
         # FT addition: set all reduce hook
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
@@ -354,6 +354,28 @@ class FaultTolerantTrainer(Trainer):
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
+
+    def _update_model_config(self, model_config) -> None:
+        model_config.update_from_config(config=self.config)
+        if self.config.override.imports:
+            apply_overrides(self.config.override, self.config)
+
+    def _set_chunked_loss_lm_head(self) -> None:
+        if not isinstance(self.loss_fn, ChunkedLossWrapper):
+            return
+
+        if self.parallel_dims.pp_enabled:
+            if not self.pp_has_last_stage:
+                return
+            model_part = self.model_parts[-1]
+        else:
+            assert len(self.model_parts) == 1
+            model_part = self.model_parts[0]
+
+        lm_head = model_part.lm_head
+        assert lm_head is not None, "ChunkedLossWrapper requires an lm_head"
+        self.loss_fn.set_lm_head(lm_head)
+        model_part._skip_lm_head = True
 
     def init_distributed(self) -> ParallelDims:
         config = self.config

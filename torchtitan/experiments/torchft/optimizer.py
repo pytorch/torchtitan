@@ -5,10 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib.util
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
+import torch
 import torch.nn as nn
+from torch.optim import Optimizer
 
 from torchtitan.components.checkpoint_utils import init_optim_state
 from torchtitan.components.optimizer import OptimizersContainer
@@ -21,6 +24,36 @@ __all__ = ["TorchFTOptimizersContainer"]
 has_torchft = importlib.util.find_spec("torchft") is not None
 if has_torchft:
     import torchft
+
+
+class _OptimizerAdapter:
+    """Call the base container without re-entering TorchFT dispatch."""
+
+    def __init__(self, owner: "TorchFTOptimizersContainer") -> None:
+        self._owner = owner
+
+    def step(self, *args, **kwargs) -> None:
+        return OptimizersContainer.step(self._owner, *args, **kwargs)
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        return OptimizersContainer.zero_grad(self._owner, *args, **kwargs)
+
+    def add_param_group(self, param_group: dict[str, Any]) -> None:
+        self._owner.add_param_group(param_group)
+
+    def state_dict(self) -> dict[str, Any]:
+        return self._owner.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._owner.load_state_dict(state_dict)
+
+    @property
+    def param_groups(self) -> list[dict[str, Any]]:
+        return self._owner.param_groups
+
+    @property
+    def state(self) -> Mapping[torch.Tensor, object]:
+        return self._owner.state
 
 
 class TorchFTOptimizersContainer(OptimizersContainer):
@@ -42,10 +75,17 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         for optim in self.optimizers:
             init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
-        self._ft_optimizer = torchft.Optimizer(ft_manager.manager, self)
+        self._inner_optimizer = cast(Optimizer, _OptimizerAdapter(self))
+        self._ft_optimizer = torchft.Optimizer(
+            ft_manager.manager, self._inner_optimizer
+        )
         # Whether to determine quorum using FT.optimizer,
         # in semi-sync training we use the synchronization step to start quorum
-        self._use_ft_optimizer: bool = ft_manager.use_async_quorum
+        # A single-replica quorum always commits, so wrapping it only adds
+        # control-plane work without providing failure isolation.
+        self._use_ft_optimizer: bool = (
+            ft_manager.use_async_quorum and ft_manager.group_size > 1
+        )
 
     def init_cache_state_dict(self) -> None:
         self.cache_state_dict = super().state_dict()
@@ -62,18 +102,16 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         self.init_cache_state_dict()
 
     def step(self, *args, **kwargs) -> None:
-        """Calling the correct step() depending on the caller.
+        """Dispatch one container step through TorchFT when required.
 
         TorchFT's OptimizerWrapper.step() is designed to be called only once
         per train step per torchft.Manager regardless how many optimizers are used.
-        Hence we will need to appropriately dispatch the call.
+        The inner adapter calls the base implementation directly, so TorchFT cannot
+        recursively enter this method.
         """
         if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.step(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().step(*args, **kwargs)
+            return self._ft_optimizer.step(*args, **kwargs)
+        return self._inner_optimizer.step(*args, **kwargs)
 
     def zero_grad(self, *args, **kwargs) -> None:
         """Calling the correct zero_grad() depending on the caller.
@@ -81,8 +119,5 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         Check the comment in ``step()``.
         """
         if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.zero_grad(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().zero_grad(*args, **kwargs)
+            return self._ft_optimizer.zero_grad(*args, **kwargs)
+        return self._inner_optimizer.zero_grad(*args, **kwargs)
