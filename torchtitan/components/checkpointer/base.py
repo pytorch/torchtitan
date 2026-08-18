@@ -10,7 +10,6 @@ import queue
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -153,71 +152,22 @@ class BaseCheckpointManager(Configurable, ABC):
     """
 
     enable: bool
-    save_future: Future | None
 
-    # A disabled manager returns early from ``__init__`` without setting up any
-    # state, so none of its attributes exist. The public entry points below own
-    # that check once, on behalf of every implementation, and dispatch to the
-    # ``_``-prefixed hooks only when enabled. Subclasses override the hooks, not
-    # these methods: overriding a public method here would silently bypass the
-    # guard and run against uninitialized state.
-
+    @abstractmethod
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
-        if not self.enable:
-            return False
-        return self._load(step)
 
+    @abstractmethod
     def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Persist state for ``curr_step``."""
-        if not self.enable:
-            return False
-        return self._save(curr_step, last_step)
 
+    @abstractmethod
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
-        if not self.enable:
-            return
-        self._maybe_wait_for_staging()
 
+    @abstractmethod
     def close(self) -> None:
         """Release background threads and other resources."""
-        # getattr rather than a plain attribute read: ``__del__`` calls close(),
-        # and it can run on a partially constructed object whose ``__init__``
-        # raised before assigning ``enable``.
-        if not getattr(self, "enable", False):
-            return
-        self._close()
-
-    def maybe_wait_for_saving(self) -> None:
-        """Block until the last asynchronous save completes.
-
-        A manager with no asynchronous save in flight leaves ``save_future`` at
-        ``None`` and never reaches ``_wait_for_saving``.
-        """
-        if not self.enable or self.save_future is None:
-            return
-        self._wait_for_saving()
-
-    @abstractmethod
-    def _wait_for_saving(self) -> None:
-        """Await ``save_future`` and clear it. Only called when it is set."""
-
-    @abstractmethod
-    def _load(self, step: int = -1) -> bool:
-        """Implement ``load``. Only called when checkpointing is enabled."""
-
-    @abstractmethod
-    def _save(self, curr_step: int, last_step: bool = False) -> bool:
-        """Implement ``save``. Only called when checkpointing is enabled."""
-
-    @abstractmethod
-    def _maybe_wait_for_staging(self) -> None:
-        """Implement ``maybe_wait_for_staging``. Only called when enabled."""
-
-    @abstractmethod
-    def _close(self) -> None:
-        """Implement ``close``. Only called when checkpointing is enabled."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

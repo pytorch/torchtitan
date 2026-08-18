@@ -100,7 +100,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.enable = config.enable
         if not self.enable:
             return
-        self.save_future = None
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
@@ -140,29 +139,27 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     # The methods are stubbed rather than omitted because BaseCheckpointManager
     # declares them abstract, so a partial implementation cannot be instantiated.
 
-    def _load(self, step: int = -1) -> bool:
+    def load(self, step: int = -1) -> bool:
+        if not self.enable:
+            return False
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement load() yet."
         )
 
-    def _save(self, curr_step: int, last_step: bool = False) -> bool:
+    def save(self, curr_step: int, last_step: bool = False) -> bool:
+        if not self.enable:
+            return False
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement save() yet."
         )
 
-    def _wait_for_saving(self) -> None:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement saving yet."
-        )
-
-    def _maybe_wait_for_staging(self) -> None:
+    def maybe_wait_for_staging(self) -> None:
+        if not self.enable:
+            return
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement maybe_wait_for_staging() yet."
         )
 
-    def _close(self) -> None:
-        # hasattr: __del__ -> close() can reach here on a partially constructed
-        # object if __init__ raised after setting enable but before building the
-        # backend manager.
+    def close(self) -> None:
         if hasattr(self, "_manager"):
             self._manager.close()
