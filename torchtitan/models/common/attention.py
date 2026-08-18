@@ -14,12 +14,14 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch.utils._pytree as pytree
 import torch_remat as remat
+from spmd_types.runtime import get_partition_spec
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -72,16 +74,29 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
+@dataclass(frozen=True, eq=False, kw_only=True)
+class VarlenMetadata:
+    """Cumulative sequence positions for queries and keys/values.
 
+    A frozen dataclass rather than a NamedTuple so a context-parallel variant
+    can extend it; ``kw_only`` so the extra field may be required even though
+    the last field here has a default. ``eq=False`` because the generated
+    ``__eq__`` would compare the tensor fields elementwise and raise on
+    multi-element tensors.
     """
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    cu_seq_q_host: tuple[int, ...] | None = None
+
+
+# Registered so pytree sees the fields instead of one opaque leaf. CUDA graph
+# input handling flattens its auxiliary inputs: an unregistered object lands in
+# the non-tensor inputs, which are compared with ``!=`` between steps, and with
+# ``eq=False`` that is identity, so rebuilt metadata would look changed.
+pytree.register_dataclass(VarlenMetadata)
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
@@ -161,6 +176,20 @@ class VarlenInnerAttention(InnerAttention):
         ):
             activate_flash_attention_impl(flash_attention_impl)
 
+    def _select_visible_kv(
+        self,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        attention_masks: VarlenMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Narrow K and V to the region the packed queries attend to.
+
+        Plain varlen already receives exactly that region, so this returns them
+        unchanged. A context-parallel kernel holds the whole sequence after its
+        collective and overrides this to select from it.
+        """
+        return k_THK, v_THV
+
     def forward(
         self,
         q_THK: torch.Tensor,
@@ -183,6 +212,7 @@ class VarlenInnerAttention(InnerAttention):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
+        k_THK, v_THV = self._select_visible_kv(k_THK, v_THV, attention_masks)
         varlen_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
@@ -221,6 +251,13 @@ class VarlenInnerAttention(InnerAttention):
         # out_transform epilogue was requested.
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                q_local = spmd.get_local_type(q_THK)
+                # varlen_attn, and any K/V selection before it, run untyped, so
+                # re-establish the output type here: attention preserves Q's
+                # token layout, so the result carries q_THK's partition spec.
+                q_ps = get_partition_spec(q_THK)
+                spmd.assert_type(result, q_local, q_ps)
             return result.to(q_THK.dtype)
 
         out_THV, lse_HT = result
@@ -498,7 +535,7 @@ def get_efficient_causal_mask_mod_for_packed_document(
 
     This uses the same convention as get_document_mask_mod: per-token positions
     reset to 0 at each packed document boundary and then increase by 1 within the
-    document. It is a manually tuned FlexAttention/FlexFlash fast path for
+    document. It is a manually tuned FlexInnerAttention/FlexFlash fast path for
     causal packed-document masking, which is why it coexists with the generic
     document-id mask.
 
@@ -601,6 +638,8 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -610,6 +649,8 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
+        include_host_offsets: Also materialize cumulative sequence offsets as
+            host metadata for kernels that need it.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -630,7 +671,24 @@ def create_varlen_metadata_for_document(
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
     seq_lengths = torch.diff(packed_cu_seqlens)
 
-    if seq_lengths.numel() > 0:
+    max_seqlen: int
+    packed_cu_seqlens_host = None
+    if include_host_offsets:
+        packed_cu_seqlens_host = tuple(
+            int(offset) for offset in packed_cu_seqlens.tolist()
+        )
+        max_seqlen = max(
+            (
+                end - start
+                for start, end in zip(
+                    packed_cu_seqlens_host[:-1],
+                    packed_cu_seqlens_host[1:],
+                    strict=False,
+                )
+            ),
+            default=0,
+        )
+    elif seq_lengths.numel() > 0:
         # device to host sync but only done once per model forward
         max_seqlen = int(seq_lengths.max().item())
     else:
@@ -641,6 +699,7 @@ def create_varlen_metadata_for_document(
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
+        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 

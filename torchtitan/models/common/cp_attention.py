@@ -22,14 +22,20 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
 
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    VarlenInnerAttention,
+    VarlenMetadata,
+)
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
 __all__ = [
     "CPInnerAttention",
+    "KVAllGatherCPInnerAttention",
     "KVAllGatherCPFlexInnerAttention",
+    "KVAllGatherCPVarlenInnerAttention",
     "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
     "UlyssesCPVarlenInnerAttention",
@@ -55,17 +61,10 @@ class CPInnerAttention(ABC):
         """Shard model inputs for this attention implementation."""
 
 
-class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
-    """FlexInnerAttention with sharded Q and all-gathered K/V."""
+class KVAllGatherCPInnerAttention(CPInnerAttention):
+    """Inner attention with sharded Q and all-gathered K/V."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
-        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
-        """Dtype of the backward reduce-scatter."""
-
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+    reduce_dtype: torch.dtype
 
     @classmethod
     def cp_shard(
@@ -88,13 +87,11 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
             ptrr_mask_key,
         )
 
-    def forward(
+    def _all_gather_kv(
         self,
-        q_THK: torch.Tensor,
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
         k_THK, v_THV = (
             spmd.redistribute(
@@ -106,6 +103,90 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
             )
             for x in (k_THK, v_THV)
         )
+        return k_THK, v_THV
+
+
+class KVAllGatherCPFlexInnerAttention(KVAllGatherCPInnerAttention, FlexInnerAttention):
+    """FlexInnerAttention with sharded Q and all-gathered K/V."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexInnerAttention.Config):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = self._all_gather_kv(k_THK, v_THV)
+        return super().forward(q_THK, k_THK, v_THV, **kwargs)
+
+
+class KVAllGatherCPVarlenInnerAttention(
+    KVAllGatherCPInnerAttention, VarlenInnerAttention
+):
+    """VarlenInnerAttention with K/V all-gathered across the context-parallel mesh.
+
+    Same shape as the Flex kernel above: Q stays sequence-sharded and the
+    kernel sees every key and value. Varlen packs documents into one sequence,
+    so gathering is not enough -- the gathered K/V still carry the other ranks'
+    query regions, which this rank must not attend to. ``CPVarlenMetadata``
+    carries a gather index that picks out the visible region, and the selection
+    happens after the packed reshape, where the index applies.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenInnerAttention.Config):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+    def _select_visible_kv(
+        self,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        attention_masks: VarlenMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from torchtitan.distributed.context_parallel.varlen_cp import CPVarlenMetadata
+
+        if not isinstance(attention_masks, CPVarlenMetadata):
+            raise ValueError(
+                f"{type(self).__name__} needs CPVarlenMetadata, which cp_shard "
+                f"builds from the global VarlenMetadata; got "
+                f"{type(attention_masks).__name__}."
+            )
+        # The right-aligned causal construction in CPVarlenMetadata only holds
+        # for causal masks.
+        if self.window_size != (-1, 0):
+            raise ValueError(
+                "Varlen attention under context parallel only supports causal "
+                f"masking (window_size=(-1, 0)); got {self.window_size}."
+            )
+        # A rank-identical local re-pack: the index carries no mesh type, so
+        # shield it from the spmd_types checker like the varlen_attn call it
+        # feeds. The output is re-typed from Q on the way out.
+        with spmd.no_typecheck():
+            indices = attention_masks.k_global_gather_indices
+            return k_THK.index_select(0, indices), v_THV.index_select(0, indices)
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = self._all_gather_kv(k_THK, v_THV)
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 

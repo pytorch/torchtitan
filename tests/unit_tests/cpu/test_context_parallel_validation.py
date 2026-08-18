@@ -266,6 +266,63 @@ class TestHeadDivisibility(unittest.TestCase):
         config.__post_init__()
 
 
+class TestVarlenCpCausalOnly(unittest.TestCase):
+    """The all-gather varlen kernel needs causal masks; Ulysses does not.
+
+    ``CPVarlenMetadata`` builds a right-aligned gather index that only holds
+    for causal masking. Ulysses keeps the metadata global and builds no index,
+    so a windowed layer is fine there.
+    """
+
+    @staticmethod
+    def _config(*, inner_attention, window):
+        from torchtitan.models.llama3.config_registry import (
+            llama3_debugmodel_varlen_attn,
+        )
+
+        config = llama3_debugmodel_varlen_attn()
+        for layer in config.model_spec.model.layers:
+            layer.attention.inner_attention.window_size = window
+        ContextParallelTransform(inner_attention=inner_attention).transform(
+            config.model_spec.model
+        )
+        config.parallelism.spmd_backend = "spmd_types"
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = None
+        config.training.max_context_length = 512
+        return config
+
+    def test_rejects_a_window_at_config_time(self):
+        """Otherwise this only surfaces at runtime, after the model is built."""
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPVarlenInnerAttention, window=(255, 0)
+        )
+        with self.assertRaisesRegex(ValueError, "only supports causal masking"):
+            config.__post_init__()
+
+    def test_allows_causal(self):
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPVarlenInnerAttention, window=(-1, 0)
+        )
+        config.__post_init__()
+
+    def test_ulysses_varlen_allows_a_window(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
+
+        config = self._config(
+            inner_attention=UlyssesCPVarlenInnerAttention, window=(255, 0)
+        )
+        config.__post_init__()
+
+
 class TestShippedCpRecipes(unittest.TestCase):
     """Validate every shipped CP recipe after construction."""
 

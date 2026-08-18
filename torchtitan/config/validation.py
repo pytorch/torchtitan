@@ -23,6 +23,7 @@ def validate_context_parallel(
     """Validate the CP backend and each inner attention."""
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
+        KVAllGatherCPVarlenInnerAttention,
         UlyssesCPInnerAttention,
     )
 
@@ -85,3 +86,11 @@ def validate_context_parallel(
                         "by tensor_parallel_degree * context_parallel_degree "
                         f"({head_shard_degree})."
                     )
+        if issubclass(cp_attention, KVAllGatherCPVarlenInnerAttention):
+            window = getattr(attention.inner_attention, "window_size", (-1, 0))
+            if window != (-1, 0):
+                raise ValueError(
+                    f"{fqn}.inner_attention uses {cp_attention.__qualname__}, which "
+                    "only supports causal masking under context parallel "
+                    f"(window_size=(-1, 0)); got {window}."
+                )

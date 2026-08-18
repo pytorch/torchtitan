@@ -14,8 +14,10 @@ TODO: we should generalize this API to cover even Flux's use case.
 """
 
 from .api import cp_shard, prepare_context_parallel_input
+from .varlen_cp import CPVarlenMetadata
 
 __all__ = [
+    "CPVarlenMetadata",
     "cp_shard",
     "prepare_context_parallel_input",
 ]
