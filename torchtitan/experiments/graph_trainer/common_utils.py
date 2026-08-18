@@ -19,9 +19,13 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
+    data_parallel as dtensor_data_parallel,
     MixedPrecisionPolicy,
+)
+from torchtitan.experiments.graph_trainer.simple_fsdp_spmd import (
+    data_parallel as spmd_data_parallel,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
@@ -419,10 +423,15 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
-    fsdp_axis = "dp_shard" if parallel_dims.spmd_backend == "spmd_types" else "fsdp"
+    data_parallel = (
+        spmd_data_parallel
+        if get_spmd_backend() == "spmd_types"
+        else dtensor_data_parallel
+    )
+    fsdp_axis = "fsdp"
     dense_non_dp_mesh = (
-        parallel_dims.get_activated_mesh(["cp", "tp"])
-        if parallel_dims.spmd_backend == "spmd_types"
+        parallel_dims.get_activated_mesh(["tp"])
+        if get_spmd_backend() == "spmd_types"
         else None
     )
     if parallel_dims.dp_replicate_enabled:
@@ -450,9 +459,16 @@ def apply_simple_fsdp(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
-        sparse_non_edp_mesh = parallel_dims.spmd_sparse_mesh()
-        assert sparse_non_edp_mesh is not None
-        sparse_non_edp_mesh = sparse_non_edp_mesh["ep"]
+        efsdp_degree = edp_mesh["efsdp"].size()
+        if parallel_dims.dp_replicate_enabled and efsdp_degree > 1:
+            expert_dp_mode = "hybrid_shard"
+        elif parallel_dims.dp_replicate_enabled:
+            edp_mesh = edp_mesh["dp_replicate"]
+            expert_dp_mode = "replicate"
+        else:
+            expert_dp_mode = "fully_shard"
+
+        expert_non_dp_mesh = parallel_dims.get_mesh("ep")
 
         for _, transformer_block in model.layers.items():
             if not isinstance(transformer_block, TransformerBlock):
@@ -462,16 +478,16 @@ def apply_simple_fsdp(
                 continue
             inner_experts = moe.routed_experts.inner_experts
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
+            if efsdp_degree * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
             moe.routed_experts.inner_experts = data_parallel(
                 inner_experts,
                 edp_mesh,
-                dp_mode,
+                expert_dp_mode,
                 mp_policy=mp_policy,
                 shard_dim=experts_shard_dim,
-                non_dp_mesh=sparse_non_edp_mesh,
+                non_dp_mesh=expert_non_dp_mesh,
             )
 
     model = data_parallel(

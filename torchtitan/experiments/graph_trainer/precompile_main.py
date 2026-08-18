@@ -28,7 +28,7 @@ import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -146,7 +146,12 @@ def _common_setup(config):
     model.to_empty(device=device_type)
     dist_config.compile_on_one_rank = False
     try:
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            dist_utils.get_spmd_context(
+                parallel_dims=parallel_dims,
+            )(),
+        ):
             model.init_weights(buffer_device=None)
     finally:
         dist_config.compile_on_one_rank = True

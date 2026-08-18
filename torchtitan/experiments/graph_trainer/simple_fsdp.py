@@ -43,6 +43,10 @@ def disable_active_parametrization() -> Generator[None, None, None]:
         _active_parametrization = True
 
 
+def is_active_parametrization() -> bool:
+    return _active_parametrization
+
+
 @dataclass(frozen=True)
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
@@ -181,7 +185,7 @@ def _register_parametrization(
     param_name_to_property = {
         param_name: property(
             lambda self, pn=param_name: self._simple_fsdp_parametrization(
-                self._parameters[pn]
+                self._parameters[pn], pn
             )
         )
         for param_name in param_names
@@ -286,14 +290,13 @@ class ReplicateComputation(Module):
 
         return output
 
-    def forward(self, x: DTensor) -> torch.Tensor:
-        global _active_parametrization
+    def forward(self, x: DTensor, _param_name: str) -> torch.Tensor:
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
         # model initialization can be done now through
         # with disable_active_parametrization():
         #     model.init_states()
-        if not _active_parametrization:
+        if not is_active_parametrization():
             return x
 
         return self.replicate_compute(x)

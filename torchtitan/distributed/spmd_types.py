@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from threading import local
 from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
+from spmd_types.types import DeviceMeshAxis
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed.utils import get_spmd_backend
@@ -31,7 +32,9 @@ __all__ = [
     "annotate_input_spmd_types",
     "current_spmd_mesh",
     "spmd_dense_mesh",
+    "spmd_dense_storage_mesh",
     "spmd_sparse_mesh",
+    "spmd_sparse_storage_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
@@ -39,6 +42,7 @@ __all__ = [
     "set_current_spmd_mesh",
     "set_spmd_meshes",
     "maybe_set_sparse_mesh",
+    "device_mesh_from_spmd_axes",
 ]
 
 
@@ -48,11 +52,15 @@ _MESH_TLS = local()
 def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
+    dense_storage_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
+    sparse_storage_mesh: DeviceMesh | None,
 ) -> None:
-    """Register the SPMD meshes for dense and sparse runtime regions."""
+    """Register SPMD compute and storage meshes."""
     _MESH_TLS.dense_mesh = dense_mesh
+    _MESH_TLS.dense_storage_mesh = dense_storage_mesh
     _MESH_TLS.sparse_mesh = sparse_mesh
+    _MESH_TLS.sparse_storage_mesh = sparse_storage_mesh
 
 
 def spmd_dense_mesh() -> DeviceMesh:
@@ -62,9 +70,50 @@ def spmd_dense_mesh() -> DeviceMesh:
     return mesh
 
 
+def spmd_dense_storage_mesh() -> DeviceMesh:
+    """Return the registered dense parameter-storage mesh."""
+    mesh = getattr(_MESH_TLS, "dense_storage_mesh", None)
+    assert mesh is not None, "SPMD dense storage mesh has not been registered"
+    return mesh
+
+
 def spmd_sparse_mesh() -> DeviceMesh | None:
     """Return the registered sparse SPMD mesh, if EP is enabled."""
     return getattr(_MESH_TLS, "sparse_mesh", None)
+
+
+def spmd_sparse_storage_mesh() -> DeviceMesh | None:
+    """Return the registered sparse parameter-storage mesh, if EP is enabled."""
+    return getattr(_MESH_TLS, "sparse_storage_mesh", None)
+
+
+def device_mesh_from_spmd_axes(
+    axes: Iterable[DeviceMeshAxis],
+    *,
+    storage_mesh: bool,
+) -> DeviceMesh | None:
+    """Return the registered compute or storage mesh matching the SPMD axes."""
+    normalized_axes = spmd.normalize_mesh(
+        frozenset(spmd.normalize_axis(axis) for axis in axes)
+    )
+    meshes = (
+        (spmd_dense_storage_mesh(), spmd_sparse_storage_mesh())
+        if storage_mesh
+        else (spmd_dense_mesh(), spmd_sparse_mesh())
+    )
+    for mesh in meshes:
+        if mesh is None:
+            continue
+        assert mesh.mesh_dim_names is not None
+        mesh_axes = spmd.normalize_mesh(
+            frozenset(
+                spmd.MeshAxis.of(mesh.get_group(axis_name))
+                for axis_name in mesh.mesh_dim_names
+            )
+        )
+        if normalized_axes == mesh_axes:
+            return mesh
+    return None
 
 
 def _spmd_mesh_stack() -> list[DeviceMesh | None]:
@@ -353,20 +402,23 @@ def spmd_redistribute_per_axis(
 def spmd_distribute_tensor(
     tensor: torch.Tensor,
     mesh: DeviceMesh,
-    layout: SpmdLayout,
+    axis_types: Mapping[Any, spmd.PerMeshAxisSpmdType],
+    partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None,
 ) -> torch.Tensor:
     """Materialize local state shards according to the declared SPMD layout.
 
     Direct ``S(dim)`` layouts are applied per axis. For ``V + PartitionSpec``
     layouts, raw PartitionSpec tuple order controls repeated sharding of the
     same tensor dim, e.g. ``(DP, CP)`` means shard by DP, then shard each DP
-    slice by CP.
+    slice by CP. Axes may be logical ``MeshAxisName`` values or concrete
+    ``MeshAxis`` objects from an SPMD annotation.
     """
-    shard_types = layout.per_axis_spmd_types()
-    if layout.partition_spec is None:
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+
+    if partition_spec is None:
         axis_shard_dims = [
             (axis_name, axis_type.dim)
-            for axis_name, axis_type in shard_types.items()
+            for axis_name, axis_type in axis_types.items()
             if isinstance(axis_type, spmd.Shard)
         ]
     else:
@@ -374,7 +426,7 @@ def spmd_distribute_tensor(
         # PartitionSpec tuple defines the slicing order. For example,
         # PartitionSpec((DP, CP), None) shards by DP first, then CP.
         axis_shard_dims = []
-        for dim, entry in enumerate(layout.partition_spec):
+        for dim, entry in enumerate(partition_spec):
             if entry is None:
                 continue
             axes = entry if isinstance(entry, tuple) else (entry,)
@@ -382,17 +434,31 @@ def spmd_distribute_tensor(
                 axis_shard_dims.append((axis_name, dim))
 
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-    for axis_name, dim in axis_shard_dims:
-        axis = axis_name.value
-        axis_size = (
-            mesh.size(mesh.mesh_dim_names.index(axis))
-            if axis in mesh.mesh_dim_names
-            else 1
-        )
+    mesh_axis_groups = {
+        spmd.MeshAxis.of(mesh.get_group(axis_name)): mesh.get_group(axis_name)
+        for axis_name in mesh.mesh_dim_names
+    }
+    for axis, dim in axis_shard_dims:
+        if isinstance(axis, spmd.MeshAxis):
+            if axis not in mesh_axis_groups:
+                raise ValueError(f"SPMD annotation axis {axis!r} is not in {mesh=}.")
+            group = mesh_axis_groups[axis]
+            axis_size = axis.size()
+        elif isinstance(axis, MeshAxisName):
+            axis_name = axis.value
+            if axis_name not in mesh.mesh_dim_names:
+                raise ValueError(f"SPMD layout axis {axis_name!r} is not in {mesh=}.")
+            group = mesh.get_group(axis_name)
+            axis_size = mesh.size(mesh.mesh_dim_names.index(axis_name))
+        else:
+            raise TypeError(
+                "SPMD distribution axes must be MeshAxisName or MeshAxis, "
+                f"got {axis!r}."
+            )
         if axis_size > 1:
             tensor = spmd.shard(
                 tensor,
-                mesh.get_group(axis),
+                group,
                 src=spmd.I,
                 dst=spmd.S(dim),
             )

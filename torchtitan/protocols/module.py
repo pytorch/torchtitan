@@ -105,7 +105,7 @@ class Module(nn.Module, Configurable):
             for name, buf in self._buffers.items()
             if isinstance(buf, DTensor)
         }
-        with self._preserve_buffer_spmd_types():
+        with self._preserve_spmd_types():
             self._init_self_buffers(buffer_device=buffer_device)
         for name, (mesh, placements) in dtensor_meta.items():
             new_buf = self._buffers.get(name)
@@ -120,39 +120,41 @@ class Module(nn.Module, Configurable):
 
     def _apply(self, fn, recurse=True):
         """Override to preserve annotations across model.to_empty() in trainer.py"""
-        with self._preserve_buffer_spmd_types():
+        with self._preserve_spmd_types():
             return super()._apply(fn, recurse=recurse)
 
     @contextlib.contextmanager
-    def _preserve_buffer_spmd_types(self) -> Iterator[None]:
+    def _preserve_spmd_types(self) -> Iterator[None]:
         """
-        Preserve SPMD type annotations on buffers across reinitialization.
+        Preserve SPMD type annotations on parameters and buffers.
 
-        ``to_empty()`` and ``_init_self_buffers()`` re-materialize buffer data,
-        clobbering over SPMD annotations. Instead of attempting to typecheck over
-        this, we save-restore annotations on their respective mesh axes.
+        ``to_empty()`` re-materializes parameters and buffers, while
+        ``_init_self_buffers()`` can replace buffer data. Save and restore their
+        annotations across both operations.
         """
         if get_spmd_backend() != "spmd_types":
             yield
             return
 
+        states = (*self.named_parameters(), *self.named_buffers())
         saved = {
             fqn: SpmdLayout(
                 # pyrefly: ignore [bad-argument-type]
-                axis_types=get_local_type(buf),
-                partition_spec=get_partition_spec(buf),
+                axis_types=get_local_type(state),
+                partition_spec=get_partition_spec(state),
             )
-            for fqn, buf in self.named_buffers()
-            if has_local_type(buf)
+            for fqn, state in states
+            if has_local_type(state)
         }
         try:
             yield
         finally:
-            for fqn, buf in self.named_buffers():
-                if fqn in saved and not has_local_type(buf):
+            states = (*self.named_parameters(), *self.named_buffers())
+            for fqn, state in states:
+                if fqn in saved and not has_local_type(state):
                     layout = saved[fqn]
                     spmd.assert_type(
-                        buf,
+                        state,
                         layout.axis_types,
                         partition_spec=layout.partition_spec,
                     )
@@ -310,7 +312,12 @@ class Module(nn.Module, Configurable):
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
-        tensor = spmd_distribute_tensor(tensor, mesh, layout)
+        tensor = spmd_distribute_tensor(
+            tensor,
+            mesh,
+            layout.axis_types,
+            partition_spec=layout.partition_spec,
+        )
         if is_param:
             self.register_parameter(name, nn.Parameter(tensor))
             registered = self._parameters[name]

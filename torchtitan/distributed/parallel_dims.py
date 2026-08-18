@@ -294,6 +294,7 @@ class ParallelDims:
         )
         loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
         spmd_dense_mesh_for_fwdbwd = None
+        spmd_dense_mesh_for_storage = None
         if self.spmd_backend == "full_dtensor":
             # Under full_dtensor, ``dp_shard`` and ``cp`` cannot be folded
             # together: activations carry a ``cp`` dimension, so parameters
@@ -324,6 +325,16 @@ class ParallelDims:
                 ("pp", "dp_replicate", "dp_shard", "cp", "tp"),
                 (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp),
             )
+            dense_fsdp_mesh = full_dense_mesh_for_fsdp["dp_shard", "cp"]._flatten(
+                "fsdp"
+            )
+            spmd_dense_mesh_for_storage = DeviceMesh._concatenate(
+                [
+                    full_dense_mesh_for_fsdp["dp_replicate"],
+                    dense_fsdp_mesh,
+                    full_dense_mesh_for_fsdp["tp"],
+                ]
+            )
             full_dense_mesh_for_fwdbwd = unflatten_mesh(
                 self._world_mesh,
                 tuple(["pp"] + candidate_spmd_dense_axes),
@@ -353,6 +364,8 @@ class ParallelDims:
         }
         if spmd_dense_mesh_for_fwdbwd is not None:
             self._global_meshes["spmd_dense_for_fwdbwd"] = spmd_dense_mesh_for_fwdbwd
+        if spmd_dense_mesh_for_storage is not None:
+            self._global_meshes["spmd_dense_for_storage"] = spmd_dense_mesh_for_storage
         if self.spmd_backend == "spmd_types" and self.ep > 1:
             self._global_meshes["spmd_sparse_for_fwdbwd"] = full_sparse_mesh[
                 "dp_replicate", "efsdp", "ep"
@@ -371,8 +384,10 @@ class ParallelDims:
             self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp["dp_shard"]
         elif self.spmd_backend == "spmd_types":
             assert spmd_dense_mesh_for_fwdbwd is not None
+            assert spmd_dense_mesh_for_storage is not None
             self._single_axis_meshes["dp"] = spmd_dense_mesh_for_fwdbwd["dp"]
             self._single_axis_meshes["dp_shard"] = full_dense_mesh_for_fsdp["dp_shard"]
+            self._single_axis_meshes["fsdp"] = spmd_dense_mesh_for_storage["fsdp"]
         else:
             self._single_axis_meshes["fsdp"] = full_dense_mesh_for_fsdp["fsdp"]
 
@@ -411,6 +426,7 @@ class ParallelDims:
         elif self.spmd_backend == "spmd_types":
             expected_sizes["dp"] = self.dp_replicate * self.dp_shard
             expected_sizes["dp_shard"] = self.dp_shard
+            expected_sizes["fsdp"] = self.dp_shard * self.cp
         else:
             expected_sizes["fsdp"] = self.dp_shard * self.cp
 
@@ -530,10 +546,24 @@ class ParallelDims:
             self.build_mesh()
         return self._global_meshes["spmd_dense_for_fwdbwd"]
 
+    def spmd_dense_storage_mesh(self) -> DeviceMesh:
+        """Dense SPMD mesh used for parameter storage and initialization."""
+        if not self._single_axis_meshes:
+            self.build_mesh()
+        assert self.spmd_backend == "spmd_types"
+        return self._global_meshes["spmd_dense_for_storage"]
+
     def spmd_sparse_mesh(self) -> DeviceMesh | None:
         """Sparse SPMD mesh used inside expert dispatch."""
         if not self._single_axis_meshes:
             self.build_mesh()
+        return self._global_meshes.get("spmd_sparse_for_fwdbwd")
+
+    def spmd_sparse_storage_mesh(self) -> DeviceMesh | None:
+        """Sparse SPMD mesh used for routed-expert parameter storage."""
+        if not self._single_axis_meshes:
+            self.build_mesh()
+        assert self.spmd_backend == "spmd_types"
         return self._global_meshes.get("spmd_sparse_for_fwdbwd")
 
     def get_dense_tp_mesh(self) -> DeviceMesh:
