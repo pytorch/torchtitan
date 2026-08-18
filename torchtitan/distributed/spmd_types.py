@@ -203,25 +203,23 @@ def spmd_layout_to_dtensor_placements(
 
 def annotate_input_spmd_types(
     parallel_dims: "ParallelDims",
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    extra_kwargs: dict[str, Any],
+    input_dict: dict[str, Any],
     input_sharding: dict[str, "SpmdLayout"],
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-    """Annotate named inputs/labels/extras with SPMD types from ``input_sharding``.
+) -> dict[str, Any]:
+    """Annotate named forward inputs with SPMD types from ``input_sharding``.
 
-    Each named tensor is asserted against its own layout. Non-tensor kwargs
-    (e.g. ``attention_masks`` containers, ``special_tokens``) are left
-    untouched. Every *tensor* input, however, must have a layout entry: a
-    tensor with no entry raises rather than being silently left untyped.
+    ``input_dict`` maps each name ('input', 'labels', and extra forward kwargs)
+    to its value. Each named tensor is asserted against its own layout.
+    Non-tensor kwargs (e.g. ``attention_masks`` containers, ``special_tokens``)
+    are left untouched. Every *tensor* input, however, must have a layout entry:
+    a tensor with no entry raises rather than being silently left untyped.
     Tensors nested inside container kwargs are not reachable here and must
     be annotated at their construction site.
     """
     mesh = parallel_dims.spmd_dense_mesh()
-    named: dict[str, Any] = {"input": inputs, "labels": labels, **extra_kwargs}
     untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
-        for name, value in named.items():
+        for name, value in input_dict.items():
             if not isinstance(value, torch.Tensor):
                 continue
             layout = input_sharding.get(name)
@@ -236,7 +234,7 @@ def annotate_input_spmd_types(
             "them to the input_sharding returned by _build_forward_inputs, or "
             "annotate nested/container tensors at their construction site."
         )
-    return inputs, labels, extra_kwargs
+    return input_dict
 
 
 def spmd_validate_redistributions(sharding_config: Any) -> None:

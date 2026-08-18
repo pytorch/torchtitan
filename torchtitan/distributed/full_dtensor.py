@@ -127,23 +127,23 @@ def resolve_sparse_fsdp_mesh(
 
 def parallelize_inputs(
     parallel_dims: ParallelDims,
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    extra_kwargs: dict[str, Any],
+    input_dict: dict[str, Any],
     input_sharding: dict[str, SpmdLayout],
-) -> tuple[DTensor, DTensor, dict[str, Any]]:
+) -> dict[str, Any]:
     """Wrap named tensors as DTensors using per-name layouts from ``input_sharding``.
 
-    Inputs are assumed already sharded; this only re-wraps via ``from_local``.
-    A tensor without an entry in ``input_sharding`` is fully replicated; a
-    non-tensor kwarg (e.g. a ``BlockMask``) passes through unchanged.
+    ``input_dict`` maps each name ('input', 'labels', and extra forward kwargs)
+    to its value. Inputs are assumed already sharded; this only re-wraps via
+    ``from_local``. A tensor without an entry in ``input_sharding`` is fully
+    replicated; a non-tensor kwarg (e.g. a ``BlockMask``) passes through
+    unchanged.
     """
     mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert mesh is not None and mesh.mesh_dim_names is not None
     replicate = [Replicate()] * len(mesh.mesh_dim_names)
 
     wrapped: dict[str, Any] = {}
-    for name, value in {"input": inputs, "labels": labels, **extra_kwargs}.items():
+    for name, value in input_dict.items():
         if not isinstance(value, torch.Tensor) or isinstance(value, DTensor):
             wrapped[name] = value
             continue
@@ -151,8 +151,4 @@ def parallelize_inputs(
         placements = list(resolve_placements(layout, mesh)) if layout else replicate
         wrapped[name] = DTensor.from_local(value, mesh, placements)
 
-    return (
-        wrapped["input"],
-        wrapped["labels"],
-        {k: wrapped[k] for k in extra_kwargs},
-    )
+    return wrapped

@@ -335,29 +335,26 @@ class Decoder(BaseModel):
     def _build_forward_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
-    ]:
-        """Decoder default: split inputs, then build attention masks.
+    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
+        """Decoder default: build inputs, then build attention masks.
 
         Masks are built only for the masked backends (Flex/Varlen) and only
         when ``positions`` is present. A maskless backend (SDPA) still receives
         positions for RoPE and relies on ``is_causal``.
         """
-        inputs, labels, extra_kwargs, _ = super()._build_forward_inputs(
-            input_dict, labels, parallel_dims=parallel_dims
+        input_dict, _ = super()._build_forward_inputs(
+            input_dict, parallel_dims=parallel_dims
         )
-        positions = extra_kwargs.get("positions", None)
+        positions = input_dict.get("positions", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                extra_kwargs["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                 )
-        return inputs, labels, extra_kwargs, decoder_input_sharding()
+        return input_dict, decoder_input_sharding()
 
     def get_attention_masks(
         self,

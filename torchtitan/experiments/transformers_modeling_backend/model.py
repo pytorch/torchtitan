@@ -1045,12 +1045,9 @@ class HFTransformerModel(BaseModel):
     def _build_forward_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
-    ]:
+    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
         """HF override of the input-build hook.
 
         Inherits the base ``None`` layout (no per-input SPMD types), so the
@@ -1060,21 +1057,21 @@ class HFTransformerModel(BaseModel):
         default decoder shard dims, and the ``BlockMask`` below is built from
         unsharded positions so CP can shard its Q axis.
         """
-        inputs, labels, extra_kwargs, input_sharding = super()._build_forward_inputs(
-            input_dict, labels, parallel_dims=parallel_dims
+        input_dict, input_sharding = super()._build_forward_inputs(
+            input_dict, parallel_dims=parallel_dims
         )
         # Build the attention mask here (mirroring `Decoder._build_forward_inputs`)
         # whenever positions are present. Under CP this must happen before
         # sharding so `prepare_context_parallel_input` can shard the mask's Q
         # axis from unsharded positions; outside CP it means `forward()` receives
         # a prebuilt mask and doesn't have to build one itself.
-        if "attention_masks" not in extra_kwargs:
-            positions = extra_kwargs.get("positions")
+        if "attention_masks" not in input_dict:
+            positions = input_dict.get("positions")
             if positions is not None:
                 masks = self.get_attention_masks(positions=positions)
                 if masks is not None:
-                    extra_kwargs["attention_masks"] = masks
-        return inputs, labels, extra_kwargs, input_sharding
+                    input_dict["attention_masks"] = masks
+        return input_dict, input_sharding
 
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).

@@ -58,7 +58,6 @@ class BaseModel(Module):
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
         device: torch.device,
@@ -66,11 +65,13 @@ class BaseModel(Module):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
         """Prepare a dataloader batch for the model forward pass.
 
+        ``input_dict`` is the batch with ``labels`` folded in (the caller merges
+        the dataloader's separate labels tensor under the ``'labels'`` key).
         Template: build forward inputs + their layout (``_build_forward_inputs``),
         CP-shard, then SPMD-wrap. Returns ``(inputs, labels, extra_kwargs,
         local_ntokens)``.
 
-        TODO(return-type): the 4th element (local token count) is a transitional
+        TODO(return-type): the 4th return value (local token count) is a transitional
         workaround. The ``full_dtensor`` backend wraps ``labels`` in a DTensor
         whose ``.numel()`` reports the GLOBAL count, so the trainer cannot count
         from the returned labels. When the DTensor path is removed, drop this
@@ -84,58 +85,52 @@ class BaseModel(Module):
             prepare_context_parallel_input,
         )
 
-        inputs, labels, extra_kwargs, input_sharding = self._build_forward_inputs(
-            input_dict, labels, parallel_dims=parallel_dims
+        input_dict, input_sharding = self._build_forward_inputs(
+            input_dict, parallel_dims=parallel_dims
         )
         if parallel_dims.cp_enabled:
-            inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs,
-                labels,
-                extra_kwargs,
+            input_dict = prepare_context_parallel_input(
+                input_dict,
+                input_sharding,
                 parallel_dims.get_mesh("cp"),
-                device,
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
-                input_sharding=input_sharding,
             )
-        local_ntokens = labels.numel()
-        # Wrap/annotate inputs for the active SPMD backend (no-op without a layout).
+        local_ntokens = input_dict["labels"].numel()
+
         if input_sharding is not None:
             if parallelism.spmd_backend == "full_dtensor":
-                inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                    parallel_dims, inputs, labels, extra_kwargs, input_sharding
+                input_dict = full_dtensor.parallelize_inputs(
+                    parallel_dims, input_dict, input_sharding
                 )
             elif parallelism.spmd_backend == "spmd_types":
-                inputs, labels, extra_kwargs = annotate_input_spmd_types(
-                    parallel_dims, inputs, labels, extra_kwargs, input_sharding
+                input_dict = annotate_input_spmd_types(
+                    parallel_dims, input_dict, input_sharding
                 )
-        return inputs, labels, extra_kwargs, local_ntokens
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict, local_ntokens
 
     def _build_forward_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
-    ]:
-        """Split inputs from forward kwargs and declare their SPMD layout.
+    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
+        """Build the forward-inputs dict and declare its SPMD layout.
 
-        Returns ``(inputs, labels, extra_kwargs, input_sharding)``. Default:
-        ``input_dict['input']`` is the positional input; every other key becomes
-        a forward kwarg; base declares no layout (``None``). Override to build
+        ``input_dict`` maps each name to its value: ``'input'`` (the positional
+        input), ``'labels'``, and every other batch key as a forward kwarg.
+        Returns ``(input_dict, input_sharding)`` where ``input_dict`` is a fresh
+        copy (so downstream mask-building / sharding never mutates the caller's
+        batch). Base declares no layout (``None``); override to build
         masks/derived inputs and return the matching ``input_sharding`` for any
-        inputs added to ``extra_kwargs``.
+        tensors added to ``input_dict``.
 
         ``parallel_dims`` is provided for overrides (e.g. CP-conditional mask
-        building) and is unused by the base split.
+        building) and is unused by the base build.
         """
-        inputs = input_dict["input"]
-        extra_kwargs: dict[str, Any] = {
-            k: v for k, v in input_dict.items() if k != "input"
-        }
-        return inputs, labels, extra_kwargs, None
+        return dict(input_dict), None
 
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.

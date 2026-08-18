@@ -342,23 +342,19 @@ class Qwen35Model(Decoder):
     def _build_forward_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
-    ]:
-        inputs, labels, extra_kwargs, input_sharding = super()._build_forward_inputs(
-            input_dict, labels, parallel_dims=parallel_dims
+    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
+        input_dict, input_sharding = super()._build_forward_inputs(
+            input_dict, parallel_dims=parallel_dims
         )
         if input_sharding is not None:
             input_sharding = {**input_sharding, **qwen35_input_sharding()}
-        return inputs, labels, extra_kwargs, input_sharding
+        return input_dict, input_sharding
 
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
         *,
         parallel_dims: ParallelDims,
         device: torch.device,
@@ -366,7 +362,6 @@ class Qwen35Model(Decoder):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
         inputs, labels, extra_kwargs, local_ntokens = super().preprocess_inputs(
             input_dict,
-            labels,
             parallel_dims=parallel_dims,
             device=device,
             parallelism=parallelism,
