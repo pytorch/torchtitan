@@ -32,7 +32,7 @@ from torchtitan.models.flux.validate import FluxValidator
 
 from . import model_registry
 
-#NOTE: Flux needs `img_size` in both `dataset.processor` and to define the `seq_len` of the model
+# NOTE: Flux needs `img_size` in both `dataset.processor` and to define the `seq_len` of the model
 # There two utils are created to take the img_size defined once in the config.
 def _flux_dataset(dataset_name: str, *, img_size: int) -> SingleDatasetConfig:
     dataset = DATASETS[dataset_name]
@@ -55,9 +55,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
     img_size = 256
     max_t5_encoding_len = 256
     training_dataset = _flux_dataset("cc12m-test", img_size=img_size)
-    validation_dataset = _flux_dataset(
-        "cc12m-test-validation", img_size=img_size
-    )
+    validation_dataset = _flux_dataset("cc12m-test-validation", img_size=img_size)
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),

@@ -20,7 +20,7 @@ from torch_checkpointing.config import AsyncCheckpointSaverConfig
 from torch_checkpointing.dtensor_resharder import DTensorResharder
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter

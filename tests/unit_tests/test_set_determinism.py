@@ -318,5 +318,6 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
             )
             mock_sda.assert_not_called()
 
+
 if __name__ == "__main__":
     unittest.main()

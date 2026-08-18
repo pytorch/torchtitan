@@ -9,9 +9,10 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
 import grain.python as grain
+import tyro
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 
@@ -55,16 +56,20 @@ class GrainDataLoader(BaseDataLoader):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
-        dataset: DatasetConfig
-        collator: Collator.Config = field(default_factory=TextCollator.Config)
+        dataset: Annotated[DatasetConfig, tyro.conf.Suppress]
+        collator: Annotated[Collator.Config, tyro.conf.Suppress] = field(
+            default_factory=TextCollator.Config
+        )
         seed: int = 42
-        shuffle: bool = True
-        repeat: bool = True
-        streaming_shuffle_buffer_size: int = 1_000
+        shuffle: Annotated[bool, tyro.conf.Suppress] = True
+        repeat: Annotated[bool, tyro.conf.Suppress] = True
+        streaming_shuffle_buffer_size: Annotated[int, tyro.conf.Suppress] = 1_000
         """Streaming rows retained per rank for approximate shuffling."""
-        read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
+        read_options: Annotated[grain.ReadOptions, tyro.conf.Suppress] = field(
+            default_factory=grain.ReadOptions
+        )
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
-        num_prefetch_batches: int = 2
+        num_prefetch_batches: Annotated[int, tyro.conf.Suppress] = 2
         """Collated batches queued per rank for trainer consumption."""
 
     def __init__(

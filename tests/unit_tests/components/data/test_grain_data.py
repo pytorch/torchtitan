@@ -113,8 +113,7 @@ class PairCollator(Collator):
     def __call__(self, rows) -> TrainerBatch:
         inputs, labels = zip(*rows)
         return {
-            key: torch.stack([row[key] for row in inputs])
-            for key in inputs[0]
+            key: torch.stack([row[key] for row in inputs]) for key in inputs[0]
         }, torch.stack(labels)
 
 
@@ -816,8 +815,8 @@ def test_concat_shards_after_one_global_index_space():
         )
     )
 
-    assert [row["value"] for row in rank_0] == [0, 2, 4, 6]
-    assert [row["value"] for row in rank_1] == [1, 3, 5, 7]
+    assert [row["value"] for row in rank_0] == [0, 1, 2, 3]
+    assert [row["value"] for row in rank_1] == [4, 5, 6, 7]
 
 
 @pytest.mark.parametrize(
@@ -1666,6 +1665,7 @@ def test_restore_failure_closes_loader():
         loader.load_state_dict(state)
 
     loader._iterator.close.assert_called_once_with()
+
 
 def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
     path = tmp_path / "rows.jsonl"

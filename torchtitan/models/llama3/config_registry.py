@@ -60,6 +60,7 @@ def llama3_debugmodel() -> Trainer.Config:
         ),
         dataloader=GrainDataLoader.Config(
             dataset=packed,
+            shuffle=False,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
@@ -73,6 +74,7 @@ def llama3_debugmodel() -> Trainer.Config:
             steps=10,
             dataloader=GrainDataLoader.Config(
                 dataset=packed,
+                shuffle=False,
             ),
         ),
     )

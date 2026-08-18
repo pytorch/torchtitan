@@ -47,6 +47,7 @@ def qwen3_debugmodel() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -160,6 +161,7 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -391,6 +393,7 @@ def qwen3_moe_debug() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -416,8 +419,8 @@ def qwen3_moe_deepep() -> Trainer.Config:
 
     The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
     takes the compact, host-synced, backward-able path. EP=4 (4 GPUs) so the dispatch is
-    actually exercised (EP=1 falls back to local); the compact path auto-sizes its buffer from
-    the per-rank token count. Numerics match the standard all-to-all backend (step-1 bitwise,
+    actually exercised (EP=1 falls back to local); the training shape determines the fixed
+    per-rank buffer capacity. Numerics match the standard all-to-all backend (step-1 bitwise,
     reduction-order drift thereafter). Needs deep_ep v2 (ElasticBuffer) in the env.
 
     Local devgpu (no RDMA NIC) needs these env vars so the ElasticBuffer inits NVLink-only:

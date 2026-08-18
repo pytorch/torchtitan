@@ -13,10 +13,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-)
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
@@ -249,9 +246,7 @@ class Validator(BaseValidator):
             ),
         )
 
-        validation_iterator = iter(
-            iterate_and_close_dataloader(validation_dataloader)
-        )
+        validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
         while True:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:

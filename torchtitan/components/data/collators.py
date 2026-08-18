@@ -11,7 +11,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
-import numpy as np
 import torch
 
 from torchtitan.components.data.dataset import TextSequence
@@ -63,11 +62,11 @@ class TextCollator(Collator):
             input_ids[row_index, :length] = torch.as_tensor(row.input_ids)
             labels[row_index, :length] = torch.as_tensor(row.labels)
             row_positions = (
-                np.arange(length, dtype=np.int64)
+                torch.arange(length)
                 if row.positions is None
-                else row.positions
+                else torch.as_tensor(row.positions)
             )
-            positions[row_index, :length] = torch.as_tensor(row_positions)
+            positions[row_index, :length] = row_positions
 
         return {
             "input": input_ids,

@@ -47,7 +47,7 @@ from .base import (
 if TYPE_CHECKING:
     import torch.nn as nn
 
-    from torchtitan.components.dataloader import BaseDataLoader
+    from torchtitan.components.data.loader import BaseDataLoader
     from torchtitan.components.optimizer import (
         LRSchedulersContainer,
         OptimizersContainer,

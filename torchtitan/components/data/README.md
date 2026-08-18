@@ -270,6 +270,30 @@ pretraining_corpus_ds = DatasetConcatConfig(
 )
 ```
 
+To include every row from one finite dataset multiple times per epoch, repeat that child in the concatenation:
+
+```python
+pretraining_corpus_ds = DatasetConcatConfig(
+    datasets=(books_ds,) * 3 + (code_ds, math_ds),
+)
+```
+
+Every `books_ds` row now appears three times in the combined finite index space. With `shuffle=True`, TorchTitan shuffles that combined index space before DP sharding.
+
+Use mixing instead when the desired behavior is relative source-selection frequency rather than exact finite duplication:
+
+```python
+pretraining_mix_ds = DatasetMixConfig(
+    datasets=(
+        WeightedDataset(dataset=books_ds, weight=0.6),
+        WeightedDataset(dataset=code_ds, weight=0.2),
+        WeightedDataset(dataset=math_ds, weight=0.2),
+    ),
+)
+```
+
+`GrainDataLoader.Config(repeat=True)` repeats the complete concatenated or mixed dataset; it does not change one child's relative contribution.
+
 # Images and multimodal data
 
 Images use the same source, dataset, loader, sharding, and checkpoint contracts. Their processors preserve modality-specific sample dictionaries, and their collators create model-specific batches.
@@ -391,13 +415,15 @@ TP/PP/CP peers               -> same rows for their effective-DP coordinate
 Data ownership is decided before batching:
 
 ```text
-random-access source -> global shuffle -> DP stride shard
+random-access source -> global shuffle -> contiguous balanced DP shard
 Hugging Face stream -> source-level DP shard
 DatasetMixConfig    -> combines children already owned by this DP rank
 DatasetConcatConfig -> concatenates, globally shuffles, then DP-shards
 packing             -> packs samples locally on each DP rank
 GrainDataLoader     -> batches and collates that rank's samples
 ```
+
+For random-access training, each rank receives a contiguous slice of the globally shuffled index space, not a contiguous region of the original corpus.
 
 With effective DP greater than one, `repeat=False` is rejected because ranks can exhaust at different steps and hang training collectives. Use `repeat=True` and let the trainer's step count stop training.
 

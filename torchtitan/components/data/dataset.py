@@ -39,7 +39,7 @@ class DatasetConfig(Protocol):
 class TextSequence:
     """Next-token-aligned text preserved through composition and packing.
 
-    NOTE: It is the dataset's processor responsability to shift tokens into
+    NOTE: It is the dataset's processor responsibility to shift tokens into
     aligned input and label pairs. The trainer does not do it.
     """
 
@@ -141,9 +141,16 @@ class SingleDatasetConfig:
                 f"dataset has {len(dataset)} rows, fewer than "
                 f"dp_world_size={dataset_iteration_policy.dp_world_size}"
             )
-        dataset = dataset[
-            dataset_iteration_policy.dp_rank :: dataset_iteration_policy.dp_world_size
-        ]
+        shard_size, remainder = divmod(
+            len(dataset), dataset_iteration_policy.dp_world_size
+        )
+        shard_start = dataset_iteration_policy.dp_rank * shard_size + min(
+            dataset_iteration_policy.dp_rank, remainder
+        )
+        shard_stop = shard_start + shard_size
+        if dataset_iteration_policy.dp_rank < remainder:
+            shard_stop += 1
+        dataset = dataset[shard_start:shard_stop]
         if dataset_iteration_policy.repeat:
             # Grain preserves the epoch through sliced map indices, so the
             # upstream shuffle uses seed + epoch on each repeat.
@@ -286,9 +293,16 @@ class DatasetConcatConfig:
                 f"dp_world_size={dataset_iteration_policy.dp_world_size}"
             )
 
-        dataset = dataset[
-            dataset_iteration_policy.dp_rank :: dataset_iteration_policy.dp_world_size
-        ]
+        shard_size, remainder = divmod(
+            len(dataset), dataset_iteration_policy.dp_world_size
+        )
+        shard_start = dataset_iteration_policy.dp_rank * shard_size + min(
+            dataset_iteration_policy.dp_rank, remainder
+        )
+        shard_stop = shard_start + shard_size
+        if dataset_iteration_policy.dp_rank < remainder:
+            shard_stop += 1
+        dataset = dataset[shard_start:shard_stop]
 
         if dataset_iteration_policy.repeat:
             dataset = dataset.repeat()

@@ -8,7 +8,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, cast, Literal
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -16,6 +16,7 @@ from torch.nn.utils.rnn import pad_sequence
 from torchtitan.components.data.collators import Collator, TrainerBatch
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.tools.logging import logger
 from .utils.image import vision_to_patches
 from .utils.text import pad_batch_dim, pad_seq_len
@@ -44,7 +45,7 @@ class MultiModalCollator(Collator):
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
         self.spatial_merge_size = config.spatial_merge_size
-        self.tokenizer = context.tokenizer
+        self.tokenizer = cast(MultiModalTokenizer, context.tokenizer)
         self.build_mrope_positions = config.build_mrope_positions
         self.patch_order = config.patch_order
 

@@ -154,6 +154,7 @@ class ChatProcessor(SampleProcessor):
         del rng
         return self._tokenize_sample(sample)
 
+
 DATASETS: dict[str, SingleDatasetConfig] = {
     "c4": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
