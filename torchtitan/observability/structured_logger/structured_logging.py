@@ -90,6 +90,7 @@ class ExtraFields(StrEnum):
     LOG_TYPE_NAME = "log_type_name"
     EVENT_NAME = "event_name"
     STEP = "step"
+    CONTEXT = "context"
     VALUE = "value"
     RELATIVE_STEP = "relative_step"
     TASK_NAME = "task_name"

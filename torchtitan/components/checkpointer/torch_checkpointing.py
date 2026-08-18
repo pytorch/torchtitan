@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import queue
 import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -59,6 +61,9 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+
+# Logger the backend emits its checkpoint events and metrics on.
+_BACKEND_LOGGER_NAME = "torch_checkpointing"
 
 
 def _step_dir_pattern(temp_dir_prefix: str) -> re.Pattern[str]:
@@ -121,6 +126,55 @@ class _BackendCheckpointStorage:
 
     def remove(self, path: str) -> None:
         self._storage.rmdir(self._backend_path(path))
+
+
+def _init_subprocess_logging(
+    output_dir: str,
+    init_fn: Callable[..., None] | None,
+    init_args: tuple[Any, ...],
+) -> None:
+    """Re-establish structured logging inside the async save subprocess.
+
+    The subprocess does not inherit the parent's logging handlers, so its
+    checkpoint records would otherwise be lost.
+    """
+    sl.init_structured_logger(source="training", output_dir=output_dir)
+    # It inherits none of the parent's logging levels either: the root logger
+    # starts at WARNING, so the backend's INFO checkpoint events would be
+    # discarded by the logger before any handler could forward them. Raise the
+    # level only when it is not already permissive enough, so an explicitly
+    # more verbose setting survives.
+    backend_logger = logging.getLogger(_BACKEND_LOGGER_NAME)
+    if not backend_logger.isEnabledFor(logging.INFO):
+        backend_logger.setLevel(logging.INFO)
+    sl.install_forwarding_structured_logging_handler(_BACKEND_LOGGER_NAME)
+    if init_fn is not None:
+        init_fn(*init_args)
+
+
+def _with_structured_logging(
+    config: BackendCheckpointManager.Config,
+    output_dir: str,
+) -> BackendCheckpointManager.Config:
+    """Forward the backend's own log records into TorchTitan's structured log.
+
+    No-op when structured logging is not active, or when saves are synchronous
+    and therefore already run in this process with the handler installed. Any
+    existing ``subprocess_init_fn`` is chained rather than replaced.
+    """
+    if not sl.install_forwarding_structured_logging_handler(_BACKEND_LOGGER_NAME):
+        return config
+    if not isinstance(config.save, AsyncCheckpointSaverConfig):
+        return config
+    return replace(
+        config,
+        subprocess_init_fn=_init_subprocess_logging,
+        subprocess_init_args=(
+            output_dir,
+            config.subprocess_init_fn,
+            config.subprocess_init_args,
+        ),
+    )
 
 
 def _item_specs() -> dict[str, ItemSpec]:
@@ -264,6 +318,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # so saves and loads use it too, not just our own path probes.
         if storage_config is not None:
             manager_config = replace(manager_config, storage_config=storage_config)
+        manager_config = _with_structured_logging(manager_config, base_folder)
         self._manager_config = manager_config
         self._step_dir_pattern = _step_dir_pattern(
             manager_config.save.writer_config.temp_dir_prefix
