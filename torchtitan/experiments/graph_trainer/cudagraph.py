@@ -389,10 +389,20 @@ def is_cudagraphable(
     # only captures CUDA kernels -- a CPU op would run on the host at capture time
     # and replay stale (e.g. the .tolist() unbind/getitem on EP token-routing split
     # sizes). Run it eager.
+    #
+    # Exception: lift_fresh_copy of a baked constant. make_fx stores free tensor
+    # constants (e.g. the Python scalar 0 in ``t[mask] = 0``) as GraphModule
+    # attributes _tensor_constantN and lifts them via lift_fresh_copy. The value
+    # is frozen at capture and baked into the captured kernels, so it is safe to
+    # cudagraph even though the lifted 0-d tensor lives on CPU.
+    constant_lift_fresh_node = node.target is torch.ops.aten.lift_fresh_copy.default and all(
+        inp.op == "get_attr" and inp.target.startswith("_tensor_constant") for inp in node.all_input_nodes
+    )
+
     tensors = _iter_tensors(node.meta.get("val"))
     for inp in node.all_input_nodes:
         tensors += _iter_tensors(inp.meta.get("val"))
-    if tensors and all(t.device.type == "cpu" for t in tensors):
+    if tensors and all(t.device.type == "cpu" for t in tensors) and not constant_lift_fresh_node:
         return False
 
     return True
