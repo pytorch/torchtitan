@@ -255,7 +255,6 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
     @with_comms
     def test_matches_stock_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-        from torchtitan.distributed.utils import set_spmd_backend
         from torchtitan.models.common.config_utils import make_ffn_config
 
         R = self.world_size

@@ -15,8 +15,7 @@ from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
     apply_overrides,
     CommConfig,

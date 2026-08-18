@@ -11,9 +11,12 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import (
+    LRSchedulersContainer,
+    OptimizersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC

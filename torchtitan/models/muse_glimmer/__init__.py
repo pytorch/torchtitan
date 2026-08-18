@@ -11,7 +11,12 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.models.common import ComplexRoPE, Embedding, Linear
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Embedding,
+    Linear,
+    ScaledBiasRowwiseLinear,
+)
 from torchtitan.models.common.attention import QKVLinear, VarlenAttention
 from torchtitan.models.common.config_utils import get_attention_config, make_ffn_config
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
@@ -36,7 +41,11 @@ from .model import (
 from .parallelize import parallelize_muse_glimmer, pipeline_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
-from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
+from .vision_encoder import (
+    MuseGlimmerVisionAdapter,
+    MuseGlimmerVisionEncoder,
+    VisionRopeFreq,
+)
 
 __all__ = [
     "parallelize_muse_glimmer",
@@ -47,6 +56,7 @@ __all__ = [
     "model_registry",
     "MuseGlimmerVisionEncoder",
     "MuseGlimmerVisionAdapter",
+    "VisionRopeFreq",
     "muse_glimmer_vision_encoder_config",
     "muse_glimmer_vision_adapter_config",
     "muse_glimmer_vision_configs",
@@ -243,6 +253,17 @@ def _vision_linear(in_features: int, out_features: int, *, bias: bool) -> Linear
     )
 
 
+def _vision_scaled_bias_rowwise_linear(
+    in_features: int, out_features: int
+) -> ScaledBiasRowwiseLinear.Config:
+    return ScaledBiasRowwiseLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        param_init=_VISION_LINEAR_INIT,
+    )
+
+
 def muse_glimmer_vision_encoder_config(
     *,
     latent_dim: int = 1536,
@@ -273,7 +294,10 @@ def muse_glimmer_vision_encoder_config(
         sparse_attention_factor=sparse_attention_factor,
         pos_emb_grid_h=pos_emb_grid_h,
         pos_emb_grid_w=pos_emb_grid_w,
-        rope_theta=rope_theta,
+        rope_freq=VisionRopeFreq.Config(
+            head_dim=head_dim,
+            rope_theta=rope_theta,
+        ),
         param_init=_POS_EMB_INIT,
         conv1=_vision_linear(patch_dim, latent_dim, bias=False),
         ln_pre=_vision_layer_norm(latent_dim),
@@ -285,12 +309,14 @@ def muse_glimmer_vision_encoder_config(
                 wq=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wk=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wv=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
-                proj=_vision_linear(num_heads * head_dim, latent_dim, bias=True),
+                proj=_vision_scaled_bias_rowwise_linear(
+                    num_heads * head_dim, latent_dim
+                ),
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
                 fc1=_vision_linear(latent_dim, mlp_hidden, bias=True),
-                fc2=_vision_linear(mlp_hidden, latent_dim, bias=True),
+                fc2=_vision_scaled_bias_rowwise_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),
         ),
