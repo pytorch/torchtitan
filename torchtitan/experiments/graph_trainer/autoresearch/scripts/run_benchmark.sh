@@ -18,7 +18,7 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --dataloader.dataset c4_test \
-    --training.num_tokens_per_dp_rank 8192 \
+    --training.num_tokens_per_microbatch_per_dp_rank 8192 \
     --metrics.no-enable_tensorboard \
     --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \

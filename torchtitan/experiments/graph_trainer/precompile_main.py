@@ -202,7 +202,7 @@ def _precompile_aot_fx_trace(
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-    num_tokens = config.training.num_tokens_per_dp_rank
+    num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     vocab_size = model_config.vocab_size
 
     dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
@@ -224,9 +224,10 @@ def _precompile_aot_fx_trace(
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
 
-        positions = torch.arange(
-            num_tokens, dtype=torch.int32, device=dummy_inputs.device
-        ) % config.training.max_seq_len
+        positions = (
+            torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
+            % config.training.max_context_length
+        )
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(

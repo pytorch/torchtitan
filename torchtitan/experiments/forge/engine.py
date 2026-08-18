@@ -90,7 +90,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     device: torch.device
     gc_handler: utils.GarbageCollection
     gradient_accumulation_steps: int
-    num_pipeline_parallel_microbatches: int
+    num_pp_microbatches: int
     train_context: Generator[None, None, None]
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -103,7 +103,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     model_config: BaseModel.Config
     num_flops_per_token: float
     model_param_count: int
-    num_tokens_per_step: int
+    num_tokens_per_train_step: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -166,7 +166,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             self.model_param_count,
             self.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.max_seq_len)
+        ) = model_config.get_nparams_and_flops(
+            model, config.training.max_context_length
+        )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         if config.training.enable_cpu_offload:
@@ -181,30 +183,19 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # Verify token budgets.
-        num_tokens_per_step = config.training.num_tokens_per_step
-        if num_tokens_per_step < 0:
-            num_tokens_per_step = config.training.num_tokens_per_dp_rank * dp_degree
-        assert num_tokens_per_step > 0
-        assert (
-            num_tokens_per_step % (config.training.num_tokens_per_dp_rank * dp_degree)
-            == 0
-        ), (
-            "num_tokens_per_step must be a multiple of num_tokens_per_dp_rank "
-            f"times data-parallel degree ({num_tokens_per_step} "
-            f"% ({config.training.num_tokens_per_dp_rank} * {dp_degree}) != 0)"
-        )
-        self.num_tokens_per_step = num_tokens_per_step
-
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-
-        # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = num_tokens_per_step // (
-            config.training.num_tokens_per_dp_rank * dp_degree
+        self.num_pp_microbatches = num_pp_microbatches
+        self.gradient_accumulation_steps = (
+            config.training.num_gradient_accumulation_steps
         )
-        assert self.gradient_accumulation_steps > 0
-        self.num_pipeline_parallel_microbatches = num_pp_microbatches
+        self.num_tokens_per_train_step = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+            * self.num_pp_microbatches
+            * self.gradient_accumulation_steps
+            * dp_degree
+        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:

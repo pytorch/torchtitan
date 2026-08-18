@@ -111,8 +111,8 @@ def _trace_dsv3_moe_block_stage(
         runtime_config = Trainer.Config(
             model_spec=model_spec,
             training=TrainingConfig(
-                num_tokens_per_dp_rank=batch_size * seq_len,
-                max_seq_len=seq_len,
+                num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
+                max_context_length=seq_len,
                 steps=1,
             ),
             parallelism=ParallelismConfig(expert_parallel_degree=2),

@@ -90,7 +90,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
                 tokenizer=HuggingFaceTokenizer.Config().build(
                     tokenizer_path="./tests/assets/tokenizer"
                 ),
-                max_seq_len=128,
+                max_context_length=128,
                 num_tokens_per_batch=128,
                 dp_rank=0,
                 dp_world_size=1,
@@ -206,7 +206,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=batch_size * seq_len,
         )
 
@@ -225,7 +225,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=batch_size * seq_len,
         )
 

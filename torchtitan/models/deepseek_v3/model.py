@@ -106,7 +106,7 @@ class Attention(BaseAttention):
             q = self.wq_a(x)
             q = self.wq_b(self.q_norm(q))
 
-        # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
+        # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
             if get_spmd_backend() == "spmd_types":

@@ -59,7 +59,7 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--training.num-tokens-per-dp-rank",
+                        "--training.num-tokens-per-microbatch-per-dp-rank",
                         str(batch_size * 512),
                         "--dataloader.img_size",
                         str(256),
@@ -79,8 +79,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
-                assert config.training.max_seq_len == 512
-                assert config.training.num_tokens_per_dp_rank == 512
+                assert config.training.max_context_length == 512
+                assert config.training.num_tokens_per_microbatch_per_dp_rank == 512
 
                 # Build the tokenizer container from config
                 tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
@@ -88,7 +88,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    max_seq_len=512,
+                    max_context_length=512,
                     num_tokens_per_batch=batch_size * 512,
                     tokenizer=tokenizer,
                 )
@@ -117,7 +117,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl_resumed = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    max_seq_len=512,
+                    max_context_length=512,
                     num_tokens_per_batch=batch_size * 512,
                     tokenizer=tokenizer,
                 )

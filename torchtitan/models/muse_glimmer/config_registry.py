@@ -94,8 +94,8 @@ def muse_glimmer_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=8 * 2048,
-            max_seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -140,8 +140,8 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 512,
-            max_seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=4 * 512,
+            max_context_length=512,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -169,8 +169,8 @@ def muse_glimmer_30b() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=1 * 8192,
-            max_seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -205,8 +205,8 @@ def muse_glimmer_30b_mm() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=1 * 8192,
-            max_seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
             steps=1000,
         ),
         parallelism=ParallelismConfig(

@@ -63,7 +63,7 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=False,
         )
@@ -97,7 +97,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             dataset=_load_dataset(),
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=False,
         )
@@ -155,7 +155,7 @@ class TestChatDatasetGreedyPacking(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=seq_len,
             infinite=False,
         )
@@ -184,7 +184,7 @@ class TestChatDatasetPerDocumentPositions(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=seq_len,
             infinite=False,
         )
@@ -226,7 +226,7 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=32,
+            max_context_length=32,
             num_tokens_per_batch=32,
             infinite=False,
         )
@@ -252,7 +252,7 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=bad_processor,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=False,
         )
@@ -274,7 +274,7 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=bad_processor,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=False,
         )
@@ -297,7 +297,7 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=bad_processor,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=False,
         )
@@ -317,7 +317,7 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=seq_len,
             infinite=False,
         )
@@ -342,7 +342,7 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=seq_len,
             infinite=False,
         )
@@ -376,7 +376,7 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
                 dp_world_size=world_size,
                 dp_rank=rank,
                 tokenizer=tokenizer_config.build(tokenizer_path=_TOKENIZER_PATH),
-                max_seq_len=seq_len,
+                max_context_length=seq_len,
                 num_tokens_per_batch=batch_size * seq_len,
             )
 
@@ -425,7 +425,7 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
 
 class TestChatDataLoaderPackedTokens(unittest.TestCase):
     def test_returns_one_flat_token_batch(self):
-        max_seq_len = 128
+        max_context_length = 128
         num_tokens_per_batch = 256
         config = ChatDataLoader.Config(
             dataset_path="json",
@@ -438,7 +438,7 @@ class TestChatDataLoaderPackedTokens(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=_load_tokenizer(),
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
         )
         input_dict, labels = next(iter(dataloader))
@@ -460,7 +460,7 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=True,
         )
@@ -481,7 +481,7 @@ class TestChatDatasetInfiniteLooping(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=seq_len,
             infinite=True,
         )
@@ -503,7 +503,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             dataset=ds,
             tokenizer=tokenizer,
             sample_processor=_process_sample,
-            max_seq_len=2048,
+            max_context_length=2048,
             num_tokens_per_batch=2048,
             infinite=False,
         )
@@ -616,7 +616,7 @@ class TestInterleavedChatDataLoader(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=tokenizer_config.build(tokenizer_path=_TOKENIZER_PATH),
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=batch_size * seq_len,
         )
 

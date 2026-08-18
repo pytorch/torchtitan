@@ -56,8 +56,8 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=8 * 2048,
-            max_seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -156,8 +156,8 @@ def deepseek_v3_16b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -225,8 +225,8 @@ def deepseek_v3_671b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10000,
         ),
         parallelism=ParallelismConfig(

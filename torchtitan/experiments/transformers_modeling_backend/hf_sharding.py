@@ -35,11 +35,9 @@ import torch.nn as nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    rowwise_config,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 from torchtitan.tools.logging import logger
@@ -49,18 +47,63 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
+def _hf_activation_placement(
+    *,
+    tp: spmd.PerMeshAxisSpmdType,
+    cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
+) -> SpmdLayout:
+    """Placement for Transformers activations with batch and sequence dims."""
+    return SpmdLayout({DP: spmd.S(0), CP: cp, TP: tp})
+
+
+def _hf_sequence_parallel_placement() -> SpmdLayout:
+    """Sequence-parallel placement for ``(batch, sequence, hidden)`` tensors."""
+    return SpmdLayout(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=(DP, (CP, TP), None),
+    )
+
+
+def _hf_colwise_config() -> ShardingConfig:
+    """Column-shard a linear whose output retains HF's batch dimension."""
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0)),
+            "bias": dense_param_placement(tp=spmd.S(0)),
+        },
+        out_src_shardings=_hf_activation_placement(tp=spmd.S(-1)),
+    )
+
+
+def _hf_rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
+    """Row-shard a linear whose output retains HF's batch dimension."""
+    out_dst = (
+        _hf_sequence_parallel_placement()
+        if output_sp
+        else _hf_activation_placement(tp=spmd.I)
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.R),
+        },
+        out_src_shardings=_hf_activation_placement(tp=spmd.P),
+        out_dst_shardings=out_dst,
+    )
+
+
 def _sp_activation(*, enable_sp: bool) -> SpmdLayout:
     """Activation layout for the sequence-parallel region.
 
     When SP is enabled, the sequence dim is sharded across both CP and TP
-    (``partition_spec=(DP, (CP, TP), None)``) — use the canonical
-    ``dense_sequence_parallel_placement`` so the CP/TP shard ordering on tensor
+    (``partition_spec=(DP, (CP, TP), None)``) -- use the HF-specific sequence
+    placement so the CP/TP shard ordering on tensor
     dim 1 is explicit. When SP is disabled, TP replicates (CP still seq-shards).
     """
     return (
-        dense_sequence_parallel_placement()
+        _hf_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.R)
+        else _hf_activation_placement(tp=spmd.R)
     )
 
 
@@ -88,8 +131,8 @@ def set_hf_sharding_configs(
             emb_state[buf_name] = dense_param_placement(tp=spmd.R)
         model.tok_embeddings._sharding_config = ShardingConfig(
             state_shardings=emb_state,
-            in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+            in_src_shardings={"input": _hf_activation_placement(tp=spmd.R)},
+            in_dst_shardings={"input": _hf_activation_placement(tp=spmd.R)},
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
         )
 
@@ -97,13 +140,18 @@ def set_hf_sharding_configs(
         model.norm._sharding_config = _hf_norm_config(enable_sp=enable_sp)
 
     if model.lm_head is not None and not isinstance(model.lm_head, nn.Identity):
+        lm_head_input = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.R)
+        )
         model.lm_head._sharding_config = ShardingConfig(
             state_shardings={
                 "weight": dense_param_placement(tp=spmd.S(0)),
                 "bias": dense_param_placement(tp=spmd.S(0)),
             },
             in_src_shardings={
-                "input": _sp_activation(enable_sp=enable_sp),
+                "input": lm_head_input,
             },
             in_dst_shardings={
                 "input": dense_activation_placement(tp=spmd.R),
@@ -227,7 +275,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
             "hidden_states": _sp_activation(enable_sp=enable_sp),
         },
         in_dst_shardings={
-            "hidden_states": dense_activation_placement(tp=spmd.R),
+            "hidden_states": _hf_activation_placement(tp=spmd.R),
         },
     )
 
@@ -244,9 +292,9 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
             if mod is not None:
                 mod._sharding_config = _replicate_config(mod)
         if hasattr(attn, "q_b_proj"):
-            attn.q_b_proj._sharding_config = colwise_config()
+            attn.q_b_proj._sharding_config = _hf_colwise_config()
     elif hasattr(attn, "q_proj"):
-        attn.q_proj._sharding_config = colwise_config()
+        attn.q_proj._sharding_config = _hf_colwise_config()
     else:
         raise ValueError(
             f"{type(attn).__name__}: no recognized query projection "
@@ -264,10 +312,10 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
             if mod is not None:
                 mod._sharding_config = _replicate_config(mod)
         if hasattr(attn, "kv_b_proj"):
-            attn.kv_b_proj._sharding_config = colwise_config()
+            attn.kv_b_proj._sharding_config = _hf_colwise_config()
     elif hasattr(attn, "k_proj") and hasattr(attn, "v_proj"):
-        attn.k_proj._sharding_config = colwise_config()
-        attn.v_proj._sharding_config = colwise_config()
+        attn.k_proj._sharding_config = _hf_colwise_config()
+        attn.v_proj._sharding_config = _hf_colwise_config()
     else:
         raise ValueError(
             f"{type(attn).__name__}: no recognized key/value projection "
@@ -277,7 +325,9 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
 
     # O projection
     o_proj_name = "o_proj" if hasattr(attn, "o_proj") else "dense"
-    getattr(attn, o_proj_name)._sharding_config = rowwise_config(output_sp=enable_sp)
+    getattr(attn, o_proj_name)._sharding_config = _hf_rowwise_config(
+        output_sp=enable_sp
+    )
 
     # Q/K norms (Qwen3) — weight replicated, activations stay heads-sharded.
     for norm_name in ("q_norm", "k_norm"):
@@ -319,17 +369,19 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         mlp_arg = _first_forward_arg(mlp)
         mlp._sharding_config = ShardingConfig(
             in_src_shardings={mlp_arg: _sp_activation(enable_sp=enable_sp)},
-            in_dst_shardings={mlp_arg: dense_activation_placement(tp=spmd.R)},
+            in_dst_shardings={mlp_arg: _hf_activation_placement(tp=spmd.R)},
         )
 
         gate_name = "gate_proj" if hasattr(mlp, "gate_proj") else "fc1"
-        getattr(mlp, gate_name)._sharding_config = colwise_config()
+        getattr(mlp, gate_name)._sharding_config = _hf_colwise_config()
 
         if hasattr(mlp, "up_proj"):
-            mlp.up_proj._sharding_config = colwise_config()
+            mlp.up_proj._sharding_config = _hf_colwise_config()
 
         down_name = "down_proj" if hasattr(mlp, "down_proj") else "fc2"
-        getattr(mlp, down_name)._sharding_config = rowwise_config(output_sp=enable_sp)
+        getattr(mlp, down_name)._sharding_config = _hf_rowwise_config(
+            output_sp=enable_sp
+        )
 
     # --- Direct-on-layer state ---
     # Some models keep parameters/buffers directly on the decoder layer rather
@@ -358,7 +410,7 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
     }
     if not enable_sp:
         return ShardingConfig(state_shardings=state)
-    sp_layout = dense_sequence_parallel_placement()
+    sp_layout = _hf_sequence_parallel_placement()
     return ShardingConfig(
         state_shardings=state,
         in_src_shardings={"hidden_states": sp_layout},
@@ -409,7 +461,7 @@ def _rope_config(module: nn.Module, *, enable_sp: bool) -> ShardingConfig:
         in_shardings[name] = (
             _sp_activation(enable_sp=enable_sp)
             if i == 0
-            else dense_activation_placement(tp=spmd.R)
+            else _hf_activation_placement(tp=spmd.R)
         )
     return ShardingConfig(
         state_shardings=state_shardings,

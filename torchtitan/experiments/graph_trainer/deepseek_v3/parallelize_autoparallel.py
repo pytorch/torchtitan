@@ -161,14 +161,16 @@ def parallelize_autoparallel_deepseekv3(
         )
 
     def input_fn():
-        num_tokens_per_step = training.num_tokens_per_step
-        if num_tokens_per_step < 0:
-            dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-            num_tokens_per_step = training.num_tokens_per_dp_rank * dp_degree
+        dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+        num_tokens_per_train_step = (
+            training.num_tokens_per_microbatch_per_dp_rank
+            * training.num_gradient_accumulation_steps
+            * dp_degree
+        )
         tokens = torch.randint(
             0,
             ap_model.model_args.vocab_size,
-            (num_tokens_per_step,),
+            (num_tokens_per_train_step,),
             device=torch.device(device_type),
         )
         return tokens

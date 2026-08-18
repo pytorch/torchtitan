@@ -341,8 +341,10 @@ class FlexAttention(Module):
 class ScaledDotProductAttention(Module):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
-    ``forward()`` adapts ``(T, N, H)`` to the kernel's ``(N, T, H)`` layout
-    and converts the result back to ``(T, N, H)``.
+    ``forward()`` adapts ``(T, N, H)`` to the kernel's ``(1, N, T, H)`` layout
+    and converts the result back to ``(T, N, H)``. The singleton kernel batch
+    is required because PyTorch context parallelism expects sequence dimension
+    2 for SDPA inputs.
 
     Note:
         The forward function must have q, k, v as the first three arguments to be
@@ -383,21 +385,21 @@ class ScaledDotProductAttention(Module):
                 "ScaledDotProductAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
-        q_NTH, k_NTH, v_NTH = (
-            q_TNH.transpose(0, 1),
-            k_TNH.transpose(0, 1),
-            v_TNH.transpose(0, 1),
+        q_BNTH, k_BNTH, v_BNTH = (
+            q_TNH.transpose(0, 1).unsqueeze(0),
+            k_TNH.transpose(0, 1).unsqueeze(0),
+            v_TNH.transpose(0, 1).unsqueeze(0),
         )
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            out_NTH = F.scaled_dot_product_attention(
-                q_NTH,
-                k_NTH,
-                v_NTH,
+            out_BNTH = F.scaled_dot_product_attention(
+                q_BNTH,
+                k_BNTH,
+                v_BNTH,
                 scale=scale,
                 is_causal=is_causal,
                 enable_gqa=enable_gqa,
             )
-        return out_NTH.transpose(0, 1)
+        return out_BNTH.squeeze(0).transpose(0, 1)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

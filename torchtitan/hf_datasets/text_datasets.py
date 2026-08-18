@@ -91,7 +91,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         dataset_name: str,
         dataset_path: str | None,
         tokenizer: BaseTokenizer,
-        max_seq_len: int = 2048,
+        max_context_length: int = 2048,
         num_tokens_per_batch: int = 16384,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -111,7 +111,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         self._original_data = split_dataset_by_node(ds, dp_rank, dp_world_size)
         self._data = self._original_data
         self._tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
+        self.max_context_length = max_context_length
         self.num_tokens_per_batch = num_tokens_per_batch
         self.infinite = infinite
         self._text_processor = text_processor
@@ -145,8 +145,8 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
     def _get_batch_positions(self) -> torch.Tensor:
         positions: list[int] = []
-        for start in range(0, self.num_tokens_per_batch, self.max_seq_len):
-            end = min(start + self.max_seq_len, self.num_tokens_per_batch)
+        for start in range(0, self.num_tokens_per_batch, self.max_context_length):
+            end = min(start + self.max_context_length, self.num_tokens_per_batch)
             positions.extend(
                 self._normalize_positions(self._positions_buffer[start:end])
             )
@@ -170,7 +170,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 # Per-document positions reset at document boundaries,
                 # matching inference frameworks (e.g. vLLM) that start
                 # positions at 0 per request. Positions also reset at
-                # max_seq_len packing boundaries to preserve the isolation
+                # max_context_length packing boundaries to preserve the isolation
                 # previously provided by separate sequence rows.
                 # TODO: make overflow policy configurable (chunk / truncate / drop).
                 self._positions_buffer.extend(range(len(sample_tokens) - 1))
@@ -289,7 +289,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
@@ -298,7 +298,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,
             tokenizer=tokenizer,
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
@@ -363,17 +363,17 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
     ):
-        if num_tokens_per_batch % max_seq_len != 0:
+        if num_tokens_per_batch % max_context_length != 0:
             raise ValueError(
-                "num_tokens_per_batch must be evenly divisible by max_seq_len "
-                "because interleaved sources produce fixed max_seq_len token chunks."
+                "num_tokens_per_batch must be evenly divisible by max_context_length "
+                "because interleaved sources produce fixed max_context_length token chunks."
             )
-        # Each weighted draw contributes max_seq_len token slots, so source
+        # Each weighted draw contributes max_context_length token slots, so source
         # weights remain token-mixture ratios after flattening the draws.
         ds = InterleavedDataset(
             datasets=[
@@ -381,8 +381,8 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
                     dataset_name=source.dataset,
                     dataset_path=source.dataset_path,
                     tokenizer=tokenizer,
-                    max_seq_len=max_seq_len,
-                    num_tokens_per_batch=max_seq_len,
+                    max_context_length=max_context_length,
+                    num_tokens_per_batch=max_context_length,
                     dp_rank=dp_rank,
                     dp_world_size=dp_world_size,
                     infinite=source.infinite,
@@ -400,7 +400,7 @@ class InterleavedHuggingFaceTextDataLoader(ParallelAwareDataloader):
             "pin_memory": config.pin_memory,
             "prefetch_factor": config.prefetch_factor,
             "snapshot_every_n_steps": snapshot_every_n_steps,
-            "batch_size": num_tokens_per_batch // max_seq_len,
+            "batch_size": num_tokens_per_batch // max_context_length,
             "collate_fn": _collate_token_chunks,
             "drop_last": True,
         }
@@ -426,7 +426,7 @@ class ChatDataset(IterableDataset, Stateful):
         dataset: Dataset,
         tokenizer: BaseTokenizer,
         sample_processor: Callable,
-        max_seq_len: int = 2048,
+        max_context_length: int = 2048,
         num_tokens_per_batch: int = 16384,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -437,13 +437,13 @@ class ChatDataset(IterableDataset, Stateful):
                 "Tokenizer does not have an eos_id set. "
                 "ChatDataset requires a tokenizer with a valid EOS token."
             )
-        if max_seq_len <= 0:
-            raise ValueError("max_seq_len must be greater than 0.")
+        if max_context_length <= 0:
+            raise ValueError("max_context_length must be greater than 0.")
         if num_tokens_per_batch <= 0:
             raise ValueError("num_tokens_per_batch must be greater than 0.")
-        if num_tokens_per_batch < max_seq_len:
+        if num_tokens_per_batch < max_context_length:
             raise ValueError(
-                "num_tokens_per_batch must be greater than or equal to max_seq_len "
+                "num_tokens_per_batch must be greater than or equal to max_context_length "
                 "so an accepted chat sample fits within one batch."
             )
 
@@ -456,7 +456,7 @@ class ChatDataset(IterableDataset, Stateful):
         self._data = self._original_data
         self._tokenizer = tokenizer
         self._eos_id = tokenizer.eos_id
-        self.max_seq_len = max_seq_len
+        self.max_context_length = max_context_length
         self.num_tokens_per_batch = num_tokens_per_batch
         self.infinite = infinite
         self._sample_processor = sample_processor
@@ -506,7 +506,7 @@ class ChatDataset(IterableDataset, Stateful):
 
         Returns (input_ids, label_ids) where input_ids = tokens[:-1] and
         label_ids = tokens[1:] with prompt tokens masked as IGNORE_INDEX.
-        Returns None if the sample exceeds max_seq_len (dropped to avoid
+        Returns None if the sample exceeds max_context_length (dropped to avoid
         training on truncated responses).
 
         Uses incremental prefix re-tokenization to find the prompt/response
@@ -526,11 +526,11 @@ class ChatDataset(IterableDataset, Stateful):
             logger.info(f"[ChatDataset] First sample full:\n{full_text}")
             self._logged_first_sample = True
 
-        # Drop examples exceeding max_seq_len rather than truncating.
-        if len(full_tokens) - 1 > self.max_seq_len:
+        # Drop examples exceeding max_context_length rather than truncating.
+        if len(full_tokens) - 1 > self.max_context_length:
             logger.debug(
                 f"Dropping sample {self._sample_idx}: "
-                f"tokens exceeds max_seq_len {self.max_seq_len}"
+                f"tokens exceeds max_context_length {self.max_context_length}"
             )
             return None
 
@@ -723,7 +723,7 @@ class ChatDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
@@ -734,7 +734,7 @@ class ChatDataLoader(ParallelAwareDataloader):
             dataset=dataset,
             tokenizer=tokenizer,
             sample_processor=config.sample_processor,
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
@@ -799,7 +799,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         snapshot_every_n_steps: int | None = 1,
         **kwargs,
@@ -814,7 +814,7 @@ class InterleavedChatDataLoader(ParallelAwareDataloader):
                     ),
                     tokenizer=tokenizer,
                     sample_processor=source.sample_processor,
-                    max_seq_len=max_seq_len,
+                    max_context_length=max_context_length,
                     num_tokens_per_batch=num_tokens_per_batch,
                     dp_rank=dp_rank,
                     dp_world_size=dp_world_size,

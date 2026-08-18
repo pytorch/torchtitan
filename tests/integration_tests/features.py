@@ -260,6 +260,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.data_parallel_shard_degree 1",
                 ],
@@ -273,12 +274,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                 ],
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule 1F1B",
                     "--parallelism.pipeline_parallel_layers_per_stage 4",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -292,6 +295,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule GPipe",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -305,6 +309,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -313,6 +318,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -326,6 +332,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.enable",
@@ -340,11 +347,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.pipeline_parallel_layers_per_stage 1",
                 ],
@@ -370,6 +379,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 4",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
                     "activation-checkpoint:full",
                 ],
@@ -384,6 +394,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
                     "activation-checkpoint:full",
                 ],
@@ -402,6 +413,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
                     "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
                     "activation-checkpoint:full",
@@ -544,11 +556,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    # 16384 tokens per DP rank and `ngpu=2` gives 32768
-                    # tokens per gradient accumulation iteration. Double it
-                    # to get two gradient accumulation iterations per step.
-                    "--training.num_tokens_per_dp_rank 16384",
-                    "--training.num_tokens_per_step 65536",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 16384",
+                    "--training.num_gradient_accumulation_steps 2",
                 ],
             ],
             "Gradient accumulation",
@@ -564,6 +573,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.pipeline_parallel_degree=2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                 ],
             ],
@@ -619,6 +629,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                 ],
             ],
             "Float8 emulate + LoRA training test",
@@ -632,6 +643,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--compile.enable",
                 ],
             ],
@@ -652,6 +664,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--compile.enable",
                 ],
             ],

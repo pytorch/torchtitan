@@ -57,8 +57,8 @@ def qwen35_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=1 * 512,
-            max_seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * 512,
+            max_context_length=512,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -91,8 +91,8 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=2 * 512,
-            max_seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * 512,
+            max_context_length=512,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -125,8 +125,8 @@ def qwen35_0_8b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -155,8 +155,8 @@ def qwen35_2b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -185,8 +185,8 @@ def qwen35_4b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -214,8 +214,8 @@ def qwen35_9b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -245,8 +245,8 @@ def qwen35_27b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -276,8 +276,8 @@ def qwen35_35b_a3b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -308,8 +308,8 @@ def qwen35_122b_a10b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -340,8 +340,8 @@ def qwen35_397b_a17b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
         ),
         parallelism=ParallelismConfig(

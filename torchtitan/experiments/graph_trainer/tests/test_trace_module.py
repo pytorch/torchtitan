@@ -34,8 +34,8 @@ from torchtitan.experiments.graph_trainer.passes import (
 
 def get_loss(logits, labels):
     return torch.nn.functional.cross_entropy(
-        logits.flatten(0, 1).float(),
-        labels.flatten(0, 1),
+        logits.reshape(-1, logits.shape[-1]).float(),
+        labels.reshape(-1),
         reduction="sum",
     )
 
@@ -249,7 +249,7 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
                 ):
                     minimal_fx_tracer(forward)(wrapper)
 
-    def test_mark_dynamic_batch_and_seq_dims_with_rope(self):
+    def test_mark_dynamic_token_dim_with_rope(self):
         from torch._dynamo import mark_dynamic
 
         from torchtitan.models.common.rope import (
@@ -267,29 +267,25 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
             q, k = CosSinRoPE.apply_rotary_emb(xq, xk, cos_sin_cache)
             return single + q + k
 
-        batch, seq, heads, head_dim = 2, 4, 1, 8
+        num_tokens, heads, head_dim = 8, 1, 8
         position_cases = {
             "none": None,
-            "single": torch.arange(seq).unsqueeze(0),
-            "batched": torch.arange(seq).repeat(batch, 1),
+            "flat": torch.arange(num_tokens),
         }
 
         for name, positions in position_cases.items():
             with self.subTest(positions=name):
-                x = torch.randn(batch, seq, heads, head_dim)
-                xq = torch.randn(batch, seq, heads, head_dim)
-                xk = torch.randn(batch, seq, heads, head_dim)
-                freqs = torch.randn(seq * 2, head_dim // 2)
+                x = torch.randn(num_tokens, heads, head_dim)
+                xq = torch.randn(num_tokens, heads, head_dim)
+                xk = torch.randn(num_tokens, heads, head_dim)
+                freqs = torch.randn(num_tokens * 2, head_dim // 2)
                 freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-                rope_cache = torch.randn(seq * 2, head_dim * 2)
+                rope_cache = torch.randn(num_tokens * 2, head_dim * 2)
 
                 for tensor in (x, xq, xk):
                     mark_dynamic(tensor, 0)
-                    mark_dynamic(tensor, 1)
                 if positions is not None:
-                    mark_dynamic(positions, 1)
-                    if positions.shape[0] > 1:
-                        mark_dynamic(positions, 0)
+                    mark_dynamic(positions, 0)
 
                 traced = minimal_fx_tracer(forward)(
                     x, xq, xk, freqs_cis, rope_cache, positions
@@ -301,7 +297,7 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
                     )
                 )
 
-    def test_mark_unbacked_positions_batch_dim_with_rope(self):
+    def test_mark_unbacked_positions_token_dim_with_rope(self):
         from torch._dynamo.decorators import mark_unbacked
 
         from torchtitan.models.common.rope import _reshape_for_broadcast, CosSinRoPE
@@ -311,19 +307,19 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
             q, k = CosSinRoPE.apply_rotary_emb(xq, xk, cos_sin_cache)
             return q + k
 
-        batch, seq, heads, head_dim = 4, 4, 1, 8
-        xq = torch.randn(batch, seq, heads, head_dim)
-        xk = torch.randn(batch, seq, heads, head_dim)
-        rope_cache = torch.randn(seq * 2, head_dim * 2)
-        positions = torch.arange(seq).repeat(batch, 1)
+        num_tokens, heads, head_dim = 16, 1, 8
+        xq = torch.randn(num_tokens, heads, head_dim)
+        xk = torch.randn(num_tokens, heads, head_dim)
+        rope_cache = torch.randn(num_tokens * 2, head_dim * 2)
+        positions = torch.arange(num_tokens)
         for tensor in (xq, xk, positions):
             mark_unbacked(
                 tensor,
                 0,
-                hint_override=batch,
+                hint_override=num_tokens,
                 min=1,
-                max=batch,
-                shape_id="batch",
+                max=num_tokens,
+                shape_id="tokens",
             )
 
         traced = minimal_fx_tracer(forward)(xq, xk, rope_cache, positions)
@@ -342,10 +338,10 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
         def forward(xq, rope_cache, positions):
             return _reshape_for_broadcast(rope_cache, xq.shape, positions)
 
-        seq, head_dim = 5, 8
-        xq = torch.randn(4, seq, 1, head_dim)
-        rope_cache = torch.randn(seq * 2, head_dim * 2)
-        positions = torch.arange(seq).repeat(xq.shape[0], 1)
+        num_tokens, head_dim = 5, 8
+        xq = torch.randn(num_tokens, 1, head_dim)
+        rope_cache = torch.randn(num_tokens * 2, head_dim * 2)
+        positions = torch.arange(num_tokens)
 
         self.assertTrue(
             torch.equal(
@@ -644,17 +640,15 @@ class TestTraceModule(unittest.TestCase):
             device=self.DEVICE, dtype=self.DTYPE
         )
         lm_head_test.load_state_dict(lm_head_ref.state_dict())
+        num_tokens = self.BATCH_SIZE * self.SEQ_LEN
         hidden_states = torch.randn(
-            self.BATCH_SIZE,
-            self.SEQ_LEN,
+            num_tokens,
             D,
             device=self.DEVICE,
             dtype=self.DTYPE,
             requires_grad=True,
         )
-        labels = torch.randint(
-            0, V, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
-        )
+        labels = torch.randint(0, V, (num_tokens,), device=self.DEVICE)
 
         def train_step(lm_head, hidden_states, labels):
             loss_fn = ChunkedLossWrapperWithParamGrads(
@@ -1494,12 +1488,9 @@ class TestTraceModels(unittest.TestCase):
         model_ref = create_model(config_cls, model_config, self.DEVICE, dtype)
         model_test = create_model(config_cls, model_config, self.DEVICE, dtype)
         model_test.load_state_dict(model_ref.state_dict())
-        tokens = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
-        )
-        labels = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
-        )
+        num_tokens = self.BATCH_SIZE * self.SEQ_LEN
+        tokens = torch.randint(0, vocab_size, (num_tokens,), device=self.DEVICE)
+        labels = torch.randint(0, vocab_size, (num_tokens,), device=self.DEVICE)
 
         fwd_args = (tokens,)
         if use_attn_masks:
@@ -1509,14 +1500,12 @@ class TestTraceModels(unittest.TestCase):
             )
 
             attn_masks = create_attention_mask(
-                get_causal_mask_mod(), 1, None, self.SEQ_LEN, self.SEQ_LEN
+                get_causal_mask_mod(), 1, None, num_tokens, num_tokens
             )
             # Decoder.forward is (tokens, positions, attention_masks). Pass
             # explicit sequential positions (make_fx can't trace a None
             # placeholder) so the BlockMask lands in the attention_masks slot.
-            positions = torch.arange(self.SEQ_LEN, device=self.DEVICE).repeat(
-                self.BATCH_SIZE, 1
-            )
+            positions = torch.arange(num_tokens, device=self.DEVICE)
             fwd_args = (tokens, positions, attn_masks)
 
         self._run_bitwise_test(
@@ -1663,11 +1652,10 @@ class TestTraceModels(unittest.TestCase):
         with torch.no_grad():
             model.init_states(buffer_device=torch.device(self.DEVICE))
 
-        tokens = torch.randint(0, vocab_size, (1, seq_len), device=self.DEVICE)
-        labels = torch.randint(0, vocab_size, (1, seq_len), device=self.DEVICE)
+        tokens = torch.randint(0, vocab_size, (seq_len,), device=self.DEVICE)
+        labels = torch.randint(0, vocab_size, (seq_len,), device=self.DEVICE)
         # Build positions that reset to 0 every 16 tokens (document boundaries)
         positions = torch.arange(seq_len, device=self.DEVICE) % 16
-        positions = positions.unsqueeze(0)  # [1, seq_len]
         block_mask = create_attention_mask(
             and_masks(get_causal_mask_mod(), get_document_mask_mod(positions)),
             B=1,
@@ -1729,21 +1717,18 @@ class TestTraceModels(unittest.TestCase):
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test.load_state_dict(model_ref.state_dict())
-        tokens = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
-        )
-        labels = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
-        )
+        num_tokens = self.BATCH_SIZE * self.SEQ_LEN
+        tokens = torch.randint(0, vocab_size, (num_tokens,), device=self.DEVICE)
+        labels = torch.randint(0, vocab_size, (num_tokens,), device=self.DEVICE)
         causal = get_causal_mask_mod()
         sw_size = config.layers[0].attention.sliding_window_size
-        basic_mask = create_attention_mask(causal, 1, None, self.SEQ_LEN, self.SEQ_LEN)
+        basic_mask = create_attention_mask(causal, 1, None, num_tokens, num_tokens)
         sliding_window_mask = create_attention_mask(
             and_masks(causal, get_sliding_window_mask_mod(sw_size)),
             1,
             None,
-            self.SEQ_LEN,
-            self.SEQ_LEN,
+            num_tokens,
+            num_tokens,
         )
         attn_masks = {
             "basic_mask": basic_mask,
@@ -1779,18 +1764,17 @@ class TestTraceModels(unittest.TestCase):
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
-        tokens = torch.randint(
-            0, config.vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device=self.DEVICE
-        )
+        num_tokens = self.BATCH_SIZE * self.SEQ_LEN
+        tokens = torch.randint(0, config.vocab_size, (num_tokens,), device=self.DEVICE)
         causal = get_causal_mask_mod()
         sw_size = config.layers[0].attention.sliding_window_size
-        basic_mask = create_attention_mask(causal, 1, None, self.SEQ_LEN, self.SEQ_LEN)
+        basic_mask = create_attention_mask(causal, 1, None, num_tokens, num_tokens)
         sliding_window_mask = create_attention_mask(
             and_masks(causal, get_sliding_window_mask_mod(sw_size)),
             1,
             None,
-            self.SEQ_LEN,
-            self.SEQ_LEN,
+            num_tokens,
+            num_tokens,
         )
         attn_masks = {
             "basic_mask": basic_mask,
@@ -1875,12 +1859,13 @@ class TestTraceFSDP(FSDPTest):
 
         vocab_size = model_config.vocab_size
         seq_len = 128
-        tokens = torch.randint(0, vocab_size, (2, seq_len), device="cuda")
-        labels = torch.randint(0, vocab_size, (2, seq_len), device="cuda")
+        num_tokens = 2 * seq_len
+        tokens = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
+        labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
         # Decoder.forward is (tokens, positions, attention_masks). Pass explicit
         # sequential positions (make_fx can't trace a None placeholder) so the
         # BlockMask lands in the attention_masks slot.
-        positions = torch.arange(seq_len, device="cuda").repeat(2, 1)
+        positions = torch.arange(num_tokens, device="cuda")
 
         if attn_masks is not None:
             fwd_args = (tokens, positions, attn_masks)
@@ -1891,7 +1876,7 @@ class TestTraceFSDP(FSDPTest):
             )
 
             attn_masks = create_attention_mask(
-                get_causal_mask_mod(), 1, None, seq_len, seq_len
+                get_causal_mask_mod(), 1, None, num_tokens, num_tokens
             )
             fwd_args = (tokens, positions, attn_masks)
         else:
@@ -1996,15 +1981,16 @@ class TestTraceFSDP(FSDPTest):
             moe_comm_backend="standard", attn_backend="flex"
         )
         seq_len = 128
+        num_tokens = 2 * seq_len
         causal = get_causal_mask_mod()
         sw_size = config.layers[0].attention.sliding_window_size
-        basic_mask = create_attention_mask(causal, 1, None, seq_len, seq_len)
+        basic_mask = create_attention_mask(causal, 1, None, num_tokens, num_tokens)
         sliding_window_mask = create_attention_mask(
             and_masks(causal, get_sliding_window_mask_mod(sw_size)),
             1,
             None,
-            seq_len,
-            seq_len,
+            num_tokens,
+            num_tokens,
         )
         attn_masks = {
             "basic_mask": basic_mask,
@@ -2051,8 +2037,8 @@ class TestTraceContextParallel(FSDPTest):
             with tempfile.TemporaryDirectory() as dump_folder:
                 config = graph_trainer_llama3_debugmodel_sdpa()
                 config.dump_folder = dump_folder
-                config.training.max_seq_len = 128
-                config.training.num_tokens_per_dp_rank = 2 * 128
+                config.training.max_context_length = 128
+                config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 128
                 config.training.steps = 1
                 config.parallelism.data_parallel_replicate_degree = 1
                 config.parallelism.data_parallel_shard_degree = dp_shard_degree
@@ -2065,7 +2051,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.model_spec.model.layers = config.model_spec.model.layers[:1]
 
                 trainer = GraphTrainer(config)
-                num_tokens = config.training.num_tokens_per_dp_rank
+                num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
                 tokens = torch.randint(
                     0,
                     trainer.model_config.vocab_size,
@@ -2080,11 +2066,14 @@ class TestTraceContextParallel(FSDPTest):
                 )
                 # The dataloader always supplies per-document positions, which
                 # drive RoPE (SDPA itself is maskless and uses is_causal).
-                positions = torch.arange(
-                    num_tokens,
-                    device=trainer.device,
-                    dtype=torch.int32,
-                ) % config.training.max_seq_len
+                positions = (
+                    torch.arange(
+                        num_tokens,
+                        device=trainer.device,
+                        dtype=torch.int32,
+                    )
+                    % config.training.max_context_length
+                )
                 trainer.forward_backward_step(
                     input_dict={"input": tokens, "positions": positions},
                     labels=labels,
@@ -2207,8 +2196,9 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 model_grad, device_mesh=fsdp_mesh, mode="fully_shard"
             )
 
-            tokens = torch.randint(0, config.vocab_size, (2, 128), device="cuda")
-            labels = torch.randint(0, config.vocab_size, (2, 128), device="cuda")
+            num_tokens = 2 * 128
+            tokens = torch.randint(0, config.vocab_size, (num_tokens,), device="cuda")
+            labels = torch.randint(0, config.vocab_size, (num_tokens,), device="cuda")
 
             from torchtitan.models.common.attention import (
                 create_attention_mask,
@@ -2216,7 +2206,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
             )
 
             attention_masks = create_attention_mask(
-                get_causal_mask_mod(), 1, None, 128, 128
+                get_causal_mask_mod(), 1, None, num_tokens, num_tokens
             )
 
             def run_backward(model):

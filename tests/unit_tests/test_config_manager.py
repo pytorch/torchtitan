@@ -93,25 +93,30 @@ class TestConfigManager(unittest.TestCase):
                 "llama3_debugmodel",
                 "--training.steps",
                 "5",
+                "--training.num_tokens_per_microbatch_per_dp_rank",
+                "4096",
+                "--training.num_gradient_accumulation_steps",
+                "2",
+                "--training.max_context_length",
+                "1024",
             ]
         )
         assert config.training.steps == 5
+        assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
+        assert config.training.num_gradient_accumulation_steps == 2
+        assert config.training.max_context_length == 1024
 
-    def test_num_pp_microbatches_must_divide_num_tokens_per_dp_rank(self):
+    def test_num_tokens_per_microbatch_must_be_positive(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="must be evenly divisible"):
+        with pytest.raises(SystemExit):
             config_manager.parse_args(
                 [
                     "--module",
                     "llama3",
                     "--config",
                     "llama3_debugmodel",
-                    "--training.num_tokens_per_dp_rank",
-                    "16384",
-                    "--parallelism.pipeline_parallel_degree",
-                    "2",
-                    "--parallelism.num_pp_microbatches",
-                    "3",
+                    "--training.num_tokens_per_microbatch_per_dp_rank",
+                    "0",
                 ]
             )
 

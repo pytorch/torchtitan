@@ -94,14 +94,12 @@ class FaultTolerantTrainer(Trainer):
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
         # build dataloader
-        num_tokens_per_batch = config.training.num_tokens_per_dp_rank // (
-            num_pp_microbatches
-        )
+        num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            max_seq_len=config.training.max_seq_len,
+            max_context_length=config.training.max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
         )
 
@@ -141,7 +139,9 @@ class FaultTolerantTrainer(Trainer):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.max_seq_len)
+        ) = model_config.get_nparams_and_flops(
+            model, config.training.max_context_length
+        )
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -164,27 +164,17 @@ class FaultTolerantTrainer(Trainer):
             compile_config=config.compile,
         )
 
-        # Verify token budgets.
-        num_tokens_per_step = config.training.num_tokens_per_step
-        if num_tokens_per_step < 0:
-            num_tokens_per_step = config.training.num_tokens_per_dp_rank * batch_degree
-        assert num_tokens_per_step > 0
-        assert (
-            num_tokens_per_step
-            % (config.training.num_tokens_per_dp_rank * batch_degree)
-            == 0
-        ), (
-            "num_tokens_per_step must be a multiple of num_tokens_per_dp_rank "
-            f"times data-parallel degree ({num_tokens_per_step} "
-            f"% ({config.training.num_tokens_per_dp_rank} * {batch_degree}) != 0)"
+        self.num_pp_microbatches = num_pp_microbatches
+        self.gradient_accumulation_steps = (
+            config.training.num_gradient_accumulation_steps
         )
-
-        # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = num_tokens_per_step // (
-            config.training.num_tokens_per_dp_rank * batch_degree
+        num_tokens_per_dp_rank = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+            * self.num_pp_microbatches
         )
-        assert self.gradient_accumulation_steps > 0
-        self.num_pipeline_parallel_microbatches = num_pp_microbatches
+        num_tokens_per_train_step = (
+            num_tokens_per_dp_rank * self.gradient_accumulation_steps * batch_degree
+        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -330,8 +320,8 @@ class FaultTolerantTrainer(Trainer):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.max_seq_len,
-                num_tokens_per_dp_rank=config.training.num_tokens_per_dp_rank,
+                seq_len=config.training.max_context_length,
+                num_tokens_per_batch=num_tokens_per_batch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -339,10 +329,10 @@ class FaultTolerantTrainer(Trainer):
 
         logger.info(
             "Trainer is initialized with "
-            f"{config.training.num_tokens_per_dp_rank} tokens per DP rank, "
-            f"{num_tokens_per_step} tokens per optimizer step, "
+            f"{num_tokens_per_dp_rank} tokens per DP rank, "
+            f"{num_tokens_per_train_step} tokens per train step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"maximum sequence length {config.training.max_seq_len}, "
+            f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
@@ -390,7 +380,7 @@ class FaultTolerantTrainer(Trainer):
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
-            for _ in range(self.num_pipeline_parallel_microbatches):
+            for _ in range(self.num_pp_microbatches):
                 input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
                 microbatches.append((input_dict, labels))

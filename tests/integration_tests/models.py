@@ -86,6 +86,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--module deepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -235,6 +236,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_ptrr_mask_key basic_mask",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 1024",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.expert_parallel_degree 4",
                     "activation-checkpoint:selective",
@@ -248,7 +250,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module gpt_oss --config gpt_oss_debugmodel",
-                    "--training.num_tokens_per_step 131072",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 1024",
+                    "--training.num_gradient_accumulation_steps 4",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
@@ -280,7 +283,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--training.num_tokens_per_dp_rank 1024",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 512",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 2",

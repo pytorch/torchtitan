@@ -52,7 +52,7 @@ class FluxTrainer(Trainer):
             seq_len_img = latent_side_width * latent_side_height
 
             seq_len_txt = self.tokenizer.max_t5_encoding_len
-            self.training.max_seq_len = seq_len_img + seq_len_txt
+            self.training.max_context_length = seq_len_img + seq_len_txt
             Trainer.Config.__post_init__(self)
 
     def __init__(self, config: Config):
@@ -155,7 +155,7 @@ class FluxTrainer(Trainer):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             bsz = labels.shape[0]
-            ntokens_batch = bsz * self.config.training.max_seq_len
+            ntokens_batch = bsz * self.config.training.max_context_length
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -264,7 +264,7 @@ class FluxTrainer(Trainer):
         # Accumulate after CP sharding so the count reflects the actual
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += (
-            bsz * self.config.training.max_seq_len // self.parallel_dims.cp
+            bsz * self.config.training.max_context_length // self.parallel_dims.cp
         )
 
         with self.train_context():

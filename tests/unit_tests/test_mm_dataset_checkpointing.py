@@ -29,7 +29,9 @@ _TOKENIZER = _TOKENIZER_CONFIG.build(tokenizer_path=_TOKENIZER_PATH)
 class TestMMDatasetCheckpointing(unittest.TestCase):
     """Test save/load for multimodal dataset, mirroring test_dataset_checkpointing.py."""
 
-    def _build_dataloader(self, num_tokens_per_batch, max_seq_len, world_size, rank):
+    def _build_dataloader(
+        self, num_tokens_per_batch, max_context_length, world_size, rank
+    ):
         dl_config = MMDataLoader.Config(
             dataset="cc12m-test",
             max_images_per_batch=128,
@@ -46,7 +48,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_TOKENIZER,
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
         )
 
@@ -54,10 +56,10 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         for world_size in [1, 2]:
             for rank in range(world_size):
                 num_tokens_per_batch = 4096
-                max_seq_len = 4096
+                max_context_length = 4096
 
                 dl = self._build_dataloader(
-                    num_tokens_per_batch, max_seq_len, world_size, rank
+                    num_tokens_per_batch, max_context_length, world_size, rank
                 )
 
                 it = iter(dl)
@@ -68,7 +70,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
                 # Create new dataloader, restore checkpoint, verify subsequent
                 # batches match
                 dl_resumed = self._build_dataloader(
-                    num_tokens_per_batch, max_seq_len, world_size, rank
+                    num_tokens_per_batch, max_context_length, world_size, rank
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)

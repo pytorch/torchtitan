@@ -117,14 +117,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
-            if (
-                self.parallelism.pipeline_parallel_degree > 1
-                and self.training.num_tokens_per_dp_rank % num_pp_microbatches != 0
-            ):
-                raise ValueError(
-                    "training.num_tokens_per_dp_rank must be evenly divisible "
-                    "by parallelism.num_pp_microbatches."
-                )
 
             if (
                 self.parallelism.spmd_backend == "spmd_types"
@@ -227,7 +219,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
     gradient_accumulation_steps: int
-    num_pipeline_parallel_microbatches: int
+    num_pp_microbatches: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
 
@@ -260,7 +252,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
         num_tokens_per_pp_microbatch = (
-            config.training.num_tokens_per_dp_rank // num_pp_microbatches
+            config.training.num_tokens_per_microbatch_per_dp_rank
         )
         seq_len_divisor = (
             parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
@@ -346,7 +338,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.max_seq_len)
+        ) = model_config.get_nparams_and_flops(
+            model, config.training.max_context_length
+        )
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -369,29 +363,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             compile_config=config.compile,
         )
 
-        # Verify token budgets.
-        num_tokens_per_step = config.training.num_tokens_per_step
-        if num_tokens_per_step < 0:
-            # This token budget results in one gradient accumulation iteration.
-            num_tokens_per_step = config.training.num_tokens_per_dp_rank * batch_degree
-        assert num_tokens_per_step > 0
-        assert (
-            num_tokens_per_step
-            % (config.training.num_tokens_per_dp_rank * batch_degree)
-            == 0
-        ), (
-            "num_tokens_per_step must be a multiple of num_tokens_per_dp_rank "
-            f"times data-parallel degree ({num_tokens_per_step} "
-            f"% ({config.training.num_tokens_per_dp_rank} * {batch_degree}) != 0)"
-        )
-
-        # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = num_tokens_per_step // (
-            config.training.num_tokens_per_dp_rank * batch_degree
-        )
-        assert self.gradient_accumulation_steps > 0
-        self.num_pipeline_parallel_microbatches = (
+        self.num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+        )
+        self.gradient_accumulation_steps = (
+            config.training.num_gradient_accumulation_steps
+        )
+        num_tokens_per_dp_rank = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+            * self.num_pp_microbatches
+        )
+        num_tokens_per_train_step = (
+            num_tokens_per_dp_rank * self.gradient_accumulation_steps * batch_degree
         )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
@@ -522,19 +505,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
-        num_tokens_per_batch = config.training.num_tokens_per_dp_rank // (
-            self.num_pipeline_parallel_microbatches
-        )
+        num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
         self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            max_seq_len=config.training.max_seq_len,
+            max_context_length=config.training.max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
             snapshot_every_n_steps=(
                 config.checkpoint.interval
                 * self.gradient_accumulation_steps
-                * self.num_pipeline_parallel_microbatches
+                * self.num_pp_microbatches
                 if config.checkpoint.enable
                 else None
             ),
@@ -584,8 +565,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.max_seq_len,
-                num_tokens_per_dp_rank=config.training.num_tokens_per_dp_rank,
+                seq_len=config.training.max_context_length,
+                num_tokens_per_batch=num_tokens_per_batch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -593,10 +574,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(
             "Trainer is initialized with "
-            f"{config.training.num_tokens_per_dp_rank} tokens per DP rank, "
-            f"{num_tokens_per_step} tokens per optimizer step, "
+            f"{num_tokens_per_dp_rank} tokens per DP rank, "
+            f"{num_tokens_per_train_step} tokens per train step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"maximum sequence length {config.training.max_seq_len}, "
+            f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
@@ -824,7 +805,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
-            for _ in range(self.num_pipeline_parallel_microbatches):
+            for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
                     input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()

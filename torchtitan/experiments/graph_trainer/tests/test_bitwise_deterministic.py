@@ -138,8 +138,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         runtime_config = Trainer.Config(
             model_spec=model_spec,
             training=TrainingConfig(
-                num_tokens_per_dp_rank=BATCH_SIZE * SEQ_LEN,
-                max_seq_len=SEQ_LEN,
+                num_tokens_per_microbatch_per_dp_rank=BATCH_SIZE * SEQ_LEN,
+                max_context_length=SEQ_LEN,
                 steps=NUM_STEPS,
             ),
             parallelism=ParallelismConfig(),

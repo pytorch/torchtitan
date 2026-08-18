@@ -1221,18 +1221,18 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         num_token_shards = (
             parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
         )
-        if training.num_tokens_per_dp_rank % num_token_shards != 0:
+        num_tokens_per_microbatch = training.num_tokens_per_microbatch_per_dp_rank
+        if num_tokens_per_microbatch % num_token_shards != 0:
             raise ValueError(
-                "training.num_tokens_per_dp_rank "
-                f"({training.num_tokens_per_dp_rank}) must be divisible by "
+                "training.num_tokens_per_microbatch_per_dp_rank "
+                f"({num_tokens_per_microbatch}) must be divisible by "
                 "context_parallel_degree * tensor_parallel_degree "
                 f"({num_token_shards}) so CP and TP/SP produce equal local "
-                "token counts. Set training.num_tokens_per_dp_rank to a multiple "
+                "token counts. Set "
+                "training.num_tokens_per_microbatch_per_dp_rank to a multiple "
                 f"of {num_token_shards}."
             )
-        required_num_max_tokens_per_rank = (
-            training.num_tokens_per_dp_rank // num_token_shards
-        )
+        required_num_max_tokens_per_rank = num_tokens_per_microbatch // num_token_shards
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         assert required_num_max_tokens_per_rank is not None

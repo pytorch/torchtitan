@@ -68,21 +68,26 @@ def parallelize_autoparallel_llama(
     dense_mesh = parallel_dims.get_mesh(dense_names)
 
     def input_fn():
-        num_tokens_per_step = training.num_tokens_per_step
-        if num_tokens_per_step < 0:
-            dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-            num_tokens_per_step = training.num_tokens_per_dp_rank * dp_degree
+        dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+        num_tokens_per_train_step = (
+            training.num_tokens_per_microbatch_per_dp_rank
+            * training.num_gradient_accumulation_steps
+            * dp_degree
+        )
         tokens = torch.randint(
             0,
             model.config.vocab_size,
-            (num_tokens_per_step,),
+            (num_tokens_per_train_step,),
             device=torch.device(device_type),
         )
-        positions = torch.arange(
-            num_tokens_per_step,
-            dtype=torch.int32,
-            device=torch.device(device_type),
-        ) % training.max_seq_len
+        positions = (
+            torch.arange(
+                num_tokens_per_train_step,
+                dtype=torch.int32,
+                device=torch.device(device_type),
+            )
+            % training.max_context_length
+        )
         return tokens, positions
 
     param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]

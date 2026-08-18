@@ -312,7 +312,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         dataset_name: str,
         dataset_path: str | None,
         tokenizer: MultiModalTokenizer,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         patch_size: int,
         temporal_patch_size: int,
@@ -349,7 +349,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
         self._tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
+        self.max_context_length = max_context_length
         self.num_tokens_per_batch = num_tokens_per_batch
         self.patch_size = patch_size
         self.temporal_patch_size = temporal_patch_size
@@ -368,7 +368,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self.enable_packing = packing_buffer_size > 0
         if self.enable_packing:
             self.packer = MMSamplePacker(
-                max_seq_length=max_seq_len,
+                max_seq_length=max_context_length,
                 buffer_size=packing_buffer_size,
             )
         self.infinite = infinite
@@ -382,18 +382,17 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         num_sample_tokens = sample["input_ids"].shape[0] - 1
         if num_sample_tokens <= 0:
             return
-        if num_sample_tokens > self.max_seq_len:
+        if num_sample_tokens > self.max_context_length:
             logger.warning(
-                "Sample has %d token slots, exceeding max_seq_len=%d. Skipping.",
+                "Sample has %d token slots, exceeding max_context_length=%d. Skipping.",
                 num_sample_tokens,
-                self.max_seq_len,
+                self.max_context_length,
             )
             return
 
         if (
             self._batch_samples
-            and self._num_batch_tokens + num_sample_tokens
-            > self.num_tokens_per_batch
+            and self._num_batch_tokens + num_sample_tokens > self.num_tokens_per_batch
         ):
             batch = self._batch_samples
             # Record the already-consumed sample as the next batch state before
@@ -442,17 +441,17 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
                     video_fps=self.video_fps,
                     video_min_frames=self.video_min_frames,
                     video_max_frames=self.video_max_frames,
-                    seq_len=self.max_seq_len,
+                    seq_len=self.max_context_length,
                 )
                 if processed is None:
                     continue
 
-                if processed["input_ids"].shape[0] - 1 > self.max_seq_len:
+                if processed["input_ids"].shape[0] - 1 > self.max_context_length:
                     logger.warning(
-                        "Sample has %d token slots, exceeding max_seq_len=%d. "
+                        "Sample has %d token slots, exceeding max_context_length=%d. "
                         "Skipping.",
                         processed["input_ids"].shape[0] - 1,
-                        self.max_seq_len,
+                        self.max_context_length,
                     )
                     continue
 
@@ -636,20 +635,20 @@ class MMDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: MultiModalTokenizer,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         **kwargs,
     ):
-        if num_tokens_per_batch < max_seq_len:
+        if num_tokens_per_batch < max_context_length:
             raise ValueError(
                 "num_tokens_per_batch must be greater than or equal to "
-                "max_seq_len so an accepted multimodal sample fits in one batch."
+                "max_context_length so an accepted multimodal sample fits in one batch."
             )
         dataset = HuggingFaceMultiModalDataset(
             dataset_name=config.dataset,
             dataset_path=config.dataset_path,
             tokenizer=tokenizer,
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,

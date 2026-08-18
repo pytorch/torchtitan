@@ -60,6 +60,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--parallelism.enable_async_tensor_parallel",
                 ],
             ],

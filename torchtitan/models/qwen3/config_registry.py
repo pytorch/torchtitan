@@ -50,8 +50,8 @@ def qwen3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=8 * 2048,
-            max_seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -161,8 +161,8 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=8 * 2048,
-            max_seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -190,8 +190,8 @@ def qwen3_0_6b() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -219,8 +219,8 @@ def qwen3_1_7b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=100,
         ),
         checkpoint=CheckpointManager.Config(
@@ -273,8 +273,8 @@ def qwen3_14b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -308,8 +308,8 @@ def qwen3_30b_a3b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=2 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=2 * 4096,
+            max_context_length=4096,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -343,8 +343,8 @@ def qwen3_32b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=2 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=2 * 4096,
+            max_context_length=4096,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -387,8 +387,8 @@ def qwen3_moe_debug() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=4 * 4096,
-            max_seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -433,8 +433,8 @@ def qwen3_moe_deepep() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=2 * 512,
-            max_seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=2 * 512,
+            max_context_length=512,
             steps=10,
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=4),
@@ -477,8 +477,8 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=1 * 2048,
-            max_seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=1 * 2048,
+            max_context_length=2048,
             steps=180,
         ),
         dataloader=ChatDataLoader.Config(

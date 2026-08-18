@@ -75,8 +75,8 @@ def run_worker(args):
         expert_parallel_degree=args.ep,
     )
     training = TrainingConfig(
-        num_tokens_per_dp_rank=1 * 128,
-        max_seq_len=128,
+        num_tokens_per_microbatch_per_dp_rank=1 * 128,
+        max_context_length=128,
         steps=1,
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",

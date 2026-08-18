@@ -42,7 +42,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=2048,
+            num_tokens_per_microbatch_per_dp_rank=2048,
             max_norm=2.0,
             steps=10,
         ),
@@ -104,7 +104,7 @@ def flux_dev() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=24576,
+            num_tokens_per_microbatch_per_dp_rank=24576,
             steps=30000,
         ),
         dataloader=FluxDataLoader.Config(
@@ -154,7 +154,7 @@ def flux_schnell() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_dp_rank=32768,
+            num_tokens_per_microbatch_per_dp_rank=32768,
             steps=30000,
         ),
         dataloader=FluxDataLoader.Config(

@@ -25,6 +25,10 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.multimodal import (
+    get_vision_positions,
+    scatter_vision_embeds,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -353,68 +357,6 @@ class MuseGlimmerModel(Decoder):
         )
         return feats
 
-    def _vision_spans(self, vision_mask: torch.Tensor) -> list[tuple[int, int]]:
-        """Find contiguous vision spans as ``(start, num_tokens)``.
-
-        Scans ``vision_mask`` (``[T]``) and returns contiguous runs of True
-        entries in token order -- the same order in which the flat
-        ``vision_features`` tokens are laid out.
-        """
-        # Compute start/end transitions for the whole token sequence on-device,
-        # then do one .tolist() sync for starts and one for lengths.
-        zero = torch.zeros(1, dtype=torch.bool, device=vision_mask.device)
-        prev = torch.cat([zero, vision_mask[:-1]])
-        nxt = torch.cat([vision_mask[1:], zero])
-        # nonzero returns indices in token order, matching the flat
-        # vision_features token layout; start/end entries align pairwise.
-        starts = (vision_mask & ~prev).nonzero(as_tuple=True)[0]
-        ends = (vision_mask & ~nxt).nonzero(as_tuple=True)[0]
-        return list(zip(starts.tolist(), (ends - starts + 1).tolist(), strict=True))
-
-    def _inject_vision(
-        self,
-        h: torch.Tensor,
-        vision_features: torch.Tensor,
-        vision_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Project + scaleless-norm vision features and scatter them into the
-        token-embedding stream at ``vision_mask`` positions.
-
-        ``vision_features`` is ``[V, adapter_dim]`` and ``vision_mask`` is
-        ``[T]`` with exactly ``V`` True entries.
-
-        Boolean-mask assignment (``h[vision_mask] = vision_features``) has no
-        DTensor sharding rule, so the features are scattered by explicit
-        integer/slice assignment instead.
-        """
-        if self.vision_projection is None or self.perception_emb_norm is None:
-            raise ValueError(
-                "vision_features were provided but the model has no "
-                "vision_projection/perception_emb_norm configured."
-            )
-        v = self.vision_projection(vision_features)
-        v = self.perception_emb_norm(v)
-        v = v.to(h.dtype)
-        # Scatter via integer/slice assignment rather than boolean-mask
-        # index_put: the latter has no DTensor sharding rule, the former does.
-        # Under TP both ``h`` and ``v`` are Replicate (the embedding output is
-        # overridden to Replicate so the full sequence is local), so the slice
-        # assignment writes straight through DTensor -- no unwrap/clone/rewrap.
-        # The plain path (single-GPU / FSDP) writes directly. ``v`` is consumed
-        # in row-major order to match the boolean-mask semantics it replaces.
-        v_offset = 0
-        spans = self._vision_spans(vision_mask)
-        total_span = sum(n_tokens for _, n_tokens in spans)
-        if total_span != v.shape[0]:
-            raise ValueError(
-                f"vision_mask selects {total_span} positions but "
-                f"vision_features has {v.shape[0]} tokens; counts must match."
-            )
-        for start, n_tokens in spans:
-            h[start : start + n_tokens] = v[v_offset : v_offset + n_tokens, :]
-            v_offset += n_tokens
-        return h
-
     def forward(
         self,
         tokens: torch.Tensor,
@@ -467,9 +409,29 @@ class MuseGlimmerModel(Decoder):
                         "pixel_values were provided but special_tokens with an "
                         "'image_id' entry was not provided."
                     )
-                vision_mask = tokens == special_tokens["image_id"]
                 vision_features = self._get_vision_features(pixel_values, grid_thw)
-                h = self._inject_vision(h, vision_features, vision_mask)
+                if self.vision_projection is None or self.perception_emb_norm is None:
+                    raise ValueError(
+                        "pixel_values were provided but the model has no "
+                        "vision_projection/perception_emb_norm configured."
+                    )
+                vision_embeds = self.perception_emb_norm(
+                    self.vision_projection(vision_features)
+                )
+                downsample_factor = self.vision_encoder.downsample_factor
+                num_tokens_per_item = (grid_thw[:, 1] // downsample_factor) * (
+                    grid_thw[:, 2] // downsample_factor
+                )
+                vision_positions = get_vision_positions(
+                    tokens,
+                    num_tokens_per_item,
+                    special_tokens["image_id"],
+                )
+                h = scatter_vision_embeds(
+                    h,
+                    vision_embeds=vision_embeds,
+                    vision_positions=vision_positions,
+                )
         else:
             h = tokens
 

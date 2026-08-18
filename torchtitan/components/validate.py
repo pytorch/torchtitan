@@ -108,7 +108,7 @@ class Validator(BaseValidator):
         validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
-        num_tokens_per_dp_rank: int,
+        num_tokens_per_batch: int,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -123,7 +123,7 @@ class Validator(BaseValidator):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
-        self.num_tokens_per_dp_rank = num_tokens_per_dp_rank
+        self.num_tokens_per_batch = num_tokens_per_batch
         self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
@@ -236,8 +236,8 @@ class Validator(BaseValidator):
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            max_seq_len=self.seq_len,
-            num_tokens_per_batch=(self.num_tokens_per_dp_rank // num_pp_microbatches),
+            max_context_length=self.seq_len,
+            num_tokens_per_batch=self.num_tokens_per_batch,
         )
 
         validation_iterator = iter(validation_dataloader)

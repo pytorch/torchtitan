@@ -157,7 +157,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=tokenizer,
-            max_seq_len=512,
+            max_context_length=512,
             num_tokens_per_batch=4096,
         )
 
@@ -178,7 +178,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=tokenizer,
-            max_seq_len=(max_seq_len := 512),
+            max_context_length=(max_context_length := 512),
             num_tokens_per_batch=4096,
         )
 
@@ -190,9 +190,9 @@ class TestParallelAwareDataloader(unittest.TestCase):
             for i, (tok, pos) in enumerate(
                 zip(batch_input_ids, batch_positions, strict=True)
             ):
-                self.assertLess(pos.item(), max_seq_len)
+                self.assertLess(pos.item(), max_context_length)
                 self.assertGreaterEqual(pos.item(), 0)
-                if i % max_seq_len == 0:
+                if i % max_context_length == 0:
                     self.assertEqual(pos.item(), 0)
                 if i > 0 and pos.item() > 0:
                     self.assertEqual(pos.item(), batch_positions[i - 1].item() + 1)
@@ -200,6 +200,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
                     self.assertEqual(batch_positions[i + 1].item(), 0)
                 if tok == tokenizer.bos_id and i > 0:
                     self.assertEqual(pos.item(), 0)
+
 
 class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
     def _make_config(self, **kwargs) -> InterleavedHuggingFaceTextDataLoader.Config:
@@ -238,7 +239,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=DummyTokenizer(),
-            max_seq_len=512,
+            max_context_length=512,
             num_tokens_per_batch=4 * 512,
         )
         self.assertEqual(dataloader.batch_size, 4)
@@ -252,7 +253,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=DummyTokenizer(),
-            max_seq_len=512,
+            max_context_length=512,
             num_tokens_per_batch=2 * 512,
         )
         batch_input, batch_label = next(iter(dataloader))
@@ -276,7 +277,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=tokenizer,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=local_batch_size * seq_len,
         )
 
@@ -287,7 +288,7 @@ class TestInterleavedHuggingFaceTextDataLoader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=tokenizer,
-            max_seq_len=seq_len,
+            max_context_length=seq_len,
             num_tokens_per_batch=local_batch_size * seq_len,
         )
 

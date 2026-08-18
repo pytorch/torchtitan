@@ -391,7 +391,7 @@ class FluxDataLoader(ParallelAwareDataloader):
         *,
         dp_world_size: int,
         dp_rank: int,
-        max_seq_len: int,
+        max_context_length: int,
         num_tokens_per_batch: int,
         tokenizer: BaseTokenizer | None = None,
         **kwargs,
@@ -404,12 +404,12 @@ class FluxDataLoader(ParallelAwareDataloader):
             )
 
         num_samples_per_batch, remainder = divmod(
-            num_tokens_per_batch, max_seq_len
+            num_tokens_per_batch, max_context_length
         )
         if remainder or num_samples_per_batch == 0:
             raise ValueError(
                 "num_tokens_per_batch must be a positive multiple of Flux's "
-                f"fixed sequence length ({max_seq_len}), but got "
+                f"fixed sequence length ({max_context_length}), but got "
                 f"{num_tokens_per_batch}."
             )
 

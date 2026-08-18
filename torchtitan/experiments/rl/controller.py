@@ -361,8 +361,8 @@ class Controller(Configurable):
             # RL policy inputs are shaped by BatchConfig, so mirror its shape
             # into the trainer's token-based configuration.
             batch_config = self.async_loop.batcher.batch
-            self.trainer.training.max_seq_len = batch_config.seq_len
-            self.trainer.training.num_tokens_per_dp_rank = (
+            self.trainer.training.max_context_length = batch_config.seq_len
+            self.trainer.training.num_tokens_per_microbatch_per_dp_rank = (
                 batch_config.local_batch_size * batch_config.seq_len
             )
 

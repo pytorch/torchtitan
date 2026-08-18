@@ -26,21 +26,27 @@ import torch
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
-    num_tokens_per_dp_rank: int = 16384
+    num_tokens_per_microbatch_per_dp_rank: int = 16384
     """
-    Number of input-token slots processed per data-parallel rank in one
-    gradient accumulation iteration, before context or tensor parallel sharding.
-    """
-
-    num_tokens_per_step: int = -1
-    """
-    Number of input-token slots processed across data-parallel ranks and
-    gradient accumulation for one optimizer step. Defaults to
-    `training.num_tokens_per_dp_rank * data-parallel degree`.
+    Number of input-token slots processed per data-parallel rank in one model
+    forward, before context or tensor parallel sharding.
     """
 
-    max_seq_len: int = 2048
-    """Maximum logical sequence length and RoPE position range."""
+    num_gradient_accumulation_steps: int = 1
+    """
+    Number of gradient accumulation iterations per train step.
+    """
+
+    max_context_length: int = 2048
+    """Maximum logical context length used for training."""
+
+    def __post_init__(self) -> None:
+        if self.num_tokens_per_microbatch_per_dp_rank <= 0:
+            raise ValueError(
+                "num_tokens_per_microbatch_per_dp_rank must be greater than 0."
+            )
+        if self.num_gradient_accumulation_steps <= 0:
+            raise ValueError("num_gradient_accumulation_steps must be greater than 0.")
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
@@ -206,9 +212,7 @@ class ParallelismConfig:
     """
     Number of pipeline microbatches per data-parallel rank and gradient
     accumulation iteration. This setting is ignored when pipeline parallelism
-    is disabled (`pipeline_parallel_degree = 1`, the default). When pipeline
-    parallelism is enabled, `training.num_tokens_per_dp_rank` is divided evenly
-    across this many microbatches.
+    is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
     context_parallel_degree: int = 1

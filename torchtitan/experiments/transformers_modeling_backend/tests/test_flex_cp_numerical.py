@@ -72,8 +72,8 @@ def main():
         else transformers_modeling_backend_debugmodel()
     )
     cfg.hf_model = args.hf_model
-    cfg.training.max_seq_len = args.seq_len
-    cfg.training.num_tokens_per_dp_rank = args.bs * args.seq_len
+    cfg.training.max_context_length = args.seq_len
+    cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
