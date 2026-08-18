@@ -469,7 +469,9 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     dim = 256
     return _kimi_k3_config(
         dim=dim,
-        vocab_size=163840,
+        # Sized for tests/assets/tokenizer, not the released 163840-token vocab,
+        # which would put 84% of the parameters in the embedding and lm_head.
+        vocab_size=2048,
         num_layers=13,
         full_attention_layers={3, 7, 11, 12},
         attn_res_block_size=12,

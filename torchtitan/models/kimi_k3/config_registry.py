@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
@@ -20,7 +19,7 @@ from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
 def kimi_k3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+    model_spec = model_registry("debugmodel", attn_backend="flex")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
