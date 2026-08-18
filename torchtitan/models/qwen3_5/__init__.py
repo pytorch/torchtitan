@@ -106,7 +106,9 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
 
 
 def _a_log_init(param: nn.Parameter) -> None:
-    param.data.uniform_(1e-6, 16.0).log_()
+    # Match https://github.com/huggingface/transformers/pull/47944 to avoid
+    # near-zero decay heads under bf16 initialization.
+    param.data.uniform_(0.01, 16.0).log_()
 
 
 def _linear(in_features: int, out_features: int) -> Linear.Config:

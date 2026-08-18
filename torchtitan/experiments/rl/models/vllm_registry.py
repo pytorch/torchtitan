@@ -76,7 +76,7 @@ class InferenceParallelismConfig:
     enable_sequence_parallel: bool = False
     """Enable dense sequence parallelism across the tensor-parallel axis."""
 
-    spmd_backend: Literal["default", "spmd_types"] = "default"
+    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
     """SPMD backend used by TorchTitan model parallelization in the generator."""
 
     @property
