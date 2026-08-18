@@ -613,6 +613,48 @@ class TestChunkedLossWrapper(unittest.TestCase):
         self.assertLess(events.index("unshard"), events.index("forward"))
         self.assertEqual(events[-1], "reshard")
 
+    def test_fsdp_defers_sync_and_reshard_when_managed_by_pipeline(self):
+        events: list[str] = []
+
+        class FakeFSDPLinear(nn.Linear):
+            def set_reshard_after_forward(self, enabled):
+                events.append(f"set_reshard_after_forward({enabled})")
+
+            def set_reshard_after_backward(self, enabled):
+                events.append(f"set_reshard_after_backward({enabled})")
+
+            def set_requires_gradient_sync(self, enabled, *, recurse):
+                events.append(f"set_requires_gradient_sync({enabled})")
+
+            def unshard(self):
+                events.append("unshard")
+
+            def reshard(self):
+                events.append("reshard")
+
+            def forward(self, input):
+                events.append("forward")
+                return super().forward(input)
+
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(
+            FakeFSDPLinear(4, 8, bias=False),
+            reshard_after_loss=False,
+            sync_gradients_on_last_chunk=False,
+        )
+        hidden_states = torch.randn(1, 4, 4)
+        labels = torch.randint(0, 8, (1, 4))
+
+        with patch("torch.distributed._composable.fsdp.FSDPModule", FakeFSDPLinear):
+            chunked_loss(hidden_states, labels)
+
+        self.assertEqual(events.count("unshard"), 1)
+        self.assertEqual(events.count("forward"), 2)
+        self.assertNotIn("set_requires_gradient_sync(True)", events)
+        self.assertNotIn("set_reshard_after_forward(True)", events)
+        self.assertNotIn("set_reshard_after_backward(True)", events)
+        self.assertNotIn("reshard", events)
+
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)

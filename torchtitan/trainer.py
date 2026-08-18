@@ -519,7 +519,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         lm_head is not None
                     ), "Last PP stage must have lm_head for ChunkedLossWrapper"
                     self.loss_fn.set_lm_head(
-                        lm_head  # pyrefly: ignore[bad-argument-type]
+                        lm_head,  # pyrefly: ignore[bad-argument-type]
+                        # The pipeline schedule owns stage residency and
+                        # gradient reduction across microbatches.
+                        reshard_after_loss=False,
+                        sync_gradients_on_last_chunk=False,
                     )
                     self.model_parts[
                         -1
