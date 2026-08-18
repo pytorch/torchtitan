@@ -369,6 +369,7 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
