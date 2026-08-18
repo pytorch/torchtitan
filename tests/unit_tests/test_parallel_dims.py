@@ -506,6 +506,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
 
         # Test mesh building
@@ -573,6 +574,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
         parallel_dims.build_mesh()
 
@@ -611,8 +613,8 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertTrue(parallel_dims.dp_shard_enabled)
 
 
-class TestSpmdMeshesLegacy(DTensorTestBase):
-    """spmd_meshes() under non-full_dtensor."""
+class TestSpmdMeshesPartialDTensor(DTensorTestBase):
+    """spmd_meshes() under partial_dtensor."""
 
     @property
     def world_size(self):
@@ -631,7 +633,7 @@ class TestSpmdMeshesLegacy(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
-                spmd_backend="default",
+                spmd_backend="partial_dtensor",
             )
             pd.build_mesh()
 
@@ -699,6 +701,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                spmd_backend="partial_dtensor",
             )
             pd.build_mesh()
 
@@ -769,6 +772,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                spmd_backend="partial_dtensor",
             )
 
             # Test mesh building

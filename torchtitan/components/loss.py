@@ -40,7 +40,7 @@ def cross_entropy_loss(
         return _cross_entropy_via_local_map(pred, labels)
 
     if isinstance(pred, DTensor):
-        assert get_spmd_backend() == "default"
+        assert get_spmd_backend() == "partial_dtensor"
         if pred.placements == (Shard(pred.ndim - 1),):
             return _LossParallelCrossEntropy.apply(
                 pred.to_local().flatten(0, 1).float(),
@@ -327,9 +327,10 @@ class BaseLoss(ABC, Configurable):
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
+            is_type_checking = spmd.is_type_checking()
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
+                if is_type_checking:
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
@@ -358,9 +359,10 @@ class CrossEntropyLoss(BaseLoss):
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
+            is_type_checking = spmd.is_type_checking()
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
+                if is_type_checking:
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 

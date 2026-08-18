@@ -934,7 +934,7 @@ class Qwen35Model(Decoder):
             else:
                 x = tokens
 
-        if get_spmd_backend() == "spmd_types":
+        if spmd.is_type_checking():
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})

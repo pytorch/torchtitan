@@ -241,6 +241,10 @@ def to_graph_trainer_config(
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
+    d["parallelism"] = replace(
+        base_config.parallelism,
+        spmd_backend="partial_dtensor",
+    )
     graph_spec = model_registry(base_config.model_spec.flavor)
     # Wrap the base model config in the graph_trainer's model config class
     # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values

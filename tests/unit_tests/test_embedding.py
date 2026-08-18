@@ -183,7 +183,7 @@ class TestEmbedding(DTensorTestBase):
                                     dst=out_type,
                                 )
                     finally:
-                        set_spmd_backend("default")
+                        set_spmd_backend("spmd_types")
 
                     # local matches DTensor bitwise and no-parallel embedding
                     self.assertTrue(

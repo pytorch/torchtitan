@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
 
 
-_spmd_backend = "default"
+_spmd_backend = "spmd_types"
 
 
 def set_spmd_backend(spmd_backend: str) -> None:
