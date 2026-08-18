@@ -7,9 +7,12 @@
 import dataclasses
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import torch.nn as nn
+
+import torchtitan.components.checkpointer.torch_checkpointing as manager_module
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
@@ -121,6 +124,22 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             barrier_config.tcpstore_port,
             DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
         )
+
+    def test_backend_storage_refuses_remote_uris(self) -> None:
+        # Path collapses "gs://bucket/x" to "gs:/bucket/x", so passing a remote
+        # id through to the Path-typed backend would read and write the wrong
+        # location without any error.
+        storage = mock.Mock()
+        adapter = manager_module._BackendCheckpointStorage(storage)
+
+        for probe in (adapter.isdir, adapter.isfile, adapter.listdir, adapter.remove):
+            with self.subTest(probe=probe.__name__):
+                with self.assertRaisesRegex(ValueError, "remote checkpoint paths"):
+                    probe("gs://bucket/checkpoint/step-1")
+        storage.assert_not_called()
+
+        adapter.isdir("/local/checkpoint/step-1")
+        storage.isdir.assert_called_once_with(Path("/local/checkpoint/step-1"))
 
     def test_legacy_config_has_no_backend_selector(self) -> None:
         config = CheckpointManager.Config()
