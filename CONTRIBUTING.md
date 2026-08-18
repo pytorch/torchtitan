@@ -50,9 +50,8 @@ Note: To accelerate contributions to and innovations around `torchtitan`, we are
 - Aim for minimal (if not zero) code change to the model. For the Llama model in `torchtitan`, if one has to make justifiable model change(s):
   - After the model change, it should still load the original checkpoint correctly.
   - Document the reasons for the code change, similar to [composability.md](docs/composability.md).
-- Keep code modularized, especially for [train.py](torchtitan/train.py), so that it remains easy to copy-paste into a minimal code example. If necessary:
-  - Introduce new config options/category in [configs.py](torchtitan/config/configs.py).
-  - Create separate functions/files.
+- Keep code modularized, especially for [train.py](torchtitan/train.py), so that it remains easy to copy-paste into a minimal code example. If necessary create separate functions/files.
+- The command-line options are frozen: no new `--section.option` flags. A knob that changes the model goes in the model config (dataclass), which is already off the command line. One that belongs to a component goes in that component's config (dataclass), and one with no other owner goes in [configs.py](torchtitan/config/configs.py) after checking with the maintainers. Both need `tyro.conf.Suppress`, since a field there is a command-line option unless you annotate it. See [the configuration doc](torchtitan/config/README.md).
 
 ### Proof of Value
 
@@ -75,7 +74,7 @@ When appropriate, one should consider
 
 - Adding CPU/GPU unit/integration tests.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
-  - To add a GPU integration test, create a new `OverrideDefinitions` in [integration_tests](tests/integration_tests/). It will override the default config to run on the Llama 3 debug model (see [config_registry.py](torchtitan/models/llama3/config_registry.py)).
+  - To add a GPU integration test, add a configuration to [torchtitan_recipes/tests.py](torchtitan_recipes/tests.py) and a new `OverrideDefinitions` naming it in [integration_tests](tests/integration_tests/). Most tests still override a base config from the command line; those are being moved over, so do not add new ones.
 - Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [float8.md](torchtitan/components/quantization/float8.md).
 - Following the tensor shape-suffix naming convention for new model code (e.g. `x_BLD`, `q_BLNH`, `out_TNH`), with a per-module legend comment as in [attention.py](torchtitan/models/common/attention.py). Capital suffixes name logical tensor dimensions (not sharding layout) and are scoped per file.
 - Adding a new file with benchmark results in [benchmarks](benchmarks) folder.
