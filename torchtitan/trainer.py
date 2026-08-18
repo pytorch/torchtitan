@@ -20,12 +20,11 @@ import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
@@ -103,7 +102,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        checkpoint: CheckpointManager.Config = field(
+        checkpoint: BaseCheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
         activation_checkpoint: ActivationCheckpointingConfig = field(
@@ -268,7 +267,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
     metrics_processor: MetricsProcessor
-    checkpointer: CheckpointManager
+    checkpointer: BaseCheckpointManager
 
     # runtime utilities
     device: torch.device

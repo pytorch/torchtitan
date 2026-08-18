@@ -11,10 +11,18 @@ import torch
 from torch.optim import Adam
 
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer.lr_scheduler import LRSchedulersContainer
 from torchtitan.config import ConfigManager
 
 
 class TestLRScheduler(unittest.TestCase):
+    def test_optimizer_package_import_path(self):
+        from torchtitan.components.optimizer import (
+            LRSchedulersContainer as PackageLRSchedulersContainer,
+        )
+
+        self.assertIs(PackageLRSchedulersContainer, LRSchedulersContainer)
+
     def setUp(self):
         # Create a simple model with parameters
         self.model = torch.nn.Linear(10, 10)

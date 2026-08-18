@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.transformers_modeling_backend.configs import (
@@ -46,7 +45,10 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         metrics=MetricsProcessor.Config(log_freq=1),
-        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="1F1B",
+            spmd_backend="partial_dtensor",
+        ),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -77,7 +79,10 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         metrics=MetricsProcessor.Config(log_freq=1),
-        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="1F1B",
+            spmd_backend="partial_dtensor",
+        ),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -106,7 +111,10 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
         metrics=MetricsProcessor.Config(log_freq=10),
-        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="1F1B",
+            spmd_backend="partial_dtensor",
+        ),
         checkpoint=CheckpointManager.Config(
             interval=500,
             last_save_model_only=False,
@@ -137,7 +145,10 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         ),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
         metrics=MetricsProcessor.Config(log_freq=1),
-        parallelism=ParallelismConfig(pipeline_parallel_schedule="1F1B"),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="1F1B",
+            spmd_backend="partial_dtensor",
+        ),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -182,6 +193,10 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             sample_processor=process_sample,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="1F1B",
+            spmd_backend="partial_dtensor",
+        ),
         checkpoint=CheckpointManager.Config(
             enable=True,
             initial_load_in_hf=True,
@@ -233,6 +248,10 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             sample_processor=process_sample,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_schedule="1F1B",
+            spmd_backend="partial_dtensor",
+        ),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,

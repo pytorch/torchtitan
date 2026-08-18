@@ -6,12 +6,13 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -26,6 +27,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.multimodal import multimodal_context
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -460,47 +462,67 @@ class MuseGlimmerModel(Decoder):
         # tok_embeddings) and inject vision features before the decoder layers.
         # On non-embedding pipeline stages tok_embeddings is None and the input
         # is already hidden states, so injection is skipped there.
-        if self.tok_embeddings is not None:
-            h = self.tok_embeddings(tokens)
-            # The model owns the encoder: when padded pixel_values are passed,
-            # run encoder->adapter here to produce the features for injection.
-            # The placeholder mask is derived from tokens + special_tokens.
-            # TODO: Video is not implemented in the training forward. The
-            # encoder itself is video-capable; this path just lacks the
-            # video-specific glue that the image path (above) doesn't need:
-            #   1. Temporal frame packing -- group `patch_temporal` frames per
-            #      patch.
-            #   2. Spatial avg-pool compression between encoder and adapter
-            #      (pool_factor from compression_ratio); the image path goes
-            #      encoder->adapter directly with no compression.
-            #   3. Video grid sizing (with compression_ratio / max_num_tokens)
-            #      vs image grid sizing.
-            #   4. A separate video placeholder token + mask instead of the
-            #      image_id used below.
-            if pixel_values_videos is not None or grid_thw_videos is not None:
-                raise NotImplementedError(
-                    "Muse Glimmer vision encoder does not support video inputs."
+        with multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                from .sharding import annotate_muse_glimmer_input_spmd_types
+
+                annotate_muse_glimmer_input_spmd_types(
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
                 )
-            if pixel_values is not None:
-                if self.vision_encoder is None:
-                    raise ValueError(
-                        "pixel_values were provided but the model has no "
-                        "vision_encoder configured."
+
+            if self.tok_embeddings is not None:
+                h = self.tok_embeddings(tokens)
+                # The model owns the encoder: when padded pixel_values are passed,
+                # run encoder->adapter here to produce the features for injection.
+                # The placeholder mask is derived from tokens + special_tokens.
+                # TODO: Video is not implemented in the training forward. The
+                # encoder itself is video-capable; this path just lacks the
+                # video-specific glue that the image path (above) doesn't need:
+                #   1. Temporal frame packing -- group `patch_temporal` frames per
+                #      patch.
+                #   2. Spatial avg-pool compression between encoder and adapter
+                #      (pool_factor from compression_ratio); the image path goes
+                #      encoder->adapter directly with no compression.
+                #   3. Video grid sizing (with compression_ratio / max_num_tokens)
+                #      vs image grid sizing.
+                #   4. A separate video placeholder token + mask instead of the
+                #      image_id used below.
+                if pixel_values_videos is not None or grid_thw_videos is not None:
+                    raise NotImplementedError(
+                        "Muse Glimmer vision encoder does not support video inputs."
                     )
-                if grid_thw is None:
-                    raise ValueError(
-                        "pixel_values were provided but grid_thw was not provided."
-                    )
-                if special_tokens is None or "image_id" not in special_tokens:
-                    raise ValueError(
-                        "pixel_values were provided but special_tokens with an "
-                        "'image_id' entry was not provided."
-                    )
-                vision_mask = tokens == special_tokens["image_id"]
-                vision_features = self._get_vision_features(pixel_values, grid_thw)
-                h = self._inject_vision(h, vision_features, vision_mask)
-        else:
-            h = tokens
+                if pixel_values is not None:
+                    if self.vision_encoder is None:
+                        raise ValueError(
+                            "pixel_values were provided but the model has no "
+                            "vision_encoder configured."
+                        )
+                    if grid_thw is None:
+                        raise ValueError(
+                            "pixel_values were provided but grid_thw was not provided."
+                        )
+                    if special_tokens is None or "image_id" not in special_tokens:
+                        raise ValueError(
+                            "pixel_values were provided but special_tokens with an "
+                            "'image_id' entry was not provided."
+                        )
+                    vision_mask = tokens == special_tokens["image_id"]
+                    vision_features = self._get_vision_features(pixel_values, grid_thw)
+                    h = self._inject_vision(h, vision_features, vision_mask)
+            else:
+                h = tokens
+
+        if get_spmd_backend() == "spmd_types":
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes as global batch sharding after the multimodal region.
+
+            # NOTE: Under PP + TP + SP, this is not a truly correct typeing.
+            # In a later PP stage, h arrives as TP sharded activation,
+            # so annotating it as R on TP is wrong. However,
+            # PP + spmd typechecking is not supported currently and
+            # the asserted type here is not used anywhere.
+            spmd.assert_type(h, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)

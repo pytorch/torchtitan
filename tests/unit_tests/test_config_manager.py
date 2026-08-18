@@ -59,6 +59,21 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args([])
 
+    def test_torchtitan_recipes_package_resolves(self):
+        """torchtitan_recipes is importable and its configs load."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "torchtitan_recipes.tests",
+                "--config",
+                "llama3_debugmodel_fsdp2_cp2",
+            ]
+        )
+        assert config.model_spec.name == "llama3"
+        assert config.model_spec.flavor == "debugmodel"
+        assert config.parallelism.context_parallel_degree == 2
+
     def test_invalid_model_errors(self):
         """--module with unknown module name raises ImportError."""
         config_manager = ConfigManager()
@@ -243,6 +258,23 @@ class TestConfigManager(unittest.TestCase):
             "optimizer",
             "lr_scheduler",
         ]
+
+    def test_concrete_checkpoint_fields_remain_overridable(self):
+        from torchtitan.components.checkpointer import CheckpointManager
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--checkpoint.async_mode",
+                "async",
+            ]
+        )
+
+        assert isinstance(config.checkpoint, CheckpointManager.Config)
+        assert config.checkpoint.async_mode == "async"
 
     def test_trainer_config_quantization_default(self):
         from torchtitan.components.quantization.utils import has_quantization
