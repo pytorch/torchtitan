@@ -23,13 +23,17 @@ Shape suffixes:
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 
+import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention, local_head_split
-from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.rope import _maybe_wrap_positions
 from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
@@ -54,6 +58,148 @@ def get_vision_block_mask_mod(num_patches: torch.Tensor) -> Callable:
         return valid_q & valid_kv
 
     return mask_mod
+
+
+def get_temporal_pos_embed(
+    num_frames: int,
+    embed_dim: int,
+    *,
+    base: float = 10000.0,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Fixed 1D sinusoidal embeddings for the temporal axis (video frames).
+
+    Returns ``(num_frames, embed_dim)`` float32; the standard 1D sincos formula
+    over frame indices.
+
+    Args:
+        num_frames: Number of video frames (temporal positions).
+        embed_dim: Embedding width per frame.
+        base: Sinusoid base (longest wavelength); the conventional PE constant.
+        device: Device for the returned tensor.
+    """
+    grid = torch.arange(num_frames, dtype=torch.float32, device=device)
+    omega = torch.arange(embed_dim // 2, dtype=torch.float32, device=device) / (
+        embed_dim / 2.0
+    )
+    omega = 1.0 / base**omega
+    out = torch.outer(grid, omega)
+    return torch.cat([out.sin(), out.cos()], dim=1)
+
+
+def compute_2d_rope_cache(
+    freq_table: torch.Tensor,
+    grids: list[list[int]],
+    max_num_patch: int,
+    head_dim: int,
+) -> torch.Tensor:
+    """Compute the padded 2D-RoPE complex ``freqs_cis`` cache in raster order.
+
+    For head-dim pair index ``k`` (``k`` in ``[0, head_dim/4)``), even output
+    pairs are rotated by the *column* (x) position and odd pairs by the *row*
+    (y) position. The per-axis angle for a position ``p`` is ``p * inv_freq[k]``;
+    this looks it up by gathering row ``p`` of ``freq_table`` (built once by
+    ``VisionRotaryEmbedding2D`` and cached by the encoder) rather than
+    recomputing ``p * inv_freq`` each call. Frames repeat the spatial pattern.
+
+    Returns a complex cache consumed by ``ComplexRoPE.apply_rotary_emb``; only
+    the cache is 2D/per-grid, which is why it is built here rather than by the
+    1D ``ComplexRoPE`` cache machinery.
+
+    Args:
+        freq_table: ``(max_hw, head_dim/4)`` position-to-frequency table, where
+            ``freq_table[p, k] = p * inv_freq[k]``.
+        grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
+            read to CPU once by the caller, so the per-item loop adds no syncs).
+        max_num_patch: Padded sequence length.
+        head_dim: Attention head dim (must be divisible by 4).
+
+    Returns:
+        ``(N, max_num_patch, 1, head_dim/2)`` complex64 (head axis = 1 to
+        broadcast over the heads).
+    """
+    device = freq_table.device
+
+    angles = freq_table.new_zeros(len(grids), max_num_patch, head_dim // 2)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        angles = spmd.mutate_type(angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
+
+    # Group by (h, w) so the per-resolution angle grid is built once.
+    hw_to_indices: dict[tuple[int, int], list[int]] = {}
+    for i, (_, h, w) in enumerate(grids):
+        hw_to_indices.setdefault((h, w), []).append(i)
+
+    for (h, w), indices in hw_to_indices.items():
+        # Raster order: position p -> (row = p // w, col = p % w). Gather each
+        # axis's angles from the precomputed table (freq_table[pos] = pos*inv_freq).
+        flat = torch.arange(h * w, device=device)
+        flat = cast(torch.Tensor, _maybe_wrap_positions(flat, freq_table))
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
+        x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
+        y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
+        # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
+        ang = torch.stack([x_ang, y_ang], dim=-1).reshape(h * w, head_dim // 2)
+        for i in indices:
+            t = grids[i][0]
+            seq_len = t * h * w
+            angles[i, :seq_len] = ang.repeat(t, 1)
+
+    # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
+    return torch.polar(torch.ones_like(angles), angles).unsqueeze(2)
+
+
+class VisionRotaryEmbedding2D(Module):
+    """2D rotary position embedding for the vision tower.
+
+    Holds the per-axis frequencies ``inv_freq`` (``head_dim/4`` of them, shared
+    by the row and column axes). ``forward(seqlen)`` returns the
+    position-to-frequency table ``freq_table[p, k] = p * inv_freq[k]`` for
+    positions up to ``seqlen``; ``compute_2d_rope_cache`` gathers per-patch
+    row/col angles from it, and ``ComplexRoPE.apply_rotary_emb`` applies them.
+    ``head_dim`` must be divisible by 4.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        head_dim: int
+        theta: float = 10000.0
+
+    def __init__(self, config: Config):
+        super().__init__()
+        if config.head_dim % 4 != 0:
+            raise ValueError(
+                f"2D RoPE requires head_dim divisible by 4, got {config.head_dim}."
+            )
+        self.head_dim = config.head_dim
+        self.theta = config.theta
+        self.register_buffer("inv_freq", self._compute_inv_freq(), persistent=False)
+
+    def _compute_inv_freq(self, *, device: torch.device | None = None) -> torch.Tensor:
+        # inv_freq[k] = theta**(-4k/head_dim) for k in [0, head_dim/4); the
+        # step of 4 leaves room for the row/col split of the 2D rotation.
+        return 1.0 / (
+            self.theta
+            ** (
+                torch.arange(0, self.head_dim, 4, dtype=torch.float32, device=device)
+                / self.head_dim
+            )
+        )
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        """Re-compute inv_freq on the target device after to_empty()."""
+        device = buffer_device or self.inv_freq.device
+        self.inv_freq = self._compute_inv_freq(device=device)
+
+    def forward(self, seqlen: int) -> torch.Tensor:
+        """Frequency table ``(seqlen, head_dim/4)`` for positions ``[0, seqlen)``."""
+        seq = torch.arange(
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+        )
+        seq = cast(torch.Tensor, _maybe_wrap_positions(seq, self.inv_freq))
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+        return torch.outer(seq, self.inv_freq)
 
 
 class VisionMLP(Module):
@@ -140,8 +286,8 @@ class VisionTransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        norm1: LayerNorm.Config
-        norm2: LayerNorm.Config
+        norm1: LayerNorm.Config | RMSNorm.Config
+        norm2: LayerNorm.Config | RMSNorm.Config
         attn: VisionAttention.Config
         mlp: VisionMLP.Config
 

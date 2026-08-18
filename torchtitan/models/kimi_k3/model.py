@@ -21,11 +21,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import (
-    GroupedExperts,
-    RoutedExperts,
-    TokenChoiceTopKRouter,
-)
+from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
@@ -65,6 +61,22 @@ class KimiRMSNormGated(Module):
         return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
 
 
+def _situ_glu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    beta: float,
+    linear_beta: float | None,
+) -> torch.Tensor:
+    """Kimi's SiTU-GLU activation, evaluated in FP32."""
+    input_dtype = gate.dtype
+    gate = gate.float()
+    up = up.float()
+    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    if linear_beta is not None:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    return (gate * up).to(input_dtype)
+
+
 class KimiFeedForward(FeedForward):
     """FeedForward with Kimi's SiTU activation"""
 
@@ -79,15 +91,9 @@ class KimiFeedForward(FeedForward):
         self.linear_beta = config.linear_beta
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.w1(x)
-        up = self.w3(x)
-        input_dtype = gate.dtype
-        gate = gate.float()
-        up = up.float()
-        gate = self.beta * torch.tanh(gate / self.beta) * torch.sigmoid(gate)
-        if self.linear_beta is not None:
-            up = self.linear_beta * torch.tanh(up / self.linear_beta)
-        return self.w2((gate * up).to(input_dtype))
+        return self.w2(
+            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
+        )
 
 
 class KimiMLAAttention(BaseAttention):
@@ -216,13 +222,6 @@ class KimiKDAKernel(Module):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
     ) -> torch.Tensor:
-        if q_BLHK.shape != k_BLHK.shape:
-            raise ValueError(
-                f"KDA q/k shapes must match, got {q_BLHK.shape} and {k_BLHK.shape}."
-            )
-        if q_BLHK.shape[:3] != v_BLHV.shape[:3]:
-            raise ValueError("Kimi KDA requires equal q/k/value head counts.")
-
         # safe_gate selects the bounded gate activation
         # lower_bound * sigmoid(exp(A_log) * (gate + dt_bias)); without it the
         # kernel applies -exp(A_log) * softplus(gate + dt_bias).
@@ -385,13 +384,7 @@ class KimiGroupedExperts(GroupedExperts):
             offs=offsets_E,
         )
 
-        input_dtype = gate_RF.dtype
-        gate_RF = gate_RF.float()
-        up_RF = up_RF.float()
-        gate_RF = self.beta * torch.tanh(gate_RF / self.beta) * torch.sigmoid(gate_RF)
-        if self.linear_beta is not None:
-            up_RF = self.linear_beta * torch.tanh(up_RF / self.linear_beta)
-        h_RF = (gate_RF * up_RF).to(input_dtype)
+        h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
 
         return self._grouped_mm(
             A=h_RF,
@@ -400,47 +393,25 @@ class KimiGroupedExperts(GroupedExperts):
         ).type_as(x_RD)
 
 
-class KimiLatentMoE(Module):
+class KimiLatentMoE(MoE):
+    """``common/moe.py::MoE`` with Kimi's latent routed-expert path.
+
+    Routed tokens are projected down to the expert latent width, run through
+    the experts, then normed and projected back up to the model dimension.
+    Shared experts still see the full-width input.
+    """
+
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        num_experts: int
-        router: TokenChoiceTopKRouter.Config
+    class Config(MoE.Config):
         routed_down: Linear.Config
-        routed_experts: RoutedExperts.Config
         routed_norm: RMSNorm.Config
         routed_up: Linear.Config
-        shared_experts: KimiFeedForward.Config
-        load_balance_coeff: float | None = 1e-3
 
     def __init__(self, config: Config):
-        super().__init__()
-        if config.routed_experts.inner_experts.num_experts != config.num_experts:
-            raise ValueError(
-                "routed_experts.inner_experts.num_experts must equal num_experts."
-            )
-        self.num_experts = config.num_experts
-        self.router = config.router.build()
+        super().__init__(config)
         self.routed_down = config.routed_down.build()
-        self.routed_experts = config.routed_experts.build()
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
-        self.shared_experts = config.shared_experts.build()
-        self.load_balance_coeff = config.load_balance_coeff
-        if self.load_balance_coeff is not None:
-            if self.load_balance_coeff <= 0.0:
-                raise ValueError("load_balance_coeff must be positive.")
-            self.register_buffer(
-                "expert_bias_E",
-                torch.zeros(config.num_experts, dtype=torch.float32),
-                persistent=True,
-            )
-        else:
-            self.expert_bias_E = None
-        self.register_buffer(
-            "tokens_per_expert_E",
-            torch.zeros(config.num_experts, dtype=torch.float32),
-            persistent=False,
-        )
 
     def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
         weights_BLS, expert_ids_BLS, scores_BLE = self.router(x_BLD, self.expert_bias_E)
@@ -448,32 +419,19 @@ class KimiLatentMoE(Module):
             -1, expert_ids_BLS, True
         )
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-        if self.training:
-            with torch.no_grad():
-                # In place so the load-balancing hook registered on the optimizer
-                # keeps referring to this buffer across steps.
-                self.tokens_per_expert_E.add_(num_tokens_per_expert_E.float())
+        with torch.no_grad():
+            self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
-        latent_BLD = self.routed_down(x_BLD)
         routed_BLD = self.routed_experts(
-            latent_BLD,
+            self.routed_down(x_BLD),
             weights_BLS,
             expert_ids_BLS,
             num_tokens_per_expert_E,
         )
-        routed_BLD = self.routed_up(self.routed_norm(routed_BLD))
-        return routed_BLD + self.shared_experts(x_BLD)
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        if buffer_device is None:
-            buffer_device = self.tokens_per_expert_E.device
-        self.tokens_per_expert_E = torch.zeros(
-            self.num_experts, dtype=torch.float32, device=buffer_device
-        )
-        if self.load_balance_coeff is not None:
-            self.expert_bias_E = torch.zeros(
-                self.num_experts, dtype=torch.float32, device=buffer_device
-            )
+        out_BLD = self.routed_up(self.routed_norm(routed_BLD))
+        if self.shared_experts is not None:
+            out_BLD = out_BLD + self.shared_experts(x_BLD)
+        return out_BLD
 
 
 def _apply_attention_residual(
@@ -482,7 +440,12 @@ def _apply_attention_residual(
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
-    """Apply Kimi's block-level attention residual in FP32."""
+    """Apply Kimi's block-level attention residual in FP32.
+
+    The norm and projection weights are folded into a single score vector, so
+    this reads them directly instead of calling the modules. That is only valid
+    while both are replicated; sharding them would need a DTensor-aware path.
+    """
     assert norm.eps is not None
 
     values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
@@ -637,6 +600,9 @@ class KimiK3Model(Decoder):
                 raise ValueError(
                     "Kimi K3 requires at least one MLA layer for FLOP accounting."
                 )
+            # KDA and the vision encoder have no dedicated term here, so their
+            # parameters only contribute the dense 6*N estimate; reported MFU is
+            # approximate.
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
