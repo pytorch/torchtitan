@@ -233,12 +233,12 @@ def _precompile_aot_fx_trace(
             0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
         ).expand(dummy_inputs.shape)
 
+        extra_kwargs["positions"] = positions
+
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,
             )
-
-        extra_kwargs["positions"] = positions
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence

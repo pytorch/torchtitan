@@ -161,12 +161,12 @@ class PrecompiledFxTraceArtifact:
     output_subclass_layouts: dict[int, SubclassLayout]
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int]
-    # user_inputs_spec is intentionally omitted: it can contain
-    # FlexAttention _MaskModWrapper objects that are not picklable,
-    # and the mask_mod is already compiled into standalone Inductor
-    # HOPs (AOTCompiledArtifact) baked into serialized_gm. The spec
-    # is only used for optional runtime validation in run_traced().
     config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
+    # This runtime binding spec retains standard container and dict-key ordering
+    # while treating custom pytree nodes such as BlockMask as leaves. The full
+    # trace-time spec cannot be serialized because BlockMask context can contain
+    # an unpicklable mask_mod closure.
+    user_inputs_spec: pytree.TreeSpec | None = None
 
     @classmethod
     def from_traced_result(
@@ -206,6 +206,7 @@ class PrecompiledFxTraceArtifact:
             output_spec=traced_result.output_spec,
             tensor_input_indices=traced_result.tensor_input_indices,
             config_fingerprint=config_fingerprint or ConfigFingerprint(""),
+            user_inputs_spec=traced_result.user_inputs_spec,
         )
 
     def to_traced_result(self) -> TracedResult:
@@ -216,6 +217,13 @@ class PrecompiledFxTraceArtifact:
         placeholder metadata contains FakeTensors for downstream
         passes like regional_inductor).
         """
+        user_inputs_spec = getattr(self, "user_inputs_spec", None)
+        if user_inputs_spec is None:
+            raise ValueError(
+                "Precompiled artifact has no input binding metadata. Delete the "
+                "stale artifact and re-run precompile to generate a fresh one."
+            )
+
         _register_coor_ops()
 
         from torch._subclasses import FakeTensorMode
@@ -228,16 +236,12 @@ class PrecompiledFxTraceArtifact:
         gm = GraphPickler.loads(self.serialized_gm, fake_mode)
         gm.recompile()
 
-        # Provide a minimal dummy spec since user_inputs_spec is not
-        # serialized (see comment on the dataclass field above).
-        dummy_spec = pytree.tree_flatten(((), {}))[1]
-
         return TracedResult(
             gm=gm,
             example_inputs=(),
             num_flat_inputs=self.num_flat_inputs,
             input_subclass_layouts=self.input_subclass_layouts,
-            user_inputs_spec=dummy_spec,
+            user_inputs_spec=user_inputs_spec,
             tensor_input_indices=self.tensor_input_indices,
             num_flat_outputs=self.num_flat_outputs,
             output_subclass_layouts=self.output_subclass_layouts,
@@ -292,7 +296,6 @@ def precompile_fx_trace_load(
     artifact: PrecompiledFxTraceArtifact = pickle.loads(data)
 
     _validate_config_fingerprint(artifact.config_fingerprint, expected_fingerprint)
-
     logger.info(
         f"FxTrace precompile artifact loaded: "
         f"state_fqns={len(artifact.state_fqns)}, "

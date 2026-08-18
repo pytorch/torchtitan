@@ -285,7 +285,9 @@ class TracedResult:
         example_inputs: Trace-time fake flat inputs used by downstream graph passes.
         num_flat_inputs: Number of flat graph inputs before subclass unwrapping.
         input_subclass_layouts: Subclass unwrap/rewrap metadata for inputs.
-        user_inputs_spec: Trace-time pytree spec for ``(args, kwargs)``.
+        user_inputs_spec: Picklable runtime binding spec for standard input
+            containers. Custom pytree nodes are treated as leaves so their
+            unpicklable contexts are excluded.
         num_flat_outputs: Number of flat graph outputs before subclass rewrapping.
         output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
         output_spec: Original output pytree spec used during reconstruction.
@@ -329,6 +331,42 @@ class TracedResult:
             else 1
             for i in range(num_state)
         )
+
+
+_USER_INPUT_CONTAINER_TYPES = (tuple, list, dict)
+
+
+def _build_user_inputs_spec(
+    args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> pytree.TreeSpec:
+    """Build a picklable runtime binding spec for user inputs.
+
+    Custom pytree nodes are leaves so their contexts are excluded. In
+    particular, a BlockMask context can contain the unpicklable mask_mod
+    closure, while the surrounding dict keys are still preserved here.
+    """
+    _, user_inputs_spec = pytree.tree_flatten(
+        (args, kwargs),
+        is_leaf=lambda value: type(value) not in _USER_INPUT_CONTAINER_TYPES,
+    )
+    return user_inputs_spec
+
+
+def _flatten_user_inputs(
+    traced_result: TracedResult,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> list[Any]:
+    input_tree = (args, kwargs)
+
+    try:
+        ordered_subtrees = traced_result.user_inputs_spec.flatten_up_to(input_tree)
+    except ValueError as error:
+        raise ValueError(f"input spec mismatch: {error}") from error
+
+    return [
+        leaf for subtree in ordered_subtrees for leaf in pytree.tree_leaves(subtree)
+    ]
 
 
 def minimal_fx_tracer(
@@ -393,7 +431,11 @@ def minimal_fx_tracer(
         state_flat, state_spec = pytree.tree_flatten(state_tree)
         num_state_inputs = len(state_flat)
 
-        user_inputs_flat, user_inputs_spec = pytree.tree_flatten((args, kwargs))
+        # The full spec is needed only to reconstruct the trace-time call. Keep
+        # it local because custom pytree contexts such as BlockMask are not
+        # necessarily picklable.
+        user_inputs_flat, trace_user_inputs_spec = pytree.tree_flatten((args, kwargs))
+        user_inputs_spec = _build_user_inputs_spec(args, kwargs)
 
         # Validate leaves.
         for leaf in [*state_flat, *user_inputs_flat]:
@@ -452,7 +494,7 @@ def minimal_fx_tracer(
             model_state_t = state_t["model"]
             optim_state_t = state_t["optim"]
             user_args, user_kwargs = pytree.tree_unflatten(
-                list(user_flat), user_inputs_spec
+                list(user_flat), trace_user_inputs_spec
             )
             if prepare_call_inputs is not None:
                 prepared = prepare_call_inputs(user_args, user_kwargs)
@@ -547,11 +589,10 @@ def run_traced(
     graph on top, keeping all forward intermediates alive via ``grad_fn``
     references.
 
-    With ``_validate_runtime=True``, runtime module parameter/buffer FQNs must match
-    trace time and runtime ``(args, kwargs)`` must flatten to the same pytree
-    spec as trace time; any mismatch raises. Off by default to keep the
-    per-step path overhead-free; the caller must pass kwargs in trace-time
-    order.
+    Runtime dictionaries are flattened in trace-time key order. Standard input
+    container structure and dictionary keys are always validated so leaves can
+    be bound safely. With ``_validate_runtime=True``, runtime module
+    parameter/buffer FQNs must also match trace time.
 
     If ``interpreter_cls`` is provided, the traced graph is executed via that
     FX interpreter instead of called directly; used by activation tracing.
@@ -569,17 +610,11 @@ def run_traced(
         state_tree = {"model": model_state, "optim": optim_state}
         state_flat, _ = pytree.tree_flatten(state_tree)
 
-        user_inputs_flat, runtime_spec = pytree.tree_flatten((args, kwargs))
-        # TODO: pytree's dict flatten preserves insertion order, so kwargs in a
-        # different order than trace produce a different spec even though they
-        # describe the same logical inputs. If pytree sorted dict keys (or
-        # provided a canonicalizing flatten), this check could match valid
-        # reordered calls without needing an explicit reorder step here.
-        if _validate_runtime and runtime_spec != traced_result.user_inputs_spec:
-            raise ValueError(
-                f"input spec mismatch: runtime {runtime_spec} != "
-                f"trace-time {traced_result.user_inputs_spec}"
-            )
+        user_inputs_flat = _flatten_user_inputs(
+            traced_result,
+            args,
+            kwargs,
+        )
         if any(
             isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_inputs_flat]
         ):
