@@ -306,6 +306,7 @@ class TestKimiK3FSDP(DTensorTestBase):
             pipeline_parallel_degree=1,
             context_parallel_degree=1,
             expert_parallel_degree=1,
+            spmd_backend="partial_dtensor",
         )
         parallel_dims = ParallelDims.from_config(parallelism, world_size=1)
         with patch(
