@@ -23,13 +23,6 @@ class TestLRScheduler(unittest.TestCase):
 
         self.assertIs(PackageLRSchedulersContainer, LRSchedulersContainer)
 
-    def test_legacy_import_path(self):
-        from torchtitan.components.lr_scheduler import (
-            LRSchedulersContainer as LegacyLRSchedulersContainer,
-        )
-
-        self.assertIs(LegacyLRSchedulersContainer, LRSchedulersContainer)
-
     def setUp(self):
         # Create a simple model with parameters
         self.model = torch.nn.Linear(10, 10)

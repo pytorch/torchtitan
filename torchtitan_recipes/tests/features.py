@@ -121,9 +121,9 @@ def llama3_debugmodel_last_save_model_only_bf16() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp2_1f1b() -> Trainer.Config:
-    """PP-only, so it keeps the default SPMD backend.
+    """PP-only, so it leaves SPMD type checking off.
 
-    ``spmd_types`` needs at least one SPMD axis greater than 1; collapsing
+    Type checking needs at least one SPMD axis greater than 1; collapsing
     every dense SPMD axis to size 1 trips DTensor's rejection of a Shard
     placement on a degenerate axis.
     """
@@ -190,7 +190,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
-    """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why the backend stays."""
+    """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 4
     config.training.disable_cuda_graphs = True
