@@ -8,9 +8,8 @@ from typing import cast
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import (
     Float8LinearConverter,
     MXFP8LinearConverter,
@@ -74,6 +73,23 @@ def llama3_debugmodel() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def llama3_debugmodel_dist_gemm() -> Trainer.Config:
+    """Async-TP: the attention TP collectives are folded into their GEMMs.
+
+    Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
+    fall back to the stock projections, so this stays runnable on one rank.
+
+    ``spmd_backend`` is pinned to spmd_types: the fused modules take and return
+    plain local tensors, which is that backend's contract. The DTensor backends
+    are being deprecated and are not supported here.
+    """
+    config = llama3_debugmodel()
+    config.model_spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
+    config.parallelism.spmd_backend = "spmd_types"
     return config
 
 
@@ -277,7 +293,10 @@ def llama3_70b() -> Trainer.Config:
 
 
 def llama3_405b() -> Trainer.Config:
-    compile_config = CompileConfig(enable=True)
+    compile_config = CompileConfig(
+        enable=True,
+        enable_async_tensor_parallel=True,
+    )
     model_spec = model_registry(
         "405B",
         converters=[
@@ -316,7 +335,6 @@ def llama3_405b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
-            enable_async_tensor_parallel=True,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),

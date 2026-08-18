@@ -15,8 +15,7 @@ from monarch.actor import Actor, current_rank, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.checkpoint_utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
     apply_overrides,
     CommConfig,
@@ -124,7 +123,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = utils.get_local_device()
         device_module.set_device(self.device)
 
         # Enable batch-invariant mode BEFORE init_distributed
@@ -272,20 +271,22 @@ class PolicyTrainer(Actor, Configurable):
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
 
-        # Check if seq_length passed the max_seq_len
-        max_seq_len = model_spec.model.max_seq_len
+        # Check if the requested context exceeds the model context length.
+        max_context_length = model_spec.model.max_context_length
         seq_len = config.training.max_context_length
-        if seq_len > max_seq_len:
+        if seq_len > max_context_length:
             raise ValueError(
                 f"Training sequence length {seq_len} exceeds "
                 f"attention RoPE maximum supported sequence "
-                f"length {max_seq_len}."
+                f"length {max_context_length}."
             )
 
         for layer_cfg in model_spec.model.layers:
             attention_cfg = getattr(layer_cfg, "attention", None)
             if attention_cfg is not None:
-                attention_cfg.rope = replace(attention_cfg.rope, max_seq_len=seq_len)
+                attention_cfg.rope = replace(
+                    attention_cfg.rope, max_context_length=seq_len
+                )
 
         # Apply this trainer's config overrides after update_from_config (which
         # sets the sharding configs the override factories read) and before build

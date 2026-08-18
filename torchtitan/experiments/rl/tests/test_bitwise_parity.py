@@ -103,9 +103,7 @@ def build_trainer_model(
     model_spec = config.model_spec
     hf_assets_path = config.hf_assets_path
 
-    device_type = utils.device_type
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    device = torch.device(f"{device_type}:{local_rank}")
+    device = utils.get_local_device()
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
@@ -150,7 +148,7 @@ def build_trainer_model(
         ac_config=trainer_config.ac_config,
         dump_folder=trainer_config.dump_folder,
     )
-    model.to_empty(device=device_type)
+    model.to_empty(device=device)
     with torch.no_grad():
         model.init_weights(buffer_device=None)
 
@@ -250,7 +248,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    engine_kwargs["max_model_len"] = config.model_spec.model.max_seq_len
+    engine_kwargs["max_model_len"] = config.model_spec.model.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop

@@ -6,15 +6,17 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
+    create_varlen_metadata_for_document,
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -27,6 +29,7 @@ from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -74,13 +77,21 @@ class Attention(GQAttention):
     class Config(GQAttention.Config):
         # Muse Glimmer-specific per-layer iRoPE flag: the shared GQAttention always
         # applies RoPE, so Muse Glimmer carries its own flag and guards the call in
-        # forward (NoPE layers still build a rope module so max_seq_len
+        # forward (NoPE layers still build a rope module so max_context_length
         # discovery/resize in the base Decoder works uniformly).
         use_rope: bool = True
         scale_query_by: float
         o_gate: Linear.Config | None = None
         # None = global attention (no sliding window) for this layer.
         window_size: int | None = None
+
+        @property
+        def sliding_window_size(self) -> int | None:
+            # Alias: the vLLM generator wrapper reads ``sliding_window_size`` to
+            # configure per-layer paged-attention windows; the flex path uses
+            # ``window_size``. Keep both in sync via this alias (mirrors gpt_oss's
+            # field name without renaming the flex-path usages).
+            return self.window_size
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -112,8 +123,12 @@ class Attention(GQAttention):
             xq, xk = self.rope(xq, xk, positions)
 
         # Select this layer's mask by its window ("global" key = full attention).
-        assert isinstance(attention_masks, dict)
-        attention_masks = attention_masks[_window_mask_key(self.window_size)]
+        # Only flex passes a window-keyed dict of BlockMasks to index into. Varlen
+        # passes a single VarlenMetadata shared by every layer (each layer's window is
+        # a kernel arg, baked in at build time), so it goes straight through to the
+        # kernel (mirrors gpt_oss).
+        if isinstance(attention_masks, dict):
+            attention_masks = attention_masks[_window_mask_key(self.window_size)]
 
         output = self.inner_attention(
             xq,
@@ -373,67 +388,84 @@ class MuseGlimmerModel(Decoder):
         # tok_embeddings) and inject vision features before the decoder layers.
         # On non-embedding pipeline stages tok_embeddings is None and the input
         # is already hidden states, so injection is skipped there.
-        if self.tok_embeddings is not None:
-            h = self.tok_embeddings(tokens)
-            # The model owns the encoder: when packed pixel_values are passed,
-            # run encoder->adapter here to produce the features for injection.
-            # The placeholder mask is derived from tokens + special_tokens.
-            # TODO: Video is not implemented in the training forward. The
-            # encoder itself is video-capable; this path just lacks the
-            # video-specific glue that the image path (above) doesn't need:
-            #   1. Temporal frame packing -- group `patch_temporal` frames per
-            #      patch.
-            #   2. Spatial avg-pool compression between encoder and adapter
-            #      (pool_factor from compression_ratio); the image path goes
-            #      encoder->adapter directly with no compression.
-            #   3. Video grid sizing (with compression_ratio / max_num_tokens)
-            #      vs image grid sizing.
-            #   4. A separate video placeholder token + mask instead of the
-            #      image_id used below.
-            if pixel_values_videos is not None or grid_thw_videos is not None:
-                raise NotImplementedError(
-                    "Muse Glimmer vision encoder does not support video inputs."
+        with multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                from .sharding import annotate_muse_glimmer_input_spmd_types
+
+                annotate_muse_glimmer_input_spmd_types(
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
                 )
-            if pixel_values is not None:
-                if self.vision_encoder is None:
-                    raise ValueError(
-                        "pixel_values were provided but the model has no "
-                        "vision_encoder configured."
+
+            if self.tok_embeddings is not None:
+                h = self.tok_embeddings(tokens)
+                # The model owns the encoder: when packed pixel_values are passed,
+                # run encoder->adapter here to produce the features for injection.
+                # The placeholder mask is derived from tokens + special_tokens.
+                # TODO: Video is not implemented in the training forward. The
+                # encoder itself is video-capable; this path just lacks the
+                # video-specific glue that the image path (above) doesn't need:
+                #   1. Temporal frame packing -- group `patch_temporal` frames per
+                #      patch.
+                #   2. Spatial avg-pool compression between encoder and adapter
+                #      (pool_factor from compression_ratio); the image path goes
+                #      encoder->adapter directly with no compression.
+                #   3. Video grid sizing (with compression_ratio / max_num_tokens)
+                #      vs image grid sizing.
+                #   4. A separate video placeholder token + mask instead of the
+                #      image_id used below.
+                if pixel_values_videos is not None or grid_thw_videos is not None:
+                    raise NotImplementedError(
+                        "Muse Glimmer vision encoder does not support video inputs."
                     )
-                if grid_thw is None:
-                    raise ValueError(
-                        "pixel_values were provided but grid_thw was not provided."
+                if pixel_values is not None:
+                    if self.vision_encoder is None:
+                        raise ValueError(
+                            "pixel_values were provided but the model has no "
+                            "vision_encoder configured."
+                        )
+                    if grid_thw is None:
+                        raise ValueError(
+                            "pixel_values were provided but grid_thw was not provided."
+                        )
+                    if special_tokens is None or "image_id" not in special_tokens:
+                        raise ValueError(
+                            "pixel_values were provided but special_tokens with an "
+                            "'image_id' entry was not provided."
+                        )
+                    vision_features = self._get_vision_features(pixel_values, grid_thw)
+                    if (
+                        self.vision_projection is None
+                        or self.perception_emb_norm is None
+                    ):
+                        raise ValueError(
+                            "pixel_values were provided but the model has no "
+                            "vision_projection/perception_emb_norm configured."
+                        )
+                    vision_embeds = self.perception_emb_norm(
+                        self.vision_projection(vision_features)
                     )
-                if special_tokens is None or "image_id" not in special_tokens:
-                    raise ValueError(
-                        "pixel_values were provided but special_tokens with an "
-                        "'image_id' entry was not provided."
+                    downsample_factor = self.vision_encoder.downsample_factor
+                    num_tokens_per_item = (
+                        grid_thw[:, 1] // downsample_factor
+                    ) * (grid_thw[:, 2] // downsample_factor)
+                    vision_positions = get_vision_positions(
+                        tokens,
+                        num_tokens_per_item,
+                        special_tokens["image_id"],
                     )
-                vision_features = self._get_vision_features(pixel_values, grid_thw)
-                if self.vision_projection is None or self.perception_emb_norm is None:
-                    raise ValueError(
-                        "pixel_values were provided but the model has no "
-                        "vision_projection/perception_emb_norm configured."
+                    h = scatter_vision_embeds(
+                        h,
+                        vision_embeds=vision_embeds,
+                        vision_positions=vision_positions,
                     )
-                vision_embeds = self.perception_emb_norm(
-                    self.vision_projection(vision_features)
-                )
-                downsample_factor = self.vision_encoder.downsample_factor
-                num_tokens_per_item = (grid_thw[:, 1] // downsample_factor) * (
-                    grid_thw[:, 2] // downsample_factor
-                )
-                vision_positions = get_vision_positions(
-                    tokens,
-                    num_tokens_per_item,
-                    special_tokens["image_id"],
-                )
-                h = scatter_vision_embeds(
-                    h,
-                    vision_embeds=vision_embeds,
-                    vision_positions=vision_positions,
-                )
-        else:
-            h = tokens
+            else:
+                h = tokens
+
+        if get_spmd_backend() == "spmd_types":
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes sharding the leading token dimension.
+            spmd.assert_type(h, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)
@@ -453,10 +485,15 @@ class MuseGlimmerModel(Decoder):
         attn_config = self.config.first_attention
         assert attn_config is not None
         inner_attn = attn_config.inner_attention
+        # Varlen carries each layer's sliding window in its own kernel arg (baked at
+        # build time), so all layers share one document-varlen metadata; only the
+        # flex path needs the per-window BlockMask dict built below.
+        if isinstance(inner_attn, VarlenAttention.Config):
+            return create_varlen_metadata_for_document(positions)
         if not isinstance(inner_attn, FlexAttention.Config):
             raise TypeError(
-                "Muse Glimmer requires FlexAttention for sliding-window masks, got "
-                f"{type(inner_attn).__name__}"
+                "Muse Glimmer requires FlexAttention or VarlenAttention for "
+                f"sliding-window masks, got {type(inner_attn).__name__}"
             )
 
         # Language models always use block-causal (per-document) masking: the

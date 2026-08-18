@@ -433,8 +433,9 @@ class MoE(Module):
         # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
-        with torch.no_grad():
-            self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
+        if self.training:
+            with torch.no_grad():
+                self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
         out_TD = self.routed_experts(
             x_TD,

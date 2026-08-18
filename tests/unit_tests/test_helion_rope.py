@@ -40,10 +40,10 @@ class _RoPEHolder(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         cos_rope: CosSinRoPE.Config = field(
-            default_factory=lambda: CosSinRoPE.Config(dim=64, max_seq_len=128)
+            default_factory=lambda: CosSinRoPE.Config(dim=64, max_context_length=128)
         )
         complex_rope: ComplexRoPE.Config = field(
-            default_factory=lambda: ComplexRoPE.Config(dim=64, max_seq_len=128)
+            default_factory=lambda: ComplexRoPE.Config(dim=64, max_context_length=128)
         )
 
     def __init__(self, config: Config):
@@ -65,7 +65,7 @@ class _SubclassRoPEHolder(Configurable):
     class Config(Configurable.Config):
         rope: CosSinRoPE.Config = field(
             default_factory=lambda: _ContractSubclassRoPE.Config(
-                dim=64, max_seq_len=128
+                dim=64, max_context_length=128
             )
         )
 
@@ -94,19 +94,24 @@ class TestHelionRoPEOverride(unittest.TestCase):
         self.assertTrue(_REGISTRY[_HELION_COMPLEX_KEY].exact)
 
     def test_cossin_factory_preserves_fields(self):
-        cfg = CosSinRoPE.Config(dim=64, max_seq_len=128, theta=5000.0, scaling="yarn")
+        cfg = CosSinRoPE.Config(
+            dim=64,
+            max_context_length=128,
+            theta=5000.0,
+            scaling="yarn",
+        )
         with patch.object(helion_rope_module, "_HELION_IMPORT_ERROR", None):
             replacement = helion_cos_sin_rope(cfg)
         self.assertIsInstance(replacement, HelionCosSinRoPE.Config)
         self.assertEqual(replacement.dim, 64)
-        self.assertEqual(replacement.max_seq_len, 128)
+        self.assertEqual(replacement.max_context_length, 128)
         self.assertEqual(replacement.theta, 5000.0)
         self.assertEqual(replacement.scaling, "yarn")
 
     def test_complex_factory_preserves_fields(self):
         cfg = ComplexRoPE.Config(
             dim=64,
-            max_seq_len=128,
+            max_context_length=128,
             theta=5000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -115,7 +120,7 @@ class TestHelionRoPEOverride(unittest.TestCase):
             replacement = helion_complex_rope(cfg)
         self.assertIsInstance(replacement, HelionComplexRoPE.Config)
         self.assertEqual(replacement.dim, 64)
-        self.assertEqual(replacement.max_seq_len, 128)
+        self.assertEqual(replacement.max_context_length, 128)
         self.assertEqual(replacement.theta, 5000.0)
         self.assertEqual(replacement.scaling, "yarn")
         self.assertEqual(replacement.rope_factor, 40.0)
@@ -170,8 +175,10 @@ class TestHelionRoPEOverride(unittest.TestCase):
         """On CPU the module falls back to CosSinRoPE, bit-for-bit identical."""
         torch.manual_seed(0)
         dim, seqlen = 64, 16
-        cossin = CosSinRoPE.Config(dim=dim, max_seq_len=seqlen).build()
-        helion_module = HelionCosSinRoPE.Config(dim=dim, max_seq_len=seqlen).build()
+        cossin = CosSinRoPE.Config(dim=dim, max_context_length=seqlen).build()
+        helion_module = HelionCosSinRoPE.Config(
+            dim=dim, max_context_length=seqlen
+        ).build()
         self.assertIsInstance(helion_module, HelionCosSinRoPE)
 
         xq = torch.randn(seqlen, 4, dim, dtype=torch.bfloat16)
@@ -187,8 +194,10 @@ class TestHelionRoPEOverride(unittest.TestCase):
         """On CPU the module falls back to ComplexRoPE, bit-for-bit identical."""
         torch.manual_seed(0)
         dim, seqlen = 64, 16
-        complex_rope = ComplexRoPE.Config(dim=dim, max_seq_len=seqlen).build()
-        helion_module = HelionComplexRoPE.Config(dim=dim, max_seq_len=seqlen).build()
+        complex_rope = ComplexRoPE.Config(dim=dim, max_context_length=seqlen).build()
+        helion_module = HelionComplexRoPE.Config(
+            dim=dim, max_context_length=seqlen
+        ).build()
         self.assertIsInstance(helion_module, HelionComplexRoPE)
 
         xq = torch.randn(seqlen, 4, dim, dtype=torch.bfloat16)
@@ -210,10 +219,12 @@ class TestHelionRoPEKernel(unittest.TestCase):
         self.device = torch.device("cuda")
         self.dim = 128
         self.seqlen = 64
-        self.cossin = CosSinRoPE.Config(dim=self.dim, max_seq_len=self.seqlen).build()
+        self.cossin = CosSinRoPE.Config(
+            dim=self.dim, max_context_length=self.seqlen
+        ).build()
         self.complex = ComplexRoPE.Config(
             dim=self.dim,
-            max_seq_len=self.seqlen * 2,
+            max_context_length=self.seqlen * 2,
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -221,11 +232,11 @@ class TestHelionRoPEKernel(unittest.TestCase):
             original_seq_len=self.seqlen,
         ).build()
         self.helion = HelionCosSinRoPE.Config(
-            dim=self.dim, max_seq_len=self.seqlen
+            dim=self.dim, max_context_length=self.seqlen
         ).build()
         self.helion_complex = HelionComplexRoPE.Config(
             dim=self.dim,
-            max_seq_len=self.seqlen * 2,
+            max_context_length=self.seqlen * 2,
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,

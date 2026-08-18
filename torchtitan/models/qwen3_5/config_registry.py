@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from torchtitan.config import ParallelismConfig, TrainingConfig
@@ -72,6 +71,7 @@ def qwen35_debugmodel() -> Trainer.Config:
 def qwen35_debugmodel_varlen_attn() -> Trainer.Config:
     config = qwen35_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -94,6 +94,7 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=1 * 512,
             max_context_length=512,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=2,
@@ -279,6 +280,7 @@ def qwen35_35b_a3b() -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * 4096,
             max_context_length=4096,
             steps=1000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
@@ -311,6 +313,7 @@ def qwen35_122b_a10b() -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * 4096,
             max_context_length=4096,
             steps=1000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
@@ -343,6 +346,7 @@ def qwen35_397b_a17b() -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=4 * 4096,
             max_context_length=4096,
             steps=1000,
+            disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,

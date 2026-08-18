@@ -18,14 +18,17 @@ Shape suffixes:
 """
 
 from dataclasses import dataclass, field
+from typing import cast
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import _maybe_wrap_positions, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
@@ -115,7 +118,12 @@ def _compute_learned_pos_embeds(
                 frames = frames + time_weight.to(frames.dtype)
                 pos[i] = frames.reshape(t * h * w, dim)
 
-    return torch.cat([pos[i] for i in range(len(grids))], dim=0)
+    packed_pos = torch.cat([pos[i] for i in range(len(grids))], dim=0)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        packed_pos = spmd.mutate_type(
+            packed_pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    return packed_pos
 
 
 def _compute_2d_rope_cache(
@@ -160,6 +168,9 @@ def _compute_2d_rope_cache(
         # Raster order: position p -> (row = p // w, col = p % w). Gather each
         # axis's angles from the precomputed table (freq_table[pos] = pos*inv_freq).
         flat = torch.arange(h * w, device=device)
+        flat = cast(torch.Tensor, _maybe_wrap_positions(flat, freq_table))
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
         x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
         y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
         # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
@@ -170,6 +181,10 @@ def _compute_2d_rope_cache(
 
     # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
     packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        packed_angles = spmd.mutate_type(
+            packed_angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
     return torch.polar(torch.ones_like(packed_angles), packed_angles).unsqueeze(1)
 
 
@@ -212,7 +227,12 @@ def _tpool_patch_merger(
         seq = seq.permute(0, 1, 3, 2, 4, 5).mean(dim=0)
         merged.append(seq.reshape(new_h * new_w, merged_dim))
 
-    return torch.cat(merged, dim=0)
+    packed_merged = torch.cat(merged, dim=0)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        packed_merged = spmd.mutate_type(
+            packed_merged, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    return packed_merged
 
 
 class VisionRotaryEmbedding2D(Module):
@@ -262,6 +282,9 @@ class VisionRotaryEmbedding2D(Module):
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
+        seq = cast(torch.Tensor, _maybe_wrap_positions(seq, self.inv_freq))
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)
 
 

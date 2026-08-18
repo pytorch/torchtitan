@@ -21,6 +21,7 @@ __all__ = [
 ]
 
 
+# pyrefly: ignore [not-callable]
 @spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
@@ -92,7 +93,7 @@ class RoPE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
-        max_seq_len: int
+        max_context_length: int
         theta: float = 10000.0
         scaling: Literal["none", "llama", "yarn"] = "none"
         # llama scaling params
@@ -113,7 +114,7 @@ class RoPE(Module):
         self.register_buffer("cache", self._precompute_cache(), persistent=False)
 
     def _precompute_cache(self) -> torch.Tensor:
-        """Build the reusable cache for all positions up to ``max_seq_len``.
+        """Build the reusable cache for all positions up to ``max_context_length``.
 
         Returns:
             RoPE cache for all valid positions.
@@ -185,11 +186,11 @@ class ComplexRoPE(RoPE):
         """Precompute complex cis values.
 
         Returns:
-            Cache of shape ``(max_seq_len, dim / 2)``.
+            Cache of shape ``(max_context_length, dim / 2)``.
         """
         cfg = self.config
         dim = cfg.dim
-        end = cfg.max_seq_len
+        end = cfg.max_context_length
         theta = cfg.theta
 
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
@@ -215,7 +216,7 @@ class ComplexRoPE(RoPE):
                 wavelen > low_freq_wavelen
             )
             freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
-        elif cfg.scaling == "yarn" and end > cfg.original_seq_len:
+        elif cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
             # YaRN (DeepSeek V3 style)
             freqs = _yarn_inv_freq(
                 dim,
@@ -273,11 +274,11 @@ class CosSinRoPE(RoPE):
         """Precompute cos/sin values.
 
         Returns:
-            Cache of shape ``(max_seq_len, dim * 2)``.
+            Cache of shape ``(max_context_length, dim * 2)``.
         """
         cfg = self.config
         dim = cfg.dim
-        max_seq_len = cfg.max_seq_len
+        max_context_length = cfg.max_context_length
         base = cfg.theta
 
         if cfg.scaling == "llama":
@@ -298,7 +299,9 @@ class CosSinRoPE(RoPE):
                 base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
             )
 
-        t = torch.arange(max_seq_len, dtype=inv_freq.dtype, device=inv_freq.device)
+        t = torch.arange(
+            max_context_length, dtype=inv_freq.dtype, device=inv_freq.device
+        )
         freqs = torch.outer(t, inv_freq).float()
         theta = torch.cat([freqs, freqs], dim=-1)
 

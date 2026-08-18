@@ -133,7 +133,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
                 model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
-                parallelism=SimpleNamespace(enable_async_tensor_parallel=False),
+                parallelism=SimpleNamespace(),
             )
 
         traced_result = SimpleNamespace(state_fqns=[])
@@ -3347,7 +3347,6 @@ class TestChunkPasses(TestCase):
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(
-                enable_async_tensor_parallel=False,
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,

@@ -19,7 +19,6 @@ from torchtitan.distributed.full_dtensor import (
     resolve_sparse_fsdp_mesh,
     validate_config,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import apply_fsdp_to_mtp_decoder
 
@@ -49,9 +48,6 @@ def parallelize_deepseekv3(
         if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
             model.parallelize(parallel_dims)
 
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -60,7 +56,11 @@ def parallelize_deepseekv3(
         ac_config.build(dump_folder=dump_folder).apply(model)
 
     if model_compile_enabled:
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+        )
 
     if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)

@@ -124,7 +124,7 @@ def prepare_context_parallel_input(
     extra_kwargs: dict[str, Any],
     cp_mesh: DeviceMesh,
     device: torch.device,
-    load_balancer_type: str | None = "headtail",
+    load_balancer_type: str | None = "ptrr",
     ptrr_mask_key: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
@@ -142,7 +142,7 @@ def prepare_context_parallel_input(
         cp_mesh: Device mesh for context parallel dimension
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
-            Options: "headtail", "ptrr", or None. Defaults to "headtail".
+            Options: "headtail", "ptrr", or None. Defaults to "ptrr".
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
             masks are a dict[str, BlockMask], selects which mask the
             PTRRLoadBalancer is built from. Ignored otherwise.
@@ -174,7 +174,7 @@ def cp_shard(
     cp_mesh: DeviceMesh,
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
-    load_balancer_type: str | None = "headtail",
+    load_balancer_type: str | None = "ptrr",
     input_seq_dim: int = 0,
     ptrr_mask_key: str | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
@@ -195,7 +195,7 @@ def cp_shard(
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
             - None: Disable load balancing
-            Defaults to "headtail".
+            Defaults to "ptrr".
         input_seq_dim: Token dimension index for sharding. Defaults to 0 for
             tensors whose leading dimension is ``num_tokens``. Can be changed
             by passing a different value if your tensors use a different
@@ -283,12 +283,19 @@ def cp_shard(
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
         assert isinstance(attention_masks, (BlockMask, dict))
-        masks = (
+        masks: list[BlockMask] = []
+        for mask in (
             [attention_masks]
             if isinstance(attention_masks, BlockMask)
-            else list(attention_masks.values())
-        )
-        masks = _context_parallel_shard(
+            else attention_masks.values()
+        ):
+            if not isinstance(mask, BlockMask):
+                raise ValueError(
+                    "Context parallelism can only shard BlockMask attention "
+                    f"masks, got {type(mask).__name__} in the mask dict."
+                )
+            masks.append(mask)
+        sharded_masks = _context_parallel_shard(
             mesh=cp_mesh,
             buffers=masks,
             seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
@@ -297,9 +304,9 @@ def cp_shard(
         attention_masks = cast(
             (BlockMask | dict[str, BlockMask]),
             (
-                masks[0]
+                sharded_masks[0]
                 if isinstance(attention_masks, BlockMask)
-                else {k: v for k, v in zip(attention_masks.keys(), masks)}
+                else {k: v for k, v in zip(attention_masks.keys(), sharded_masks)}
             ),
         )
 

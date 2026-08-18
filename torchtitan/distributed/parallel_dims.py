@@ -534,6 +534,14 @@ class ParallelDims:
             self.build_mesh()
         return self._global_meshes.get("spmd_sparse_for_fwdbwd")
 
+    def get_dense_tp_mesh(self) -> DeviceMesh:
+        """Return the TP-axis mesh used by dense forward/backward computation."""
+        if self.spmd_backend == "spmd_types":
+            return self.spmd_dense_mesh()["tp"]
+        if self.spmd_backend == "full_dtensor":
+            return self.spmd_meshes()[0]["tp"]
+        return self.get_mesh("tp")
+
     def get_activated_mesh(self, axes: list[str]) -> DeviceMesh | None:
         """Submesh of ``axes`` filtered to those actually enabled in this run.
 

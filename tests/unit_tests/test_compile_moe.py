@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -42,12 +43,63 @@ class TinyModel(Module):
 
 
 class TestApplyCompile(unittest.TestCase):
+    def test_async_tp_requires_model_compile(self):
+        invalid_configs = (
+            {"enable_async_tensor_parallel": True},
+            {
+                "enable": True,
+                "enable_async_tensor_parallel": True,
+                "components": ["loss"],
+            },
+        )
+        for kwargs in invalid_configs:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Async TP requires 'model' in --compile.components and "
+                    "--compile.enable",
+                ):
+                    CompileConfig(**kwargs)
+
+    def test_apply_compile_configures_async_tp(self):
+        model = TinyModel(num_layers=2, dim=128)
+        compile_config = CompileConfig(
+            enable=True,
+            enable_async_tensor_parallel=True,
+        )
+        parallel_dims = MagicMock(tp_enabled=True)
+        tp_mesh = parallel_dims.get_dense_tp_mesh.return_value
+        tp_mesh.get_group.return_value.group_name = "tp_group"
+        previous_micro_pipeline_tp = torch._inductor.config._micro_pipeline_tp
+
+        try:
+            with (
+                patch.object(torch.nn.Module, "compile"),
+                patch(
+                    "torch.distributed._symmetric_memory.enable_symm_mem_for_group"
+                ) as enable_symm_mem,
+            ):
+                apply_compile(
+                    model,
+                    compile_config=compile_config,
+                    parallel_dims=parallel_dims,
+                )
+
+            enable_symm_mem.assert_called_once_with("tp_group")
+            self.assertTrue(torch._inductor.config._micro_pipeline_tp)
+        finally:
+            torch._inductor.config._micro_pipeline_tp = previous_micro_pipeline_tp
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_grouped_mm_compiles_and_runs(self):
         model = TinyModel(num_layers=2, dim=128).cuda()
         compile_config = CompileConfig(backend="inductor")
 
-        apply_compile(model, compile_config)
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=MagicMock(tp_enabled=False),
+        )
 
         from torchtitan.models.common.moe import GroupedExperts
 

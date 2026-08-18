@@ -101,12 +101,14 @@ class Decoder(BaseModel):
             )
 
         @property
-        def max_seq_len(self) -> int:
+        def max_context_length(self) -> int:
             # The first full-attention layer's RoPE defines the context length.
             rope_cfg = getattr(self.first_attention, "rope", None)
             if rope_cfg is None:
-                raise ValueError("Decoder config does not define RoPE max_seq_len.")
-            return rope_cfg.max_seq_len
+                raise ValueError(
+                    "Decoder config does not define RoPE max_context_length."
+                )
+            return rope_cfg.max_context_length
 
         def update_from_config(
             self,
@@ -161,23 +163,24 @@ class Decoder(BaseModel):
 
             # NOTE: Inference-only callers such as the RL generator skip
             # training.max_context_length sync. Generated sequence length is not known
-            # ahead of time, so keep the RoPE cache at the model's max_seq_len.
+            # ahead of time, so keep the RoPE cache at the model's
+            # max_context_length.
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.max_context_length
-                max_seq_len = self.max_seq_len
-                if seq_len > max_seq_len:
+                max_context_length = self.max_context_length
+                if seq_len > max_context_length:
                     raise ValueError(
                         f"Training sequence length {seq_len} exceeds "
                         f"attention RoPE maximum supported sequence "
-                        f"length {max_seq_len}."
+                        f"length {max_context_length}."
                     )
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
                     if attention_cfg is not None:
                         attention_cfg.rope = dataclasses.replace(
-                            attention_cfg.rope, max_seq_len=seq_len
+                            attention_cfg.rope, max_context_length=seq_len
                         )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (

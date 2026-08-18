@@ -19,8 +19,12 @@ tensors via local_map.
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
+import torch
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     colwise_config,
     dense_activation_placement,
     dense_param_placement,
@@ -30,38 +34,68 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
+    token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.vision_encoder_sharding import (
+    invariant_norm_config,
+    set_vision_transformer_block_sharding_config,
+    vision_colwise_config,
+    vision_invariant_linear_config,
+    vision_scaled_bias_rowwise_config,
+)
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+
+DP = MeshAxisName.DP
+TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
     from torchtitan.models.common import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.model import (
         GatedDeltaNet,
         Qwen35Attention,
+        Qwen35AttentionMaskDict,
         Qwen35Model,
         Qwen35TransformerBlock,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def _replicate_norm() -> ShardingConfig:
-    """Replicate norm (weight/bias and activations) — used by the vision
-    encoder, which runs without sequence parallelism."""
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        out_dst_shardings=dense_activation_placement(tp=spmd.R),
-    )
+def annotate_qwen35_input_spmd_types(
+    *,
+    attention_masks: "Qwen35AttentionMaskDict | None",
+    mrope_positions: torch.Tensor | None,
+    pixel_values: torch.Tensor | None,
+    pixel_values_videos: torch.Tensor | None,
+    grid_thw: torch.Tensor | None,
+    grid_thw_videos: torch.Tensor | None,
+) -> None:
+    """Annotate Qwen3.5 structured inputs with their local SPMD types."""
+    token_type = {MeshAxisName.DP: spmd.S(0), MeshAxisName.TP: spmd.R}
+    multimodal_type = {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.I}
+
+    if mrope_positions is not None:
+        spmd.assert_type(mrope_positions, token_type)
+    if attention_masks is not None:
+        deltanet_metadata = attention_masks["deltanet"]
+        if isinstance(deltanet_metadata, VarlenMetadata):
+            spmd.assert_type(
+                deltanet_metadata.cu_seq_q,
+                {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
+            )
+    for tensor in (
+        pixel_values,
+        pixel_values_videos,
+        grid_thw,
+        grid_thw_videos,
+    ):
+        if tensor is not None:
+            spmd.assert_type(tensor, multimodal_type)
 
 
 def _qk_norm_sharding() -> ShardingConfig:
     """Per-head QK-norm sharding: weight Replicate, activations Shard(1)."""
-    head_plc = dense_activation_placement(tp=spmd.S(1))
+    head_plc = attention_activation_placement()
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": head_plc},
@@ -109,23 +143,28 @@ def set_qwen35_sharding_config(
     # Override tok_embeddings: output TP-replicated for vision scatter.
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
+        in_src_shardings={"input": token_id_placement()},
+        in_dst_shardings={"input": token_id_placement()},
         out_src_shardings=dense_activation_placement(tp=spmd.P),
         out_dst_shardings=dense_activation_placement(tp=spmd.R),
         local_map=LocalMapConfig(in_grad_placements=None),
     )
     _set_vision_encoder_sharding(config.vision_encoder)
     # The embedding path stays replicated through multimodal vision scatter.
-    # The first attention block restores SP; later decoder block inputs are SP.
-    first_layer_input_layout = dense_activation_placement(tp=spmd.R)
+    # Layer 0 restores SP at the block boundary; later blocks are already SP.
+    decoder_input_layout = dense_activation_placement(tp=spmd.R)
     layer_input_layout = dense_sequence_parallel_placement()
     for layer_idx, layer_cfg in enumerate(config.layers):
+        layer_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={
+                "x_TD": (decoder_input_layout if layer_idx == 0 else layer_input_layout)
+            },
+            in_dst_shardings={"x_TD": layer_input_layout},
+            out_src_shardings=layer_input_layout,
+        )
         _set_qwen35_layer_sharding(
             layer_cfg,
-            attention_input_layout=(
-                first_layer_input_layout if layer_idx == 0 else layer_input_layout
-            ),
+            attention_input_layout=layer_input_layout,
             enable_ep=enable_ep,
         )
 
@@ -191,59 +230,39 @@ def _set_shared_expert_gate_sharding(
             "weight": dense_param_placement(tp=spmd.R),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        out_dst_shardings=dense_activation_placement(tp=spmd.R),
+        out_src_shardings=dense_activation_placement(tp=spmd.R),
+        out_dst_shardings=dense_sequence_parallel_placement(),
     )
 
 
 def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     """Sharding for the vision encoder.
 
-    All activations flow as Replicate — no SP in the vision encoder.
+    All activations flow without SP in the vision encoder.
     Linear layers are ColwiseParallel/RowwiseParallel for memory savings.
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": dense_param_placement(tp=spmd.R)},
+        state_shardings={"pos_embed": SpmdLayout({DP: spmd.R, TP: spmd.I})},
+        out_src_shardings=SpmdLayout({DP: spmd.V, TP: spmd.I}),
+        out_dst_shardings=SpmdLayout({DP: spmd.V, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": dense_param_placement(tp=spmd.I)},
-        out_src_shardings=dense_param_placement(tp=spmd.I),
+        state_shardings={"inv_freq": SpmdLayout({DP: spmd.R, TP: spmd.I})},
+        out_src_shardings=SpmdLayout({DP: spmd.R, TP: spmd.I}),
     )
 
-    # patch_embed receives plain pixel_values — wrap as DTensor(Replicate)
-    ve_cfg.patch_embed_proj.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        out_dst_shardings=dense_activation_placement(tp=spmd.R),
+    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
+    set_vision_transformer_block_sharding_config(
+        ve_cfg.block,
+        rope_cache_dp=spmd.V,
     )
-
-    # Block sub-modules
-    block = ve_cfg.block
-    block.norm1.sharding_config = _replicate_norm()
-    block.norm2.sharding_config = _replicate_norm()
-
-    block.attn.sharding_config = ShardingConfig(
-        in_src_shardings={"rope_cache": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"rope_cache": dense_activation_placement(tp=spmd.R)},
-    )
-    block.attn.wq.sharding_config = colwise_config()
-    block.attn.wk.sharding_config = colwise_config()
-    block.attn.wv.sharding_config = colwise_config()
-    block.attn.proj.sharding_config = rowwise_config(output_sp=False)
-    set_gqa_inner_attention_local_map(block.attn.inner_attention)
-
-    block.mlp.fc1.sharding_config = colwise_config()
-    block.mlp.fc2.sharding_config = rowwise_config(output_sp=False)
 
     # Merger sub-modules
     merger = ve_cfg.merger
-    merger.norm.sharding_config = _replicate_norm()
-    merger.fc1.sharding_config = colwise_config()
-    merger.fc2.sharding_config = rowwise_config(output_sp=False)
+    merger.norm.sharding_config = invariant_norm_config()
+    merger.fc1.sharding_config = vision_colwise_config()
+    merger.fc2.sharding_config = vision_scaled_bias_rowwise_config()
 
 
 def _set_full_attention_sharding(
@@ -308,7 +327,7 @@ def _set_deltanet_sharding(
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
 
     # RMSNormGated: per-head norm, weight Replicate, activations Shard(1)
-    _norm_plc = dense_activation_placement(tp=spmd.S(1))
+    _norm_plc = attention_activation_placement()
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"x": _norm_plc, "gate": _norm_plc},
@@ -317,18 +336,25 @@ def _set_deltanet_sharding(
     )
 
     # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
-    _kernel_plc = dense_activation_placement(tp=spmd.S(1))
+    _kernel_head_plc = attention_activation_placement()
+    _kernel_gate_plc = dense_activation_placement(tp=spmd.S(1))
     deltanet_cfg.kernel.sharding_config = ShardingConfig(
         in_dst_shardings={
-            "xq_TNK": _kernel_plc,
-            "xk_TNK": _kernel_plc,
-            "xv_TNV": _kernel_plc,
-            "g_TN": _kernel_plc,
-            "beta_TN": _kernel_plc,
+            "xq_TNK": _kernel_head_plc,
+            "xk_TNK": _kernel_head_plc,
+            "xv_TNV": _kernel_head_plc,
+            "g_TN": _kernel_gate_plc,
+            "beta_TN": _kernel_gate_plc,
         },
-        out_src_shardings=_kernel_plc,
+        out_src_shardings=_kernel_head_plc,
         local_map=LocalMapConfig(
-            in_grad_placements=(_kernel_plc,) * 5,
+            in_grad_placements=(
+                _kernel_head_plc,
+                _kernel_head_plc,
+                _kernel_head_plc,
+                _kernel_gate_plc,
+                _kernel_gate_plc,
+            ),
         ),
     )
 

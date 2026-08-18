@@ -9,13 +9,21 @@ Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
   - Profiler.Config                 (in tools/profiler.py)
-  - OptimizersContainer.Config      (in components/optimizer.py)
-  - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
+  - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
+  - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
-  - CheckpointManager.Config        (in components/checkpoint.py)
+  - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
 Configs without a clear single owner (or with circular-import constraints)
 live here.
+
+Most knobs belong to a component or to the model, not here. But some options
+have no suitable home, e.g. ``local_batch_size``, and those can be placed here.
+Discuss with the maintainers first if you intend to add one.
+
+The command-line surface is frozen either way, so annotate a new field with
+``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``torchtitan/config/README.md``.
 """
 
 from dataclasses import dataclass, field
@@ -60,6 +68,18 @@ class TrainingConfig:
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
+    """
+
+    disable_cuda_graphs: bool = False
+    """
+    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    graphs require fixed-shape inputs and no CPU<->GPU synchronization during
+    the captured region. Expert parallelism is supported only with HybridEP
+    when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
+    EP backends synchronize with the host during dispatch. Pipeline parallelism
+    is not supported yet. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -144,9 +164,6 @@ class ParallelismConfig:
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
-    enable_async_tensor_parallel: bool = False
-    """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
-
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
@@ -221,7 +238,7 @@ class ParallelismConfig:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
-    context_parallel_load_balancer: str | None = "headtail"
+    context_parallel_load_balancer: str | None = "ptrr"
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
@@ -277,10 +294,22 @@ class CompileConfig:
     enable: bool = False
     """Whether to apply torch.compile"""
 
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
     components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
 
     backend: str = "inductor"
+
+    def __post_init__(self) -> None:
+        if self.enable_async_tensor_parallel and not (
+            self.enable and "model" in self.components
+        ):
+            raise ValueError(
+                "Async TP requires 'model' in --compile.components and "
+                "--compile.enable"
+            )
 
 
 @dataclass(kw_only=True, slots=True)

@@ -1612,7 +1612,7 @@ class TestTraceModels(unittest.TestCase):
                         v_head_dim=v_head_dim,
                         rope=ComplexRoPE.Config(
                             dim=rope_dim,
-                            max_seq_len=seq_len,
+                            max_context_length=seq_len,
                             scaling="none",
                         ),
                         q_norm=RMSNorm.Config(normalized_shape=1),

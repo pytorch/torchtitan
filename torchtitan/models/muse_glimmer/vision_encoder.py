@@ -31,11 +31,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
@@ -43,6 +45,15 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
+
+
+def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
+    """Annotate a tensor created inside the vision forward."""
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        return spmd.mutate_type(
+            tensor, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    return tensor
 
 
 def reorder_patch_vector(
@@ -118,6 +129,7 @@ class _VisionPosEmbed(Module):
         pos_xy = torch.stack(torch.meshgrid(ys, xs, indexing="xy"), dim=-1).reshape(
             -1, 2
         )[None, None]
+        pos_xy = _annotate_vision_activation_type(pos_xy)
         sampled = F.grid_sample(pos_emb, pos_xy, mode="bilinear", align_corners=False)
         return sampled[0, :, 0, :].T  # [grid_h*grid_w, latent_dim]
 
@@ -142,16 +154,8 @@ class _VisionTokenPermute(Module):
         return x[index]
 
 
-class _VisionRopeFreq(Module):
-    """Holds the RoPE inverse-frequency table (a per-head constant).
-
-    A leaf module with NO sharding_config on purpose: ``Module.parallelize``
-    skips config-less modules, so ``inv_freq`` stays a plain tensor under TP.
-    ``_make_2d_rope`` combines it with plain index tensors via ``torch.outer``,
-    which rejects a mix of DTensor and plain tensors -- keeping it plain (rather
-    than a Replicate DTensor on the encoder) sidesteps that. Mirrors qwen3_5's
-    ``VisionRotaryEmbedding``.
-    """
+class VisionRopeFreq(Module):
+    """Holds the replicated RoPE inverse-frequency table."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -230,7 +234,7 @@ class MuseGlimmerVisionEncoder(Module):
         sparse_attention_factor: int
         pos_emb_grid_h: int
         pos_emb_grid_w: int
-        rope_theta: float = 10000.0
+        rope_freq: VisionRopeFreq.Config
         conv1: Linear.Config
         ln_pre: LayerNorm.Config
         block: VisionTransformerBlock.Config
@@ -250,14 +254,7 @@ class MuseGlimmerVisionEncoder(Module):
         self.sparse_attention_factor = config.sparse_attention_factor
         self.pos_emb_grid_h = config.pos_emb_grid_h
         self.pos_emb_grid_w = config.pos_emb_grid_w
-        self.rope_theta = config.rope_theta
-
-        # RoPE inverse frequencies live on a config-less leaf so they stay a
-        # plain tensor under TP (see _VisionRopeFreq) -- _make_2d_rope mixes them
-        # with plain index tensors, which DTensor would reject.
-        self.rope_freq = _VisionRopeFreq.Config(
-            head_dim=self.head_dim, rope_theta=self.rope_theta
-        ).build()
+        self.rope_freq = config.rope_freq.build()
 
         self.conv1_linear = config.conv1.build()
         # Raw nn.Parameter (interpolated directly), initialized via the encoder
@@ -292,6 +289,8 @@ class MuseGlimmerVisionEncoder(Module):
 
         idx_h = torch.arange(1, grid_h + 1, dtype=torch.float32, device=device)
         idx_w = torch.arange(1, grid_w + 1, dtype=torch.float32, device=device)
+        idx_h = _annotate_vision_activation_type(idx_h)
+        idx_w = _annotate_vision_activation_type(idx_w)
         idx_ij_h = idx_h.unsqueeze(1).expand(-1, grid_w).reshape(-1)
         idx_ij_w = idx_w.unsqueeze(0).expand(grid_h, -1).reshape(-1)
 
@@ -358,6 +357,7 @@ class MuseGlimmerVisionEncoder(Module):
         pad_w = math.ceil(grid_w / gw) * gw
 
         idx = torch.arange(grid_h * grid_w, device=device).view(grid_h, grid_w)
+        idx = _annotate_vision_activation_type(idx)
         idx = F.pad(idx, (0, pad_w - grid_w, 0, pad_h - grid_h), value=-1).flatten()
         idx = idx.view(pad_h // gh, gh, pad_w // gw, gw)
         idx = idx.permute(0, 2, 1, 3).reshape(-1)
@@ -401,7 +401,7 @@ class MuseGlimmerVisionEncoder(Module):
         if self.sparse_attention_factor > 1:
             sp_perm, sp_slens = self._get_sparse_perm_and_slens(grid_h, grid_w, device)
             x = self.token_permute(x, sp_perm)
-            freqs_cis = freqs_cis[sp_perm]
+            freqs_cis = self.token_permute(freqs_cis, sp_perm)
 
         return x, freqs_cis, n_tokens, grid_h, grid_w, sp_perm, sp_slens
 
@@ -451,6 +451,11 @@ class MuseGlimmerVisionEncoder(Module):
             "MuseGlimmerVisionEncoder only supports grid_thw[:, 0] == 1 "
             f"(T patches), got {grid_thw[:, 0].tolist()}"
         )
+        f = self.downsample_factor
+        assert bool((grid_thw[:, 1:] % f == 0).all()), (
+            "MuseGlimmerVisionEncoder requires grid h/w divisible by "
+            f"downsample_factor={f} (pixel-shuffle), got {grid_thw[:, 1:].tolist()}"
+        )
 
         grid_hw = grid_thw[:, 1:3].tolist()
         offset = 0
@@ -482,6 +487,11 @@ class MuseGlimmerVisionEncoder(Module):
             all_global_slens.append(n_tokens)
             per_image_meta.append((grid_h, grid_w, n_tokens, sp_perm))
 
+        assert offset == pixel_values.shape[0], (
+            f"grid_thw describes {offset} patches, but pixel_values contains "
+            f"{pixel_values.shape[0]}"
+        )
+
         # Phase 2: concatenate, build masks, run the transformer once.
         x = torch.cat(all_x, dim=0)
         freqs_cis = torch.cat(all_freqs, dim=0)
@@ -493,8 +503,11 @@ class MuseGlimmerVisionEncoder(Module):
         total_tokens = x.shape[0]
 
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
+        global_slens = _annotate_vision_activation_type(
+            torch.tensor(all_global_slens, device=device, dtype=torch.int32)
+        )
         global_mask = create_block_diagonal_mask(
-            torch.tensor(all_global_slens, device=device, dtype=torch.int32),
+            global_slens,
             total_tokens,
             device,
         )

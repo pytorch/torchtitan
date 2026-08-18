@@ -9,17 +9,22 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-
+from fla.modules.conv.triton.ops import CausalConv1dFunction
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
 )
+from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
+from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
+from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -31,26 +36,32 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .rope import MRoPE
-from .sharding import set_qwen35_sharding_config
+from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
+Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
+spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
+spmd.register_local_autograd_function(FusedRecurrentFunction)
+spmd.register_local_autograd_function(CausalConv1dFunction)
 
-@dataclass(frozen=True, slots=True)
-class Qwen35AttentionMasks:
-    """Attention metadata for the full-attention and DeltaNet layers."""
-
-    full_attention: AttentionMasksType | None
-    delta_net: VarlenMetadata | None
-
-
+@spmd.local_map(
+    in_types=(
+        {"dp": spmd.S(0), "tp": spmd.S(1)},
+        {"dp": spmd.R, "tp": spmd.S(0)},
+        {"dp": spmd.V, "tp": spmd.R},
+        {"dp": spmd.V, "tp": spmd.R},
+    ),
+    out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
+)
 def _causal_conv1d_varlen(
     x_TD: torch.Tensor,
     weight: torch.Tensor,
@@ -219,11 +230,9 @@ class GatedDeltaNet(Module):
 
     Uses recurrent state + gated delta rule instead of softmax attention.
     No RoPE, different head structure from standard attention. When varlen
-    metadata (``VarlenMetadata``) is provided -- i.e. under the ``varlen``
-    attention backend -- conv and recurrent state are reset at document
-    boundaries. Under other backends (e.g. ``flex``, which passes a
-    ``BlockMask``) no reset occurs and the packed sequence is processed as a
-    single continuous stream.
+    Document offsets are read from the model's attention-mask dictionary, so
+    convolution and recurrent state reset at packed-document boundaries for
+    both full-attention backends.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -363,8 +372,12 @@ class GatedDeltaNet(Module):
         num_tokens = x_TD.shape[0]
         cu_seqlens = None
         cu_seqlens_cpu = None
-        if isinstance(attention_masks, VarlenMetadata):
-            cu_seqlens = attention_masks.cu_seq_q
+        if attention_masks is not None:
+            # FLA caches varlen index helpers by tensor identity. A fresh
+            # tensor keeps forward and activation-checkpoint recompute on the
+            # same path.
+            with spmd.local():
+                cu_seqlens = attention_masks.cu_seq_q.clone()
             cu_seqlens_host = attention_masks.cu_seq_q_host
             if cu_seqlens_host is None:
                 raise ValueError(
@@ -379,6 +392,8 @@ class GatedDeltaNet(Module):
                 dtype=cu_seqlens.dtype,
                 device="cpu",
             )
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                spmd.mutate_type(cu_seqlens_cpu, "dp", src=spmd.R, dst=spmd.V)
 
         # Shapes:
         #   xq_TNK, xk_TNK: (T, n_key_heads, key_head_dim)
@@ -544,6 +559,7 @@ class Qwen35TransformerBlock(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.full_attn = config.attention is not None
+        self.attn_mask_key = "quadratic_attention" if self.full_attn else "deltanet"
 
         if self.full_attn:
             self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
@@ -565,15 +581,17 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
-        delta_net_metadata: VarlenMetadata | None = None,
     ) -> torch.Tensor:
+        layer_mask = (
+            attention_masks[self.attn_mask_key] if attention_masks is not None else None
+        )
         h_TD = self.attention_norm(x_TD)
         if self.full_attn:
-            h_TD = self.attn(h_TD, attention_masks, positions)
+            h_TD = self.attn(h_TD, layer_mask, positions)
         else:
-            h_TD = self.attn(h_TD, delta_net_metadata)
+            h_TD = self.attn(h_TD, layer_mask)
         x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
@@ -692,21 +710,9 @@ class Qwen35Model(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
-    ) -> Qwen35AttentionMasks | VarlenMetadata:
+    ) -> Qwen35AttentionMaskDict:
         attn_config = self.config.first_attention
-        if attn_config is not None and isinstance(
-            attn_config.inner_attention, VarlenAttention.Config
-        ):
-            # Host offsets are a GatedDeltaNet-only need: the FLA varlen
-            # kernels take cu_seqlens as a CPU tensor to size their launches,
-            # whereas quadratic attention (torch.nn.attention.varlen) consumes
-            # the device tensor directly. They are stored as Python ints so
-            # SelectiveAC checkpoint metadata stays tensor-free.
-            return create_varlen_metadata_for_document(
-                positions,
-                include_host_offsets=True,
-            )
-        full_attention_masks = super().get_attention_masks(positions)
+
         # Multimodal padding uses position 0 for every padded token. A real
         # document start is position 0 followed by position 1; keep index 0 as
         # the first start. This avoids routing a single padded sample through
@@ -727,9 +733,23 @@ class Qwen35Model(Decoder):
         if (
             delta_net_metadata.cu_seq_q_host is not None
             and len(delta_net_metadata.cu_seq_q_host) == 2
+            and not (
+                attn_config is not None
+                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
+            )
         ):
             delta_net_metadata = None
-        return Qwen35AttentionMasks(full_attention_masks, delta_net_metadata)
+
+        if attn_config is None:
+            quadratic_attention = None
+        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
+            quadratic_attention = delta_net_metadata
+        else:
+            quadratic_attention = super().get_attention_masks(positions)
+        return {
+            "quadratic_attention": quadratic_attention,
+            "deltanet": delta_net_metadata,
+        }
 
     def _get_vision_embeds(
         self,
@@ -819,42 +839,42 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: Qwen35AttentionMasks | AttentionMasksType | None = None,
+        attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+        with multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                annotate_qwen35_input_spmd_types(
+                    attention_masks=attention_masks,
+                    mrope_positions=mrope_positions,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                )
 
-        if isinstance(attention_masks, Qwen35AttentionMasks):
-            full_attention_masks = attention_masks.full_attention
-            delta_net_metadata = attention_masks.delta_net
-        else:
-            full_attention_masks = attention_masks
-            delta_net_metadata = (
-                attention_masks if isinstance(attention_masks, VarlenMetadata) else None
-            )
+            if self.tok_embeddings is not None:
+                x = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,
+                )
+            else:
+                x = tokens
+
+        if get_spmd_backend() == "spmd_types":
+            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions
         assert rope_positions is not None
         for layer in self.layers.values():
-            x = layer(
-                x,
-                full_attention_masks,
-                rope_positions,
-                delta_net_metadata,
-            )
+            x = layer(x, attention_masks, rope_positions)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

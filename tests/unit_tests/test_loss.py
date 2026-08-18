@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
@@ -515,7 +516,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         hidden_states: torch.Tensor,
         labels: torch.Tensor,
         num_chunks: int,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
     ):
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
         for h_chunk, label_chunk in zip(
@@ -585,6 +586,42 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.testing.assert_close(
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
+
+    def test_fsdp_unshards_once_before_chunk_forwards(self):
+        events: list[str] = []
+
+        class FakeFSDPLinear(nn.Linear):
+            def set_reshard_after_forward(self, enabled):
+                events.append(f"set_reshard_after_forward({enabled})")
+
+            def set_reshard_after_backward(self, enabled):
+                events.append(f"set_reshard_after_backward({enabled})")
+
+            def set_requires_gradient_sync(self, enabled, *, recurse):
+                events.append(f"set_requires_gradient_sync({enabled})")
+
+            def unshard(self):
+                events.append("unshard")
+
+            def reshard(self):
+                events.append("reshard")
+
+            def forward(self, input):
+                events.append("forward")
+                return super().forward(input)
+
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.lm_head = FakeFSDPLinear(4, 8, bias=False)
+        hidden_states = torch.randn(4, 4)
+        labels = torch.randint(0, 8, (4,))
+
+        with patch("torch.distributed._composable.fsdp.FSDPModule", FakeFSDPLinear):
+            chunked_loss(hidden_states, labels)
+
+        self.assertEqual(events.count("unshard"), 1)
+        self.assertEqual(events.count("forward"), 2)
+        self.assertLess(events.index("unshard"), events.index("forward"))
+        self.assertEqual(events[-1], "reshard")
 
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""

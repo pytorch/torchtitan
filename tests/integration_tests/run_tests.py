@@ -244,7 +244,11 @@ def run_tests(
             )
             try:
                 run_single_test(
-                    test_flavor, args.output_dir, module, config, gpu_ids=gpus
+                    test_flavor,
+                    args.output_dir,
+                    module,
+                    config,
+                    gpu_ids=gpus,
                 )
             finally:
                 pool.release(gpus)

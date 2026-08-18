@@ -56,7 +56,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenAttention.Config(),
-            rope=ComplexRoPE.Config(dim=head_dim, max_seq_len=num_tokens),
+            rope=ComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
         ).build()
         x_TD = torch.randn(num_tokens, dim)
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import math
 import unittest
 from unittest.mock import patch
 
@@ -41,7 +42,7 @@ class TestApplyRotaryEmbCosSin(unittest.TestCase):
             self.num_tokens, 1, self.head_dim * 2, dtype=torch.float32
         )
         self.rope = CosSinRoPE(
-            CosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.num_tokens)
+            CosSinRoPE.Config(dim=self.head_dim, max_context_length=self.num_tokens)
         )
 
     def test_output_dtype_matches_input(self):
@@ -116,8 +117,10 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
         self.head_dim = 64
-        self.max_seq_len = 32
-        rope_cfg = ComplexRoPE.Config(dim=self.head_dim, max_seq_len=self.max_seq_len)
+        self.max_context_length = 32
+        rope_cfg = ComplexRoPE.Config(
+            dim=self.head_dim, max_context_length=self.max_context_length
+        )
         self.rope = rope_cfg.build()
         self.assertIsInstance(self.rope, ComplexRoPE)
 
@@ -132,7 +135,9 @@ class TestRoPEPositionBoundsComplex(unittest.TestCase):
         num_tokens = 4
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
-        positions = torch.tensor([0, 1, self.max_seq_len, self.max_seq_len + 1])
+        positions = torch.tensor(
+            [0, 1, self.max_context_length, self.max_context_length + 1]
+        )
         with self.assertRaises(RuntimeError):
             self.rope(xq, xk, positions)
 
@@ -143,8 +148,10 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
         self.head_dim = 64
-        self.max_seq_len = 32
-        rope_cfg = CosSinRoPE.Config(dim=self.head_dim, max_seq_len=self.max_seq_len)
+        self.max_context_length = 32
+        rope_cfg = CosSinRoPE.Config(
+            dim=self.head_dim, max_context_length=self.max_context_length
+        )
         self.rope = rope_cfg.build()
         self.assertIsInstance(self.rope, CosSinRoPE)
 
@@ -159,7 +166,9 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
         num_tokens = 4
         xq = torch.randn(num_tokens, 4, self.head_dim)
         xk = torch.randn(num_tokens, 4, self.head_dim)
-        positions = torch.tensor([0, 1, self.max_seq_len, self.max_seq_len + 1])
+        positions = torch.tensor(
+            [0, 1, self.max_context_length, self.max_context_length + 1]
+        )
         with self.assertRaises(RuntimeError):
             self.rope(xq, xk, positions)
 
@@ -171,7 +180,7 @@ class TestMRoPECache(unittest.TestCase):
         head_dim = 12
         rope = MRoPE.Config(
             dim=head_dim,
-            max_seq_len=8,
+            max_context_length=8,
             mrope_section=[2, 1, 1],
         ).build()
         # (tokens, 3): per-token [temporal, height, width] positions.
@@ -194,6 +203,47 @@ class TestMRoPECache(unittest.TestCase):
         self.assertEqual(xk_out.shape, xk.shape)
 
 
+class TestYaRNScaling(unittest.TestCase):
+    """YaRN follows the explicit scaling policy, not the cache length.
+
+    The cache is sized to the training sequence length, which can be shorter
+    than ``original_seq_len`` (e.g. fine-tuning a YaRN checkpoint on short
+    sequences), so it must not decide whether YaRN applies.
+    """
+
+    def test_complex_rope_applies_below_original_sequence_length(self):
+        yarn = ComplexRoPE.Config(
+            dim=64,
+            max_context_length=2048,
+            scaling="yarn",
+            rope_factor=40.0,
+            original_seq_len=4096,
+        ).build()
+        unscaled = ComplexRoPE.Config(dim=64, max_context_length=2048).build()
+
+        self.assertFalse(torch.equal(yarn.cache[1], unscaled.cache[1]))
+
+    def test_deepseek_mscale_applies_below_original_sequence_length(self):
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3.model import Attention
+
+        model_config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        attention_config = model_config.layers[0].attention
+        assert isinstance(attention_config, Attention.Config)
+        attention_config.rope = dataclasses.replace(
+            attention_config.rope,
+            max_context_length=attention_config.rope.original_seq_len // 2,
+        )
+        attention = attention_config.build()
+
+        expected_mscale = (
+            0.1 * attention_config.mscale * math.log(attention_config.rope.rope_factor)
+            + 1.0
+        )
+        expected_softmax_scale = attention.qk_head_dim**-0.5 * expected_mscale**2
+        self.assertAlmostEqual(attention.softmax_scale, expected_softmax_scale)
+
+
 class TestPerLayerRoPECache(unittest.TestCase):
     def test_gqa_attention_uses_layer_rope_cache(self):
         torch.manual_seed(42)
@@ -211,7 +261,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenAttention.Config(),
-            rope=ComplexRoPE.Config(dim=head_dim, max_seq_len=16),
+            rope=ComplexRoPE.Config(dim=head_dim, max_context_length=16),
         ).build()
 
         x = torch.randn(8, dim)
@@ -249,7 +299,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
 
 
 class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
-    """update_from_config must reject seq_len > rope.max_seq_len."""
+    """Reject training contexts larger than the RoPE context length."""
 
     def _make_trainer_config(self, seq_len):
         from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
@@ -273,26 +323,26 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
 
     def test_rejects_oversized_seq_len(self):
         cfg = self._make_config()
-        rope_max = cfg.max_seq_len
+        rope_max = cfg.max_context_length
         with self.assertRaises(ValueError):
             cfg.update_from_config(config=self._make_trainer_config(rope_max + 1))
 
     def test_accepts_valid_seq_len(self):
         cfg = self._make_config()
-        rope_max = cfg.max_seq_len
+        rope_max = cfg.max_context_length
         cfg.update_from_config(config=self._make_trainer_config(rope_max))
-        self.assertEqual(cfg.max_seq_len, rope_max)
+        self.assertEqual(cfg.max_context_length, rope_max)
 
     def test_vllm_max_model_len_as_seq_len(self):
         """vLLM wrapper translates max_model_len to TrainingConfig.max_context_length.
 
-        When max_context_length equals rope.max_seq_len, the RoPE cache stays at
-        the model's intrinsic maximum.
+        When the training and RoPE context lengths match, the RoPE cache stays
+        at the model's intrinsic maximum.
         """
         cfg = self._make_config()
-        original_max = cfg.max_seq_len
+        original_max = cfg.max_context_length
         cfg.update_from_config(config=self._make_trainer_config(original_max))
-        self.assertEqual(cfg.max_seq_len, original_max)
+        self.assertEqual(cfg.max_context_length, original_max)
 
 
 if __name__ == "__main__":

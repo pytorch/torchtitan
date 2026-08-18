@@ -32,8 +32,10 @@ from torchtitan.distributed.spmd_types import (
     spmd_validate_redistributions,
 )
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     dense_activation_placement,
     dense_sequence_parallel_placement,
+    token_id_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
@@ -257,6 +259,20 @@ class TestSpmdLayout(DTensorTestBase):
                 MeshAxisName.CP: spmd.S(1),
                 MeshAxisName.TP: spmd.S(1),
             },
+        )
+
+    def test_decoder_layout_partition_spec_ranks(self):
+        self.assertEqual(
+            token_id_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP),),
+        )
+        self.assertEqual(
+            dense_activation_placement(tp=spmd.R).partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP), None),
+        )
+        self.assertEqual(
+            attention_activation_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP), MeshAxisName.TP, None),
         )
 
     def test_unfold_dp_axes(self):

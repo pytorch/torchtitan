@@ -28,7 +28,12 @@ class _FakeController:
         self.setup_generator_meshes = None
         self.instances.append(self)
 
-    async def setup_async(self, *, trainer_mesh=None, generator_meshes=None):
+    async def setup_async(
+        self,
+        *,
+        trainer_mesh=None,
+        generator_meshes=None,
+    ):
         self.events.append("setup")
         self.setup_trainer_mesh = trainer_mesh
         self.setup_generator_meshes = generator_meshes
@@ -197,9 +202,10 @@ def stub_mesh_provisioning(monkeypatch):
     monkeypatch.setattr(train, "_compute_generator_world_size", lambda p: 1)
 
     def _spawn_proc_mesh(*args, num_generators=1, **kwargs):
-        return "trainer_mesh", [
-            f"generator_mesh_{idx}" for idx in range(num_generators)
-        ]
+        return (
+            "trainer_mesh",
+            [f"generator_mesh_{idx}" for idx in range(num_generators)],
+        )
 
     monkeypatch.setattr(train, "spawn_proc_mesh", _spawn_proc_mesh)
 
@@ -295,6 +301,21 @@ class _StubEndpoint:
             raise RuntimeError(f"{self._name} failed")
 
 
+class _RouterCloseEndpoint:
+    def __init__(self, router):
+        self._router = router
+
+    async def call_one(self):
+        return await self._router._fanout("close", return_exceptions=True)
+
+
+class _StubRouterHandle:
+    """Stands in for the router's actor-mesh handle, whose endpoints take adverbs."""
+
+    def __init__(self, router):
+        self.close_generators = _RouterCloseEndpoint(router)
+
+
 class _StubActor:
     def __init__(self, name, events, raises=False):
         self.close = _StubEndpoint(name, events, raises)
@@ -321,9 +342,11 @@ class _StubMesh:
 
 
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = InterGeneratorRouter(
-        InterGeneratorRouter.Config(),
-        generators=generators,
+    rl_trainer.generator_router = _StubRouterHandle(
+        InterGeneratorRouter(
+            InterGeneratorRouter.Config(),
+            generators=generators,
+        )
     )
 
 

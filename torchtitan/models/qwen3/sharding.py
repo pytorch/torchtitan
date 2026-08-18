@@ -11,6 +11,7 @@ import spmd_types as spmd
 from torchtitan.models.common.attention import GQAttention
 
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
@@ -80,12 +81,13 @@ def _set_qwen3_layer_sharding(
 
     # QK norms: shard on head dim (dim=1), independent of SP.
     if attention.qk_norm is not None:
+        head_layout = attention_activation_placement()
         attention.qk_norm.sharding_config = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-            in_src_shardings={"input": dense_activation_placement(tp=spmd.S(1))},
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.S(1))},
-            out_src_shardings=dense_activation_placement(tp=spmd.S(1)),
-            out_dst_shardings=dense_activation_placement(tp=spmd.S(1)),
+            in_src_shardings={"input": head_layout},
+            in_dst_shardings={"input": head_layout},
+            out_src_shardings=head_layout,
+            out_dst_shardings=head_layout,
         )
 
     # Dense FFN (non-MoE layers only)

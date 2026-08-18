@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -45,12 +44,16 @@ def flux_debugmodel() -> FluxTrainer.Config:
             num_tokens_per_microbatch_per_dp_rank=2048,
             max_norm=2.0,
             steps=10,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             prompt_dropout_prob=0.447,
             img_size=256,
         ),
-        parallelism=ParallelismConfig(context_parallel_degree=1),
+        parallelism=ParallelismConfig(
+            context_parallel_degree=1,
+            context_parallel_load_balancer="headtail",
+        ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -106,11 +109,15 @@ def flux_dev() -> FluxTrainer.Config:
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=24576,
             steps=30000,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",
             prompt_dropout_prob=0.447,
             img_size=256,
+        ),
+        parallelism=ParallelismConfig(
+            context_parallel_load_balancer="headtail",
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -156,11 +163,15 @@ def flux_schnell() -> FluxTrainer.Config:
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=32768,
             steps=30000,
+            disable_cuda_graphs=True,
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",
             prompt_dropout_prob=0.447,
             img_size=256,
+        ),
+        parallelism=ParallelismConfig(
+            context_parallel_load_balancer="headtail",
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),

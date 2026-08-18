@@ -84,7 +84,7 @@ class Attention(BaseAttention):
         self.wo = config.wo.build()
         self.softmax_scale = self.qk_head_dim**-0.5
 
-        if config.rope.max_seq_len > config.rope.original_seq_len:
+        if config.rope.scaling == "yarn" and config.rope.rope_factor > 1.0:
             mscale = 0.1 * config.mscale * math.log(config.rope.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 

@@ -337,7 +337,7 @@ class MTPLoss(BaseLoss):
         self,
         pred: list[torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: float | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         positions = kwargs.pop("positions", None)
