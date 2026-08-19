@@ -77,14 +77,12 @@ def olmo3_7b() -> Trainer.Config:
             enable_profiling=True,
             profile_freq=1000,
         ),
-        metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
-            tensorboard_step_axis="both",
-        ),
+        metrics=MetricsProcessor.Config(enable_tensorboard=True),
         model_spec=model_spec,
         optimizer=olmo3_pretrain_adamw(lr=3e-4),
         lr_scheduler=Olmo3CosWithWarmup.Config(
             warmup_steps=2000,
+            total_steps=1_192_092,
             alpha_f=0.1,
         ),
         training=TrainingConfig(
@@ -126,9 +124,3 @@ def olmo3_7b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=1000),
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def olmo3_7b_c4() -> Trainer.Config:
-    config = olmo3_7b()
-    config.dataloader = HuggingFaceTextDataLoader.Config(dataset="c4")
-    return config
