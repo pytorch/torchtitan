@@ -17,8 +17,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.models.llama3.model import Llama3Model
 
 
@@ -39,8 +38,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
-        validate_config(parallel_dims, model)
+    if parallelism.spmd_backend == "spmd_types":
         model.parallelize(parallel_dims)
     else:
         if parallel_dims.cp_enabled:
@@ -68,7 +66,7 @@ def parallelize_llama(
 
     # Always run apply_fsdp_to_decoder -- with shard_degree=1 it is a no-op for
     # the all-gather but still installs the MixedPrecisionPolicy.
-    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
+    if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
     else:
         names = (

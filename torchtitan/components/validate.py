@@ -20,7 +20,7 @@ from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -199,11 +199,6 @@ class Validator(BaseValidator):
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
                 self.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        if self.parallelism.spmd_backend == "full_dtensor":
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
             )
 
         return inputs, labels, extra_kwargs
