@@ -32,7 +32,6 @@ def parallelize_kimi_k3(
     dump_folder: str,
 ) -> nn.Module:
     """Apply FSDP2 to the Kimi K3 decoder and vision encoder."""
-    del dump_folder
 
     unsupported_parallelisms = [
         name
@@ -55,11 +54,7 @@ def parallelize_kimi_k3(
             "only; the config registry pins it."
         )
     if compile_config.enable and "model" in compile_config.components:
-        raise NotImplementedError("Kimi K3 does not support model compilation.")
-    if ac_config is not None:
-        raise NotImplementedError(
-            "Kimi K3 FSDP2 does not support activation checkpointing yet."
-        )
+        raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
@@ -67,6 +62,12 @@ def parallelize_kimi_k3(
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
     assert isinstance(model, KimiK3Model)
+    if ac_config is not None:
+        ac_policy = ac_config.build(dump_folder=dump_folder)
+        ac_policy.apply(model)
+        if model.vision_encoder is not None:
+            ac_policy.apply(model.vision_encoder)
+
     vision_encoder = model.vision_encoder
     if vision_encoder is not None:
         # TODO: An image batch on one DP rank and a text-only batch on another
