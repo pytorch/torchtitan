@@ -14,6 +14,7 @@
 # to fp32 noise (rel < 1e-4); bf16 mixed precision masks this, so we force fp32.
 #
 # Run: torchrun --nproc_per_node=2 tests/test_flex_cp_numerical.py \
+#          [--backend partial_dtensor|spmd_types] \
 #          [--balancer none|headtail|ptrr]
 
 import argparse
@@ -34,7 +35,11 @@ from torchtitan.tools import utils
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", default="default")
+    parser.add_argument(
+        "--backend",
+        default="partial_dtensor",
+        choices=["partial_dtensor", "spmd_types"],
+    )
     parser.add_argument("--hf_model", default="Qwen/Qwen2.5-7B")
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--bs", type=int, default=1)
@@ -49,6 +54,7 @@ def main():
     device = utils.get_local_device()
     torch.cuda.set_device(device)
     dist.init_process_group("nccl")
+    rank = dist.get_rank()
     torch.set_default_dtype(torch.float32)
 
     cp = world  # cp = world_size (dp=tp=pp=1)
@@ -155,6 +161,16 @@ def main():
         full_mask_cp,
         load_balancer_type=balancer,
     )
+    if args.backend == "spmd_types":
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+
+        loc_input, _, extra_kwargs = annotate_input_spmd_types(
+            parallel_dims,
+            loc_input,
+            loc_input,
+            {"positions": loc_pos},
+        )
+        loc_pos = extra_kwargs["positions"]
     _fm = tuple(full_mask_cp.shape) if full_mask_cp is not None else None
     _lm = tuple(loc_mask.shape) if loc_mask is not None else None
     print(
@@ -162,7 +178,8 @@ def main():
         f"full_mask={_fm} loc_mask={_lm}"
     )
 
-    with torch.no_grad():
+    train_context = dist_utils.get_spmd_context(parallel_dims=parallel_dims)
+    with torch.no_grad(), train_context():
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
     loc_logits = (
         loc_logits.to_local() if hasattr(loc_logits, "to_local") else loc_logits
