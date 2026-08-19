@@ -36,6 +36,7 @@ from ._optimizer_reshard_schedule import (
     _RedistributionPlan,
     _require_valid_plan,
     _RouteEndpoint,
+    _StorageRegionMapping,
     _TensorRegion,
     _TensorRegionRoute,
     _validate_bucket_plans_across_ranks,
@@ -1122,7 +1123,7 @@ def _build_parameter_redistribution_plan(
 
 
 def _build_batched_matrix_redistribution_plan(
-    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
+    storage_regions: Sequence[_StorageRegionMapping],
     *,
     participants: tuple[int, ...],
     storage_shape: tuple[int, ...],
@@ -1495,10 +1496,10 @@ def _resolve_storage_to_compute_transition(
                 )
                 if type(preserved_storage_sharding) is Replicate:
                     continue
-                source_storage_placement = param.placements[
+                redistribution_storage_placement = param.placements[
                     redistribution_storage_mesh_axis
                 ]
-                target_compute_sharding = (
+                redistribution_compute_sharding = (
                     normalized_target_sharding_by_storage_mesh_axis.get(
                         redistribution_storage_mesh_axis
                     )
@@ -1508,32 +1509,32 @@ def _resolve_storage_to_compute_transition(
                     and _is_supported_orthogonal_dim0_shard_redistribution(
                         ndim=param.ndim,
                         compute_view=compute_view,
-                        source_storage_placement=source_storage_placement,
-                        target_compute_sharding=target_compute_sharding,
+                        source_storage_placement=redistribution_storage_placement,
+                        target_compute_sharding=redistribution_compute_sharding,
                         preserved_storage_placement=placement,
                     )
                 ):
                     uses_supported_orthogonal_shard_redistribution = True
                     continue
                 if (
-                    type(source_storage_placement) is Shard
-                    and type(target_compute_sharding)
+                    type(redistribution_storage_placement) is Shard
+                    and type(redistribution_compute_sharding)
                     in (Shard, _StridedShard, BlockShard)
                     and type(placement) is Shard
                 ):
                     target_compute_shard = cast(
                         Shard | _StridedShard | BlockShard,
-                        target_compute_sharding,
+                        redistribution_compute_sharding,
                     )
                     storage_dim = _normalize_dim(
-                        source_storage_placement.dim, param.ndim
+                        redistribution_storage_placement.dim, param.ndim
                     )
                     target_dim = _normalize_dim(target_compute_shard.dim, param.ndim)
                     preserved_dim = _normalize_dim(placement.dim, param.ndim)
                     if (
                         storage_dim == 1
                         and target_dim == preserved_dim == 0
-                        and type(target_compute_sharding) is Shard
+                        and type(redistribution_compute_sharding) is Shard
                         and redistribution_storage_mesh_axis < storage_mesh_axis
                     ):
                         raise ValueError(
@@ -1548,7 +1549,7 @@ def _resolve_storage_to_compute_transition(
                         f"Muon parameter {fqn!r} cannot redistribute storage on "
                         f"mesh axis {redistribution_axis_name!r} from "
                         f"Shard({storage_dim}) to "
-                        f"{target_compute_sharding!r} while "
+                        f"{redistribution_compute_sharding!r} while "
                         f"preserving Shard({preserved_dim}) storage on mesh axis "
                         f"{mesh_axis_names[storage_mesh_axis]!r}; orthogonal-shard "
                         "redistribution is not implemented"

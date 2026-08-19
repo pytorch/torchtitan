@@ -243,6 +243,10 @@ class ConfigManager:
                 str_from_instance=lambda instance: [",".join(instance)],
             )
 
+        # Tyro traverses default optimizer factory kwargs even without a CLI
+        # override. Inspecting PyTorch's private _StridedShard normally raises
+        # `NameError: name '_SymNodeLike' is not defined`, so parse it as a
+        # primitive.
         @registry.primitive_rule
         def strided_shard_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
             """Treat PyTorch's private strided-shard placement as a primitive."""

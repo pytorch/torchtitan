@@ -122,6 +122,12 @@ class _TensorRegion:
         return math.prod(self.shape)
 
 
+_StorageRegionMapping: TypeAlias = tuple[tuple[int, ...], _TensorRegion]
+_DTensorStorageDomain: TypeAlias = tuple[
+    tuple[int, ...], tuple[_StorageRegionMapping, ...]
+]
+
+
 @dataclass(frozen=True, slots=True)
 class _ParticipantPartition:
     """One participant's tensor shape and its global logical regions."""
@@ -466,7 +472,7 @@ def _validate_regions_cover_partition(
 
 
 def _build_whole_tensor_redistribution_plan(
-    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
+    storage_regions: Sequence[_StorageRegionMapping],
     *,
     participants: tuple[int, ...],
     compute_participants: tuple[int, ...],
@@ -553,7 +559,7 @@ def _build_whole_tensor_redistribution_plan(
 
 
 def _build_owned_redistribution_plan(
-    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
+    storage_regions: Sequence[_StorageRegionMapping],
     *,
     participants: tuple[int, ...],
     owner_rank: int,
@@ -569,15 +575,13 @@ def _build_owned_redistribution_plan(
 
 
 def _build_dim0_shard_redistribution_plan(
-    storage_regions: Sequence[tuple[tuple[int, ...], _TensorRegion]],
+    storage_regions: Sequence[_StorageRegionMapping],
     *,
     participants: tuple[int, ...],
     shard_participants: tuple[int, ...],
     logical_shape: tuple[int, ...],
 ) -> _RedistributionPlan:
     """Route storage regions to dim-0 compute shards."""
-    participants = tuple(participants)
-    shard_participants = tuple(shard_participants)
     participant_set = set(participants)
     _require_valid_plan(
         len(shard_participants) == len(participants)
@@ -586,8 +590,7 @@ def _build_dim0_shard_redistribution_plan(
     )
     storage_endpoints = []
     storage_by_participant = {}
-    for raw_holders, logical_region in storage_regions:
-        holders = tuple(raw_holders)
+    for holders, logical_region in storage_regions:
         _require_valid_plan(
             bool(holders)
             and len(set(holders)) == len(holders)
@@ -615,6 +618,7 @@ def _build_dim0_shard_redistribution_plan(
     )
 
     compute_partitions = []
+    storage_to_compute_routes = []
     compute_endpoints = []
     shard_index_by_participant = {
         participant: index for index, participant in enumerate(shard_participants)
@@ -640,7 +644,6 @@ def _build_dim0_shard_redistribution_plan(
         )
         compute_endpoints.append((participant, logical_region))
 
-    storage_to_compute_routes = []
     for source_holders, storage_region in storage_endpoints:
         for destination, compute_region in compute_endpoints:
             logical_region = _tensor_region_intersection(
@@ -940,7 +943,8 @@ def _dtensor_storage_regions(
     participants: tuple[int, ...],
     *,
     required_storage_mesh_axis: int | None,
-) -> tuple[tuple[int, ...], tuple[tuple[tuple[int, ...], _TensorRegion], ...],]:
+) -> _DTensorStorageDomain:
+    """Return the transport-local shape and holder-to-region mappings."""
     storage_mesh = tensor.device_mesh
     storage_ranks = storage_mesh.mesh
     reference_locations = (storage_ranks == participants[0]).nonzero()

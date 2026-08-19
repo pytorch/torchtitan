@@ -458,11 +458,12 @@ def _dist_muon_optimizer(
     )
 
 
-def _refresh_dist_muon_expert_compute_layout(
+def _align_dist_muon_expert_compute_layouts(
     optimizer_config: OptimizersContainer.Config,
     *,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
+    """Align routed-expert layouts with the final parallelism config."""
     factory_kwargs_by_name = {
         name: dict(factory_kwargs)
         for name, factory_kwargs in (
@@ -477,18 +478,18 @@ def _refresh_dist_muon_expert_compute_layout(
         dist_muon_kwargs["compute_sharding_by_fqn"],
     )
     per_expert = _per_expert_compute_layout(parallelism)
-    refreshed_shardings = {}
+    aligned_shardings = {}
     changed = False
     for fqn, compute_layout in compute_sharding_by_fqn.items():
         if ".moe.routed_experts.inner_experts." in fqn and compute_layout != per_expert:
-            refreshed_shardings[fqn] = per_expert
+            aligned_shardings[fqn] = per_expert
             changed = True
         else:
-            refreshed_shardings[fqn] = compute_layout
+            aligned_shardings[fqn] = compute_layout
     if not changed:
         return optimizer_config
 
-    dist_muon_kwargs["compute_sharding_by_fqn"] = refreshed_shardings
+    dist_muon_kwargs["compute_sharding_by_fqn"] = aligned_shardings
     return replace(
         optimizer_config,
         optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
@@ -499,7 +500,7 @@ def _refresh_dist_muon_expert_compute_layout(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimizer = _refresh_dist_muon_expert_compute_layout(
+        self.optimizer = _align_dist_muon_expert_compute_layouts(
             self.optimizer,
             parallelism=self.parallelism,
         )
