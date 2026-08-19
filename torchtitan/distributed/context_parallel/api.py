@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
@@ -15,21 +15,26 @@ from torch.distributed.tensor.experimental._attention import (
 )
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import AttentionMasksType
 
+if TYPE_CHECKING:
+    from torchtitan.config import ParallelismConfig
 
-def validate_cp_backend(parallel_dims: ParallelDims) -> None:
+
+def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
     """Reject Context Parallel on SPMD backends that do not implement it.
 
-    CP redistribution is declared in ``ShardingConfig`` -- q stays seq-sharded
-    on the CP axis while k/v are all-gathered at the ``local_map`` boundary --
-    and only the spmd_types backend applies those annotations.
+    Call this from a model config's ``update_from_config``. Models that bring
+    their own CP implementation instead of declaring it in ``ShardingConfig``
+    do not call this.
     """
-    if parallel_dims.cp_enabled and parallel_dims.spmd_backend != "spmd_types":
+    if (
+        parallelism.context_parallel_degree > 1
+        and parallelism.spmd_backend != "spmd_types"
+    ):
         raise ValueError(
             "Context Parallel requires parallelism.spmd_backend='spmd_types', "
-            f"got '{parallel_dims.spmd_backend}'."
+            f"got '{parallelism.spmd_backend}'."
         )
 
 

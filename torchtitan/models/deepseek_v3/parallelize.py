@@ -13,9 +13,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import validate_cp_backend
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh, resolve_sparse_fsdp_mesh
-from torchtitan.distributed.spmd_types import validate_config
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import apply_fsdp_to_mtp_decoder
 
@@ -30,11 +28,11 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    validate_cp_backend(parallel_dims)
-    if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
-        model.parallelize(parallel_dims)
-    elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)
 
     model_compile_enabled = (

@@ -244,7 +244,7 @@ def to_graph_trainer_config(
     # TODO: adopt spmd_types and re-enable Context Parallel. CP shardings are
     # declared in ShardingConfig and only the spmd_types backend applies them,
     # so pinning partial_dtensor here is what makes CP unavailable to
-    # graph_trainer (see validate_cp_backend).
+    # graph_trainer (rejected by Decoder.Config.update_from_config).
     d["parallelism"] = replace(
         base_config.parallelism,
         spmd_backend="partial_dtensor",

@@ -12,8 +12,8 @@ Context Parallel APIs
 ``prepare_context_parallel_input`` is the main API.
 TODO: we should generalize this API to cover even Flux's use case.
 
-``validate_cp_backend`` is called by every model that expresses CP through
-``ShardingConfig``, which is all of them.
+``validate_cp_backend`` is called from a model config's
+``update_from_config`` by the models that declare CP in ``ShardingConfig``.
 """
 
 from .api import cp_shard, prepare_context_parallel_input, validate_cp_backend

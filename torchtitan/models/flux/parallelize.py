@@ -28,7 +28,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.context_parallel import validate_cp_backend
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
@@ -50,7 +49,6 @@ def parallelize_flux(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    validate_cp_backend(parallel_dims)
     if ac_config is not None:
         apply_ac(model)
 

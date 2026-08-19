@@ -19,8 +19,7 @@ _JIT_DISABLED = True
 # TODO: Context Parallel is unavailable to graph_trainer. CP shardings are
 # declared in ShardingConfig and only the spmd_types backend applies them,
 # while to_graph_trainer_config pins spmd_backend to partial_dtensor.
-# Clear once graph_trainer adopts spmd_types. Some CP flavors below carry a
-# second blocker and stay disabled until that one is cleared too.
+# Re-enable once graph_trainer adopts spmd_types.
 _CP_DISABLED = True
 
 # TODO: FlexAttention + CP + regional_inductor is unsupported upstream: the CP

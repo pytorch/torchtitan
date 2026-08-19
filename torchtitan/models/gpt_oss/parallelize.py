@@ -16,13 +16,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import validate_cp_backend
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from torchtitan.distributed.spmd_types import validate_config
 from torchtitan.models.gpt_oss.model import GptOssModel
 
 
@@ -71,11 +69,11 @@ def parallelize_gptoss(
         compile_config.enable and "model" in compile_config.components
     )
 
-    validate_cp_backend(parallel_dims)
-    if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
-        model.parallelize(parallel_dims)
-    elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)
 
     if ac_config is not None:
