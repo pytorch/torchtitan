@@ -904,7 +904,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
-        loss_is_finite = torch.ones((), dtype=torch.bool, device=self.device)
+        # int32 is supported by NCCL reductions, unlike bool.
+        loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
         for microbatches in microbatch_groups:
             input_dict_mbs = []
             label_mbs = []
@@ -951,19 +952,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 pp_mesh=parallel_dims.get_optional_mesh("pp"),
                 ep_enabled=parallel_dims.ep_enabled,
             )
-            finite_flags = torch.stack(
-                [loss_is_finite, torch.isfinite(grad_norm).all()]
-            ).to(dtype=torch.int32)
-            torch.distributed.all_reduce(
-                finite_flags,
-                op=torch.distributed.ReduceOp.MIN,
-                group=parallel_dims.world_mesh.get_group(),
-            )
-            if not finite_flags.all().item():
-                raise RuntimeError(
-                    "Loss or gradient norm is not finite on at least one rank at "
-                    f"step {self.step}. Stopping training before the optimizer update."
+            # Only the last PP stage owns the loss. First combine its DP/CP
+            # replicas, then propagate the result across PP. TP replicas have
+            # identical loss values, and grad_norm is already world-reduced by
+            # clip_grad_norm_.
+            if not parallel_dims.pp_enabled or self.pp_has_last_stage:
+                loss_mesh = parallel_dims.get_optional_mesh("loss")
+                if loss_mesh is not None:
+                    torch.distributed.all_reduce(
+                        loss_is_finite,
+                        op=torch.distributed.ReduceOp.MIN,
+                        group=loss_mesh.get_group(),
+                    )
+            pp_mesh = parallel_dims.get_optional_mesh("pp")
+            if pp_mesh is not None:
+                torch.distributed.all_reduce(
+                    loss_is_finite,
+                    op=torch.distributed.ReduceOp.MIN,
+                    group=pp_mesh.get_group(),
                 )
+
+            step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
+            # Keep the check and optimizer kernels ordered on the device without
+            # synchronizing the host on every step. A failed CUDA assertion
+            # invalidates the process before later kernels can update parameters.
+            torch._assert_async(
+                step_is_finite,
+                "Loss or gradient norm is not finite on at least one rank at "
+                f"step {self.step}. Stopping training before the optimizer update.",
+            )
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
             self.lr_schedulers.step()
