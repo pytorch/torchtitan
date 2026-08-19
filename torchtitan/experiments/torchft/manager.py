@@ -20,6 +20,9 @@ from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
 
 from torchtitan.config import Configurable
+from torchtitan.experiments.torchft.process_group_registry import (
+    create_process_group,
+)
 from torchtitan.tools.logging import logger
 
 if importlib.util.find_spec("torchft") is not None:
@@ -47,7 +50,9 @@ class TorchFTManager(Configurable):
 
         process_group: str = "gloo"
         """
-        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
+        The process group to use for fault tolerance. TorchTitan registers
+        "gloo", "nccl", and "mccl". Accelerator integrations may register
+        additional backends with ``register_process_group_factory``.
         """
 
         process_group_timeout_ms: int = 10000
@@ -88,24 +93,7 @@ class TorchFTManager(Configurable):
             raise ImportError("torchft is not installed. Please install it.")
 
         process_group_timeout = timedelta(milliseconds=config.process_group_timeout_ms)
-        if config.process_group == "gloo":
-            pg = torchft.ProcessGroupGloo(timeout=process_group_timeout)
-        elif config.process_group == "nccl":
-            pg = torchft.ProcessGroupNCCL(timeout=process_group_timeout)
-        elif config.process_group == "mccl":
-            import torchcomms
-            from torchft.torchcomms import ProcessGroupTorchComms
-
-            comm = torchcomms.new_comm(
-                "mccl",
-                device=torch.device("cuda"),
-                name="mccl_ft",
-                timeout=process_group_timeout,
-                enable_reconfigure=True,
-            )
-            pg = ProcessGroupTorchComms(comm, timeout=process_group_timeout)
-        else:
-            raise ValueError(f"Unsupported process group: {config.process_group}")
+        pg = create_process_group(config.process_group, process_group_timeout)
 
         # If the training method is specific, then the quorum should be synchronous
         self.use_async_quorum = config.semi_sync_method is None
