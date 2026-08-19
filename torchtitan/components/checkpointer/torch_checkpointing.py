@@ -17,7 +17,9 @@ from torch_checkpointing.checkpoint_manager import (
 )
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
-from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.dtensor_resharder import (  # pyrefly: ignore[missing-import]
+    DTensorResharder,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torchtitan.components.data.loader import BaseDataLoader
@@ -41,7 +43,7 @@ _DEFAULT_BARRIER_TIMEOUT_SEC = 600
 
 
 def _item_specs() -> dict[str, ItemSpec]:
-    resharder = DefaultResharder()
+    resharder = DTensorResharder()
     return {
         MODEL: ItemSpec(
             requires_copy=True,
