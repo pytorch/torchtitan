@@ -17,10 +17,12 @@ from torch_checkpointing.checkpoint_manager import (
 )
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
-from torch_checkpointing.dtensor_resharder import DTensorResharder
+from torch_checkpointing.dtensor_resharder import (  # pyrefly: ignore[missing-import]
+    DTensorResharder,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -100,6 +102,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.enable = config.enable
         if not self.enable:
             return
+        self.save_future = None
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
@@ -139,27 +142,29 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     # The methods are stubbed rather than omitted because BaseCheckpointManager
     # declares them abstract, so a partial implementation cannot be instantiated.
 
-    def load(self, step: int = -1) -> bool:
-        if not self.enable:
-            return False
+    def _load(self, step: int = -1) -> bool:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement load() yet."
         )
 
-    def save(self, curr_step: int, last_step: bool = False) -> bool:
-        if not self.enable:
-            return False
+    def _save(self, curr_step: int, last_step: bool = False) -> bool:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement save() yet."
         )
 
-    def maybe_wait_for_staging(self) -> None:
-        if not self.enable:
-            return
+    def _wait_for_saving(self) -> None:
+        raise NotImplementedError(
+            "TorchCheckpointingManager does not implement saving yet."
+        )
+
+    def _maybe_wait_for_staging(self) -> None:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement maybe_wait_for_staging() yet."
         )
 
-    def close(self) -> None:
+    def _close(self) -> None:
+        # hasattr: __del__ -> close() can reach here on a partially constructed
+        # object if __init__ raised after setting enable but before building the
+        # backend manager.
         if hasattr(self, "_manager"):
             self._manager.close()
