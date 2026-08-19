@@ -19,9 +19,10 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.ema import EMA
+from torchtitan.components.external_eval import ExternalEval
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -96,12 +97,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
+        ema: EMA.Config = field(default_factory=EMA.Config)
         activation_checkpoint: ActivationCheckpointingConfig = field(
             default_factory=SelectiveAC.Config
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
+        external_eval: ExternalEval.Config = field(default_factory=ExternalEval.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
@@ -524,6 +527,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
+        self.ema = config.ema.build(checkpointer=self.checkpointer)
+        self.external_eval = config.external_eval.build()
+
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
             spmd_typechecking=(
@@ -912,6 +918,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         last_step=(self.step == config.training.steps),
                     )
 
+                    averaged_checkpoint = self.ema.maybe_save(
+                        self.step,
+                        warmup_steps=config.lr_scheduler.warmup_steps,
+                    )
+
+                    if config.external_eval.enable and self.external_eval.should_eval(
+                        self.step
+                    ):
+                        if config.external_eval.eval_raw:
+                            checkpoint_dir = self.checkpointer.save_for_external_eval(
+                                self.step
+                            )
+                            self.external_eval.launch(
+                                step=self.step,
+                                checkpoint_dir=checkpoint_dir,
+                                output_name=f"step-{self.step}",
+                                source_steps=[self.step],
+                                trainer_config=config,
+                            )
+
+                        if averaged_checkpoint is not None:
+                            self.external_eval.launch(
+                                step=self.step,
+                                checkpoint_dir=averaged_checkpoint.checkpoint_dir,
+                                output_name=averaged_checkpoint.output_name,
+                                source_steps=averaged_checkpoint.source_steps,
+                                trainer_config=config,
+                            )
+
                     # Run validation if validator is available
                     if self.config.validator.enable and self.validator.should_validate(
                         self.step
@@ -953,3 +988,5 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
+        if hasattr(self, "external_eval") and self.external_eval:
+            self.external_eval.close()
