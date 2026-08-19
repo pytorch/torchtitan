@@ -107,9 +107,9 @@ def parallelize_hf_transformers(
         raise NotImplementedError(
             f"The HF transformers backend only supports "
             f"spmd_backend='partial_dtensor' "
-            f"today; got '{parallel_dims.spmd_backend}'. spmd_types/full_dtensor "
-            "are not yet wired for this backend (FSDP mesh resolution, "
-            "Titan-native embedding, and attention kernels are pending)."
+            f"today; got '{parallel_dims.spmd_backend}'. spmd_types is not yet "
+            "wired for this backend (FSDP mesh resolution, Titan-native "
+            "embedding, and attention kernels are pending)."
         )
 
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP

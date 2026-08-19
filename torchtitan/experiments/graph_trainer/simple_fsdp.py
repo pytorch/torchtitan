@@ -171,7 +171,6 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        full_dtensor: bool = False,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -184,7 +183,6 @@ class ReplicateComputation(Module):
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
-        self.full_dtensor = full_dtensor
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -194,10 +192,6 @@ class ReplicateComputation(Module):
         non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
-            if self.full_dtensor:
-                raise NotImplementedError(
-                    "full_dtensor not implemented for nD parallelisms"
-                )
             dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
@@ -234,9 +228,7 @@ class ReplicateComputation(Module):
                 forward_dtype=self.param_dtype,
                 backward_dtype=self.reduce_dtype,
             )
-
-            if not self.full_dtensor:
-                output = output.to_local(grad_placements=self.grad_placements)
+            output = output.to_local(grad_placements=self.grad_placements)
         else:
             raise AssertionError(
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
@@ -264,7 +256,6 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
-    full_dtensor: bool = False,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
@@ -323,7 +314,6 @@ def data_parallel(
                 param_sharding,
                 mode,
                 mp_policy=mp_policy,
-                full_dtensor=full_dtensor,
             ),
         )
     return model

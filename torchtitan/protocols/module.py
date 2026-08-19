@@ -590,12 +590,6 @@ class Module(nn.Module, Configurable):
             if mesh is None:
                 continue
 
-            if (
-                not isinstance(value, DTensor)
-                and parallel_dims.spmd_backend == "full_dtensor"
-            ):
-                raise ValueError("Got a plain Tensor under the full_dtensor mode.")
-
             if not isinstance(value, DTensor) and src_spmd_layout is not None:
                 layout = resolve_placements(src_spmd_layout, mesh)
                 value = DTensor.from_local(
