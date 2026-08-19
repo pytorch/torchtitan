@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -14,7 +13,6 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from fla.modules.conv.triton.ops import CausalConv1dFunction
-
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
@@ -26,7 +24,6 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import (
@@ -40,6 +37,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -749,12 +747,6 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
-    def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
-        """Use local DP typechecking while preparing multimodal inputs."""
-        if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
-            return spmd.set_current_mesh(local_axes=("dp",))
-        return contextlib.nullcontext()
-
     def get_attention_masks(
         self,
         positions: torch.Tensor,
@@ -919,7 +911,7 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        with self.multimodal_context():
+        with multimodal_context():
             if get_spmd_backend() == "spmd_types":
                 annotate_qwen35_input_spmd_types(
                     attention_masks=attention_masks,
@@ -942,7 +934,7 @@ class Qwen35Model(Decoder):
             else:
                 x = tokens
 
-        if get_spmd_backend() == "spmd_types":
+        if spmd.is_type_checking():
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})

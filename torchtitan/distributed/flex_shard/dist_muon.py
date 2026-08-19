@@ -21,11 +21,7 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
-from ._optimizer_reshard_runtime import (
-    _BucketedRedistributionRuntime,
-    _BufferSlot,
-    _LocalBucketExecutor,
-)
+from ._optimizer_reshard_runtime import _BucketedRedistributionRuntime
 
 from ._optimizer_reshard_schedule import (
     _bind_bucket_configs,
@@ -68,11 +64,14 @@ def build_dist_muon(
 ) -> DistMuon:
     """Construct a DistMuon optimizer with FlexShard redistribution.
 
-    For DistMuon, ``BlockShard(dim=0, block_size=R)`` interprets a parameter
-    stored as ``[M * R, C]`` as ``M`` independent matrices ``[M, R, C]`` for
-    local Muon compute. A native 3D ``[M, R, C]`` parameter can use
-    ``Shard(0)`` to distribute complete matrices. A 2D parameter without
-    ``BlockShard`` must use whole-matrix compute such as ``Owned``.
+    DistMuon's ``BlockShard`` path accepts only a 2D parameter stored as
+    ``[M * R, C]`` with contiguous local DTensor storage. The placement must
+    target tensor dimension 0 with ``block_size=R``; the leading dimension
+    must be nonzero and divisible by ``R``. Each consecutive ``R`` rows forms
+    one independent ``[R, C]`` matrix for local Muon compute. A native
+    batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
+    complete matrices. A single 2D matrix without ``BlockShard`` uses
+    whole-matrix compute such as ``Owned``.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -142,6 +141,11 @@ def _matrix_batch_view_from_compute_layout(
     if not block_shards:
         return None
 
+    if len(storage_shape) != 2:
+        raise ValueError(
+            f"Muon parameter {fqn!r} BlockShard currently requires a "
+            f"2D [M * R, C] parameter; got shape {tuple(storage_shape)}"
+        )
     normalized_dims = tuple(
         _normalize_dim(block_shard.dim, len(storage_shape))
         for block_shard in block_shards
@@ -242,15 +246,11 @@ def _initialize_dist_muon(
     optimizer._redistribution_runtime.reserve_buffers(
         optimizer._bucket_plans,
         local_tensor_spec=optimizer._local_tensor_spec,
-        local_bucket_executor=optimizer,
     )
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
 
 
-class DistMuon(
-    Optimizer,
-    _LocalBucketExecutor["_ParameterComputeLayout"],
-):
+class DistMuon(Optimizer):
     """Muon optimizer constructed by ``build_dist_muon``.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
@@ -327,7 +327,6 @@ class DistMuon(
             prepare=self._prepare_local,
             compute=self._compute_update,
             finalize=self._apply_update,
-            local_bucket_executor=self,
         )
         return loss
 
@@ -438,9 +437,6 @@ class DistMuon(
         )
         self._bucket_plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
-        self._local_execution_plans: dict[
-            tuple[str, ...], tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]
-        ] = {}
 
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
@@ -615,14 +611,9 @@ class DistMuon(
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
+        group = self._group(compute_layout)
         if compute_layout.compute_view is not None:
             compute = compute_layout.compute_view.view_as_matrix_batch(compute)
-        self._compute_direction(compute_layout, compute)
-
-    def _compute_direction(
-        self, compute_layout: _ParameterComputeLayout, compute: Tensor
-    ) -> None:
-        group = self._group(compute_layout)
         _compute_muon_direction(
             compute,
             ns_coefficients=group["ns_coefficients"],
@@ -648,131 +639,6 @@ class DistMuon(
         )
         torch.autograd.graph.increment_version(compute_layout.param)
 
-    def _plan_local_bucket(
-        self,
-        local_work: tuple[_ParameterComputeLayout, ...],
-    ) -> dict[tuple[torch.device, torch.dtype], int]:
-        execution_plan = self._build_local_execution_plan(local_work)
-        self._local_execution_plans[_local_bucket_key(local_work)] = execution_plan
-
-        requirements: dict[tuple[torch.device, torch.dtype], int] = {}
-        for local_execution in execution_plan:
-            if isinstance(local_execution, _LocalMatrixBatch):
-                shape = local_execution.shape
-                dtype = local_execution.dtype
-                device = local_execution.device
-            else:
-                shape, dtype, device = self._local_tensor_spec(local_execution)
-            key = (device, dtype)
-            requirements[key] = max(requirements.get(key, 0), math.prod(shape))
-        return requirements
-
-    def _execute_local_bucket(
-        self,
-        local_work: tuple[_ParameterComputeLayout, ...],
-        slot: _BufferSlot,
-    ) -> None:
-        for local_execution in self._local_execution_plans[
-            _local_bucket_key(local_work)
-        ]:
-            if not isinstance(local_execution, _LocalMatrixBatch):
-                self._execute_local_item(local_execution, slot)
-                continue
-
-            ns_signature = self._ns_signature(local_execution.slices[0].layout)
-            if any(
-                self._ns_signature(batch_slice.layout) != ns_signature
-                for batch_slice in local_execution.slices[1:]
-            ):
-                # Optimizer group dictionaries remain mutable. Preserve
-                # per-group semantics if NS settings diverge after planning.
-                for batch_slice in local_execution.slices:
-                    self._execute_local_item(batch_slice.layout, slot)
-                continue
-
-            prepared = slot.compute_buffer(
-                local_execution.shape,
-                dtype=local_execution.dtype,
-                device=local_execution.device,
-            )
-            for batch_slice in local_execution.slices:
-                matrix_batch = prepared.narrow(0, batch_slice.offset, batch_slice.size)
-                self._prepare_local(
-                    batch_slice.layout,
-                    _physical_compute_tensor(batch_slice.layout, matrix_batch),
-                )
-
-            self._compute_direction(local_execution.slices[0].layout, prepared)
-            for batch_slice in local_execution.slices:
-                matrix_batch = prepared.narrow(0, batch_slice.offset, batch_slice.size)
-                self._apply_update(
-                    batch_slice.layout,
-                    _physical_compute_tensor(batch_slice.layout, matrix_batch),
-                )
-
-    def _execute_local_item(
-        self,
-        layout: _ParameterComputeLayout,
-        slot: _BufferSlot,
-    ) -> None:
-        shape, dtype, device = self._local_tensor_spec(layout)
-        prepared = slot.compute_buffer(shape, dtype=dtype, device=device)
-        self._prepare_local(layout, prepared)
-        self._compute_update(layout, prepared)
-        self._apply_update(layout, prepared)
-
-    def _ns_signature(
-        self,
-        layout: _ParameterComputeLayout,
-    ) -> tuple[Any, ...]:
-        group = self._group(layout)
-        return (
-            tuple(group["ns_coefficients"]),
-            group["ns_steps"],
-            group["eps"],
-        )
-
-    def _build_local_execution_plan(
-        self,
-        layouts: tuple[_ParameterComputeLayout, ...],
-    ) -> tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]:
-        grouped: dict[tuple[Any, ...], list[_ParameterComputeLayout]] = {}
-        for layout in layouts:
-            shape, dtype, device = _local_matrix_batch_spec(layout)
-            if len(shape) != 3:
-                key = (layout.fqn,)
-            else:
-                # Communication buckets may span layers. Restrict batching to
-                # sibling tensors so their combined scratch stays layer-local.
-                parent_fqn, separator, _ = layout.fqn.rpartition(".")
-                key = (
-                    parent_fqn if separator else layout.fqn,
-                    tuple(shape[1:]),
-                    dtype,
-                    device,
-                    self._ns_signature(layout),
-                )
-            grouped.setdefault(key, []).append(layout)
-
-        execution_plan: list[_ParameterComputeLayout | _LocalMatrixBatch] = []
-        for compatible_layouts in grouped.values():
-            batch_layouts = []
-            batch_bytes = 0
-            for layout in compatible_layouts:
-                shape, _dtype, _device = _local_matrix_batch_spec(layout)
-                tensor_bytes = math.prod(shape) * layout.param.element_size()
-                if (
-                    batch_layouts
-                    and batch_bytes + tensor_bytes > _MAX_LOCAL_MATRIX_BATCH_BYTES
-                ):
-                    execution_plan.append(_make_local_matrix_execution(batch_layouts))
-                    batch_layouts = []
-                    batch_bytes = 0
-                batch_layouts.append(layout)
-                batch_bytes += tensor_bytes
-            execution_plan.append(_make_local_matrix_execution(batch_layouts))
-        return tuple(execution_plan)
-
     @staticmethod
     def _local_tensor_spec(
         compute_layout: _ParameterComputeLayout,
@@ -780,11 +646,6 @@ class DistMuon(
         assert compute_layout.storage_is_compute_ready
         tensor = compute_layout.param.to_local().detach()
         return tensor.shape, tensor.dtype, tensor.device
-
-
-# Bound persistent scratch for a combined local batch. A single layout may
-# exceed this cap and continues through the existing unbatched path.
-_MAX_LOCAL_MATRIX_BATCH_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -863,7 +724,7 @@ def _validate_matrix_batch_storage_placements(
 
 def _row_intervals_by_mesh_axis_coordinate(
     num_rows: int,
-    sharding: Replicate | Shard | BlockShard,
+    sharding: _AxisComputeSharding,
     *,
     mesh_axis_size: int,
 ) -> tuple[tuple[int, int], ...]:
@@ -902,7 +763,7 @@ def _resolve_storage_to_compute_redistribution_requirement(
     fqn: str,
     param: DTensor,
     compute_view: _MatrixBatchView | None,
-    target_sharding_by_storage_mesh_axis: Mapping[int, Replicate | Shard | BlockShard],
+    target_sharding_by_storage_mesh_axis: Mapping[int, _AxisComputeSharding],
     declared_storage_mesh_axes: Sequence[int],
 ) -> tuple[int, ...]:
     """Compare actual storage with the target compute tensor."""
@@ -1034,7 +895,7 @@ class _ParameterComputeLayout:
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
     local_storage_signature: tuple[Any, ...]
-    compute_sharding: _ComputeSharding
+    compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
     redistribution_storage_mesh_axis: int | None
@@ -1059,8 +920,13 @@ class _RedistributionTransition:
 _StorageToComputeTransition = _NoRedistributionTransition | _RedistributionTransition
 
 
-_ComputeSharding = Owned | Replicate | Shard
-_ComputeTensorSharding = Replicate | Shard | BlockShard
+# Per-mesh-axis tensor sharding while resolving ``ComputeLayout``. ``BlockShard``
+# remains explicit here, while ``Owned`` is handled separately.
+_AxisComputeSharding = Replicate | Shard | BlockShard
+
+# Executor strategy after per-axis shardings are resolved. ``BlockShard`` has
+# become ``Shard(0)`` plus ``_MatrixBatchView``; ``Owned`` remains valid here.
+_ResolvedComputeSharding = Owned | Replicate | Shard
 
 
 @dataclass(frozen=True, slots=True)
@@ -1089,7 +955,7 @@ class _UnsupportedStoragePlacement:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedStorageToComputeTransition:
-    compute_sharding: _ComputeSharding
+    compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
     redistribution_storage_mesh_axis: int | None = None
@@ -1516,7 +1382,7 @@ def _resolve_storage_to_compute_transition(
             )
 
     normalized_target_sharding_by_storage_mesh_axis: dict[
-        int, _ComputeTensorSharding
+        int, _AxisComputeSharding
     ] = {}
     declared_shard_dims = []
     for (
@@ -1525,7 +1391,7 @@ def _resolve_storage_to_compute_transition(
     ) in applicable_compute_shardings_by_storage_mesh_axis.items():
         if type(sharding) is Owned:
             continue
-        placement = cast(_ComputeTensorSharding, sharding)
+        placement = cast(_AxisComputeSharding, sharding)
         if type(placement) is Shard:
             declared_shard_dims.append(_normalize_dim(placement.dim, param.ndim))
         elif type(placement) is BlockShard:
@@ -1622,7 +1488,7 @@ def _resolve_storage_to_compute_transition(
     for storage_mesh_axis, axis_name in enumerate(mesh_axis_names):
         if storage_mesh_axis in owned_axis_set:
             target_sharding: (
-                Owned | Replicate | Shard | BlockShard | _UnsupportedStoragePlacement
+                Owned | _AxisComputeSharding | _UnsupportedStoragePlacement
             ) = Owned()
         elif storage_mesh_axis in normalized_target_sharding_by_storage_mesh_axis:
             target_sharding = normalized_target_sharding_by_storage_mesh_axis[
@@ -1671,7 +1537,7 @@ def _resolve_storage_to_compute_transition(
             )
 
     if active_owned_storage_mesh_axes:
-        compute_sharding: _ComputeSharding = Owned()
+        compute_sharding: _ResolvedComputeSharding = Owned()
     elif redistribution_storage_mesh_axis is not None:
         transport_sharding = resolved_target_by_storage_mesh_axis[
             redistribution_storage_mesh_axis
@@ -1710,11 +1576,11 @@ def _raise_unsupported_layout(fqn: str) -> NoReturn:
 
 
 def _normalize_compute_placement(
-    placement: _ComputeTensorSharding,
+    placement: _AxisComputeSharding,
     *,
     ndim: int,
     mesh_axis_size: int,
-) -> _ComputeTensorSharding:
+) -> _AxisComputeSharding:
     if type(placement) is Replicate:
         return Replicate()
     if type(placement) is Shard:
@@ -1751,72 +1617,6 @@ def _normalize_dim(dim: int, ndim: int) -> int:
     if normalized < 0 or normalized >= ndim:
         raise ValueError(f"dimension {dim} is invalid for a rank-{ndim} tensor")
     return normalized
-
-
-@dataclass(frozen=True, slots=True)
-class _LocalMatrixSlice:
-    layout: _ParameterComputeLayout
-    offset: int
-    size: int
-
-
-@dataclass(frozen=True, slots=True)
-class _LocalMatrixBatch:
-    slices: tuple[_LocalMatrixSlice, ...]
-    shape: torch.Size
-    dtype: torch.dtype
-    device: torch.device
-
-
-def _make_local_matrix_execution(
-    layouts: Sequence[_ParameterComputeLayout],
-) -> _ParameterComputeLayout | _LocalMatrixBatch:
-    if len(layouts) == 1:
-        return layouts[0]
-
-    first_shape, dtype, device = _local_matrix_batch_spec(layouts[0])
-    assert len(first_shape) == 3
-    offset = 0
-    slices = []
-    for layout in layouts:
-        shape, layout_dtype, layout_device = _local_matrix_batch_spec(layout)
-        assert shape[1:] == first_shape[1:]
-        assert layout_dtype == dtype and layout_device == device
-        size = shape[0]
-        slices.append(_LocalMatrixSlice(layout, offset, size))
-        offset += size
-    return _LocalMatrixBatch(
-        slices=tuple(slices),
-        shape=torch.Size((offset, *first_shape[1:])),
-        dtype=dtype,
-        device=device,
-    )
-
-
-def _local_matrix_batch_spec(
-    layout: _ParameterComputeLayout,
-) -> tuple[torch.Size, torch.dtype, torch.device]:
-    assert layout.storage_is_compute_ready
-    tensor = layout.param.to_local().detach()
-    shape = torch.Size(tensor.shape)
-    if layout.compute_view is not None:
-        shape = layout.compute_view.matrix_batch_shape(shape)
-    return shape, tensor.dtype, tensor.device
-
-
-def _physical_compute_tensor(
-    layout: _ParameterComputeLayout,
-    matrix_batch: Tensor,
-) -> Tensor:
-    if layout.compute_view is None:
-        return matrix_batch
-    return matrix_batch.flatten(0, 1)
-
-
-def _local_bucket_key(
-    layouts: tuple[_ParameterComputeLayout, ...],
-) -> tuple[str, ...]:
-    return tuple(layout.fqn for layout in layouts)
 
 
 def _adjust_muon_learning_rate(
@@ -1942,7 +1742,6 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon._redistribution_runtime.reserve_buffers(
         muon._bucket_plans,
         local_tensor_spec=muon._local_tensor_spec,
-        local_bucket_executor=muon,
     )
     # init_optim_state may have validated placeholder state before the load.
     muon._first_step_validated = False

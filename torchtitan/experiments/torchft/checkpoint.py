@@ -32,8 +32,7 @@ from torchtitan.components.checkpoint import (
     TRAIN_STATE,
 )
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
@@ -141,7 +140,7 @@ class TorchFTCheckpointManager(CheckpointManager):
                 self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
     @torch.no_grad()
-    def save(self, curr_step: int, last_step: bool = False) -> None:
+    def _save(self, curr_step: int, last_step: bool = False) -> None:
         # FT dataloader checkpoint is saved every step (not gated by interval)
         # to minimize data replay on replica failure.
         if self.enable_ft_dataloader_checkpoints:
@@ -152,7 +151,7 @@ class TorchFTCheckpointManager(CheckpointManager):
             # pyrefly: ignore [missing-attribute]
             and self.ft_manager.participating_rank() == 0
         ):
-            super().save(curr_step, last_step)
+            super()._save(curr_step, last_step)
         elif self.enable_ft_dataloader_checkpoints:
             assert self.ft_manager is not None
             logger.info(
@@ -162,10 +161,10 @@ class TorchFTCheckpointManager(CheckpointManager):
             )
 
     @torch.no_grad()
-    def load(self, step: int = -1) -> bool:
+    def _load(self, step: int = -1) -> bool:
         if self.enable_ft_dataloader_checkpoints:
             self._ft_load()
-        return super().load(step)
+        return super()._load(step)
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         states = super()._states_to_load(model_only)
@@ -173,12 +172,12 @@ class TorchFTCheckpointManager(CheckpointManager):
             states.pop(DATALOADER, None)
         return states
 
-    def maybe_wait_for_saving(self) -> None:
+    def _wait_for_saving(self) -> None:
         # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
-        # so save_future can exist even when self.async_mode is DISABLED. The base
-        # class would incorrectly raise in that case, so we override to handle it.
-        if self.save_future is None:
-            return
+        # so save_future can exist even when self.async_mode is DISABLED. The DCP
+        # manager would incorrectly raise in that case, so we override to handle
+        # it. BaseCheckpointManager.maybe_wait_for_saving has already checked
+        # that save_future is set.
         self.save_future.result()
         # ASYNC_WITH_PINNED_MEM: the stager manages the future's lifecycle;
         # all other modes (ASYNC, DISABLED with FT) should clear the future.

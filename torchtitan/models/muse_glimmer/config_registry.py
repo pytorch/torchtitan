@@ -6,9 +6,8 @@
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -106,6 +105,7 @@ def muse_glimmer_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
+        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -153,6 +153,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
             steps=10,
             disable_cuda_graphs=True,
         ),
+        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -183,6 +184,7 @@ def muse_glimmer_30b() -> Trainer.Config:
             steps=1000,
         ),
         parallelism=ParallelismConfig(
+            spmd_backend="spmd_types",
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=1,
             context_parallel_degree=1,
@@ -220,6 +222,7 @@ def muse_glimmer_30b_mm() -> Trainer.Config:
             disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
+            spmd_backend="spmd_types",
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=1,
             context_parallel_degree=1,

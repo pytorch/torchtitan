@@ -18,14 +18,17 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
 - `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
-  values in `compute_sharding_by_fqn`. Within DistMuon,
-  `BlockShard(dim=0, block_size=R)` interprets a 2D parameter `[M * R, C]` as
-  `M` independent matrices `[M, R, C]`. FlexShard routes the flat 2D compute
-  tensor, and DistMuon applies the local matrix-batch view immediately before
-  Muon compute. The builder validates named DTensor parameters and plans their
-  storage-to-compute transitions. A native 3D `[M, R, C]` parameter can use
-  `Shard(0)` to distribute complete matrices. A 2D parameter without
-  `BlockShard` must use whole-matrix compute such as `Owned`.
+  values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
+  only a 2D parameter `[M * R, C]` with contiguous local DTensor storage. The
+  placement must target tensor dimension 0 with `block_size=R`; the leading
+  dimension must be nonzero and divisible by `R`. Each consecutive `R` rows
+  forms one independent `[R, C]` matrix. FlexShard routes the flat 2D compute
+  tensor, and DistMuon applies a zero-copy local `[M_local, R, C]` view
+  immediately before Muon compute. A native batch-first 3D `[M, R, C]`
+  parameter uses `Shard(0)` to distribute complete matrices. A single 2D
+  matrix without `BlockShard` uses whole-matrix compute such as `Owned`. The
+  builder validates named DTensor parameters and plans their storage-to-compute
+  transitions.
 
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
