@@ -362,9 +362,8 @@ class PolicyTrainer(Actor, Configurable):
         Args:
             training_data: List of TrainingMicrobatch, one per DP rank. Local rank
                 picks training_data[self.dp_rank].
-            num_global_valid_tokens: Total response tokens across all DP
-                ranks for this step. The controller computes this before
-                sharding training_samples.
+            num_global_valid_tokens: Total response tokens with finite generator
+                logprobs across all DP ranks and microbatches for this step.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
