@@ -7,8 +7,8 @@
 """
 Context Parallel APIs
 
-``apply_cp_to_forward`` is for the legacy spmd backend. Full DTensor and spmd_types
-don't need this API.
+``apply_cp_to_forward`` is for the partial_dtensor backend. spmd_types does not
+need this API.
 
 ``cp_shard`` is only used by Flux, which has a different input pattern from LLMs.
 

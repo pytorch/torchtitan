@@ -20,8 +20,9 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
+    resolve_fsdp_mesh,
 )
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
+from torchtitan.distributed.spmd_types import validate_config
 from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel

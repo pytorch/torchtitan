@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
+import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed.utils import get_spmd_backend
@@ -39,6 +40,7 @@ __all__ = [
     "set_current_spmd_mesh",
     "set_spmd_meshes",
     "maybe_set_sparse_mesh",
+    "validate_config",
 ]
 
 
@@ -132,6 +134,29 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
         yield
 
 
+def validate_config(parallel_dims: "ParallelDims", model: nn.Module) -> None:
+    """Validate that the current configuration is compatible with spmd_types.
+
+    Walks ``model`` to discover the actual attention modules in use and
+    raises ``NotImplementedError`` with a clear message if incompatible.
+    """
+    from torchtitan.models.common.attention import (
+        ScaledDotProductAttention,
+        VarlenAttention,
+    )
+
+    if parallel_dims.cp_enabled:
+        if any(
+            isinstance(m, (ScaledDotProductAttention, VarlenAttention))
+            for m in model.modules()
+        ):
+            raise NotImplementedError(
+                "spmd_types + CP is not supported with "
+                "ScaledDotProductAttention or VarlenAttention. "
+                "Use FlexAttention + CP or disable CP."
+            )
+
+
 def annotate_input_spmd_types(
     parallel_dims: "ParallelDims",
     inputs: torch.Tensor,
@@ -142,8 +167,6 @@ def annotate_input_spmd_types(
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
-    Analogous to ``full_dtensor.parallelize_inputs()`` but for the
-    ``spmd_types`` path.
     """
     from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -182,7 +205,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
     or we should write collective-based (not placement-based) redistributions
-    after full_dtensor backend is removed.
+    once the partial_dtensor backend is removed.
     """
 
     def _normalize_partition_spec(
