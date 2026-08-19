@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
+    _yarn_inv_freq,
     ComplexRoPE,
     CosSinRoPE,
     RoPE,
@@ -197,6 +198,26 @@ class TestYaRNScaling(unittest.TestCase):
     than ``original_seq_len`` (e.g. fine-tuning a YaRN checkpoint on short
     sequences), so it must not decide whether YaRN applies.
     """
+
+    def test_zero_lower_correction_boundary(self):
+        dim = 128
+        rope_factor = 40.0
+        inv_freq = _yarn_inv_freq(
+            dim=dim,
+            base=10000.0,
+            rope_factor=rope_factor,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=64,
+            truncate=True,
+        )
+        unscaled_inv_freq = 1.0 / (
+            10000.0 ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        )
+
+        self.assertEqual(inv_freq.shape, (dim // 2,))
+        torch.testing.assert_close(inv_freq[0], unscaled_inv_freq[0])
+        torch.testing.assert_close(inv_freq[17], unscaled_inv_freq[17] / rope_factor)
 
     def test_complex_rope_applies_below_original_sequence_length(self):
         yarn = ComplexRoPE.Config(

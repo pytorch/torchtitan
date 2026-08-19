@@ -4,12 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -21,16 +26,19 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
+    BlockShard,
     BucketConfig,
     ComputeLayout,
-    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MultiModalProcessor,
+)
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
 from torchtitan.protocols.model_spec import ModelSpec
@@ -39,22 +47,41 @@ from torchtitan.trainer import Trainer
 from . import KIMI_K2_5_SPECIAL_TOKENS, KimiK25Model, model_registry
 
 
-def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
-    return MMDataLoader.Config(
-        dataset=dataset,
-        max_images_per_batch=128,
+def _kimi_multimodal_dataloader(
+    dataset: SingleDatasetConfig,
+) -> GrainDataLoader.Config:
+    processor = dataset.processor
+    if not isinstance(processor, MultiModalProcessor.Config):
+        raise ValueError("Kimi multimodal data requires MultiModalProcessor.Config")
+
+    processor = MultiModalProcessor.Config(
+        sample_processor=processor.sample_processor,
         patch_size=14,
         temporal_patch_size=1,
         spatial_merge_size=2,
-        patch_order="raster",
-        resize_fn=resize_to_patch_budget,
-        max_patches=16384,
-        max_patches_per_side=512,
-        min_pixels=65536,
-        max_pixels=16777216,
+        min_pixels=65_536,
+        max_pixels=16_777_216,
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
-        **kwargs,
+        resize_fn=resize_to_patch_budget,
+        max_patches=16_384,
+        max_patches_per_side=512,
+        video_dir="",
+        video_fps=2.0,
+        video_min_frames=4,
+        video_max_frames=768,
+    )
+
+    return GrainDataLoader.Config(
+        dataset=replace(dataset, processor=processor),
+        collator=MultiModalCollator.Config(
+            max_images_per_batch=128,
+            patch_size=processor.patch_size,
+            temporal_patch_size=processor.temporal_patch_size,
+            spatial_merge_size=processor.spatial_merge_size,
+            patch_order="raster",
+            build_mrope_positions=False,
+        ),
     )
 
 
@@ -70,7 +97,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**KIMI_K2_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=_mm_dataloader("cc12m-test"),
+        dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optimizer=_dist_muon_optimizer(model_spec, lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -104,7 +131,9 @@ def moonlight_16b_a3b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -145,7 +174,7 @@ def kimi_vl_a3b() -> Trainer.Config:
         model_spec=model_spec,
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
-        dataloader=_mm_dataloader("cc12m"),
+        dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m"]),
         optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -181,7 +210,9 @@ def kimi_k2_5() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Kimi-K2.5",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         optimizer=_dist_muon_optimizer(model_spec, lr=2.2e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -213,42 +244,46 @@ def _dist_muon_optimizer(
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
-    owned = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Owned(),
-            },
-        )
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Owned(),
+        },
     )
-    per_head = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-        ),
-        compute_view=AttentionPerHeadComputeView(
-            num_heads=attention.n_heads,
-        ),
+    per_query_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+            )
+        },
     )
-    per_expert = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-                MeshAxisName.EFSDP.value: Shard(0),
-                MeshAxisName.EP.value: Shard(0),
-            },
-        )
+    per_key_value_head = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+            )
+        },
     )
-    query_shardings: dict[str, MuonComputeShardingConfig] = (
+    per_expert = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Shard(0),
+            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EP.value: Shard(0),
+        },
+    )
+    query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
-            "wq_b": per_head,
+            "wq_b": per_query_head,
         }
         if attention.q_lora_rank
-        else {"wq": per_head}
+        else {"wq": per_query_head}
     )
     attention_shardings = {
         **query_shardings,
         "wkv_a": owned,
-        "wkv_b": per_head,
+        "wkv_b": per_key_value_head,
         "wo": owned,
     }
     num_layers = len(model_config.layers)
@@ -271,7 +306,7 @@ def _dist_muon_optimizer(
 
     def compute_shardings_for_layer(
         layer_id: int,
-    ) -> dict[str, MuonComputeShardingConfig]:
+    ) -> dict[str, ComputeLayout]:
         prefix = f"layers.{layer_id}"
         shardings = {
             f"{prefix}.attention.{projection}.weight": compute_sharding
