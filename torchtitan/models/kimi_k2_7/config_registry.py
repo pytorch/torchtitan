@@ -230,16 +230,19 @@ def kimi_k2_5() -> Trainer.Config:
 def _per_expert_compute_layout(ep_size: int) -> ComputeLayout:
     if ep_size <= 0:
         raise ValueError("expert_parallel_degree must be positive")
+    if ep_size == 1:
+        return ComputeLayout(
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: Shard(0),
+            },
+        )
+
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
     # smaller than the EFSDP size, add balanced rank assignment only after
     # benchmarks show that the fixed nonempty EFSDP coordinates are a hotspot.
-    efsdp_sharding = (
-        Shard(0) if ep_size == 1 else _StridedShard(0, split_factor=ep_size)
-    )
     return ComputeLayout(
         shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: Shard(0),
-            MeshAxisName.EFSDP.value: efsdp_sharding,
+            MeshAxisName.EFSDP.value: _StridedShard(0, split_factor=ep_size),
             MeshAxisName.EP.value: Shard(0),
         },
     )

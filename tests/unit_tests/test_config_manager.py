@@ -58,6 +58,7 @@ class TestConfigManager(unittest.TestCase):
             if ".moe.routed_experts.inner_experts." in fqn
         )
 
+        assert set(expert_layout.shardings_by_mesh_axis) == {"efsdp", "ep"}
         efsdp_sharding = expert_layout.shardings_by_mesh_axis["efsdp"]
         assert type(efsdp_sharding) is _StridedShard
         assert efsdp_sharding.dim == 0
@@ -91,10 +92,35 @@ class TestConfigManager(unittest.TestCase):
         )
 
         assert updated.optimizer is not config.optimizer
-        assert type(source_expert_layout.shardings_by_mesh_axis["efsdp"]) is Shard
+        assert dict(source_expert_layout.shardings_by_mesh_axis) == {
+            "dp_shard": Shard(0)
+        }
+        assert set(updated_expert_layout.shardings_by_mesh_axis) == {"efsdp", "ep"}
         assert updated_expert_layout.shardings_by_mesh_axis["efsdp"] == _StridedShard(
             0, split_factor=2
         )
+
+    def test_kimi_ep_override_to_one_uses_dense_expert_layout(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "kimi_k2_7",
+                "--config",
+                "moonlight_16b_a3b",
+                "--parallelism.expert_parallel_degree",
+                "1",
+            ]
+        )
+        compute_sharding_by_fqn = config.optimizer.optimizer_factory_kwargs_by_name[
+            "DistMuon"
+        ]["compute_sharding_by_fqn"]
+        expert_layout = next(
+            layout
+            for fqn, layout in compute_sharding_by_fqn.items()
+            if ".moe.routed_experts.inner_experts." in fqn
+        )
+
+        assert dict(expert_layout.shardings_by_mesh_axis) == {"dp_shard": Shard(0)}
 
     def test_kimi_ep_replace_preserves_manual_expert_layout(self):
         config = ConfigManager().parse_args(
