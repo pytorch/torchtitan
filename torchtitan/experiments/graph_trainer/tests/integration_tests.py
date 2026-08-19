@@ -67,6 +67,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
@@ -76,6 +77,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
@@ -486,6 +488,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
@@ -503,6 +506,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
@@ -520,6 +524,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
