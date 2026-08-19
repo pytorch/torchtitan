@@ -16,7 +16,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
+from torchtitan.distributed.context_parallel import validate_cp_backend
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.distributed.spmd_types import validate_config
 from torchtitan.models.llama3.model import Llama3Model
@@ -39,18 +39,12 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    validate_cp_backend(parallel_dims)
     if parallelism.spmd_backend == "spmd_types":
         validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
-    else:
-        if parallel_dims.cp_enabled:
-            apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute, not-callable]
-                [block.attention.inner_attention for block in model.layers.values()],
-                parallel_dims.get_mesh("cp"),
-            )
-        if parallel_dims.tp_enabled:
-            model.parallelize(parallel_dims)
+    elif parallel_dims.tp_enabled:
+        model.parallelize(parallel_dims)
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

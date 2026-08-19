@@ -16,6 +16,20 @@ from tests.integration_tests.run_tests import run_tests
 # partitioner issue is resolved.
 _JIT_DISABLED = True
 
+# TODO: Context Parallel is unavailable to graph_trainer. CP shardings are
+# declared in ShardingConfig and only the spmd_types backend applies them,
+# while to_graph_trainer_config pins spmd_backend to partial_dtensor.
+# Clear once graph_trainer adopts spmd_types. Some CP flavors below carry a
+# second blocker and stay disabled until that one is cleared too.
+_CP_DISABLED = True
+
+# TODO: FlexAttention + CP + regional_inductor is unsupported upstream: the CP
+# load balancer injects an index-rearrange constant (torch
+# _context_parallel/_attention.py qkv_rearrange_indices / qkv_idx_restore) that
+# regional_inductor's make_fx re-trace cannot lift ("Attempting to use
+# FunctionalTensor on its own"). Clear once that is fixed upstream.
+_FLEX_CP_INDUCTOR_DISABLED = True
+
 
 def _build_llama3_tests() -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
@@ -121,7 +135,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "JIT HSDP+CP (with dp_shard)",
             "jit_hsdp+cp_with_dp_shard",
             ngpu=8,
-            disabled=_JIT_DISABLED,
+            disabled=_JIT_DISABLED or _CP_DISABLED,
         ),
         OverrideDefinitions(
             [
@@ -137,7 +151,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "JIT FSDP+TP+CP",
             "jit_fsdp+tp+cp",
             ngpu=8,
-            disabled=_JIT_DISABLED,
+            disabled=_JIT_DISABLED or _CP_DISABLED,
         ),
         OverrideDefinitions(
             [
@@ -178,22 +192,14 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
         # === aot_fx_trace mode tests ===
         # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
         #
-        # Uses the SDPA backend: the default FlexAttention + CP +
-        # regional_inductor combination is not yet supported — the CP load
-        # balancer injects an index-rearrange constant (torch
-        # _context_parallel/_attention.py qkv_rearrange_indices) that
-        # regional_inductor's make_fx re-trace cannot lift ("Attempting to use
-        # FunctionalTensor on its own"). SDPA has native CP support and no such
-        # constant, so it exercises the CP graph path. cudagraph is disabled
-        # here: CUDA-graph replay of the coalesced FSDP collectives fails under
-        # CP with "CUDA error: invalid argument".
-        # TODO: re-test on FlexAttention once flex + CP + regional_inductor is
-        # supported upstream.
+        # cudagraph is disabled for this flavor: CUDA-graph replay of the
+        # coalesced FSDP collectives fails under CP with "CUDA error: invalid
+        # argument".
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel_sdpa",
+                    "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
                     "--compile.disable_passes cudagraph_pass",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -205,6 +211,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
+            disabled=_CP_DISABLED or _FLEX_CP_INDUCTOR_DISABLED,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
         OverrideDefinitions(
@@ -339,7 +346,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "JIT FSDP+CP",
             "jit_fsdp+cp",
             ngpu=8,
-            disabled=_JIT_DISABLED,
+            disabled=_JIT_DISABLED or _CP_DISABLED,
         ),
         OverrideDefinitions(
             [
@@ -364,9 +371,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
         # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
         #
-        # TODO: FSDP+TP+CP+EP is disabled: tracing fails with "aten.add.Tensor
-        # got mixed torch.Tensor and DTensor" — a separate CP+EP issue,
-        # unrelated to the empty_strided shadow-node fix. Re-enable once fixed.
+        # TODO: on top of _CP_DISABLED, tracing FSDP+TP+CP+EP fails with
+        # "aten.add.Tensor got mixed torch.Tensor and DTensor", a separate CP+EP
+        # issue. Keep this flavor off until that is fixed as well.
         OverrideDefinitions(
             [
                 [
@@ -551,20 +558,9 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
-        # TODO: Disabled — this uses the default FlexAttention backend, and
-        # FlexAttention + CP + regional_inductor is unsupported: the CP load
-        # balancer injects an index-rearrange constant (torch
-        # _context_parallel/_attention.py qkv_idx_restore) that
-        # regional_inductor's make_fx re-trace cannot lift ("Attempting to use
-        # FunctionalTensor on its own"). This is the same upstream issue noted
-        # for the llama3 CP test above, which works around it with an SDPA
-        # config. To re-enable, add a qwen3 SDPA debug config and switch to it
-        # (mirroring aot_fx_trace_llama3_fsdp_tp_cp), or wait for flex + CP +
-        # regional_inductor support upstream.
-        #
-        # cudagraph is also disabled here (kept for when this is re-enabled):
-        # CUDA-graph replay of the coalesced FSDP collectives fails under
-        # context parallelism with "CUDA error: invalid argument".
+        # cudagraph is disabled for this flavor: CUDA-graph replay of the
+        # coalesced FSDP collectives fails under context parallelism with
+        # "CUDA error: invalid argument".
         OverrideDefinitions(
             [
                 [
@@ -580,7 +576,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 FSDP+TP+CP",
             "aot_fx_trace_qwen3_fsdp_tp_cp",
             ngpu=8,
-            disabled=True,
+            disabled=_CP_DISABLED or _FLEX_CP_INDUCTOR_DISABLED,
         ),
         OverrideDefinitions(
             [
