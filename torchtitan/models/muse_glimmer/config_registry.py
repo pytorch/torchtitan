@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import replace
+
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
@@ -32,7 +35,9 @@ MUSE_GLIMMER_SPECIAL_TOKENS = {
 }
 
 
-def _muse_glimmer_mm_dataloader(model_spec: ModelSpec, dataset: str):
+def _muse_glimmer_mm_dataloader(
+    model_spec: ModelSpec, dataset_name: str
+) -> GrainDataLoader.Config:
     """Build the shared multimodal dataloader config, taking the vision-patch
     geometry from the model's own vision encoder.
 
@@ -44,7 +49,7 @@ def _muse_glimmer_mm_dataloader(model_spec: ModelSpec, dataset: str):
     grid); ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE
     on the LLM side, not MRoPE.
 
-    NOTE: the multimodal dataloader imports (``MMDataLoader`` /
+    NOTE: the multimodal dataloader imports (``MultiModalCollator`` /
     ``resize_to_pixel_budget``) are done lazily here because they pull in
     ``torchvision`` (via ``torchtitan.hf_datasets.multimodal.utils.image``).
     ``torchvision`` is an optional dependency (not in requirements.txt /
@@ -53,20 +58,32 @@ def _muse_glimmer_mm_dataloader(model_spec: ModelSpec, dataset: str):
     have not installed it. Keeping these imports inside the multimodal-only path
     lets the text configs load without torchvision.
     """
-    from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+    from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+    from torchtitan.hf_datasets.multimodal.mm_datasets import (
+        MM_DATASETS,
+        MultiModalProcessor,
+    )
     from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
 
     model_config = model_spec.model
-    assert isinstance(model_config, MuseGlimmerModel.Config)
+    if not isinstance(model_config, MuseGlimmerModel.Config):
+        raise ValueError("Muse Glimmer requires MuseGlimmerModel.Config")
     encoder = model_config.vision_encoder
-    assert encoder is not None, "multimodal flavor must own a vision_encoder"
-    return MMDataLoader.Config(
-        dataset=dataset,
-        max_images_per_batch=8,
+    if encoder is None:
+        raise ValueError("Multimodal Muse Glimmer must own a vision encoder")
+
+    base_dataset = MM_DATASETS[dataset_name]
+    base_processor = base_dataset.processor
+    if not isinstance(base_processor, MultiModalProcessor.Config):
+        raise ValueError(
+            f"Multimodal dataset {dataset_name!r} must use "
+            "MultiModalProcessor.Config"
+        )
+    processor = replace(
+        base_processor,
         patch_size=encoder.patch_size,
         temporal_patch_size=encoder.patch_temporal,
         spatial_merge_size=encoder.downsample_factor,
-        patch_order="raster",
         resize_fn=resize_to_pixel_budget,
         min_pixels=784,
         max_pixels=3136,
@@ -74,7 +91,19 @@ def _muse_glimmer_mm_dataloader(model_spec: ModelSpec, dataset: str):
         image_std=(0.5, 0.5, 0.5),
         max_patches=4096,
         max_patches_per_side=512,
-        build_mrope_positions=False,
+    )
+    dataset = replace(base_dataset, processor=processor)
+
+    return GrainDataLoader.Config(
+        dataset=dataset,
+        collator=MultiModalCollator.Config(
+            max_images_per_batch=8,
+            patch_size=processor.patch_size,
+            temporal_patch_size=processor.temporal_patch_size,
+            spatial_merge_size=processor.spatial_merge_size,
+            patch_order="raster",
+            build_mrope_positions=False,
+        ),
     )
 
 
@@ -92,7 +121,10 @@ def muse_glimmer_debugmodel() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -119,7 +151,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
 
     Trains the ``debugmodel_mm`` flavor (debug text decoder that owns a
     scaled-down vision encoder + adapter) end-to-end on the ``cc12m-test`` local
-    tar fixture. The shared :class:`MMDataLoader` emits padded ``pixel_values`` +
+    tar fixture. The shared Grain data pipeline emits padded ``pixel_values`` +
     ``grid_thw`` + ``special_tokens``; the model derives the vision-placeholder
     mask from ``special_tokens``. Vision-placeholder positions are already
     ``IGNORE_INDEX`` in the labels, so a standard ``CrossEntropyLoss`` (wrapped in
@@ -175,7 +207,9 @@ def muse_glimmer_30b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
