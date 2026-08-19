@@ -7,13 +7,152 @@
 import dataclasses
 import sys
 import unittest
+from typing import Any
 from unittest import mock
 
 import pytest
+import tyro
+from torch.distributed.tensor import Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torchtitan.config import ConfigManager
 
 
 class TestConfigManager(unittest.TestCase):
+    def test_strided_shard_default_under_any(self):
+        @dataclasses.dataclass
+        class Config:
+            sharding: Any
+
+        registry = tyro.constructors.ConstructorRegistry()
+        ConfigManager.register_tyro_rules(registry)
+        default = Config(sharding=_StridedShard(0, split_factor=8))
+
+        parsed_default = tyro.cli(Config, args=[], default=default, registry=registry)
+        parsed_override = tyro.cli(
+            Config,
+            args=["--sharding", "1", "4"],
+            default=default,
+            registry=registry,
+        )
+
+        assert parsed_default.sharding == _StridedShard(0, split_factor=8)
+        assert parsed_override.sharding == _StridedShard(1, split_factor=4)
+
+    def test_kimi_ep_override_refreshes_dist_muon_expert_layout(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "kimi_k2_7",
+                "--config",
+                "kimi_k2_5_debugmodel",
+                "--parallelism.expert_parallel_degree",
+                "2",
+            ]
+        )
+        compute_sharding_by_fqn = config.optimizer.optimizer_factory_kwargs_by_name[
+            "DistMuon"
+        ]["compute_sharding_by_fqn"]
+        expert_layout = next(
+            layout
+            for fqn, layout in compute_sharding_by_fqn.items()
+            if ".moe.routed_experts.inner_experts." in fqn
+        )
+
+        efsdp_sharding = expert_layout.shardings_by_mesh_axis["efsdp"]
+        assert type(efsdp_sharding) is _StridedShard
+        assert efsdp_sharding.dim == 0
+        assert efsdp_sharding.split_factor == 2
+
+    def test_kimi_ep_replace_does_not_mutate_source_optimizer(self):
+        config = ConfigManager().parse_args(
+            ["--module", "kimi_k2_7", "--config", "kimi_k2_5_debugmodel"]
+        )
+        parallelism = dataclasses.replace(
+            config.parallelism,
+            expert_parallel_degree=2,
+        )
+
+        updated = dataclasses.replace(config, parallelism=parallelism)
+        source_shardings = config.optimizer.optimizer_factory_kwargs_by_name[
+            "DistMuon"
+        ]["compute_sharding_by_fqn"]
+        updated_shardings = updated.optimizer.optimizer_factory_kwargs_by_name[
+            "DistMuon"
+        ]["compute_sharding_by_fqn"]
+        source_expert_layout = next(
+            layout
+            for fqn, layout in source_shardings.items()
+            if ".moe.routed_experts.inner_experts." in fqn
+        )
+        updated_expert_layout = next(
+            layout
+            for fqn, layout in updated_shardings.items()
+            if ".moe.routed_experts.inner_experts." in fqn
+        )
+
+        assert updated.optimizer is not config.optimizer
+        assert type(source_expert_layout.shardings_by_mesh_axis["efsdp"]) is Shard
+        assert updated_expert_layout.shardings_by_mesh_axis["efsdp"] == _StridedShard(
+            0, split_factor=2
+        )
+
+    def test_kimi_ep_replace_preserves_manual_expert_layout(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "kimi_k2_7",
+                "--config",
+                "kimi_k2_5_debugmodel",
+                "--parallelism.expert_parallel_degree",
+                "2",
+            ]
+        )
+        factory_kwargs_by_name = {
+            name: dict(factory_kwargs)
+            for name, factory_kwargs in (
+                config.optimizer.optimizer_factory_kwargs_by_name.items()
+            )
+        }
+        dist_muon_kwargs = factory_kwargs_by_name["DistMuon"]
+        compute_sharding_by_fqn = dict(dist_muon_kwargs["compute_sharding_by_fqn"])
+        expert_fqns = tuple(
+            fqn
+            for fqn in compute_sharding_by_fqn
+            if ".moe.routed_experts.inner_experts." in fqn
+        )
+        manual_fqn, auto_fqn = expert_fqns[:2]
+        manual_layout = compute_sharding_by_fqn[manual_fqn]
+        compute_sharding_by_fqn[manual_fqn] = dataclasses.replace(
+            manual_layout,
+            shardings_by_mesh_axis={
+                **dict(manual_layout.shardings_by_mesh_axis),
+                "efsdp": _StridedShard(1, split_factor=2),
+            },
+        )
+        dist_muon_kwargs["compute_sharding_by_fqn"] = compute_sharding_by_fqn
+        custom_optimizer = dataclasses.replace(
+            config.optimizer,
+            optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
+        )
+        custom_config = dataclasses.replace(config, optimizer=custom_optimizer)
+        updated = dataclasses.replace(
+            custom_config,
+            parallelism=dataclasses.replace(
+                custom_config.parallelism,
+                expert_parallel_degree=4,
+            ),
+        )
+        updated_shardings = updated.optimizer.optimizer_factory_kwargs_by_name[
+            "DistMuon"
+        ]["compute_sharding_by_fqn"]
+
+        assert updated_shardings[manual_fqn].shardings_by_mesh_axis[
+            "efsdp"
+        ] == _StridedShard(1, split_factor=2)
+        assert updated_shardings[auto_fqn].shardings_by_mesh_axis[
+            "efsdp"
+        ] == _StridedShard(0, split_factor=4)
+
     def test_model_config_args(self):
         """--module and --config together load the correct config."""
         config_manager = ConfigManager()

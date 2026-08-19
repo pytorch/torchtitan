@@ -14,6 +14,7 @@ from typing import Any
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 
 __all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
 
@@ -56,18 +57,21 @@ class BlockShard:
             raise ValueError("BlockShard.block_size must be a positive integer")
 
 
-class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard | BlockShard]):
+_ComputeSharding = Owned | Replicate | Shard | _StridedShard | BlockShard
+
+
+class _FrozenShardingsByMeshAxis(Mapping[str, _ComputeSharding]):
     """Small immutable mapping that remains safe to copy with configs."""
 
     __slots__ = ("_items",)
 
     def __init__(
         self,
-        shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard | BlockShard],
+        shardings_by_mesh_axis: Mapping[str, _ComputeSharding],
     ) -> None:
         self._items = tuple(shardings_by_mesh_axis.items())
 
-    def __getitem__(self, axis_name: str) -> Owned | Replicate | Shard | BlockShard:
+    def __getitem__(self, axis_name: str) -> _ComputeSharding:
         for candidate_axis_name, sharding in self._items:
             if candidate_axis_name == axis_name:
                 return sharding
@@ -95,11 +99,12 @@ class ComputeLayout:
 
     These shardings apply before any optimizer-local tensor view.
 
-    Each named axis uses one of four compute shardings: ``Owned`` assigns the
+    Each named axis uses one of five compute shardings: ``Owned`` assigns the
     complete subgroup-local logical tensor to one dynamically selected owner rank,
     ``Replicate`` assigns it to every rank, ``Shard`` partitions one tensor
-    dimension, and ``BlockShard`` partitions fixed-size blocks without changing
-    the tensor shape.
+    dimension, ``_StridedShard`` encodes non-default ordering when multiple mesh
+    axes shard the same tensor dimension, and ``BlockShard`` partitions fixed-size
+    blocks without changing the tensor shape.
     Multiple ``Owned`` shardings select one owner rank from their joint Cartesian
     group.
     Omitted axes preserve their storage placement. Extra declarations may target
@@ -111,7 +116,7 @@ class ComputeLayout:
 
             ComputeLayout(
                 shardings_by_mesh_axis={
-                    "efsdp": Shard(0),
+                    "efsdp": _StridedShard(0, split_factor=8),
                     "ep": Shard(0),
                 }
             )
@@ -134,7 +139,7 @@ class ComputeLayout:
             )
     """
 
-    shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard | BlockShard]
+    shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
 
     def __post_init__(self) -> None:
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
@@ -145,10 +150,23 @@ class ComputeLayout:
                 raise ValueError(
                     "ComputeLayout.shardings_by_mesh_axis keys must be strings"
                 )
-            if type(sharding) not in (Owned, Replicate, Shard, BlockShard):
+            if type(sharding) not in (
+                Owned,
+                Replicate,
+                Shard,
+                _StridedShard,
+                BlockShard,
+            ):
                 raise ValueError(
                     "ComputeLayout.shardings_by_mesh_axis values must be "
-                    "Owned, Replicate, Shard, or BlockShard"
+                    "Owned, Replicate, Shard, _StridedShard, or BlockShard"
+                )
+            if type(sharding) is _StridedShard and (
+                type(sharding.split_factor) is not int or sharding.split_factor <= 0
+            ):
+                raise ValueError(
+                    "ComputeLayout _StridedShard.split_factor must be a "
+                    "positive integer"
                 )
         normalized_shardings_by_mesh_axis = dict(sorted(shardings_by_mesh_axis.items()))
         object.__setattr__(

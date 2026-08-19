@@ -132,7 +132,7 @@ def _matrix_batch_view_from_compute_layout(
             )
         applicable_axis_names = set(mesh_axis_names)
     block_shards = tuple(
-        cast(BlockShard, sharding)
+        sharding
         for axis_name, sharding in compute_layout.shardings_by_mesh_axis.items()
         if type(sharding) is BlockShard
         and (applicable_axis_names is None or axis_name in applicable_axis_names)
@@ -920,7 +920,7 @@ _StorageToComputeTransition = _NoRedistributionTransition | _RedistributionTrans
 
 # Per-mesh-axis tensor sharding while resolving ``ComputeLayout``. ``BlockShard``
 # remains explicit here, while ``Owned`` is handled separately.
-_AxisComputeSharding = Replicate | Shard | BlockShard
+_AxisComputeSharding = Replicate | Shard | _StridedShard | BlockShard
 
 # Executor strategy after per-axis shardings are resolved. ``BlockShard`` has
 # become ``Shard(0)`` plus ``_MatrixBatchView``; ``Owned`` remains valid here.
@@ -1264,6 +1264,82 @@ def _build_batched_matrix_redistribution_plan(
     )
 
 
+def _validate_strided_compute_targets(
+    fqn: str,
+    param: DTensor,
+    target_sharding_by_storage_mesh_axis: Mapping[int, _AxisComputeSharding],
+    owned_storage_mesh_axes: Sequence[int],
+) -> None:
+    mesh_axis_names = param.device_mesh.mesh_dim_names
+    assert mesh_axis_names is not None
+    owned_axis_set = set(owned_storage_mesh_axes)
+    for (
+        storage_mesh_axis,
+        target_sharding,
+    ) in target_sharding_by_storage_mesh_axis.items():
+        if type(target_sharding) is not _StridedShard:
+            continue
+        target_dim = _normalize_dim(target_sharding.dim, param.ndim)
+        rightward_shard_axes = []
+        for rightward_mesh_axis in range(
+            storage_mesh_axis + 1,
+            param.device_mesh.ndim,
+        ):
+            if rightward_mesh_axis in owned_axis_set:
+                continue
+            rightward_sharding = target_sharding_by_storage_mesh_axis.get(
+                rightward_mesh_axis
+            )
+            if rightward_sharding is None:
+                rightward_sharding = _normalize_storage_placement(
+                    param.placements[rightward_mesh_axis],
+                    ndim=param.ndim,
+                    mesh_axis_size=param.device_mesh.size(rightward_mesh_axis),
+                )
+            if (
+                type(rightward_sharding) is Shard
+                and _normalize_dim(rightward_sharding.dim, param.ndim) == target_dim
+            ):
+                rightward_shard_axes.append(rightward_mesh_axis)
+
+        if len(rightward_shard_axes) != 1:
+            raise ValueError(
+                f"Muon parameter {fqn!r} _StridedShard compute on mesh axis "
+                f"{mesh_axis_names[storage_mesh_axis]!r} requires exactly one "
+                "rightward Shard axis on the same tensor dimension"
+            )
+        preserved_mesh_axis_size = param.device_mesh.size(rightward_shard_axes[0])
+        if target_sharding.split_factor != preserved_mesh_axis_size:
+            raise ValueError(
+                f"Muon parameter {fqn!r} _StridedShard split_factor must equal "
+                f"the preserved mesh axis size {preserved_mesh_axis_size}; got "
+                f"{target_sharding.split_factor}"
+            )
+
+
+def _is_supported_orthogonal_dim0_shard_redistribution(
+    *,
+    ndim: int,
+    compute_view: _MatrixBatchView | None,
+    source_storage_placement: object,
+    target_compute_sharding: _AxisComputeSharding | None,
+    preserved_storage_placement: object,
+) -> bool:
+    if compute_view is not None or ndim != 3:
+        return False
+    if (
+        type(source_storage_placement) is not Shard
+        or type(target_compute_sharding) is not _StridedShard
+        or type(preserved_storage_placement) is not Shard
+    ):
+        return False
+
+    storage_dim = _normalize_dim(source_storage_placement.dim, ndim)
+    compute_dim = _normalize_dim(target_compute_sharding.dim, ndim)
+    preserved_dim = _normalize_dim(preserved_storage_placement.dim, ndim)
+    return storage_dim == 1 and compute_dim == preserved_dim == 0
+
+
 def _resolve_storage_to_compute_transition(
     fqn: str,
     param: DTensor,
@@ -1320,12 +1396,13 @@ def _resolve_storage_to_compute_transition(
             for storage_mesh_axis, sharding in (
                 applicable_compute_shardings_by_storage_mesh_axis.items()
             )
-            if type(sharding) is Shard
+            if type(sharding) in (Shard, _StridedShard)
         ]
         if shard_axes:
             raise ValueError(
                 f"Muon parameter {fqn!r} with matrix-batch compute requires "
-                f"BlockShard instead of Shard on mesh axes {shard_axes}"
+                f"BlockShard instead of Shard or _StridedShard on mesh axes "
+                f"{shard_axes}"
             )
 
     replicated_axes = [
@@ -1354,6 +1431,8 @@ def _resolve_storage_to_compute_transition(
         placement = cast(_AxisComputeSharding, sharding)
         if type(placement) is Shard:
             declared_shard_dims.append(_normalize_dim(placement.dim, param.ndim))
+        elif type(placement) is _StridedShard:
+            declared_shard_dims.append(_normalize_dim(placement.dim, param.ndim))
         elif type(placement) is BlockShard:
             declared_shard_dims.append(0)
         target_sharding = _normalize_compute_placement(
@@ -1365,6 +1444,12 @@ def _resolve_storage_to_compute_transition(
             storage_mesh_axis
         ] = target_sharding
 
+    _validate_strided_compute_targets(
+        fqn,
+        param,
+        normalized_target_sharding_by_storage_mesh_axis,
+        applicable_owned_storage_mesh_axes,
+    )
     changed_storage_mesh_axes = _resolve_storage_to_compute_redistribution_requirement(
         fqn,
         param,
@@ -1391,7 +1476,7 @@ def _resolve_storage_to_compute_transition(
     redistribution_storage_mesh_axis = (
         transport_mesh_axes[0] if transport_mesh_axes else None
     )
-    allowed_orthogonal_dim0_shard = False
+    uses_supported_orthogonal_shard_redistribution = False
     if redistribution_storage_mesh_axis is not None:
         redistribution_axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
         for storage_mesh_axis, placement in enumerate(param.placements):
@@ -1410,43 +1495,60 @@ def _resolve_storage_to_compute_transition(
                 )
                 if type(preserved_storage_sharding) is Replicate:
                     continue
-                redistribution_storage_placement = param.placements[
+                source_storage_placement = param.placements[
                     redistribution_storage_mesh_axis
                 ]
-                redistribution_compute_sharding = (
+                target_compute_sharding = (
                     normalized_target_sharding_by_storage_mesh_axis.get(
                         redistribution_storage_mesh_axis
                     )
                 )
                 if (
-                    not allowed_orthogonal_dim0_shard
-                    and compute_view is None
-                    and param.ndim == 3
-                    and type(redistribution_storage_placement) is Shard
-                    and _normalize_dim(redistribution_storage_placement.dim, param.ndim)
-                    == 1
-                    and type(redistribution_compute_sharding) is Shard
-                    and _normalize_dim(redistribution_compute_sharding.dim, param.ndim)
-                    == 0
-                    and type(placement) is Shard
-                    and _normalize_dim(placement.dim, param.ndim) == 0
+                    not uses_supported_orthogonal_shard_redistribution
+                    and _is_supported_orthogonal_dim0_shard_redistribution(
+                        ndim=param.ndim,
+                        compute_view=compute_view,
+                        source_storage_placement=source_storage_placement,
+                        target_compute_sharding=target_compute_sharding,
+                        preserved_storage_placement=placement,
+                    )
                 ):
-                    allowed_orthogonal_dim0_shard = True
+                    uses_supported_orthogonal_shard_redistribution = True
                     continue
                 if (
-                    type(redistribution_storage_placement) is Shard
-                    and type(redistribution_compute_sharding) in (Shard, BlockShard)
+                    type(source_storage_placement) is Shard
+                    and type(target_compute_sharding)
+                    in (Shard, _StridedShard, BlockShard)
                     and type(placement) is Shard
                 ):
-                    storage_dim = _normalize_dim(
-                        redistribution_storage_placement.dim, param.ndim
+                    target_compute_shard = cast(
+                        Shard | _StridedShard | BlockShard,
+                        target_compute_sharding,
                     )
+                    storage_dim = _normalize_dim(
+                        source_storage_placement.dim, param.ndim
+                    )
+                    target_dim = _normalize_dim(target_compute_shard.dim, param.ndim)
                     preserved_dim = _normalize_dim(placement.dim, param.ndim)
+                    if (
+                        storage_dim == 1
+                        and target_dim == preserved_dim == 0
+                        and type(target_compute_sharding) is Shard
+                        and redistribution_storage_mesh_axis < storage_mesh_axis
+                    ):
+                        raise ValueError(
+                            f"Muon parameter {fqn!r} must use "
+                            f"_StridedShard(0, split_factor="
+                            f"{param.device_mesh.size(storage_mesh_axis)}) on "
+                            f"mesh axis {redistribution_axis_name!r} when "
+                            f"preserving Shard(0) on mesh axis "
+                            f"{mesh_axis_names[storage_mesh_axis]!r}"
+                        )
                     raise NotImplementedError(
                         f"Muon parameter {fqn!r} cannot redistribute storage on "
                         f"mesh axis {redistribution_axis_name!r} from "
                         f"Shard({storage_dim}) to "
-                        f"{redistribution_compute_sharding!r} while "
+                        f"{target_compute_sharding!r} while "
                         f"preserving Shard({preserved_dim}) storage on mesh axis "
                         f"{mesh_axis_names[storage_mesh_axis]!r}; orthogonal-shard "
                         "redistribution is not implemented"
@@ -1458,6 +1560,25 @@ def _resolve_storage_to_compute_transition(
                     f"placement {placement}; this implementation requires every "
                     "other storage mesh axis to be replicated"
                 )
+
+    active_strided_axis_names = [
+        mesh_axis_names[storage_mesh_axis]
+        for storage_mesh_axis, target_sharding in (
+            normalized_target_sharding_by_storage_mesh_axis.items()
+        )
+        if type(target_sharding) is _StridedShard
+    ]
+    if (
+        active_strided_axis_names
+        and redistribution_storage_mesh_axis is not None
+        and not uses_supported_orthogonal_shard_redistribution
+    ):
+        raise ValueError(
+            f"Muon parameter {fqn!r} has unsupported _StridedShard compute on "
+            f"mesh axes {active_strided_axis_names}; DistMuon currently supports "
+            "_StridedShard only when a preceding redistribution axis preserves "
+            "one rightward Shard axis on the same tensor dimension"
+        )
 
     resolved_target_signature = []
     resolved_shard_dims = []
@@ -1485,6 +1606,8 @@ def _resolve_storage_to_compute_transition(
             )
         resolved_target_signature.append((axis_name, target_sharding))
         if type(target_sharding) is Shard:
+            resolved_shard_dims.append(target_sharding.dim)
+        elif type(target_sharding) is _StridedShard:
             resolved_shard_dims.append(target_sharding.dim)
         elif type(target_sharding) is BlockShard:
             resolved_shard_dims.append(0)
@@ -1532,7 +1655,7 @@ def _resolve_storage_to_compute_transition(
             type(source_sharding) is not Replicate
             and type(target_sharding) is not BlockShard
             and source_sharding != target_sharding
-            and not allowed_orthogonal_dim0_shard
+            and not uses_supported_orthogonal_shard_redistribution
         ):
             axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
             raise NotImplementedError(
@@ -1569,13 +1692,21 @@ def _normalize_compute_placement(
     if type(placement) is Replicate:
         return Replicate()
     if type(placement) is Shard:
-        placement = cast(Shard, placement)
         normalized_dim = _normalize_dim(placement.dim, ndim)
         if mesh_axis_size == 1:
             return Replicate()
         return Shard(normalized_dim)
+    if type(placement) is _StridedShard:
+        normalized_dim = _normalize_dim(placement.dim, ndim)
+        if mesh_axis_size == 1:
+            return Replicate()
+        if placement.split_factor == 1:
+            return Shard(normalized_dim)
+        return _StridedShard(
+            normalized_dim,
+            split_factor=placement.split_factor,
+        )
     assert type(placement) is BlockShard
-    placement = cast(BlockShard, placement)
     normalized_dim = _normalize_dim(placement.dim, ndim)
     if mesh_axis_size == 1:
         return Replicate()
@@ -1587,12 +1718,19 @@ def _normalize_storage_placement(
     *,
     ndim: int,
     mesh_axis_size: int,
-) -> Replicate | Shard | _UnsupportedStoragePlacement:
+) -> Replicate | Shard | _StridedShard | _UnsupportedStoragePlacement:
     if mesh_axis_size == 1 or type(placement) is Replicate:
         return Replicate()
-    if type(placement) in (Shard, _StridedShard):
-        shard = cast(Shard | _StridedShard, placement)
-        return Shard(_normalize_dim(shard.dim, ndim))
+    if type(placement) is Shard:
+        return Shard(_normalize_dim(placement.dim, ndim))
+    if type(placement) is _StridedShard:
+        normalized_dim = _normalize_dim(placement.dim, ndim)
+        if placement.split_factor == 1:
+            return Shard(normalized_dim)
+        return _StridedShard(
+            normalized_dim,
+            split_factor=placement.split_factor,
+        )
     return _UnsupportedStoragePlacement(
         type_name=type(placement).__name__,
         representation=repr(placement),

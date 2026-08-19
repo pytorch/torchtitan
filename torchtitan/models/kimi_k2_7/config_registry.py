@@ -4,10 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, replace
+from typing import Annotated, cast
 
+import tyro
 from torch.distributed.tensor import Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -59,6 +61,7 @@ def _mm_dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
 
 def kimi_k2_5_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
+    parallelism = ParallelismConfig(spmd_backend="spmd_types")
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -70,7 +73,11 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
         dataloader=_mm_dataloader("cc12m-test"),
-        optimizer=_dist_muon_optimizer(model_spec, lr=8e-4),
+        optimizer=_dist_muon_optimizer(
+            model_spec,
+            lr=8e-4,
+            ep_size=parallelism.expert_parallel_degree,
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -83,7 +90,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
+        parallelism=parallelism,
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -95,6 +102,10 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
 def moonlight_16b_a3b() -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
     model_spec = model_registry("moonlight-16B-A3B", attn_backend="flex")
+    parallelism = ParallelismConfig(
+        expert_parallel_degree=8,
+        spmd_backend="spmd_types",
+    )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -104,7 +115,11 @@ def moonlight_16b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
+        optimizer=_dist_muon_optimizer(
+            model_spec,
+            lr=3e-4,
+            ep_size=parallelism.expert_parallel_degree,
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -117,10 +132,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
             steps=10000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=8,
-            spmd_backend="spmd_types",
-        ),
+        parallelism=parallelism,
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
     )
@@ -129,6 +141,10 @@ def moonlight_16b_a3b() -> Trainer.Config:
 def kimi_vl_a3b() -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
     model_spec = model_registry("Kimi-VL-A3B", attn_backend="flex")
+    parallelism = ParallelismConfig(
+        expert_parallel_degree=8,
+        spmd_backend="spmd_types",
+    )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -145,7 +161,11 @@ def kimi_vl_a3b() -> Trainer.Config:
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_mm_dataloader("cc12m"),
-        optimizer=_dist_muon_optimizer(model_spec, lr=3e-4),
+        optimizer=_dist_muon_optimizer(
+            model_spec,
+            lr=3e-4,
+            ep_size=parallelism.expert_parallel_degree,
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -158,10 +178,7 @@ def kimi_vl_a3b() -> Trainer.Config:
             steps=10000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=8,
-            spmd_backend="spmd_types",
-        ),
+        parallelism=parallelism,
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
     )
@@ -172,6 +189,11 @@ def kimi_k2_5() -> Trainer.Config:
     compile_config = CompileConfig(enable=True, components=["loss"])
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
     model_spec = model_registry("Kimi-K2.5", attn_backend="flex")
+    parallelism = ParallelismConfig(
+        pipeline_parallel_schedule="Interleaved1F1B",
+        expert_parallel_degree=8,
+        spmd_backend="spmd_types",
+    )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -181,7 +203,11 @@ def kimi_k2_5() -> Trainer.Config:
         hf_assets_path="./assets/hf/Kimi-K2.5",
         model_spec=model_spec,
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
-        optimizer=_dist_muon_optimizer(model_spec, lr=2.2e-4),
+        optimizer=_dist_muon_optimizer(
+            model_spec,
+            lr=2.2e-4,
+            ep_size=parallelism.expert_parallel_degree,
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -194,14 +220,28 @@ def kimi_k2_5() -> Trainer.Config:
             steps=10000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=8,
-            spmd_backend="spmd_types",
-        ),
+        parallelism=parallelism,
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
+    )
+
+
+def _per_expert_compute_layout(ep_size: int) -> ComputeLayout:
+    if ep_size <= 0:
+        raise ValueError("expert_parallel_degree must be positive")
+    # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
+    # smaller than the EFSDP size, add balanced rank assignment only after
+    # benchmarks show that the fixed nonempty EFSDP coordinates are a hotspot.
+    efsdp_sharding = (
+        Shard(0) if ep_size == 1 else _StridedShard(0, split_factor=ep_size)
+    )
+    return ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Shard(0),
+            MeshAxisName.EFSDP.value: efsdp_sharding,
+            MeshAxisName.EP.value: Shard(0),
+        },
     )
 
 
@@ -209,6 +249,7 @@ def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
     lr: float,
+    ep_size: int,
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
@@ -233,13 +274,7 @@ def _dist_muon_optimizer(
             )
         },
     )
-    per_expert = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: Shard(0),
-            MeshAxisName.EFSDP.value: Shard(0),
-            MeshAxisName.EP.value: Shard(0),
-        },
-    )
+    per_expert = _per_expert_compute_layout(ep_size)
     query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
@@ -388,10 +423,74 @@ def _dist_muon_optimizer(
     )
 
 
+def _refresh_dist_muon_expert_compute_layout(
+    optimizer_config: OptimizersContainer.Config,
+    *,
+    previous_ep_size: int,
+    ep_size: int,
+    manual_layout_fqns: tuple[str, ...],
+) -> tuple[OptimizersContainer.Config, tuple[str, ...]]:
+    factory_kwargs_by_name = {
+        name: dict(factory_kwargs)
+        for name, factory_kwargs in (
+            optimizer_config.optimizer_factory_kwargs_by_name.items()
+        )
+    }
+    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
+    if dist_muon_kwargs is None:
+        return optimizer_config, manual_layout_fqns
+    compute_sharding_by_fqn = cast(
+        dict[str, ComputeLayout],
+        dist_muon_kwargs["compute_sharding_by_fqn"],
+    )
+    previous_per_expert = _per_expert_compute_layout(previous_ep_size)
+    per_expert = _per_expert_compute_layout(ep_size)
+    manual_fqn_set = set(manual_layout_fqns)
+    refreshed_shardings = {}
+    changed = False
+    for fqn, compute_layout in compute_sharding_by_fqn.items():
+        if ".moe.routed_experts.inner_experts." not in fqn or fqn in manual_fqn_set:
+            refreshed_shardings[fqn] = compute_layout
+        elif compute_layout == previous_per_expert:
+            refreshed_shardings[fqn] = per_expert
+            changed = changed or compute_layout != per_expert
+        else:
+            refreshed_shardings[fqn] = compute_layout
+            manual_fqn_set.add(fqn)
+    if not changed:
+        return optimizer_config, tuple(sorted(manual_fqn_set))
+
+    dist_muon_kwargs["compute_sharding_by_fqn"] = refreshed_shardings
+    return (
+        replace(
+            optimizer_config,
+            optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
+        ),
+        tuple(sorted(manual_fqn_set)),
+    )
+
+
 @dataclass(kw_only=True, slots=True)
 class _KimiTrainerConfig(Trainer.Config):
+    _auto_expert_layout_ep_size: Annotated[int, tyro.conf.Suppress] = -1
+    _manual_expert_layout_fqns: Annotated[tuple[str, ...], tyro.conf.Suppress] = ()
+
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
+        ep_size = self.parallelism.expert_parallel_degree
+        if self._auto_expert_layout_ep_size < 0:
+            self._auto_expert_layout_ep_size = ep_size
+        elif self._auto_expert_layout_ep_size != ep_size:
+            (
+                self.optimizer,
+                self._manual_expert_layout_fqns,
+            ) = _refresh_dist_muon_expert_compute_layout(
+                self.optimizer,
+                previous_ep_size=self._auto_expert_layout_ep_size,
+                ep_size=ep_size,
+                manual_layout_fqns=self._manual_expert_layout_fqns,
+            )
+            self._auto_expert_layout_ep_size = ep_size
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
         # TODO(#4102): Build DistMuon from PP stage-local parameter groups.
         if (

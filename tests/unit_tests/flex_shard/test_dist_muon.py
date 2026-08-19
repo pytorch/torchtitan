@@ -7,10 +7,12 @@
 # @lint-ignore-every CITRINE
 
 import unittest
+from unittest import mock
 
 import torch
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -31,6 +33,27 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
+
+
+class TestComputeLayout(unittest.TestCase):
+    def test_accepts_strided_shard(self):
+        sharding = _StridedShard(0, split_factor=2)
+        layout = ComputeLayout(
+            shardings_by_mesh_axis={
+                "efsdp": sharding,
+                "ep": Shard(0),
+            }
+        )
+
+        self.assertEqual(layout.shardings_by_mesh_axis["efsdp"], sharding)
+
+    def test_rejects_nonpositive_strided_shard_split_factor(self):
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "efsdp": _StridedShard(0, split_factor=0),
+                }
+            )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -259,29 +282,54 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         device = torch.device(self.device_type, self.rank)
         value = torch.arange(30, device=device).reshape(2, 5, 3).float().div_(13)
         storage_placements = (Shard(1), Shard(0))
+        target_placements = (
+            _StridedShard(0, split_factor=mesh["ep"].size()),
+            Shard(0),
+        )
         parameter = torch.nn.Parameter(
             distribute_tensor(value.clone(), mesh, storage_placements)
         )
         fqn = "layers.0.routed_experts.inner_experts.w1_EFD"
-        optimizer = build_dist_muon(
-            [{"params": [parameter], "param_names": [fqn]}],
-            lr=lr,
-            weight_decay=weight_decay,
-            momentum=0.8,
-            nesterov=True,
-            ns_steps=2,
-            compute_sharding_by_fqn={
-                fqn: ComputeLayout(
-                    shardings_by_mesh_axis={
-                        "efsdp": Shard(0),
-                        "ep": Shard(0),
-                    },
-                )
-            },
-            bucket_configs=[BucketConfig(patterns=(fqn,))],
+
+        def make_optimizer(param, efsdp_sharding):
+            return build_dist_muon(
+                [{"params": [param], "param_names": [fqn]}],
+                lr=lr,
+                weight_decay=weight_decay,
+                momentum=0.0,
+                nesterov=False,
+                ns_steps=2,
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "efsdp": efsdp_sharding,
+                            "ep": Shard(0),
+                        },
+                    )
+                },
+                bucket_configs=[BucketConfig(patterns=(fqn,))],
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "split_factor must equal the preserved mesh axis size 2; got 3",
+        ):
+            make_optimizer(parameter, _StridedShard(0, split_factor=3))
+        with self.assertRaisesRegex(
+            ValueError,
+            r"must use _StridedShard\(0, split_factor=2\)",
+        ):
+            make_optimizer(parameter, Shard(0))
+
+        optimizer = make_optimizer(parameter, target_placements[0])
+        compute_layout = optimizer._parameter_compute_layouts[0]
+        self.assertEqual(compute_layout.compute_sharding, Shard(0))
+        self.assertEqual(
+            compute_layout.resolved_compute_layout_signature,
+            (("efsdp", target_placements[0]), ("ep", target_placements[1])),
         )
         grad = (
-            torch.arange(30, device=device)
+            torch.arange(value.numel(), device=device)
             .reshape_as(value)
             .float()
             .mul_(0.37)
@@ -295,15 +343,47 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             references,
             lr=lr,
             weight_decay=weight_decay,
-            momentum=0.8,
-            nesterov=True,
+            momentum=0.0,
+            nesterov=False,
             ns_steps=2,
         )
         for reference, matrix_grad in zip(references, grad, strict=True):
             reference.grad = matrix_grad.clone()
 
-        optimizer.step()
+        mesh_coordinate = mesh.get_coordinate()
+        assert mesh_coordinate is not None
+        efsdp_coordinate, ep_coordinate = mesh_coordinate
+        expected_compute = (
+            grad.narrow(0, ep_coordinate, 1).contiguous()
+            if efsdp_coordinate == 0
+            else grad.new_empty((0, *grad.shape[1:]))
+        )
+        captured_compute = None
+        original_compute_update = optimizer._compute_update
+
+        def capture_compute(compute_layout, compute):
+            nonlocal captured_compute
+            captured_compute = compute.clone()
+            original_compute_update(compute_layout, compute)
+
+        with mock.patch.object(
+            optimizer,
+            "_compute_update",
+            side_effect=capture_compute,
+        ):
+            optimizer.step()
         reference_optimizer.step()
+
+        if expected_compute.numel():
+            self.assertIsNotNone(captured_compute)
+            torch.testing.assert_close(
+                captured_compute,
+                expected_compute,
+                rtol=0,
+                atol=0,
+            )
+        else:
+            self.assertIsNone(captured_compute)
 
         decay = 1 - lr * weight_decay
         expected = torch.stack([reference.detach() for reference in references])
@@ -315,6 +395,32 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             atol=2e-2,
         )
         self.assertEqual(parameter.placements, storage_placements)
+
+        compute_ready_local = (
+            value.narrow(0, ep_coordinate, 1).contiguous()
+            if efsdp_coordinate == 0
+            else value.new_empty((0, *value.shape[1:]))
+        )
+        compute_ready_parameter = torch.nn.Parameter(
+            DTensor.from_local(
+                compute_ready_local,
+                mesh,
+                target_placements,
+                shape=value.shape,
+                stride=value.stride(),
+                run_check=False,
+            )
+        )
+        compute_ready_optimizer = make_optimizer(
+            compute_ready_parameter,
+            target_placements[0],
+        )
+        compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
+        self.assertTrue(compute_ready_layout.storage_is_compute_ready)
+        self.assertEqual(
+            compute_ready_layout.resolved_compute_layout_signature,
+            (("efsdp", target_placements[0]), ("ep", target_placements[1])),
+        )
 
 
 if __name__ == "__main__":
