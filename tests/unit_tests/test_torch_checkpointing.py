@@ -52,6 +52,8 @@ class _BackendManager:
     def __init__(self) -> None:
         self.closed = False
         self.lock_calls = 0
+        self.load_calls = []
+        self.load_result = None
         self.prewarm_calls = []
         self.save_calls = []
         self.save_result = Future()
@@ -66,6 +68,10 @@ class _BackendManager:
     def lock(self):
         self.lock_calls += 1
         return nullcontext()
+
+    def load(self, checkpoint_id, into=None, **kwargs):
+        self.load_calls.append((checkpoint_id, into, kwargs))
+        return self.load_result if self.load_result is not None else into
 
     def close(self) -> None:
         self.closed = True
@@ -99,6 +105,10 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         *,
         backend_config: BackendCheckpointManager.Config | None = None,
         storage_config=None,
+        base_folder: str = "/tmp",
+        model_parts=None,
+        optimizers=None,
+        states=None,
     ) -> tuple[TorchCheckpointingManager, _BackendManager]:
         if backend_config is None:
             backend_config = _default_backend_config()
@@ -117,12 +127,12 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         ):
             manager = config.build(
                 dataloader=None,
-                model_parts=[nn.Linear(2, 2)],
-                optimizers=_Stateful("optimizer"),
+                model_parts=model_parts or [nn.Linear(2, 2)],
+                optimizers=optimizers or _Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
-                states={"train_state": _Stateful("train")},
+                states=states or {"train_state": _Stateful("train")},
                 sd_adapter=None,
-                base_folder="/tmp",
+                base_folder=base_folder,
                 storage_config=storage_config,
             )
         return manager, backend_manager
@@ -813,3 +823,169 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             storage_config=storage_config,
         )
         manager.close()
+
+    def test_native_load_restores_model_and_optimizer(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "checkpoint", "step-5")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                pass
+            model = nn.Linear(2, 2, bias=False)
+            optimizer = _Stateful("optimizer")
+            config = TorchCheckpointingManager.Config(
+                enable=True,
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+                model_parts=[model],
+                optimizers=optimizer,
+            )
+            expected_weight = torch.full_like(model.weight, 3)
+            backend_manager.load_result = {
+                "weight": expected_weight,
+                OPTIMIZER: {"value": "restored"},
+            }
+
+            self.assertTrue(manager.load(step=5))
+
+            torch.testing.assert_close(model.weight, expected_weight)
+            self.assertEqual("restored", optimizer.value)
+            self.assertEqual(checkpoint_id, backend_manager.load_calls[0][0])
+            self.assertEqual(set(manager.states), set(backend_manager.load_calls[0][1]))
+            self.assertEqual({"strict": True}, backend_manager.load_calls[0][2])
+            manager.close()
+
+    def test_native_load_requires_every_requested_key(self) -> None:
+        # The backend skips absent keys by default, which would leave those
+        # parameters at their initialized values and quietly resume from a model
+        # that is not the one that was saved.
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "checkpoint", "step-5")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                pass
+            config = TorchCheckpointingManager.Config(
+                enable=True,
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+            backend_manager.load = mock.Mock(
+                side_effect=RuntimeError(
+                    f"Checkpoint at {checkpoint_id} is missing keys: "
+                    f"['{MODEL}::weight']"
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "is missing keys"):
+                manager.load(step=5)
+
+            self.assertIs(True, backend_manager.load.call_args.kwargs["strict"])
+            manager.close()
+
+    def test_load_latest_step_zero_loads_only_model_state(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "checkpoint", "step-0")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                pass
+            config = TorchCheckpointingManager.Config(
+                enable=True,
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+
+            self.assertTrue(manager.load())
+
+            self.assertEqual({MODEL}, set(backend_manager.load_calls[0][1]))
+            manager.close()
+
+    def test_load_latest_uses_configured_storage(self) -> None:
+        # The backend Storage the adapter wraps: step-7 is a directory holding a
+        # metadata.pkl file.
+        storage = mock.Mock()
+        storage.ls.return_value = ["step-7"]
+        storage.exists.return_value = True
+        storage.isdir.side_effect = lambda path: not str(path).endswith("metadata.pkl")
+        storage_config = mock.Mock()
+        storage_config.create_storage.return_value = storage
+        config = TorchCheckpointingManager.Config(
+            enable=True,
+            folder="checkpoint",
+            keep_latest_k=0,
+            initial_load_model_only=False,
+            load_only=True,
+        )
+        backend_config = _default_backend_config()
+        backend_config.storage_config = storage_config
+        manager, backend_manager = self._build_manager(
+            config,
+            backend_config=backend_config,
+            base_folder="/custom",
+        )
+
+        self.assertTrue(manager.load())
+
+        self.assertEqual(
+            "/custom/checkpoint/step-7",
+            backend_manager.load_calls[0][0],
+        )
+        manager.close()
+
+    def test_load_latest_ignores_incomplete_checkpoint_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_folder = os.path.join(base_folder, "checkpoint")
+            for step in (2, 5):
+                checkpoint_id = os.path.join(checkpoint_folder, f"step-{step}")
+                os.makedirs(checkpoint_id)
+                with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                    pass
+            incomplete_checkpoint_id = os.path.join(checkpoint_folder, "step-8")
+            os.makedirs(incomplete_checkpoint_id)
+            # An interrupted save leaves its metadata behind, so the temporary
+            # directory looks complete. Resuming from it would build the id
+            # "step-9", which does not exist.
+            # Neither is a checkpoint id we could reconstruct: "tmp_step-9" is
+            # an interrupted save whose metadata already landed, so it looks
+            # complete, and "step-99.partial" is not a name we write at all.
+            # Matching either one loosely resolves to a step that does not exist.
+            for decoy in ("tmp_step-9", "step-99.partial"):
+                decoy_id = os.path.join(checkpoint_folder, decoy)
+                os.makedirs(decoy_id)
+                with open(os.path.join(decoy_id, "metadata.pkl"), "wb"):
+                    pass
+            config = TorchCheckpointingManager.Config(
+                enable=True,
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+
+            self.assertTrue(manager.load())
+
+            self.assertEqual(
+                os.path.join(checkpoint_folder, "step-5"),
+                backend_manager.load_calls[0][0],
+            )
+            manager.close()
