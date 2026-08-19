@@ -7,6 +7,13 @@
 from typing import cast
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -19,10 +26,7 @@ from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
-    HuggingFaceTextDataLoader,
-)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -33,6 +37,7 @@ from .model import Llama3Model
 
 def llama3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
+    packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -53,8 +58,9 @@ def llama3_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4_test",
+        dataloader=GrainDataLoader.Config(
+            dataset=packed,
+            shuffle=False,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
@@ -66,6 +72,10 @@ def llama3_debugmodel() -> Trainer.Config:
         validator=Validator.Config(
             freq=5,
             steps=10,
+            dataloader=GrainDataLoader.Config(
+                dataset=packed,
+                shuffle=False,
+            ),
         ),
     )
 
@@ -204,8 +214,8 @@ def llama3_8b() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
@@ -277,8 +287,8 @@ def llama3_70b() -> Trainer.Config:
             seq_len=8192,
             steps=1000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
@@ -330,8 +340,8 @@ def llama3_405b() -> Trainer.Config:
             seq_len=8192,
             steps=3000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
@@ -377,13 +387,20 @@ def sft_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="json",
+                        split="train",
+                        load_dataset_kwargs={
+                            "data_files": "tests/assets/sft_test/data.json",
+                        },
+                    ),
+                    processor=ChatProcessor.Config(messages_fn=process_sample),
+                    post_filters=(lambda sample: sample is not None,),
+                ),
+            ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(

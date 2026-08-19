@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, TypeAlias
@@ -13,19 +13,20 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.collators import TrainerBatch
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
 
 ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
@@ -76,15 +77,16 @@ class Validator(BaseValidator):
 
         steps: int = -1
         """
-        Number of steps to take in the validation set, -1 means consuming
-        all the data in the validation dataset.
-        WARNING: When setting to -1 there could be hangs due to mismatch among ranks
+        Number of validation steps. -1 consumes the finite dataset and therefore
+        requires an effective data-parallel degree of one.
         """
 
         dataloader: BaseDataLoader.Config = field(
-            default_factory=lambda: HuggingFaceTextDataLoader.Config(
-                dataset="c4_validation",
-                infinite=False,
+            default_factory=lambda: GrainDataLoader.Config(
+                dataset=ConcatThenSplitPackingConfig(
+                    dataset=DATASETS["c4_validation"],
+                ),
+                repeat=False,
             )
         )
         """DataLoader configuration for validation"""
@@ -119,7 +121,8 @@ class Validator(BaseValidator):
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        self.dl_config = replace(config.dataloader, infinite=config.steps != -1)
+        # A bounded validation run repeats data; steps=-1 consumes one finite pass.
+        self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
@@ -129,12 +132,6 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
-
-        if config.steps == -1:
-            logger.warning(
-                "Setting validation steps to -1 might cause hangs because of "
-                "unequal sample counts across ranks when dataset is exhausted."
-            )
 
     def post_dataloading_process(
         self,
@@ -249,7 +246,7 @@ class Validator(BaseValidator):
             ),
         )
 
-        validation_iterator = iter(validation_dataloader)
+        validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
         while True:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
@@ -353,3 +350,13 @@ class Validator(BaseValidator):
         # Set model back to train mode
         for model in model_parts:
             model.train()
+
+
+def iterate_and_close_dataloader(
+    dataloader: BaseDataLoader,
+) -> Iterator[TrainerBatch]:
+    """Close a temporary dataloader when its consumer stops iterating."""
+    try:
+        yield from dataloader
+    finally:
+        dataloader.close()
