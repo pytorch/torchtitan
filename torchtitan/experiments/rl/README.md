@@ -181,3 +181,13 @@ TitanRL exposes three complementary views of a run:
 Together these answer three different debugging questions: what the distributed system was doing, how the run was learning, and what the model actually produced.
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
+
+## Monarch specifics
+
+### Actor endpoints use `@concurrent_endpoint`
+
+**Every endpoint on a Monarch actor, e.g. `PolicyTrainer`, `VLLMGenerator`, and so on, is declared with `@concurrent_endpoint`, not `@endpoint`.** New endpoints follow the same rule.
+
+When messages are sent to an actor, the messages are put on this actor's internal queue first, and then dispatched to the corresponding endpoints sequentially. When a plain `@endpoint` is processing a message, it will block the actor from processing the next next message. `@concurrent_endpoint` on the other hand allows the actor to process messages concurrently. Under the hood, `@concurrent_endpoint` is a wrapper of `@endpoint`, but it runs each message in its own asyncio task, in order to avoid the blocking. The caveat is when an actor has both `@endpoint` and `@concurrent_endpoint` endpoints, `@endpoint` will block all the other endpoints, including `@concurrent_endpoint`. This could lead to surprising behaviors. More details can be found in [Monarch's documentation](https://meta-pytorch.org/monarch/stable/actors.html#concurrent-endpoints).
+
+To avoid surprises, and since TorchTitanRL currently does not has a need for sequential processing, we require all endpoints to use `@concurrent_endpoint`. Note this does not bar us from using `@endpoint` in the future, as far as its usage can be justified. When we do that, the reason should be clearly stated in the endpoint's docstring.

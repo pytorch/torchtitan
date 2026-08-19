@@ -501,7 +501,7 @@ class MultiModalTokenizer(HuggingFaceTokenizer):
 
     Requires 5 token strings via config, validates them against the vocabulary
     at init, and exposes both string and ID attributes (e.g. ``image_token``,
-    ``image_id``). The multimodal data pipeline (``MMDataLoader``) requires
+    ``image_id``). The Qwen multimodal Grain processor requires
     ``MultiModalTokenizer`` (not ``HuggingFaceTokenizer``) and reads these
     attributes directly; the collator packs the IDs into a plain
     ``dict[str, int]`` that travels through the batch to the model forward.
