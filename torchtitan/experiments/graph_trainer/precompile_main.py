@@ -51,6 +51,7 @@ def _common_setup(config):
         )
 
     parallelism = config.parallelism
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
     cp = parallelism.context_parallel_degree
@@ -94,7 +95,6 @@ def _common_setup(config):
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
-    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     parallel_dims = ParallelDims(
         dp_shard=dp_shard,
         dp_replicate=dp_replicate,
