@@ -99,6 +99,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "deepseek_v3_hsdp+ep",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.disable_cuda_graphs",
+                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--override.imports torchtitan.overrides.fused_mla.fused_mla,"
+                    "torchtitan.overrides.fused_swiglu.fused_swiglu",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "DeepSeek V3 fused MLA+SwiGLU FSDP+EP",
+            "deepseek_v3_fused_mla_swiglu_fsdp+ep",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             [
