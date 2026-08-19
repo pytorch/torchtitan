@@ -30,6 +30,28 @@ jobs:
             *) echo "Expected an RC version, got: $version"; exit 1 ;;
           esac
 
+      - name: Read release dependency versions
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          versions = json.loads(Path("assets/release_versions.json").read_text())
+          required = {
+              "torch": "TORCH_VERSION",
+              "torchvision": "TORCHVISION_VERSION",
+              "torchao": "TORCHAO_VERSION",
+          }
+          missing = required.keys() - versions.keys()
+          if missing:
+              raise ValueError(f"Missing release versions: {sorted(missing)}")
+
+          with open(os.environ["GITHUB_ENV"], "a") as env_file:
+              for package, env_name in required.items():
+                  print(f"{env_name}={versions[package]}", file=env_file)
+          PY
+
       - name: Create clean virtual environment
         run: python -m venv "$RUNNER_TEMP/validate-rc-venv"
 
@@ -39,9 +61,9 @@ jobs:
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
             --pre \
             --index-url https://download.pytorch.org/whl/test/cpu \
-            "torch==2.14.0" \
-            "torchvision==0.29.0" \
-            "torchao==0.18.0"
+            "torch==$TORCH_VERSION" \
+            "torchvision==$TORCHVISION_VERSION" \
+            "torchao==$TORCHAO_VERSION"
 
       - name: Install RC from TestPyPI
         run: |
