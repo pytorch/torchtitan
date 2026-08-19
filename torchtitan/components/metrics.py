@@ -9,7 +9,7 @@ import time
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -114,30 +114,15 @@ class BaseLogger:
 class TensorBoardLogger(BaseLogger):
     """Logger implementation for TensorBoard."""
 
-    def __init__(
-        self,
-        log_dir: str,
-        tag: str | None = None,
-        step_axis: Literal["steps", "tokens", "both"] = "steps",
-    ):
+    def __init__(self, log_dir: str, tag: str | None = None):
         self.tag = tag
-        self.step_axis = step_axis
         self.writer = SummaryWriter(log_dir, max_queue=1000)
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        step_values = {"": step}
-        if self.step_axis == "tokens":
-            step_values = {"": int(metrics["n_tokens_seen"])}
-        elif self.step_axis == "both":
-            step_values = {
-                "steps/": step,
-                "tokens/": int(metrics["n_tokens_seen"]),
-            }
         for k, v in metrics.items():
             tag = k if self.tag is None else f"{self.tag}/{k}"
-            for axis_prefix, axis_step in step_values.items():
-                self.writer.add_scalar(f"{axis_prefix}{tag}", v, axis_step)
+            self.writer.add_scalar(tag, v, step)
 
     def close(self) -> None:
         self.writer.close()
@@ -296,9 +281,6 @@ class MetricsProcessor(Configurable):
 
         enable_tensorboard: bool = False
         """Whether to log metrics to TensorBoard"""
-
-        tensorboard_step_axis: Literal["steps", "tokens", "both"] = "steps"
-        """Use optimizer steps, cumulative training tokens, or log both TensorBoard axes."""
 
         disable_color_printing: bool = False
         """Whether to disable color printing in logs"""
@@ -459,11 +441,7 @@ class MetricsProcessor(Configurable):
 
         if config.enable_tensorboard:
             logger.debug("Creating TensorBoard logger")
-            tensorboard_logger = TensorBoardLogger(
-                base_log_dir,
-                tag,
-                step_axis=config.tensorboard_step_axis,
-            )
+            tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
             logger_container.add_logger(tensorboard_logger)
 
         if logger_container.number_of_loggers == 0:
@@ -550,8 +528,7 @@ class MetricsProcessor(Configurable):
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu_str}  "
-            f"{color.yellow}data_loading: {time_data_loading_pct:5.2f}%{color.reset}"
+            f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
 
         self.ntokens_since_last_log = 0

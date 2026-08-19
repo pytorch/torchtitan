@@ -8,6 +8,7 @@
 import argparse
 import gzip
 import json
+import random
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 SUPPORTED_JSONL_PATTERNS = ("*.jsonl", "*.jsonl.gz", "*.jsonl.zst")
+FORMAT_VERSION = 2
 
 
 def _input_files(input_dir: Path, pattern: str | None) -> list[Path]:
@@ -70,6 +72,18 @@ def _iter_records(path: Path) -> Iterator[dict]:
         yield from _iter_jsonl_gz(path)
     else:
         yield from _iter_jsonl(path)
+
+
+def _shuffled_records(
+    path: Path,
+    *,
+    shuffle_seed: int,
+    source_file_idx: int,
+) -> list[dict]:
+    """Load and deterministically shuffle the documents in one input shard."""
+    records = list(_iter_records(path))
+    random.Random(shuffle_seed + source_file_idx).shuffle(records)
+    return records
 
 
 def _append_tokens(output_path: Path, tokens: list[int]) -> None:
@@ -340,6 +354,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--text-field", default="text")
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=34521,
+        help=(
+            "Seed for deterministic document shuffling within each input file. "
+            "Each input file is materialized in memory before tokenization."
+        ),
+    )
     parser.add_argument("--output-prefix", default="part")
     parser.add_argument("--tokens-per-bin", type=int, default=8_000_000_000)
     parser.add_argument("--add-bos", action="store_true")
@@ -357,6 +380,23 @@ def _load_progress(progress_path: Path) -> dict[str, Any] | None:
         return None
     with progress_path.open() as f:
         return json.load(f)
+
+
+def _validate_completed_metadata(
+    metadata_path: Path,
+    *,
+    shuffle_seed: int,
+) -> None:
+    with metadata_path.open() as file:
+        metadata = json.load(file)
+    if (
+        metadata.get("format_version") != FORMAT_VERSION
+        or metadata.get("shuffle_seed") != shuffle_seed
+    ):
+        raise ValueError(
+            f"Completed output at {metadata_path.parent} is incompatible with "
+            "the configured document shuffle. Pass --overwrite to regenerate it."
+        )
 
 
 def _cursor_from_last_data_file(
@@ -532,7 +572,7 @@ def _make_progress_payload(
 ) -> dict[str, Any]:
     payload = {
         "format": "pretokenized_uint32_bins_progress",
-        "format_version": 1,
+        "format_version": FORMAT_VERSION,
         "dtype": "uint32",
         "num_tokens": num_tokens,
         "num_documents": num_documents,
@@ -548,6 +588,7 @@ def _make_progress_payload(
         "text_field": args.text_field,
         "add_bos": args.add_bos,
         "add_eos": args.add_eos,
+        "shuffle_seed": args.shuffle_seed,
     }
     payload.update(writer.checkpoint_state())
     if (
@@ -589,6 +630,7 @@ def main() -> None:
     metadata_path = output_dir / "metadata.json"
     progress_path = output_dir / "progress.json"
     if metadata_path.exists() and not args.overwrite:
+        _validate_completed_metadata(metadata_path, shuffle_seed=args.shuffle_seed)
         print(
             f"Skipping {args.input_dir.name}: found complete metadata at "
             f"{metadata_path}. Pass --overwrite to regenerate.",
@@ -614,6 +656,11 @@ def main() -> None:
         raise RuntimeError("zstdcat is required to read .zst files")
 
     if progress is not None:
+        if progress.get("format_version") != FORMAT_VERSION:
+            raise ValueError(
+                "progress.json was written by an incompatible pretokenization "
+                "format. Pass --overwrite to restart."
+            )
         if progress.get("source_files") != [str(path) for path in source_files]:
             raise ValueError(
                 "progress.json source file list does not match current input. "
@@ -622,6 +669,11 @@ def main() -> None:
         if progress.get("tokens_per_bin") != args.tokens_per_bin:
             raise ValueError(
                 "progress.json tokens_per_bin does not match current args. "
+                "Pass --overwrite to restart."
+            )
+        if progress.get("shuffle_seed") != args.shuffle_seed:
+            raise ValueError(
+                "progress.json shuffle_seed does not match current args. "
                 "Pass --overwrite to restart."
             )
         progress = _repair_current_tmp_for_resume(
@@ -670,7 +722,12 @@ def main() -> None:
         resume_record_idx = (
             start_record_idx if source_file_idx == start_source_file_idx else 0
         )
-        for record_idx, record in enumerate(_iter_records(source_file)):
+        records = _shuffled_records(
+            source_file,
+            shuffle_seed=args.shuffle_seed,
+            source_file_idx=source_file_idx,
+        )
+        for record_idx, record in enumerate(records):
             if record_idx < resume_record_idx:
                 continue
 
@@ -733,7 +790,7 @@ def main() -> None:
 
     metadata = {
         "format": "pretokenized_uint32_bins",
-        "format_version": 1,
+        "format_version": FORMAT_VERSION,
         "dtype": "uint32",
         "num_tokens": num_tokens,
         "num_documents": num_documents,
@@ -746,6 +803,7 @@ def main() -> None:
         "text_field": args.text_field,
         "add_bos": args.add_bos,
         "add_eos": args.add_eos,
+        "shuffle_seed": args.shuffle_seed,
     }
     _write_json_atomic(metadata_path, metadata)
     progress_path.unlink(missing_ok=True)
