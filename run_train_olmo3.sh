@@ -47,7 +47,7 @@ EXTRA_ARGS=(
   --comm.train_timeout_seconds "${COMM_TRAIN_TIMEOUT_SECONDS}"
 )
 
-# Optional downstream eval hook. Enable with EXTERNAL_EVAL_ENABLE=1.
+# Optional checkpoint averaging and downstream eval hooks.
 export EXTERNAL_EVAL_ENABLE=${EXTERNAL_EVAL_ENABLE:-1}
 export CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-10}
 export CHECKPOINT_KEEP_LATEST_K=${CHECKPOINT_KEEP_LATEST_K:-10}
@@ -55,28 +55,46 @@ export EXTERNAL_EVAL_FREQ=${EXTERNAL_EVAL_FREQ:-10}
 export EXTERNAL_EVAL_PATH=${EXTERNAL_EVAL_PATH:-"$(pwd)/scripts/run_external_eval.py"}
 export EXTERNAL_EVAL_TASKS=${EXTERNAL_EVAL_TASKS:-"olmo3_arc_challenge_5shot,olmo3_arc_easy_5shot,olmo3_hellaswag_5shot,olmo3_mmlu_humanities_5shot,olmo3_mmlu_other_5shot,olmo3_mmlu_social_sciences_5shot,olmo3_mmlu_stem_5shot,olmo3_humaneval_gold_bpb_3shot,olmo3_mbpp_gold_bpb_3shot,olmo3_math500_gold_bpb_0shot"}
 export EXTERNAL_EVAL_EVAL_RAW=${EXTERNAL_EVAL_EVAL_RAW:-0}
-export EXTERNAL_EVAL_MERGE_CHECKPOINTS=${EXTERNAL_EVAL_MERGE_CHECKPOINTS:-4}
-export EXTERNAL_EVAL_MERGE_INTERVAL=${EXTERNAL_EVAL_MERGE_INTERVAL:-${CHECKPOINT_INTERVAL}}
-export EXTERNAL_EVAL_MERGE_START_STEP=${EXTERNAL_EVAL_MERGE_START_STEP:--1}
 export EXTERNAL_EVAL_CUDA_VISIBLE_DEVICES=${EXTERNAL_EVAL_CUDA_VISIBLE_DEVICES:-"6,7"}
 export EXTERNAL_EVAL_GPUS=${EXTERNAL_EVAL_GPUS:-2}
 export EXTERNAL_EVAL_EXPORT_DTYPE=${EXTERNAL_EVAL_EXPORT_DTYPE:-"bfloat16"}
 export EXTERNAL_EVAL_EXTRA_ARGS=${EXTERNAL_EVAL_EXTRA_ARGS:-"--eval-gpus ${EXTERNAL_EVAL_GPUS} --batch-size 1 --max-sequence-length 8192"}
+export EMA_ENABLE=${EMA_ENABLE:-1}
+export EMA_FREQ=${EMA_FREQ:-${EXTERNAL_EVAL_FREQ}}
+export EMA_CHECKPOINT_COUNT=${EMA_CHECKPOINT_COUNT:-4}
+export EMA_CHECKPOINT_INTERVAL=${EMA_CHECKPOINT_INTERVAL:-${CHECKPOINT_INTERVAL}}
+export EMA_START_STEP=${EMA_START_STEP:--1}
+export EMA_DECAY=${EMA_DECAY:-1.0}
+export EMA_STATEFUL_DECAY=${EMA_STATEFUL_DECAY:-0.0}
 
-if [[ "${EXTERNAL_EVAL_ENABLE}" == "1" || "${EXTERNAL_EVAL_ENABLE}" == "true" ]]; then
+if [[ "${EXTERNAL_EVAL_ENABLE}" == "1" || "${EXTERNAL_EVAL_ENABLE}" == "true" || "${EMA_ENABLE}" == "1" || "${EMA_ENABLE}" == "true" ]]; then
   EXTRA_ARGS+=(
     --checkpoint.enable
     --checkpoint.no_last_save_model_only
     --checkpoint.interval "${CHECKPOINT_INTERVAL}"
     --checkpoint.keep_latest_k "${CHECKPOINT_KEEP_LATEST_K}"
+  )
+fi
+
+if [[ "${EMA_ENABLE}" == "1" || "${EMA_ENABLE}" == "true" ]]; then
+  EXTRA_ARGS+=(
+    --ema.enable
+    --ema.freq "${EMA_FREQ}"
+    --ema.checkpoint_count "${EMA_CHECKPOINT_COUNT}"
+    --ema.checkpoint_interval "${EMA_CHECKPOINT_INTERVAL}"
+    --ema.start_step "${EMA_START_STEP}"
+    --ema.decay "${EMA_DECAY}"
+    --ema.stateful_decay "${EMA_STATEFUL_DECAY}"
+  )
+fi
+
+if [[ "${EXTERNAL_EVAL_ENABLE}" == "1" || "${EXTERNAL_EVAL_ENABLE}" == "true" ]]; then
+  EXTRA_ARGS+=(
     --external_eval.enable
     --external_eval.freq "${EXTERNAL_EVAL_FREQ}"
     --external_eval.path "${EXTERNAL_EVAL_PATH}"
     --external_eval.tasks "${EXTERNAL_EVAL_TASKS}"
     --external_eval.export_dtype "${EXTERNAL_EVAL_EXPORT_DTYPE}"
-    --external_eval.merge_checkpoint_count "${EXTERNAL_EVAL_MERGE_CHECKPOINTS}"
-    --external_eval.merge_checkpoint_interval "${EXTERNAL_EVAL_MERGE_INTERVAL}"
-    --external_eval.merge_start_step "${EXTERNAL_EVAL_MERGE_START_STEP}"
   )
 
   if [[ "${EXTERNAL_EVAL_EVAL_RAW}" != "1" && "${EXTERNAL_EVAL_EVAL_RAW}" != "true" ]]; then
