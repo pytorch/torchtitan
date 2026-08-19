@@ -28,7 +28,7 @@ import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -94,6 +94,7 @@ def _common_setup(config):
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
 
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     parallel_dims = ParallelDims(
         dp_shard=dp_shard,
         dp_replicate=dp_replicate,
