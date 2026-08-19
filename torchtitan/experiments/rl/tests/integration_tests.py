@@ -236,7 +236,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.parallelism.tensor_parallel_degree 2",
                     "--generator.parallelism.tensor_parallel_degree 2",
                     "--num_generators 2",
-                    "--async-loop.max-offpolicy-steps 0",
+                    "--async-loop.target-offpolicy-steps 0",
                     "--async-loop.num-samples-per-prompt 2",
                     "--async-loop.batcher.batch.seq-len 1024",
                     "--renderer.enable-thinking False",
