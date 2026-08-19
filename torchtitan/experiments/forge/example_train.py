@@ -13,7 +13,7 @@ from typing import Any
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -252,6 +252,7 @@ class Trainer(ForgeEngine):
             if target_mbs is not None:
                 target_mbs.append(labels)
 
+        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
             losses = [] if self.pp_has_last_stage else None
             self.pp_schedule.step(
@@ -259,14 +260,14 @@ class Trainer(ForgeEngine):
                 kwarg_mbs=kwarg_mbs,
                 target_mbs=target_mbs,
                 losses=losses,
+                loss_kwargs=loss_kwargs,
+                return_outputs=False,
             )
 
         # TODO: PP+FSDP unexpectedly puts the loss back to the CPU.
         if self.pp_has_last_stage:
             assert losses is not None
-            return (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
-                self.device
-            )
+            return torch.sum(torch.stack(losses)).to(self.device)
         return torch.tensor([-1.0], device=self.device)
 
     def train_step(

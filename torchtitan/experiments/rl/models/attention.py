@@ -86,7 +86,14 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             # activate_flash_attention_impl() will restore internal global state
             # and re-run register function, so we want to only call it once.
             if current_flash_attention_impl() != flash_attention_impl:
-                activate_flash_attention_impl(flash_attention_impl)
+                try:
+                    activate_flash_attention_impl(flash_attention_impl)
+                except (ImportError, RuntimeError, ValueError) as error:
+                    capability = torch.cuda.get_device_capability()
+                    raise RuntimeError(
+                        f"{flash_attention_impl} is required on detected SM "
+                        f"{capability[0]}.{capability[1]}, but activation failed."
+                    ) from error
         else:
             warn_once(
                 logger,

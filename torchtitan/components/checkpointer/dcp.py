@@ -47,7 +47,7 @@ from .base import (
 if TYPE_CHECKING:
     import torch.nn as nn
 
-    from torchtitan.components.dataloader import BaseDataLoader
+    from torchtitan.components.data.loader import BaseDataLoader
     from torchtitan.components.optimizer import (
         LRSchedulersContainer,
         OptimizersContainer,
@@ -569,6 +569,9 @@ class CheckpointManager(BaseCheckpointManager):
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
 
+        # TODO(checkpoint-rng): Save rank-local training RNG state so same-topology
+        # resumes continue exactly. If world size changes, omit it during load and
+        # keep each rank's newly initialized RNG stream.
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,

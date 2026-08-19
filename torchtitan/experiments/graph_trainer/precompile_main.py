@@ -28,7 +28,7 @@ import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -51,6 +51,7 @@ def _common_setup(config):
         )
 
     parallelism = config.parallelism
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
     cp = parallelism.context_parallel_degree
@@ -102,6 +103,7 @@ def _common_setup(config):
         pp=pp,
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
+        spmd_backend=parallelism.spmd_backend,
     )
     parallel_dims.build_mesh()
 
@@ -233,8 +235,6 @@ def _precompile_aot_fx_trace(
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,
             )
-
-        extra_kwargs["positions"] = positions
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence

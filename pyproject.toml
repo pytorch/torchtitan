@@ -3,7 +3,7 @@
 name = "torchtitan"
 description = "A PyTorch native platform for training generative AI models"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {file = "LICENSE"}
 authors = [
     { name = "PyTorch Team", email = "packages@pytorch.org" },
@@ -11,7 +11,7 @@ authors = [
 keywords = ["pytorch", "training", "llm"]
 dependencies = [
     # Stateful Dataloader
-    "torchdata>=0.8.0",
+    "grain==0.2.18",
 
     # Checkpointing
     "torch_checkpointing>=0.1.0",
@@ -71,6 +71,7 @@ addopts = ["--showlocals"]  # show local variables in tracebacks
 testpaths = ["tests"]
 
 [tool.pyrefly]
+python-version = "3.11"
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
 replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms"]  # optional dependencies
 search-path = ["../pytorch"]  # local built pytorch

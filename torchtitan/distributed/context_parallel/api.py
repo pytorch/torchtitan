@@ -124,7 +124,7 @@ def prepare_context_parallel_input(
     extra_kwargs: dict[str, Any],
     cp_mesh: DeviceMesh,
     device: torch.device,
-    load_balancer_type: str | None = "ptrr",
+    load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
@@ -142,7 +142,7 @@ def prepare_context_parallel_input(
         cp_mesh: Device mesh for context parallel dimension
         device: Device for the tensors
         load_balancer_type: Type of load balancer to use for sharding.
-            Options: "headtail", "ptrr", or None. Defaults to "ptrr".
+            Options: "headtail", "ptrr", or None. Defaults to "headtail".
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
             masks are a dict[str, BlockMask], selects which mask the
             PTRRLoadBalancer is built from. Ignored otherwise.
@@ -174,7 +174,7 @@ def cp_shard(
     cp_mesh: DeviceMesh,
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
-    load_balancer_type: str | None = "ptrr",
+    load_balancer_type: str | None = "headtail",
     input_seq_dim: int = 0,
     ptrr_mask_key: str | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
@@ -195,7 +195,7 @@ def cp_shard(
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
             - None: Disable load balancing
-            Defaults to "ptrr".
+            Defaults to "headtail".
         input_seq_dim: Token dimension index for sharding. Defaults to 0 for
             tensors whose leading dimension is ``num_tokens``. Can be changed
             by passing a different value if your tensors use a different

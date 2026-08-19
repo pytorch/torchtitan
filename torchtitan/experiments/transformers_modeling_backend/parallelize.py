@@ -94,11 +94,12 @@ def parallelize_hf_transformers(
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
-    # Only the "default" sharding backend is wired here.
+    # Only the partial-DTensor sharding backend is wired here.
     # TODO: wire spmd_types (next PR) -- see the migration TODO in hf_sharding.py.
-    if parallel_dims.spmd_backend != "default":
+    if parallel_dims.spmd_backend != "partial_dtensor":
         raise NotImplementedError(
-            f"The HF transformers backend only supports spmd_backend='default' "
+            f"The HF transformers backend only supports "
+            f"spmd_backend='partial_dtensor' "
             f"today; got '{parallel_dims.spmd_backend}'. spmd_types/full_dtensor "
             "are not yet wired for this backend (FSDP mesh resolution, "
             "Titan-native embedding, and attention kernels are pending)."

@@ -348,7 +348,7 @@ class TestConfigManager(unittest.TestCase):
         assert config.parallelism.context_parallel_load_balancer == "headtail"
 
     def test_default_context_parallel_load_balancer(self):
-        assert ParallelismConfig().context_parallel_load_balancer == "ptrr"
+        assert ParallelismConfig().context_parallel_load_balancer == "headtail"
 
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""

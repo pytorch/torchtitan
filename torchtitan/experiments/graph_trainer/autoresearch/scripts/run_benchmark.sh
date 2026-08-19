@@ -13,7 +13,7 @@ set -e
 
 start_time=$(date +%s)
 
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \

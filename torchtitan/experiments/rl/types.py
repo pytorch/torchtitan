@@ -143,7 +143,7 @@ class TrainingBatch:
         #    microbatches = [[TrainingMicrobatch(token_ids=[20])],
         #                    [TrainingMicrobatch(token_ids=[20])]]
         # The second microbatch contains one real row and one pad row.
-        # num_global_valid_tokens = count of loss_mask=True tokens across the 5 samples
+        # num_global_valid_tokens = response tokens with finite generator logprobs
     """
 
     microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]

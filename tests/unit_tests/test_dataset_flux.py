@@ -5,51 +5,97 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 
 import torch
-from datasets import load_dataset
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.config import ConfigManager
-from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.models.flux.config_registry import (
+    flux_debugmodel,
+    flux_dev,
+    flux_schnell,
+)
+from torchtitan.models.flux.flux_datasets import FluxSampleProcessor
 
 
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
         # Import here to avoid circular import during test collection
-        from torchtitan.models.flux.flux_datasets import (
-            _cc12m_wds_data_processor,
-            DATASETS,
-            FluxDataLoader,
+        from torchtitan.models.flux.flux_datasets import DATASETS, FluxCollator
+
+        self._dataset = DATASETS["cc12m-test"]
+        self._collator = FluxCollator.Config()
+
+    def test_collator_moves_image_to_labels(self):
+        rows = [
+            {
+                "t5": torch.tensor([1, 2]),
+                "clip": torch.tensor([3]),
+                "prompt": "first",
+                "image": torch.full((3, 2, 2), 1.0),
+            },
+            {
+                "t5": torch.tensor([4, 5]),
+                "clip": torch.tensor([6]),
+                "prompt": "second",
+                "image": torch.full((3, 2, 2), 2.0),
+            },
+        ]
+
+        context = SimpleNamespace(
+            num_tokens_per_batch=2,
+            max_context_length=1,
+        )
+        model_inputs, labels = self._collator.build(context=context)(rows)
+
+        self.assertNotIn("image", model_inputs)
+        self.assertEqual(model_inputs["prompt"], ["first", "second"])
+        self.assertTrue(
+            torch.equal(labels, torch.stack([row["image"] for row in rows]))
         )
 
-        # Store reference for use in tearDown
-        self._DATASETS = DATASETS
-        self._cc12m_wds_data_processor = _cc12m_wds_data_processor
-        self._FluxDataLoader = FluxDataLoader
+    def test_recipe_context_length_matches_dataset_geometry(self):
+        for recipe, expected_max_context_length in (
+            (flux_debugmodel, 512),
+            (flux_dev, 768),
+            (flux_schnell, 512),
+        ):
+            with self.subTest(recipe=recipe.__name__):
+                config = recipe()
+                processor = config.dataloader.dataset.processor
 
-        self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
-            path="tests/assets/cc12m_test",
-            loader=lambda path: load_dataset(
-                path, split="train", data_files={"train": "*tar"}
-            ).to_iterable_dataset(num_shards=4),
-            sample_processor=self._cc12m_wds_data_processor,
-        )
+                self.assertIsInstance(processor, FluxSampleProcessor.Config)
+                self.assertEqual(processor.img_size, 256)
+                self.assertEqual(
+                    config.training.max_context_length,
+                    expected_max_context_length,
+                )
 
-    def tearDown(self):
-        del self._DATASETS["cc12m-test-iterable"]
+    def test_validation_timestep_preserves_sample(self):
+        from torchtitan.models.flux.flux_datasets import _add_validation_timestep
+
+        sample = {
+            "t5": torch.tensor([1, 2]),
+            "clip": torch.tensor([3]),
+            "prompt": "caption",
+            "image": torch.ones(3, 2, 2),
+        }
+
+        timed = _add_validation_timestep(3, sample)
+
+        self.assertEqual(timed["timestep"], 3.5 / 8)
+        self.assertNotIn("timestep", sample)
+        for key in sample:
+            self.assertIs(timed[key], sample[key])
 
     def test_load_dataset(self):
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
         for world_size in [2]:
             for rank in range(world_size):
-                dataset_name = "cc12m-test-iterable"
                 batch_size = 1
 
                 num_steps = 15
-
-                # TODO: if num_steps * batch_size * world_size is larger than the number of samples
-                # in the dataset, then the test will fail, due to huggingface's
-                # non-resumption when checkpointing after the first epoch
 
                 # Load flux config via --module/--config
                 config_manager = ConfigManager()
@@ -59,14 +105,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--training.num-tokens-per-microbatch-per-dp-rank",
-                        str(batch_size * 512),
-                        "--dataloader.img_size",
-                        str(256),
-                        "--dataloader.dataset",
-                        dataset_name,
-                        "--dataloader.prompt_dropout_prob",
-                        "0.447",
+                        "--training.num_tokens_per_microbatch_per_dp_rank",
+                        "512",
                         "--tokenizer.test_mode",
                         "--tokenizer.t5_tokenizer_path",
                         "tests/assets/tokenizer",
@@ -79,8 +119,12 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
-                assert config.training.max_context_length == 512
-                assert config.training.num_tokens_per_microbatch_per_dp_rank == 512
+                config.dataloader = GrainDataLoader.Config(
+                    dataset=self._dataset,
+                    collator=self._collator,
+                    shuffle=False,
+                    streaming_shuffle_buffer_size=128,
+                )
 
                 # Build the tokenizer container from config
                 tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
@@ -88,9 +132,11 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    max_context_length=512,
-                    num_tokens_per_batch=batch_size * 512,
+                    num_tokens_per_batch=(
+                        batch_size * config.training.max_context_length
+                    ),
                     tokenizer=tokenizer,
+                    max_context_length=config.training.max_context_length,
                 )
 
                 it = iter(dl)
@@ -117,19 +163,17 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl_resumed = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    max_context_length=512,
-                    num_tokens_per_batch=batch_size * 512,
+                    num_tokens_per_batch=(
+                        batch_size * config.training.max_context_length
+                    ),
                     tokenizer=tokenizer,
+                    max_context_length=config.training.max_context_length,
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)
 
                 for i in range(num_steps):
-                    # Set torch manual seed before each dataloader iteration to ensure consistent randomness
-                    # across dataloaders for testing purposes.
-                    torch.manual_seed(i)
                     expected_input_ids, expected_labels = next(it)
-                    torch.manual_seed(i)
                     input_ids, labels = next(it_resumed)
 
                     assert torch.equal(input_ids["clip"], expected_input_ids["clip"])

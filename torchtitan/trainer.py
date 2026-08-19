@@ -21,7 +21,7 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
-from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
@@ -562,13 +562,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.training.max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
-            snapshot_every_n_steps=(
-                config.checkpoint.interval
-                * self.gradient_accumulation_steps
-                * self.num_pp_microbatches
-                if config.checkpoint.enable
-                else None
-            ),
         )
 
         # build checkpointer
@@ -1067,6 +1060,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if hasattr(self, "dataloader") and self.dataloader:
+            self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:

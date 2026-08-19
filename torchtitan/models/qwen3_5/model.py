@@ -867,7 +867,7 @@ class Qwen35Model(Decoder):
             else:
                 x = tokens
 
-        if get_spmd_backend() == "spmd_types":
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.

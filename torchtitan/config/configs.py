@@ -18,8 +18,8 @@ Configs without a clear single owner (or with circular-import constraints)
 live here.
 
 Most knobs belong to a component or to the model, not here. But some options
-have no suitable home, e.g. ``local_batch_size``, and those can be placed here.
-Discuss with the maintainers first if you intend to add one.
+have no suitable home, e.g. the training token-budget settings, and those can
+be placed here. Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
 ``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
@@ -167,11 +167,13 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
+    spmd_backend: Literal[
+        "partial_dtensor", "full_dtensor", "spmd_types"
+    ] = "spmd_types"
     """
     SPMD backend selector.
 
-    - "default": use the existing TorchTitan parallelism paths.
+    - "partial_dtensor": use DTensor for model-parallel axes only.
     - "full_dtensor": use the existing full DTensor path.
     - "spmd_types": use the spmd_types path.
     """
@@ -238,7 +240,7 @@ class ParallelismConfig:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
-    context_parallel_load_balancer: str | None = "ptrr"
+    context_parallel_load_balancer: str | None = "headtail"
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
@@ -256,10 +258,14 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.spmd_backend not in {"default", "full_dtensor", "spmd_types"}:
+        if self.spmd_backend not in {
+            "partial_dtensor",
+            "full_dtensor",
+            "spmd_types",
+        }:
             raise ValueError(
                 "parallelism.spmd_backend must be one of "
-                "'default', 'full_dtensor', or 'spmd_types'."
+                "'partial_dtensor', 'full_dtensor', or 'spmd_types'."
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(

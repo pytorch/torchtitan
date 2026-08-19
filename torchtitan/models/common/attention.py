@@ -701,7 +701,7 @@ class QKVLinear(BaseQKVLinear):
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
                 x_TNH = x.view(num_tokens, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types":
+                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                     spmd.assert_type(
                         x_TNH,
                         spmd.V,
@@ -769,7 +769,7 @@ class FusedQKVLinear(BaseQKVLinear):
         qkv = self.wqkv(x)
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types":
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 spmd.assert_type(
                     qkv,
                     spmd.V,
@@ -919,7 +919,6 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_tokens = x_TD.shape[0]
         xq_TNH, xk_TNH, xv_TNH = self.qkv_linear(x_TD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -939,5 +938,5 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        out_TD = out_TNH.view(num_tokens, -1)
+        out_TD = out_TNH.view(out_TNH.shape[0], -1)
         return self.wo(out_TD)
