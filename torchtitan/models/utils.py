@@ -127,7 +127,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         # pyrefly: ignore [bad-argument-type]
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
-            if placement.dim == dim:
+            if isinstance(placement, (Shard, _StridedShard)) and placement.dim == dim:
                 mesh_names.append(name)
                 dim_i_placements.append(placement)
 
