@@ -41,7 +41,8 @@ jobs:
             --index-url https://download.pytorch.org/whl/test/cpu \
             "torch==2.14.0" \
             "torchvision==0.29.0" \
-            "torchao==0.18.0"
+            "torchao==0.18.0" \
+            "triton==3.8.0"
 
       - name: Install RC from TestPyPI
         run: |
@@ -67,6 +68,7 @@ jobs:
           import torch
           import torchao
           import torchvision
+          import triton
 
           assert torchtitan.__version__ == os.environ["RC_VERSION"]
           assert "site-packages" in torchtitan.__file__
@@ -74,6 +76,7 @@ jobs:
           print(f"torch={torch.__version__}")
           print(f"torchvision={torchvision.__version__}")
           print(f"torchao={torchao.__version__}")
+          print(f"triton={triton.__version__}")
           PY
 
       - name: Run CPU debug-model training smoke test
