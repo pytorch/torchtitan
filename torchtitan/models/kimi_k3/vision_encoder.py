@@ -343,30 +343,11 @@ class KimiK3VisionEncoder(Module):
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         """Encode padded raster-order patches and return padded text features."""
-        if grid_thw.ndim != 2 or grid_thw.shape[1] != 3:
-            raise ValueError(f"grid_thw must have shape (N, 3), got {grid_thw.shape}.")
         num_items, max_num_patches, _ = pixel_values.shape
         grids = grid_thw.tolist()
-        if len(grids) != num_items:
-            raise ValueError(
-                f"pixel_values contains {num_items} items but grid_thw "
-                f"contains {len(grids)}."
-            )
 
         kernel_h, kernel_w = self.merge_kernel_size
         num_patches_N = grid_thw.prod(dim=-1).to(torch.long)
-        for num_frames, grid_h, grid_w in grids:
-            if grid_h % kernel_h != 0 or grid_w % kernel_w != 0:
-                raise ValueError(
-                    f"Vision grid {grid_h}x{grid_w} is not divisible by "
-                    f"merge kernel {self.merge_kernel_size}."
-                )
-            item_num_patches = num_frames * grid_h * grid_w
-            if item_num_patches > max_num_patches:
-                raise ValueError(
-                    f"Vision grid requires {item_num_patches} patches, but "
-                    f"pixel_values only provides {max_num_patches}."
-                )
 
         learned_pos, rope_cache = self._compute_position_embeddings(
             grids, max_num_patches

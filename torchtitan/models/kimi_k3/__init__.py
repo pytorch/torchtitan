@@ -457,7 +457,6 @@ def _kimi_k3_config(
         output_res_norm=_norm(dim),
         output_res_proj=_linear(dim, 1),
         vision_encoder=vision_encoder,
-        spatial_merge_size=2,
     )
 
 
