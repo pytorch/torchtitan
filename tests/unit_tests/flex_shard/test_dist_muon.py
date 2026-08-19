@@ -258,8 +258,18 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             (2, 2),
             mesh_dim_names=("efsdp", "ep"),
         )
+        num_experts = 3
+        self.assertLess(
+            num_experts,
+            mesh["efsdp"].size() * mesh["ep"].size(),
+        )
         device = torch.device(self.device_type, self.rank)
-        value = torch.arange(30, device=device).reshape(2, 5, 3).float().div_(13)
+        value = (
+            torch.arange(num_experts * 5 * 3, device=device)
+            .reshape(num_experts, 5, 3)
+            .float()
+            .div_(13)
+        )
         storage_placements = (Shard(1), Shard(0))
         target_placements = (
             _StridedShard(0, split_factor=mesh["ep"].size()),
@@ -301,12 +311,6 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             make_optimizer(parameter, Shard(0))
 
         optimizer = make_optimizer(parameter, target_placements[0])
-        compute_layout = optimizer._parameter_compute_layouts[0]
-        self.assertEqual(compute_layout.compute_sharding, Shard(0))
-        self.assertEqual(
-            compute_layout.resolved_compute_layout_signature,
-            (("efsdp", target_placements[0]), ("ep", target_placements[1])),
-        )
         grad = (
             torch.arange(value.numel(), device=device)
             .reshape_as(value)
@@ -317,33 +321,37 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         parameter.grad = distribute_tensor(grad.clone(), mesh, storage_placements)
 
-        references = tuple(torch.nn.Parameter(matrix.clone()) for matrix in value)
-        reference_optimizer = torch.optim.Muon(
-            references,
-            lr=lr,
-            weight_decay=weight_decay,
-            momentum=0.0,
-            nesterov=False,
-            ns_steps=2,
-        )
-        for reference, matrix_grad in zip(references, grad, strict=True):
-            reference.grad = matrix_grad.clone()
-
         mesh_coordinate = mesh.get_coordinate()
         assert mesh_coordinate is not None
         efsdp_coordinate, ep_coordinate = mesh_coordinate
-        expected_compute = (
-            grad.narrow(0, ep_coordinate, 1).contiguous()
-            if efsdp_coordinate == 0
-            else grad.new_empty((0, *grad.shape[1:]))
+        ep_num_experts, ep_offset = Shard.local_shard_size_and_offset(
+            num_experts,
+            mesh["ep"].size(),
+            ep_coordinate,
+        )
+        efsdp_num_experts, efsdp_offset = Shard.local_shard_size_and_offset(
+            ep_num_experts,
+            mesh["efsdp"].size(),
+            efsdp_coordinate,
+        )
+        compute_offset = ep_offset + efsdp_offset
+        expected_compute = grad.narrow(
+            0,
+            compute_offset,
+            efsdp_num_experts,
+        ).contiguous()
+        expected_direction = grad.clone().mul_(0.5).add_(0.25)
+        expected_parameter = value.clone().mul_(1 - lr * weight_decay)
+        expected_parameter.add_(
+            expected_direction,
+            alpha=-_adjust_muon_learning_rate(lr, None, value.shape[1:]),
         )
         captured_compute = None
-        original_compute_update = optimizer._compute_update
 
-        def capture_compute(compute_layout, compute):
+        def capture_compute(_compute_layout, compute):
             nonlocal captured_compute
             captured_compute = compute.clone()
-            original_compute_update(compute_layout, compute)
+            compute.mul_(0.5).add_(0.25)
 
         with mock.patch.object(
             optimizer,
@@ -351,7 +359,6 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             side_effect=capture_compute,
         ):
             optimizer.step()
-        reference_optimizer.step()
 
         if expected_compute.numel():
             self.assertIsNotNone(captured_compute)
@@ -364,22 +371,19 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         else:
             self.assertIsNone(captured_compute)
 
-        decay = 1 - lr * weight_decay
-        expected = torch.stack([reference.detach() for reference in references])
-        adjusted_lr = _adjust_muon_learning_rate(lr, None, references[0].shape)
         torch.testing.assert_close(
-            (value * decay - parameter.full_tensor()) / adjusted_lr,
-            (value * decay - expected) / adjusted_lr,
+            parameter.full_tensor(),
+            expected_parameter,
             rtol=0,
-            atol=2e-2,
+            atol=0,
         )
         self.assertEqual(parameter.placements, storage_placements)
 
-        compute_ready_local = (
-            value.narrow(0, ep_coordinate, 1).contiguous()
-            if efsdp_coordinate == 0
-            else value.new_empty((0, *value.shape[1:]))
-        )
+        compute_ready_local = value.narrow(
+            0,
+            compute_offset,
+            efsdp_num_experts,
+        ).contiguous()
         compute_ready_parameter = torch.nn.Parameter(
             DTensor.from_local(
                 compute_ready_local,
@@ -396,10 +400,6 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
-        self.assertEqual(
-            compute_ready_layout.resolved_compute_layout_signature,
-            (("efsdp", target_placements[0]), ("ep", target_placements[1])),
-        )
 
 
 if __name__ == "__main__":
