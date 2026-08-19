@@ -75,10 +75,7 @@ from torchao.prototype.mx_formats.config import (
     MXFP8Dim1CastKernelChoice,
     ScaleCalculationMode,
 )
-from torchao.prototype.mx_formats.kernels import (
-    triton_to_mxfp8_dim0,
-    triton_to_mxfp8_dim1,
-)
+from torchao.prototype.mx_formats.kernels import triton_to_mxfp8_dim0
 from torchao.prototype.mx_formats.utils import (
     _to_mxfp8_dim1_kernel_wrapper,
     to_blocked,
@@ -124,23 +121,51 @@ def _cast_weight_rowwise_3d(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 
 
 def _cast_weight_colwise_3d(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``[G, N, K]`` quantized along N: qdata stride ``(N*K, 1, N)`` +
+    """``[G, N, K]`` quantized along N: k-major per-group qdata +
     per-group blocked scales for logical ``(K, N/32)``.
 
-    No fused non-CuTe kernel exists for this orientation, so it is a
-    per-group ``triton_to_mxfp8_dim1`` loop (2·G extra launches per layer
-    backward, accepted for v1). Stride trap: ``torch.stack`` on the
-    ``(1, N)``-strided dim1 outputs silently materializes ROW-major qdata
-    (values equal, stride wrong), so stack the transposed contiguous views
-    and re-transpose. The cudnn ops accept this native transposed memory
-    directly (probe-verified) — no ``.contiguous()`` anywhere.
+    Batched: ONE (32x1 RCEIL) cast of the flat ``[G*N, K]`` view along dim0
+    + ONE ``K_groups`` swizzle with uniform scale-column offsets. Exact
+    because N is a 256-multiple, so 32-row quantization blocks never
+    straddle groups, and every group's N/32 scale columns are 4-multiples,
+    so the swizzle packs the same per-group ``to_blocked`` bytes densely
+    from the buffer start. qdata, scales, AND downstream op outputs are
+    BITWISE-equal to the archived per-group ``triton_to_mxfp8_dim1`` +
+    ``to_blocked`` loop (probe_t1a, 2026-08-19) at ~4x less time and ~6*G
+    fewer launches per weight.
+
+    The cast's native ``[G, N, K]`` view carries an interleaved batch
+    stride ``(N, 1, G*N)``, which the cudnn wrappers reject (B must be
+    per-group-contiguous, k- or n-major); one fp8 repack to k-major — the
+    same major the rowwise casts pass — restores an accepted layout.
     """
-    qdatas, scales = [], []
-    for g in range(w.shape[0]):
-        qdata_g, scales_g = triton_to_mxfp8_dim1(w[g], _BLOCK_SIZE, _SCALING_MODE)
-        qdatas.append(qdata_g.t())
-        scales.append(to_blocked(scales_g))
-    return torch.stack(qdatas).transpose(-2, -1), torch.stack(scales)
+    g, n, k = w.shape
+    mx = _to_mxfp8_dim1_kernel_wrapper(
+        w.reshape(g * n, k),
+        _BLOCK_SIZE,
+        elem_dtype=torch.float8_e4m3fn,
+        hp_dtype=w.dtype,
+        kernel_preference=KernelPreference.AUTO,
+        cast_kernel_choice=MXFP8Dim1CastKernelChoice.CUDA,
+        scale_calculation_mode=ScaleCalculationMode.RCEIL,
+    )
+    scale_offsets = (
+        torch.arange(1, g + 1, device=w.device, dtype=torch.int32)
+        * (n // _BLOCK_SIZE)
+    )
+    # Same pow2 quirk as _cast_colwise_grouped: the K_groups swizzle's
+    # tl.arange needs a power-of-2 group count; repeated end-offsets are
+    # zero-size groups the kernel skips.
+    g_pow2 = 1 << (g - 1).bit_length()
+    if g_pow2 != g:
+        scale_offsets = torch.cat(
+            [scale_offsets, scale_offsets[-1:].expand(g_pow2 - g)]
+        )
+    col_scales = triton_mx_block_rearrange_2d_K_groups(mx.scale, scale_offsets)
+    k_pad = -(-k // 128) * 128
+    flat = col_scales.reshape(-1)[: k_pad * (g * n // _BLOCK_SIZE)]
+    qdata = mx.qdata.view(k, g, n).permute(1, 2, 0).contiguous()
+    return qdata, flat.view(g, -1)
 
 
 def _cast_colwise_grouped(
@@ -194,11 +219,13 @@ class _CudnnMXFP8GroupedMLP(torch.autograd.Function):
 
     All inputs are plain BF16 CUDA tensors (the module prologue casts and
     un-DTensors them); ``dy`` arrives as contiguous BF16 ``[R, D]``. ``w13``
-    is ``[G, 2F, D]`` in 32-block GLU row order. Weight casts are lazy:
-    forward quantizes the rowwise views, backward requantizes the colwise
-    views from the saved BF16 parameter references — safe because the
-    same-step backward always precedes the optimizer update (an update in
-    between trips the autograd version counter).
+    is ``[G, 2F, D]`` in 32-block GLU row order. All backward-only casts are
+    lazy: forward quantizes only what forward consumes (the rowwise views);
+    backward requantizes the colwise weight views and the colwise ``x`` from
+    the saved BF16 references — safe because the same-step backward always
+    precedes the optimizer update (an update in between trips the autograd
+    version counter), and cheaper under per-op SAC because the forward (and
+    thus any forward-side cast) re-runs in the recompute pass.
     """
 
     @staticmethod
@@ -210,9 +237,6 @@ class _CudnnMXFP8GroupedMLP(torch.autograd.Function):
         offsets: torch.Tensor,
     ) -> torch.Tensor:
         x_row_q, x_row_sf = _cast_rowwise(x)
-        # x colwise is a forward-side cast because it is retained for the
-        # FC1 wgrad in backward.
-        x_col_q, x_col_sf = _cast_colwise_grouped(x, offsets)
         w13_row_q, w13_row_sf = _cast_weight_rowwise_3d(w13)
         z, h_row_q, h_row_sf, h_col_q, h_col_sf = (
             torch.ops.torchao.mxfp8_cudnn_grouped_mlp_fwd(
@@ -233,16 +257,18 @@ class _CudnnMXFP8GroupedMLP(torch.autograd.Function):
             w2_row_sf.reshape(-1),
             offsets,
         )
-        ctx.save_for_backward(
-            z, h_col_q, h_col_sf, x_col_q, x_col_sf, offsets, w13, w2
-        )
+        # x is saved BF16; its colwise cast is deferred to backward. Under
+        # per-op SAC the whole forward re-runs in the recompute pass, so a
+        # forward-side cast would execute twice per step for one consumer
+        # (the FC1 wgrad) — deferring makes it run exactly once. Safe for the
+        # same reason the weight casts are lazy: the same-step backward always
+        # precedes the optimizer update.
+        ctx.save_for_backward(z, h_col_q, h_col_sf, x, offsets, w13, w2)
         return y
 
     @staticmethod
     def backward(ctx, dy: torch.Tensor):
-        z, h_col_q, h_col_sf, x_col_q, x_col_sf, offsets, w13, w2 = (
-            ctx.saved_tensors
-        )
+        z, h_col_q, h_col_sf, x, offsets, w13, w2 = ctx.saved_tensors
         # The casts assert contiguity; dy is contiguous today (BF16 [R, D]
         # stride (D, 1)) but that is a live invariant, not a given.
         dy = dy.contiguous()
@@ -273,6 +299,7 @@ class _CudnnMXFP8GroupedMLP(torch.autograd.Function):
             offsets,
         )
         dy_col_q, dy_col_sf = _cast_colwise_grouped(dy, offsets)
+        x_col_q, x_col_sf = _cast_colwise_grouped(x, offsets)
         # dw2 [G, D, F] = dy^T @ h per expert; dw13 [G, 2F, D] = dz^T @ x per
         # expert, landing directly in the 32-block parameter order.
         dw2 = torch.ops.torchao.mxfp8_cudnn_grouped_mlp_wgrad(
