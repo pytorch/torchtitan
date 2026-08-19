@@ -281,12 +281,13 @@ class BaseCheckpointManager(Configurable, ABC):
         )
 
     @abstractmethod
-    def _parse_step(self, filename: str) -> int | None:
+    def _parse_step(self, filename: str) -> tuple[int, bool] | None:
         """Read ``filename`` as a checkpoint directory name.
 
-        Returns its step number, or ``None`` when the name is not one this
-        manager writes. Names a manager does not recognize are left alone
-        rather than deleted.
+        Returns the step number and whether the directory is a staging one that
+        a backend renames into place once a save completes, or ``None`` when the
+        name is not one this manager writes. Names a manager does not recognize
+        are left alone rather than deleted.
         """
 
     @abstractmethod
@@ -319,29 +320,79 @@ class BaseCheckpointManager(Configurable, ABC):
 
         valid_steps = []
         for filename in self._storage.listdir(folder):
-            step = self._parse_step(filename)
-            if step is None:
+            parsed = self._parse_step(filename)
+            if parsed is None:
+                continue
+            step, is_staging = parsed
+            # A staging directory may already hold its metadata and so look
+            # complete, but the id we would rebuild from its step -- the
+            # published name -- does not exist yet.
+            if is_staging:
                 continue
             if self._is_valid_checkpoint(filesystem.join(folder, filename)):
                 valid_steps.append(step)
         return max(valid_steps) if valid_steps else -1
 
-    def _purge_stale_checkpoints(self) -> None:
-        """Delete the checkpoints beyond the ``keep_latest_k`` most recent."""
+    def _purge_stale_checkpoints(self, *, is_save_in_flight: bool = True) -> None:
+        """Delete the checkpoints beyond the ``keep_latest_k`` most recent.
+
+        Args:
+            is_save_in_flight: Whether a save is being written right now. True
+                for a manager that purges after dispatching its save; False for
+                one that purges before issuing it.
+
+        That single fact settles both of the things this method has to get
+        right, because both follow from it.
+
+        Slot accounting. With a save in flight its directory is already on disk
+        and counted, so all k slots go to what is there. Without one, the
+        imminent checkpoint has no directory yet, so a slot is held for it and
+        only k-1 existing ones stay -- the accounting the config assumes where
+        it rejects ``keep_latest_k == 1`` because "the last one may be in the
+        process of being saved".
+
+        What occupies a slot. A directory with no metadata cannot be resumed
+        from, so letting it hold a slot would evict one that can. With a save in
+        flight the newest directory is legitimately incomplete, so completeness
+        is not required and nothing is deleted outright. Without one, every
+        incomplete directory is abandoned: skipped for accounting, and removed.
+        """
         if not self._should_purge():
             return
 
-        discovered: list[tuple[int, str]] = []
+        durable: list[tuple[int, str]] = []
+        abandoned: list[str] = []
         for filename in self._storage.listdir(self.folder):
-            step = self._parse_step(filename)
-            if step is None:
+            parsed = self._parse_step(filename)
+            if parsed is None:
                 continue
-            discovered.append((step, filesystem.join(self.folder, filename)))
+            step, is_staging = parsed
+            path = filesystem.join(self.folder, filename)
+            if is_save_in_flight:
+                durable.append((step, path))
+            elif is_staging or not self._is_valid_checkpoint(path):
+                abandoned.append(path)
+            else:
+                durable.append((step, path))
 
-        discovered.sort()
-        for _, path in discovered[: -self.keep_latest_k]:
+        durable.sort()
+        retain = self.keep_latest_k - (0 if is_save_in_flight else 1)
+        for _, path in durable[:-retain]:
             assert self.purge_thread is not None
             self.purge_queue.put(path)
+
+        # Deleted here rather than queued. The reason these are safe to remove
+        # is that no save is being written, and that is only true at this
+        # instant: a queued delete could land after the next attempt at the same
+        # step has recreated the very directory it names.
+        for path in abandoned:
+            logger.info("Checkpointer is deleting the abandoned %s.", path)
+            try:
+                self._storage.remove(path)
+            except Exception as error:
+                logger.warning(
+                    "Checkpointer failed to delete %s: %s. Skipping.", path, error
+                )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
