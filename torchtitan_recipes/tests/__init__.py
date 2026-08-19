@@ -7,16 +7,11 @@
 """Full configurations backing the integration tests.
 
 Each function here is one run of one entry in ``tests/integration_tests``,
-expressed as a configuration instead of a base config plus command-line flags.
-Keeping them in this package rather than in the test files means CI exercises
-the same selection path users do.
+expressed as a full Trainer configuration.
 
 Model registries that need an optional dependency (``fla``, ``torchvision``) or
 that are slow to import are imported inside the function that uses them, so
 selecting any single configuration stays cheap.
-
-Unrelated to the repository's top-level ``tests/`` package, which holds the
-test code itself.
 """
 
 from torchtitan.trainer import Trainer

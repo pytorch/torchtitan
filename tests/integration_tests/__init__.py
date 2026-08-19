@@ -33,6 +33,8 @@ class OverrideDefinitions:
     Everything a run needs belongs in its configuration. ``override_args`` is
     the older command-line form, still used by the experiment suites in
     ``torchtitan/experiments``; entries here set one or the other, not both.
+
+    TODO(fegin): remove override_args after no usages.
     """
 
     def __post_init__(self):

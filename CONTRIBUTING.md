@@ -74,7 +74,7 @@ When appropriate, one should consider
 
 - Adding CPU/GPU unit/integration tests.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
-  - To add a GPU integration test, add a configuration to the matching module in [torchtitan_recipes/tests](torchtitan_recipes/tests/) and a new `OverrideDefinitions` naming it in [integration_tests](tests/integration_tests/). These suites name a configuration per run instead of overriding a base config from the command line; only the suites under `torchtitan/experiments` still do that.
+  - To add a GPU integration test, add a configuration to the matching module in [torchtitan_recipes/tests](torchtitan_recipes/tests/) and a new `OverrideDefinitions` naming it in [integration_tests](tests/integration_tests/). These suites name a full Trainer configuration per run.
 - Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [float8.md](torchtitan/components/quantization/float8.md).
 - Following the tensor shape-suffix naming convention for new model code (e.g. `x_BLD`, `q_BLNH`, `out_TNH`), with a per-module legend comment as in [attention.py](torchtitan/models/common/attention.py). Capital suffixes name logical tensor dimensions (not sharding layout) and are scoped per file.
 - Adding a new file with benchmark results in [benchmarks](benchmarks) folder.

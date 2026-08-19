@@ -39,11 +39,11 @@ Arguments:
 - `--test_name`: (Optional) Specific test to run by name (default: "all")
 - `--ngpu`: (Optional) Number of GPUs to use for testing (default: 8)
 
-There is no option to pick the model or the configuration. Each test names the
-configurations it runs, one per run, and the runner passes them to
-`run_train.sh` as the `MODULE` and `CONFIG` env vars. The configurations live in
-[torchtitan_recipes/tests](../torchtitan_recipes/tests/), one module per suite.
-To run something else, add a configuration there and a test entry that names it.
+Each test names the full configurations it runs, one per run, and the runner passes
+them to `run_train.sh` as the `MODULE` and `CONFIG` env vars. The configurations
+live in [torchtitan_recipes/tests](../torchtitan_recipes/tests/), one module per
+test suite. To run something else, add a configuration there and a test entry
+that names it.
 
 Examples:
 ```bash
