@@ -121,6 +121,58 @@ def _make_stub_model(params=None, buffers=None):
     return model
 
 
+class TestPrecompileMain(unittest.TestCase):
+    def test_validates_memory_policy_after_model_setup(self):
+        from torchtitan.experiments.graph_trainer import precompile_main
+
+        events = []
+        compile_config = SimpleNamespace(mode="aot_fx_trace")
+        config = SimpleNamespace(compile=compile_config)
+        config_manager = MagicMock()
+        config_manager.parse_args.return_value = config
+        setup_result = (
+            object(),
+            object(),
+            object(),
+            compile_config,
+            object(),
+            object(),
+            object(),
+        )
+
+        def common_setup(_config):
+            events.append("setup")
+            return setup_result
+
+        def validate(actual_compile_config):
+            self.assertIs(actual_compile_config, compile_config)
+            self.assertEqual(events, ["setup"])
+            events.append("validate")
+
+        def precompile(*_args):
+            self.assertEqual(events, ["setup", "validate"])
+            events.append("precompile")
+
+        with (
+            patch.object(precompile_main, "ConfigManager", return_value=config_manager),
+            patch.object(precompile_main, "_common_setup", side_effect=common_setup),
+            patch.object(
+                precompile_main,
+                "validate_memory_policy_config",
+                side_effect=validate,
+            ),
+            patch.object(
+                precompile_main,
+                "_precompile_aot_fx_trace",
+                side_effect=precompile,
+            ),
+            patch.object(precompile_main.dist, "destroy_process_group"),
+        ):
+            precompile_main.main()
+
+        self.assertEqual(events, ["setup", "validate", "precompile"])
+
+
 class TestConfigFingerprint(unittest.TestCase):
     def test_deterministic(self):
         from torchtitan.experiments.graph_trainer.precompile import (

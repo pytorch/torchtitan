@@ -97,7 +97,7 @@ def _resolve_op_target(op_name: str) -> object:
 def _parse_full_recompute_save_ops(
     value: str,
 ) -> tuple[tuple[str, object], ...]:
-    """Parse ``FQN :: OP | FQN :: OP`` save selectors."""
+    """Parse ``FQN::OP | FQN::OP`` save selectors."""
     if not value.strip():
         return ()
 
@@ -107,7 +107,7 @@ def _parse_full_recompute_save_ops(
         if len(parts) != 2 or not all(part.strip() for part in parts):
             raise ValueError(
                 "Invalid --compile.full_recompute_save_ops selector "
-                f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN :: OP'"
+                f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
             )
         module_fqn_pattern, op_name = (part.strip() for part in parts)
         selectors.append((module_fqn_pattern, _resolve_op_target(op_name)))
@@ -421,7 +421,6 @@ def tag_with_memory_policy_pass(
     via ``register_memory_policy`` without modifying this function.
     """
     memory_policy = config.compile.memory_policy
-    validate_memory_policy_config(config.compile)
     if memory_policy not in MEMORY_POLICY_REGISTRY:
         raise ValueError(
             f"Unknown memory_policy: {memory_policy!r}. "

@@ -93,6 +93,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_full_memory_policy,
     tag_sac_policy,
     tag_with_memory_policy_pass,
+    validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
@@ -1762,16 +1763,13 @@ class TestFullMemoryPolicy(TestCase):
         self.assertEqual(node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
     def test_save_ops_rejected_for_other_memory_policies(self):
-        gm = self._build_gm([torch.ops.aten.mm.default])
-        config = SimpleNamespace(
-            compile=GraphTrainerCompileConfig(
-                memory_policy="default",
-                full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
-            )
+        compile_config = GraphTrainerCompileConfig(
+            memory_policy="default",
+            full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
         )
 
         with self.assertRaisesRegex(ValueError, "requires.*memory_policy full"):
-            tag_with_memory_policy_pass(gm, config=config)
+            validate_memory_policy_config(compile_config)
 
     def test_invalid_save_op_selectors_rejected(self):
         invalid_values = (
