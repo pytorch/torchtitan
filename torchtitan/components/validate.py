@@ -36,13 +36,17 @@ class BaseValidator(Configurable):
         freq: int = 10
         """Frequency of validation"""
 
+        def __post_init__(self) -> None:
+            if self.freq <= 0:
+                raise ValueError(
+                    f"validation frequency must be positive, got {self.freq}"
+                )
+
     def __init__(
         self,
         config: Config,
         **kwargs,
     ):
-        if config.freq <= 0:
-            raise ValueError(f"validation frequency must be positive, got {config.freq}")
         self.config = config
 
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
@@ -92,6 +96,7 @@ class Validator(BaseValidator):
         """DataLoader configuration for validation"""
 
         def __post_init__(self):
+            BaseValidator.Config.__post_init__(self)
             assert (
                 self.steps > 0 or self.steps == -1
             ), "validation steps must be positive or -1"
