@@ -221,6 +221,9 @@ def maybe_semi_sync_training(
                 model=model,
                 optimizer=optimizer,
                 sync_every=extend_ft_config.sync_steps,
+                offload_averaged_parameters_to_cpu=(
+                    extend_ft_config.local_sgd_offload_to_cpu
+                ),
             )
         else:
             raise ValueError(
