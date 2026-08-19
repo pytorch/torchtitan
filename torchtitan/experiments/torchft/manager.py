@@ -33,6 +33,28 @@ else:
     has_torchft = False
 
 
+def _set_fsdp_all_reduce_hook(
+    module: FSDPModule,
+    hook: Callable[[torch.Tensor], None],
+) -> None:
+    """Install a TorchFT hook, including FSDP modules with multiple groups."""
+    state = module._get_fsdp_state()
+    param_groups = state._fsdp_param_groups
+    if len(param_groups) <= 1:
+        module.set_all_reduce_hook(hook)
+        return
+
+    # The public API rejects multiple groups because their meshes may differ.
+    # TorchFT applies the same cross-replica reduction semantics to every group.
+    if not all(hasattr(group, "_all_reduce_hook") for group in param_groups):
+        raise RuntimeError(
+            "The installed PyTorch FSDP parameter-group API is incompatible "
+            "with TorchFT all-reduce hooks."
+        )
+    for param_group in param_groups:
+        param_group._all_reduce_hook = hook
+
+
 class TorchFTManager(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -68,6 +90,12 @@ class TorchFTManager(Configurable):
 
         min_replica_size: int = 1
         """The minimum number of FT replica for each step."""
+
+        init_sync: bool = True
+        """
+        Whether to synchronize model weights across replicas before step 0.
+        Set this to false when every replica is initialized identically.
+        """
 
         semi_sync_method: str | None = None
         """
@@ -117,11 +145,12 @@ class TorchFTManager(Configurable):
             state_dict=None,
             use_async_quorum=self.use_async_quorum,
             replica_id=f"torchtitan_ft_{config.replica_id}",
+            init_sync=config.init_sync,
         )
         self.group_size = config.group_size
         self.replica_id = config.replica_id
 
-        if self.use_async_quorum:
+        if self.use_async_quorum and self.group_size > 1:
             self.replicate_pg = torchft.process_group.ManagedProcessGroup(self._manager)
             self.replicate_pg.register("dp_replicate")
 
@@ -141,23 +170,37 @@ class TorchFTManager(Configurable):
             return dp_degree, dp_rank
 
     def maybe_set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
-        if self.enabled and self.use_async_quorum:
+        if not (self.enabled and self.use_async_quorum) or self.group_size <= 1:
+            return
 
-            def all_reduce_hook(output):
-                dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
+        def all_reduce_hook(output):
+            dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
 
-            def apply_set_all_reduce_hook(m):
-                if isinstance(m, FSDPModule):
-                    m.set_all_reduce_hook(all_reduce_hook)
+        num_data_parallel_modules = 0
 
-            for model_part in model_parts:
-                model_part.apply(apply_set_all_reduce_hook)
+        def apply_set_all_reduce_hook(module):
+            nonlocal num_data_parallel_modules
+            # ReplicateModule inherits from FSDPModule in the supported PyTorch
+            # version, so this covers replicate-only DP and FSDP uniformly.
+            if isinstance(module, FSDPModule):
+                _set_fsdp_all_reduce_hook(module, all_reduce_hook)
+                num_data_parallel_modules += 1
+
+        for model_part in model_parts:
+            model_part.apply(apply_set_all_reduce_hook)
+
+        if num_data_parallel_modules == 0:
+            raise RuntimeError(
+                "TorchFT synchronous multi-replica training requires the model "
+                "to use replicate-only DP or FSDP, but no supported "
+                "data-parallel module was found."
+            )
 
     @property
     def loss_sync_pg(
         self,
     ) -> "torchft.process_group.ManagedProcessGroup" | None:
-        if self.enabled and self.use_async_quorum:
+        if self.enabled and self.use_async_quorum and self.group_size > 1:
             return self.replicate_pg
         else:
             # skip loss sync when using semi-sync training
