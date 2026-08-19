@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 import spmd_types as spmd
 import torch
 
-from torchtitan.components.dataloader import DataloaderExhaustedError
+from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
@@ -22,10 +22,7 @@ from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
-    IMAGE_LATENT_SIZE_RATIO,
     pack_latents,
-    PATCH_HEIGHT,
-    PATCH_WIDTH,
     preprocess_data,
 )
 from torchtitan.trainer import Trainer
@@ -43,23 +40,11 @@ class FluxTrainer(Trainer):
         inference: Inference = field(default_factory=Inference)
 
     def __init__(self, config: Config):
-        # Compute image token count: autoencoder downscales the image,
-        # then pack_latents tiles the latent into 2×2 patches.
-        # pyrefly: ignore [missing-attribute]
-        img_size = config.dataloader.img_size
-        ae_downscale = IMAGE_LATENT_SIZE_RATIO
-        latent_side_width = img_size // ae_downscale // PATCH_WIDTH
-        latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
-        seq_len_img = latent_side_width * latent_side_height
-
-        seq_len_txt = config.tokenizer.max_t5_encoding_len
-        config.training.seq_len = seq_len_img + seq_len_txt
-
         super().__init__(config)
 
-        # Set random seed, and maybe enable deterministic mode
-        # (mainly for debugging, expect perf loss).
-        # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
+        # Flux samples diffusion noise and timesteps during each model step, so
+        # data-parallel ranks need distinct model RNG streams. Dataset
+        # transformations such as prompt dropout use Grain's separate RNG.
         distinct_seed_mesh_dims = (
             ["cp", "dp_shard", "dp_replicate"]
             if config.parallelism.spmd_backend in ("full_dtensor", "spmd_types")

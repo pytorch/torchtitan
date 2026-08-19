@@ -40,6 +40,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="deepseek_v3_hsdp+ep",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2],
+            test_descr="DeepSeek V3 fused MLA+SwiGLU FSDP+EP",
+            test_name="deepseek_v3_fused_mla_swiglu_fsdp+ep",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             configs=[recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_ep4],

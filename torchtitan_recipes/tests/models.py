@@ -61,6 +61,19 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    _use_spmd_types(config, typechecking=True)
+    config.override.imports = [
+        "torchtitan.overrides.fused_mla.fused_mla",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+    ]
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_ep4() -> Trainer.Config:
     config = qwen3_debugmodel_moe_param_groups()
     _use_spmd_types(config, typechecking=True)

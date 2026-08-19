@@ -163,6 +163,53 @@ class TestFTCheckpointManager(unittest.TestCase):
 
         manager.close()
 
+    def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
+        config = TorchFTCheckpointManager.Config(
+            enable=True,
+            async_mode="disabled",
+            folder=self.test_folder,
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            export_dtype="float32",
+            exclude_from_loading=[],
+            initial_load_path=None,
+            initial_load_model_only=False,
+            enable_ft_dataloader_checkpoints=True,
+        )
+        return TorchFTCheckpointManager(
+            config,
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            sd_adapter=None,
+            base_folder=self.test_folder,
+            ft_manager=DummyFTManager(
+                enabled=True, participating_rank=participating_rank
+            ),
+        )
+
+    @mock.patch("torch.cuda.Stream")
+    @mock.patch.object(dist_checkpoint, "async_save", side_effect=fake_async_save)
+    def test_save_returns_whether_the_full_checkpoint_was_written(
+        self,
+        mock_async_save,
+        mock_cuda_stream,
+    ):
+        # BaseCheckpointManager.save returns _save's result, so this override has
+        # to report a bool. The per-replica dataloader checkpoint is a side
+        # channel and does not count as writing the checkpoint.
+        with mock.patch.object(dist_checkpoint, "save"):
+            participating = self._manager(participating_rank=0)
+            self.assertIs(True, participating.save(curr_step=5))
+            participating.close()
+
+            bystander = self._manager(participating_rank=1)
+            self.assertIs(False, bystander.save(curr_step=5))
+            bystander.close()
+
 
 if __name__ == "__main__":
     unittest.main()

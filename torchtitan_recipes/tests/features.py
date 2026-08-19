@@ -340,7 +340,6 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=False)
     config.validator.enable = True
-    config.validator.dataloader.dataset = "c4_test"
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
