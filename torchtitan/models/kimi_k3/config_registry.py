@@ -19,7 +19,7 @@ from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
 def kimi_k3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel", attn_backend="flex")
+    model_spec = model_registry("debugmodel")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
