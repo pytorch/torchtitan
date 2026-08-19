@@ -26,6 +26,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     compiled_create_block_mask,
     get_vision_block_mask_mod,
@@ -135,26 +136,10 @@ def _compute_2d_rope_cache(
         padded_angles.append(_pad_sequence(item_angles, max_num_patches))
 
     angles = torch.stack(padded_angles)
-    return torch.stack((angles.cos(), angles.sin()), dim=-1).unsqueeze(2)
-
-
-def _apply_2d_rope(
-    q_NPHK: torch.Tensor,
-    k_NPHK: torch.Tensor,
-    rope_cache_NP1C2: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply 2D RoPE using the real form of complex multiplication."""
-
-    cos_NP1C = rope_cache_NP1C2[..., 0]
-    sin_NP1C = rope_cache_NP1C2[..., 1]
-
-    def rotate(x_NPHK: torch.Tensor) -> torch.Tensor:
-        x_NPHC2 = x_NPHK.float().reshape(*x_NPHK.shape[:-1], -1, 2)
-        real_NPHC = x_NPHC2[..., 0] * cos_NP1C - x_NPHC2[..., 1] * sin_NP1C
-        imag_NPHC = x_NPHC2[..., 0] * sin_NP1C + x_NPHC2[..., 1] * cos_NP1C
-        return torch.stack((real_NPHC, imag_NPHC), dim=-1).flatten(-2)
-
-    return rotate(q_NPHK).to(q_NPHK.dtype), rotate(k_NPHK).to(k_NPHK.dtype)
+    # ComplexRoPE.apply_rotary_emb multiplies in complex64; float() only widens
+    # the container, so cos/sin keep whatever precision angles were computed in.
+    cos_sin = torch.stack((angles.cos(), angles.sin()), dim=-1).float()
+    return torch.view_as_complex(cos_sin).unsqueeze(2)
 
 
 def _temporal_pool_and_merge(
@@ -261,7 +246,7 @@ class KimiK3VisionBlock(Module):
         x_NPD = x_NPD + self.attn(
             self.norm1(x_NPD),
             rope_cache=rope_cache,
-            rope_apply=_apply_2d_rope,
+            rope_apply=ComplexRoPE.apply_rotary_emb,
             attention_mask=attention_mask,
         )
         return x_NPD + self.mlp(self.norm2(x_NPD))

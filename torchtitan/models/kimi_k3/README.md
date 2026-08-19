@@ -45,10 +45,10 @@ describe the released model.
 ## Numerical Parity
 
 End-to-end KL divergence against the Hugging Face implementation (multimodal
-inputs): **1.5370e-6**, with **100% top-1 and top-5 match**.
+inputs): **9.6895e-8**, with **100% top-1 and top-5 match**.
 
 Vision parity: pixel preprocessing max difference **1.192e-7**; projected vision
-features cosine similarity **1.000000** and max difference **2.669e-3**.
+features cosine similarity **1.000000** and max difference **2.654e-3**.
 
 Test scripts:
 
