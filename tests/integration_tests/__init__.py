@@ -21,6 +21,14 @@ class OverrideDefinitions:
     """
 
     override_args: Sequence[Sequence[str]] = ()
+    """One command line per run, appended to ``run_train.sh``.
+
+    The older form, kept for the suites under ``torchtitan/experiments``, which
+    still express a run as a base config plus overrides.
+
+    TODO(fegin): remove after those suites move to ``configs``.
+    """
+
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
@@ -30,11 +38,8 @@ class OverrideDefinitions:
     configs: Sequence[Callable[[], Trainer.Config]] = ()
     """One configuration per run, selected with ``--module``/``--config``.
 
-    Everything a run needs belongs in its configuration. ``override_args`` is
-    the older command-line form, still used by the experiment suites in
-    ``torchtitan/experiments``; entries here set one or the other, not both.
-
-    TODO(fegin): remove override_args after no usages.
+    Everything a run needs belongs in its configuration, so an entry sets this
+    or ``override_args``, not both.
     """
 
     def __post_init__(self):
