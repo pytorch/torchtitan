@@ -16,11 +16,6 @@ run_one() {
   local out="$ROOT/pre-tokenize-data/$name"
   local lock_dir="$out/.process.lock"
 
-  if [ -f "$out/metadata.json" ]; then
-    echo "skip existing $name"
-    return 0
-  fi
-
   mkdir -p "$out"
   if ! mkdir "$lock_dir" 2>/dev/null; then
     echo "skip locked $name ($lock_dir exists)"
