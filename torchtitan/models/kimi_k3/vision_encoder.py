@@ -55,10 +55,6 @@ def _get_temporal_pos_embed(
 def _pad_sequence(x: torch.Tensor, target_length: int) -> torch.Tensor:
     """Pad the leading sequence dimension without modifying ``x`` in place."""
     padding_length = target_length - x.shape[0]
-    if padding_length < 0:
-        raise ValueError(
-            f"Cannot pad a sequence of length {x.shape[0]} to {target_length}."
-        )
     if padding_length == 0:
         return x
     padding = x.new_zeros(padding_length, *x.shape[1:])
@@ -257,7 +253,6 @@ class KimiK3VisionProjector(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        merged_dim: int
         linear_1: Linear.Config
         linear_2: Linear.Config
         post_norm: RMSNorm.Config
@@ -265,18 +260,12 @@ class KimiK3VisionProjector(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.merged_dim = config.merged_dim
         self.linear_1 = config.linear_1.build()
         self.linear_2 = config.linear_2.build()
         self.post_norm = config.post_norm.build()
         self.activation = config.activation.build()
 
     def forward(self, merged_NMF: torch.Tensor) -> torch.Tensor:
-        if merged_NMF.shape[-1] != self.merged_dim:
-            raise ValueError(
-                f"Expected merged vision dim {self.merged_dim}, got "
-                f"{merged_NMF.shape[-1]}."
-            )
         projected_NMO = self.linear_2(self.activation(self.linear_1(merged_NMF)))
         return self.post_norm(projected_NMO)
 
@@ -301,9 +290,6 @@ class KimiK3VisionEncoder(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.dim = config.dim
-        self.patch_size = config.patch_size
-        self.in_channels = config.in_channels
         self.merge_kernel_size = config.merge_kernel_size
         self.max_num_frames = config.max_num_frames
         self.interpolation_mode = config.interpolation_mode
