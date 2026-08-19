@@ -6,7 +6,6 @@
 
 import dataclasses
 import json
-import math
 import os
 import time
 from collections.abc import Iterable, Iterator
@@ -19,6 +18,7 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
@@ -904,6 +904,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
+        loss_is_finite = torch.ones((), dtype=torch.bool, device=self.device)
         for microbatches in microbatch_groups:
             input_dict_mbs = []
             label_mbs = []
@@ -927,14 +928,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 labels=fwd_bwd_labels,
                 global_valid_tokens=global_valid_tokens,
             )
+            detached_loss = loss.detach()
+            local_loss = (
+                detached_loss.to_local()
+                if isinstance(detached_loss, DTensor)
+                else detached_loss
+            )
+            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
             if should_log:
-                loss = loss.detach()
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the
                     # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = loss.clone()
+                    accumulated_loss = detached_loss.clone()
                 else:
-                    accumulated_loss.add_(loss)
+                    accumulated_loss.add_(detached_loss)
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -944,6 +951,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 pp_mesh=parallel_dims.get_optional_mesh("pp"),
                 ep_enabled=parallel_dims.ep_enabled,
             )
+            finite_flags = torch.stack(
+                [loss_is_finite, torch.isfinite(grad_norm).all()]
+            ).to(dtype=torch.int32)
+            torch.distributed.all_reduce(
+                finite_flags,
+                op=torch.distributed.ReduceOp.MIN,
+                group=parallel_dims.world_mesh.get_group(),
+            )
+            if not finite_flags.all().item():
+                raise RuntimeError(
+                    "Loss or gradient norm is not finite on at least one rank at "
+                    f"step {self.step}. Stopping training before the optimizer update."
+                )
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
             self.lr_schedulers.step()
@@ -986,16 +1006,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = self.ntokens_seen
-
-        # Crash on invalid loss. global_avg_loss is a SUM reduction, so a infinite
-        # loss on any rank propagates here. This reuses the D2H copy already done
-        # for logging, so it adds no extra sync.
-        # TODO: make this step work even logging is off.
-        if not math.isfinite(global_avg_loss):
-            raise RuntimeError(
-                f"Loss is not finite (global_avg_loss={global_avg_loss}) at "
-                f"step {self.step}. Stopping training."
-            )
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
