@@ -5,9 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, replace
-from typing import Annotated, cast
+from typing import cast
 
-import tyro
 from torch.distributed.tensor import Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
@@ -104,7 +103,7 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=8e-4,
-            ep_size=parallelism.expert_parallel_degree,
+            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -148,7 +147,7 @@ def moonlight_16b_a3b() -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=3e-4,
-            ep_size=parallelism.expert_parallel_degree,
+            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -194,7 +193,7 @@ def kimi_vl_a3b() -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=3e-4,
-            ep_size=parallelism.expert_parallel_degree,
+            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -238,7 +237,7 @@ def kimi_k2_5() -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=2.2e-4,
-            ep_size=parallelism.expert_parallel_degree,
+            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -259,7 +258,8 @@ def kimi_k2_5() -> Trainer.Config:
     )
 
 
-def _per_expert_compute_layout(ep_size: int) -> ComputeLayout:
+def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
+    ep_size = parallelism.expert_parallel_degree
     if ep_size <= 0:
         raise ValueError("expert_parallel_degree must be positive")
     if ep_size == 1:
@@ -284,7 +284,7 @@ def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
     lr: float,
-    ep_size: int,
+    parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
@@ -309,7 +309,7 @@ def _dist_muon_optimizer(
             )
         },
     )
-    per_expert = _per_expert_compute_layout(ep_size)
+    per_expert = _per_expert_compute_layout(parallelism)
     query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
@@ -461,10 +461,8 @@ def _dist_muon_optimizer(
 def _refresh_dist_muon_expert_compute_layout(
     optimizer_config: OptimizersContainer.Config,
     *,
-    previous_ep_size: int,
-    ep_size: int,
-    manual_layout_fqns: tuple[str, ...],
-) -> tuple[OptimizersContainer.Config, tuple[str, ...]]:
+    parallelism: ParallelismConfig,
+) -> OptimizersContainer.Config:
     factory_kwargs_by_name = {
         name: dict(factory_kwargs)
         for name, factory_kwargs in (
@@ -473,59 +471,38 @@ def _refresh_dist_muon_expert_compute_layout(
     }
     dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
     if dist_muon_kwargs is None:
-        return optimizer_config, manual_layout_fqns
+        return optimizer_config
     compute_sharding_by_fqn = cast(
         dict[str, ComputeLayout],
         dist_muon_kwargs["compute_sharding_by_fqn"],
     )
-    previous_per_expert = _per_expert_compute_layout(previous_ep_size)
-    per_expert = _per_expert_compute_layout(ep_size)
-    manual_fqn_set = set(manual_layout_fqns)
+    per_expert = _per_expert_compute_layout(parallelism)
     refreshed_shardings = {}
     changed = False
     for fqn, compute_layout in compute_sharding_by_fqn.items():
-        if ".moe.routed_experts.inner_experts." not in fqn or fqn in manual_fqn_set:
-            refreshed_shardings[fqn] = compute_layout
-        elif compute_layout == previous_per_expert:
+        if ".moe.routed_experts.inner_experts." in fqn and compute_layout != per_expert:
             refreshed_shardings[fqn] = per_expert
-            changed = changed or compute_layout != per_expert
+            changed = True
         else:
             refreshed_shardings[fqn] = compute_layout
-            manual_fqn_set.add(fqn)
     if not changed:
-        return optimizer_config, tuple(sorted(manual_fqn_set))
+        return optimizer_config
 
     dist_muon_kwargs["compute_sharding_by_fqn"] = refreshed_shardings
-    return (
-        replace(
-            optimizer_config,
-            optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
-        ),
-        tuple(sorted(manual_fqn_set)),
+    return replace(
+        optimizer_config,
+        optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
     )
 
 
 @dataclass(kw_only=True, slots=True)
 class _KimiTrainerConfig(Trainer.Config):
-    _auto_expert_layout_ep_size: Annotated[int, tyro.conf.Suppress] = -1
-    _manual_expert_layout_fqns: Annotated[tuple[str, ...], tyro.conf.Suppress] = ()
-
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        ep_size = self.parallelism.expert_parallel_degree
-        if self._auto_expert_layout_ep_size < 0:
-            self._auto_expert_layout_ep_size = ep_size
-        elif self._auto_expert_layout_ep_size != ep_size:
-            (
-                self.optimizer,
-                self._manual_expert_layout_fqns,
-            ) = _refresh_dist_muon_expert_compute_layout(
-                self.optimizer,
-                previous_ep_size=self._auto_expert_layout_ep_size,
-                ep_size=ep_size,
-                manual_layout_fqns=self._manual_expert_layout_fqns,
-            )
-            self._auto_expert_layout_ep_size = ep_size
+        self.optimizer = _refresh_dist_muon_expert_compute_layout(
+            self.optimizer,
+            parallelism=self.parallelism,
+        )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
         # TODO(#4102): Build DistMuon from PP stage-local parameter groups.
         if (

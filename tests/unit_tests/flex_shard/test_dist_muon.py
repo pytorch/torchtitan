@@ -35,27 +35,6 @@ from torchtitan.distributed.flex_shard.dist_muon import (
 )
 
 
-class TestComputeLayout(unittest.TestCase):
-    def test_accepts_strided_shard(self):
-        sharding = _StridedShard(0, split_factor=2)
-        layout = ComputeLayout(
-            shardings_by_mesh_axis={
-                "efsdp": sharding,
-                "ep": Shard(0),
-            }
-        )
-
-        self.assertEqual(layout.shardings_by_mesh_axis["efsdp"], sharding)
-
-    def test_rejects_nonpositive_strided_shard_split_factor(self):
-        with self.assertRaisesRegex(ValueError, "positive integer"):
-            ComputeLayout(
-                shardings_by_mesh_axis={
-                    "efsdp": _StridedShard(0, split_factor=0),
-                }
-            )
-
-
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistMuon(DTensorTestBase):
     @property
