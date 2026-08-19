@@ -2019,9 +2019,8 @@ class TestTraceFSDP(FSDPTest):
         )
 
 
-# TODO: re-enable once graph_trainer adopts the spmd_types backend. CP
-# shardings are declared in ShardingConfig and only that backend applies them,
-# so GraphTrainer now rejects context_parallel_degree > 1.
+# TODO: Re-enable after graph_trainer adopts spmd_types; partial_dtensor does
+# not apply the CP placements declared in ShardingConfig.
 @unittest.skip("Context Parallel is not supported by graph_trainer")
 @unittest.skipIf(torch.cuda.device_count() < 2, "CP trace test requires 2 GPUs")
 class TestTraceContextParallel(FSDPTest):

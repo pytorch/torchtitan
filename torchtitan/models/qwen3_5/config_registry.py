@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import replace
+
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -12,26 +15,27 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMDataLoader
+from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import (
+    MM_DATASETS,
+    MultiModalProcessor,
+)
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry, QWEN3_5_SPECIAL_TOKENS
 
 
-def _dataloader(dataset: str, **kwargs) -> MMDataLoader.Config:
-    return MMDataLoader.Config(
-        dataset=dataset,
-        max_images_per_batch=128,
-        patch_size=16,
-        temporal_patch_size=2,
-        spatial_merge_size=2,
-        min_pixels=65536,
-        max_pixels=16777216,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-        build_mrope_positions=True,
-        **kwargs,
+def _multimodal_collator_config(
+    dataset_config: SingleDatasetConfig,
+) -> MultiModalCollator.Config:
+    processor_config = dataset_config.processor
+    assert isinstance(processor_config, MultiModalProcessor.Config)
+    return replace(
+        MultiModalCollator.Config(build_mrope_positions=True),
+        patch_size=processor_config.patch_size,
+        temporal_patch_size=processor_config.temporal_patch_size,
+        spatial_merge_size=processor_config.spatial_merge_size,
     )
 
 
@@ -47,7 +51,11 @@ def qwen35_debugmodel() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m-test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m-test"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -87,7 +95,11 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m-test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m-test"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
@@ -121,7 +133,11 @@ def qwen35_0_8b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-0.8B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -151,7 +167,11 @@ def qwen35_2b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-2B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -181,7 +201,11 @@ def qwen35_4b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-4B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -210,7 +234,11 @@ def qwen35_9b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -241,7 +269,11 @@ def qwen35_27b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -272,7 +304,11 @@ def qwen35_35b_a3b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -305,7 +341,11 @@ def qwen35_122b_a10b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-122B-A10B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
@@ -338,7 +378,11 @@ def qwen35_397b_a17b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-397B-A17B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         model_spec=model_spec,
-        dataloader=_dataloader("cc12m"),
+        dataloader=GrainDataLoader.Config(
+            dataset=MM_DATASETS["cc12m"],
+            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            streaming_shuffle_buffer_size=128,
+        ),
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(

@@ -144,9 +144,7 @@ class Decoder(BaseModel):
                 )
 
             if parallelism.context_parallel_degree > 1:
-                # Only the `spmd_types` backend supports the CP
-                # implementation -- current CP implementation relies on
-                # ShardingConfig. VarlenCP is not enabled yet.
+                # ShardingConfig-based CP requires the spmd_types backend.
                 validate_cp_backend(parallelism)
                 if any(self.traverse(ScaledDotProductAttention.Config)) or any(
                     self.traverse(VarlenAttention.Config)

@@ -22,12 +22,7 @@ if TYPE_CHECKING:
 
 
 def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
-    """Reject Context Parallel on SPMD backends that do not implement it.
-
-    Call this from a model config's ``update_from_config``. Models that bring
-    their own CP implementation instead of declaring it in ``ShardingConfig``
-    do not call this.
-    """
+    """Validate CP backend compatibility for ShardingConfig-based models."""
     if (
         parallelism.context_parallel_degree > 1
         and parallelism.spmd_backend != "spmd_types"
