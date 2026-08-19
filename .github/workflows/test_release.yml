@@ -66,3 +66,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1.13
         with:
           repository-url: https://test.pypi.org/legacy/
+
+  validate-rc:
+    needs:
+      - testpypi-publish
+    uses: ./.github/workflows/validate_rc.yaml
