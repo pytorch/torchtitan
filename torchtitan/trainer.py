@@ -758,10 +758,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.config.parallelism.context_parallel_ptrr_mask_key,
             )
 
-        # Accumulate after CP sharding so labels.numel() reflects the actual
-        # unique tokens this rank processes (not the full pre-split sequence).
-        self.ntokens_seen += labels.numel()
-
         if self.config.parallelism.spmd_backend == "full_dtensor":
             inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
                 self.parallel_dims, inputs, labels, extra_kwargs
@@ -891,6 +887,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
+        self.ntokens_seen += int(local_valid_tokens)
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
@@ -980,7 +977,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         torch.tensor(
                             self.ntokens_seen, dtype=torch.int64, device=self.device
                         ),
-                        loss_mesh,
+                        parallel_dims.get_optional_mesh("batch"),
                     ),
                 )
             else:
