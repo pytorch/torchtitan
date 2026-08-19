@@ -28,7 +28,7 @@ import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -51,6 +51,7 @@ def _common_setup(config):
         )
 
     parallelism = config.parallelism
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
     cp = parallelism.context_parallel_degree
