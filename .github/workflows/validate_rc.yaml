@@ -14,7 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
-        torch-channel: [release, nightly]
 
     steps:
       - uses: actions/checkout@v7
@@ -35,7 +34,6 @@ jobs:
         run: python -m venv "$RUNNER_TEMP/validate-rc-venv"
 
       - name: Install release PyTorch packages
-        if: matrix.torch-channel == 'release'
         run: |
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
@@ -44,15 +42,6 @@ jobs:
             "torch==2.14.0" \
             "torchvision==0.29.0" \
             "torchao==0.18.0"
-
-      - name: Install nightly PyTorch packages
-        if: matrix.torch-channel == 'nightly'
-        run: |
-          "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install --upgrade pip
-          "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
-            --pre \
-            --index-url https://download.pytorch.org/whl/nightly/cpu \
-            torch torchvision torchao
 
       - name: Install RC from TestPyPI
         run: |
