@@ -469,9 +469,7 @@ def _apply_attention_residual(
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32.
 
-    The norm and projection weights are folded into a single score vector, so
-    this reads them directly instead of calling the modules. That is only valid
-    while both are replicated; sharding them would need a DTensor-aware path.
+    TODO: Add TP Support. The current implementation assumes that the input tensors are on a single device.
     """
     assert norm.eps is not None
 
