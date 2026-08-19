@@ -56,6 +56,54 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
 
 
+def _count_embedding_parameters(model: torch.nn.Module) -> int:
+    seen_param_ids: set[int] = set()
+    num_embedding_params = 0
+    for module in model.modules():
+        if not isinstance(module, torch.nn.Embedding):
+            continue
+        for param in module.parameters(recurse=False):
+            param_id = id(param)
+            if param_id in seen_param_ids:
+                continue
+            seen_param_ids.add(param_id)
+            num_embedding_params += param.numel()
+    return num_embedding_params
+
+
+def _get_dataloader_num_tokens(dataloader: BaseDataLoader) -> int | None:
+    dataset = getattr(dataloader, "dataset", None)
+    num_tokens = getattr(dataset, "num_tokens", None)
+    if num_tokens is None:
+        return None
+    return int(num_tokens)
+
+
+def _resolve_training_steps(
+    configured_steps: int,
+    *,
+    dataset_num_tokens: int | None,
+    tokens_per_step: int,
+) -> int:
+    if configured_steps == -1:
+        if dataset_num_tokens is None:
+            raise ValueError(
+                "training.steps=-1 requires a dataloader that exposes its total "
+                "number of tokens"
+            )
+        training_steps = dataset_num_tokens // tokens_per_step
+        if training_steps < 1:
+            raise ValueError(
+                f"Dataset has {dataset_num_tokens} tokens, fewer than the "
+                f"{tokens_per_step} tokens required for one training step"
+            )
+        return training_steps
+
+    if configured_steps < 1:
+        raise ValueError("training.steps must be positive or -1")
+    return configured_steps
+
+
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -324,6 +372,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_param_count,
             self.metrics_processor.num_flops_per_token,
         ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        embedding_param_count = _count_embedding_parameters(model)
+        non_embedding_param_count = model_param_count - embedding_param_count
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -449,9 +499,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     self.loss_fn.set_lm_head(
                         lm_head  # pyrefly: ignore[bad-argument-type]
                     )
-                    self.model_parts[
-                        -1
-                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                    self.model_parts[-1]._skip_lm_head = (
+                        True  # pyrefly: ignore[bad-argument-type]
+                    )
             else:
                 assert len(self.model_parts) == 1
                 lm_head = self.model_parts[0].lm_head
@@ -459,9 +509,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     lm_head is not None
                 ), "Model must have lm_head for ChunkedLossWrapper"
                 self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
-                self.model_parts[
-                    0
-                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[0]._skip_lm_head = (
+                    True  # pyrefly: ignore[bad-argument-type]
+                )
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -480,10 +530,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
             )
-        self.lr_schedulers = config.lr_scheduler.build(
-            optimizers=self.optimizers,
-            training_steps=config.training.steps,
-        )
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
 
@@ -508,6 +554,64 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else None
             ),
         )
+
+        tokens_per_step = global_batch_size * config.training.seq_len
+        dataset_num_tokens = _get_dataloader_num_tokens(self.dataloader)
+        configured_steps = config.training.steps
+        config.training.steps = _resolve_training_steps(
+            configured_steps,
+            dataset_num_tokens=dataset_num_tokens,
+            tokens_per_step=tokens_per_step,
+        )
+        if configured_steps == -1:
+            logger.info(
+                "Resolved training.steps=-1 to %s full dataset steps",
+                f"{config.training.steps:,}",
+            )
+
+        self.lr_schedulers = config.lr_scheduler.build(
+            optimizers=self.optimizers,
+            training_steps=config.training.steps,
+        )
+
+        configured_training_tokens = tokens_per_step * config.training.steps
+        configured_training_flops = (
+            configured_training_tokens * self.metrics_processor.num_flops_per_token
+        )
+        scaling_ladder_prefix = f"{color.blue}[Sclaing-Ladder Info]"
+        if dataset_num_tokens is None:
+            logger.info(
+                f"{scaling_ladder_prefix} dataset: {color.red}"
+                f"token count unavailable for {type(self.dataloader).__name__}"
+                f"{color.reset}"
+            )
+        else:
+            dataset_full_steps = dataset_num_tokens // tokens_per_step
+            dataset_training_flops = (
+                dataset_num_tokens * self.metrics_processor.num_flops_per_token
+            )
+            logger.info(
+                f"{scaling_ladder_prefix} dataset: {color.red}"
+                f"tokens {dataset_num_tokens:,}; "
+                f"tokens per step {tokens_per_step:,}; "
+                f"one-pass full steps {dataset_full_steps:,}; "
+                f"total steps {config.training.steps:,}"
+                f"{color.reset}"
+            )
+            logger.info(
+                f"{scaling_ladder_prefix} parameter: {color.red}"
+                f"including embeddings {model_param_count:,}; "
+                f"embedding {embedding_param_count:,}; "
+                f"excluding embeddings {non_embedding_param_count:,}"
+                f"{color.reset}"
+            )
+            logger.info(
+                f"{scaling_ladder_prefix} FLOP: {color.red}"
+                f"per token {self.metrics_processor.num_flops_per_token:.6e}; "
+                f"one-pass training {dataset_training_flops:.6e}; "
+                f"total training {configured_training_flops:.6e}"
+                f"{color.reset}"
+            )
 
         # build checkpointer
         self.checkpointer = config.checkpoint.build(
