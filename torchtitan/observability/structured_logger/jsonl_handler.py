@@ -121,10 +121,20 @@ class TraceJsonlFormatter(logging.Formatter):
         if isinstance(value, (float, int)):
             log_dict["value"] = float(value)
 
+        context = getattr(record, str(ExtraFields.CONTEXT), None)
+        if context is not None:
+            log_dict["context"] = context
+
         # task_name pairs start/end records
         task_name = getattr(record, str(ExtraFields.TASK_NAME), None)
         if task_name is not None:
             log_dict["task_name"] = task_name
+
+        measured_from_start_time_ms = getattr(
+            record, "measured_from_start_time_ms", None
+        )
+        if measured_from_start_time_ms is not None:
+            log_dict["measured_from_start_time_ms"] = measured_from_start_time_ms
 
         # Caller field for source traceability (file:line:function)
         log_dict[

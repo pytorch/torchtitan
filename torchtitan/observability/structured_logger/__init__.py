@@ -16,6 +16,9 @@ Typical use::
         ...
 """
 
+from torchtitan.observability.structured_logger.forwarding_handler import (
+    install_forwarding_structured_logging_handler,
+)
 from torchtitan.observability.structured_logger.step_state import (
     add_step_tag,
     clear_step_tags,
@@ -42,4 +45,5 @@ __all__ = [
     "log_trace_scalar",
     "log_trace_instant",
     "log_trace_span",
+    "install_forwarding_structured_logging_handler",
 ]
