@@ -7,6 +7,13 @@
 from typing import cast
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
@@ -19,10 +26,7 @@ from torchtitan.components.quantization import NVFP4LinearConverter
 from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
-    HuggingFaceTextDataLoader,
-)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -41,7 +45,10 @@ def qwen3_debugmodel() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -152,7 +159,10 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -184,8 +194,8 @@ def qwen3_0_6b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -213,8 +223,8 @@ def qwen3_1_7b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-1.7B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -267,8 +277,8 @@ def qwen3_14b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-14B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -302,8 +312,8 @@ def qwen3_30b_a3b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -337,8 +347,8 @@ def qwen3_32b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-32B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -381,8 +391,9 @@ def qwen3_moe_debug() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4_test",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -429,7 +440,9 @@ def qwen3_moe_deepep() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
@@ -482,10 +495,18 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             seq_len=2048,
             steps=180,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="openai/gsm8k",
-            load_dataset_kwargs={"name": "main", "split": "train"},
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="openai/gsm8k",
+                        name="main",
+                        split="train",
+                    ),
+                    processor=ChatProcessor.Config(messages_fn=process_sample),
+                    post_filters=(lambda sample: sample is not None,),
+                ),
+            ),
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,

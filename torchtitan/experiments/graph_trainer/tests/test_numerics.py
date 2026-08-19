@@ -345,7 +345,8 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
 
 
 GRAPH_PP_DSV3_PP_OPTIONS = (
-    "--parallelism.pipeline_parallel_degree=2"
+    "--training.disable_cuda_graphs"
+    " --parallelism.pipeline_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
     " --training.local_batch_size=8"

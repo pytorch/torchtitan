@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import unittest
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from torchtitan.config.configurable import Configurable
@@ -145,6 +147,21 @@ class TestConfigurable(unittest.TestCase):
         self.assertEqual(d2["x"], 42)
         self.assertEqual(d2["inner"]["a"], 1)
         self.assertEqual(d2["inner"]["b"], 2)
+
+    def test_to_dict_converts_callable_in_plain_dataclass(self):
+        """to_dict converts callables nested in plain dataclasses."""
+
+        @dataclass(frozen=True)
+        class PlainRecipe:
+            filter_fn: Callable
+
+        @dataclass(kw_only=True, slots=True)
+        class Holder(Configurable.Config):
+            recipe: PlainRecipe | None = None
+
+        value = Holder(recipe=PlainRecipe(filter_fn=lambda row: True)).to_dict()
+        self.assertIsInstance(value["recipe"]["filter_fn"], str)
+        json.dumps(value)
 
     def test_traverse_recurse_descends_into_matching_configs(self):
         """traverse(..., recurse=True) descends after yielding matches."""

@@ -6,12 +6,15 @@
 
 """Multimodal collator for VLM datasets."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast, Literal
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
+from torchtitan.components.data.collators import Collator, TrainerBatch
+from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.tools.logging import logger
@@ -19,23 +22,32 @@ from .utils.image import vision_to_patches
 from .utils.text import pad_batch_dim, pad_seq_len
 
 
-@dataclass
-class MultiModalCollator:
+class MultiModalCollator(Collator):
     """Multimodal collator for VLM training.
 
     Handles both image and text data, converting images to patches
     and preparing text for model input.
     """
 
-    batch_size: int
-    seq_len: int
-    max_images_per_batch: int
-    patch_size: int
-    temporal_patch_size: int
-    spatial_merge_size: int
-    tokenizer: MultiModalTokenizer
-    build_mrope_positions: bool
-    patch_order: str = "block"
+    @dataclass(kw_only=True, slots=True)
+    class Config(Collator.Config):
+        max_images_per_batch: int = 128
+        patch_size: int = 16
+        temporal_patch_size: int = 2
+        spatial_merge_size: int = 2
+        build_mrope_positions: bool = False
+        patch_order: Literal["block", "raster"] = "block"
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        self.batch_size = context.local_batch_size
+        self._seq_len = context.seq_len
+        self.max_images_per_batch = config.max_images_per_batch
+        self.patch_size = config.patch_size
+        self.temporal_patch_size = config.temporal_patch_size
+        self.spatial_merge_size = config.spatial_merge_size
+        self.tokenizer = cast(MultiModalTokenizer, context.tokenizer)
+        self.build_mrope_positions = config.build_mrope_positions
+        self.patch_order = config.patch_order
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -103,24 +115,24 @@ class MultiModalCollator:
             batch_first=True,
             padding_value=0,
         )
-        # Pad or truncate to seq_len + 1
+        # Pad or truncate to the model sequence length.
         input_ids, labels = pad_seq_len(
             input_ids,
             labels,
-            self.seq_len + 1,
+            self._seq_len,
             # pyrefly: ignore [missing-attribute]
             padding_idx=self.tokenizer.pad_id,
             ignore_idx=IGNORE_INDEX,
         )
-        # Pad or truncate positions to seq_len + 1
-        if positions.shape[1] < self.seq_len + 1:
+        # Pad or truncate positions to the same length.
+        if positions.shape[1] < self._seq_len:
             positions = torch.nn.functional.pad(
                 positions,
-                (0, self.seq_len + 1 - positions.shape[1]),
+                (0, self._seq_len - positions.shape[1]),
                 value=0,
             )
         else:
-            positions = positions[:, : self.seq_len + 1]
+            positions = positions[:, : self._seq_len]
         # Pad dummy rows to reach target batch size
         input_ids, labels = pad_batch_dim(
             input_ids,
@@ -137,7 +149,7 @@ class MultiModalCollator:
                 value=0,
             )
 
-        return input_ids[:, :-1], labels[:, 1:], positions[:, :-1]
+        return input_ids, labels, positions
 
     def _build_mrope_positions(
         self,
@@ -169,6 +181,8 @@ class MultiModalCollator:
         Returns:
             (batch, seq_len, 3) MRoPE position IDs.
         """
+        # TODO(data-qwen-video-mrope): Per-frame grid expansion here conflicts with
+        # the one-video/one-placeholder-run contract; reconcile before video input.
         # MRoPE position IDs are laid out in block order; a raster patch order
         # would desync them from the patch sequence.
         if self.patch_order != "block":
@@ -311,10 +325,10 @@ class MultiModalCollator:
 
         return mrope_positions
 
-    def __call__(
-        self, batch: list[dict[str, Any]]
-    ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
+    def __call__(self, batch: Sequence[dict[str, Any]]) -> TrainerBatch:
         """Collate batch with patch-based approach."""
+        # Count media in each sample.
+        batch = list(batch)
         images_per_sample: list[int] = []
         for sample in batch:
             num_images = len(sample.get("pixel_values", []))
@@ -322,7 +336,11 @@ class MultiModalCollator:
                 num_images += vid.shape[0] // self.temporal_patch_size
             images_per_sample.append(num_images)
 
+        # Drop samples that exceed the batch media limit.
         total_images = sum(images_per_sample)
+        # TODO(data-mm-collator-admission): Rows dropped above
+        # max_images_per_batch are already consumed. Move admission earlier so
+        # deferred rows can be reused.
         while total_images > self.max_images_per_batch and batch:
             removed_images = images_per_sample.pop()
             total_images -= removed_images
@@ -332,12 +350,15 @@ class MultiModalCollator:
                 f"total <= {self.max_images_per_batch}"
             )
 
+        # Collate image and video patches.
         all_images = [
             img
             for sample in batch
             if "pixel_values" in sample
             for img in sample["pixel_values"]
         ]
+        # TODO(data-mm-padded-budget): Bound padded patch allocation
+        # (len(items) * max(per-item patches)), not only media count.
         patches, grids = self.collate_images(all_images) if all_images else (None, None)
 
         all_videos = [
@@ -350,6 +371,7 @@ class MultiModalCollator:
             self.collate_images(all_videos) if all_videos else (None, None)
         )
 
+        # Pad text.
         input_ids, labels, positions = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
@@ -364,6 +386,7 @@ class MultiModalCollator:
             },
         }
 
+        # Build multimodal RoPE positions.
         if self.build_mrope_positions and (
             grids is not None or video_grids is not None
         ):
@@ -377,5 +400,4 @@ class MultiModalCollator:
                 video_token_id=special_tokens["video_id"],
             )
 
-        # pyrefly: ignore [bad-return]
         return input_dict, labels
