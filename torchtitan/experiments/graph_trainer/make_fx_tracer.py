@@ -6,7 +6,8 @@
 
 import contextlib
 import copy
-from collections.abc import Callable, Generator
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,14 @@ from torchtitan.experiments.graph_trainer.dynamic_shapes import (
 # Everything else (callables, custom objects) should be registered as pytree
 # nodes/constants or captured in fn's closure.
 _ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
+
+
+class TraceTimeTransform(ABC):
+    """Reusable configuration for a scoped transformation during tracing."""
+
+    @abstractmethod
+    def activate(self) -> contextlib.AbstractContextManager[None]:
+        """Return a fresh context manager for one trace."""
 
 
 @contextmanager
@@ -343,6 +352,7 @@ def minimal_fx_tracer(
     ]
     | None = None,
     record_stack_traces: bool = True,
+    trace_time_transforms: Sequence[TraceTimeTransform] | None = None,
     _insert_runtime_asserts: bool = False,
 ) -> Callable[..., TracedResult]:
     """Return a tracer that captures ``fn`` with implicit module/optimizer state.
@@ -374,6 +384,11 @@ def minimal_fx_tracer(
     Tensor subclasses (for example ``DTensor``) are recursively unwrapped into
     plain tensors for tracing, and the layouts needed to rewrap them are stored
     in the returned :class:`TracedResult`.
+
+    ``trace_time_transforms`` are reusable configurations activated while ``fn``
+    is traced. They can replace selected forward calls with graph-native
+    implementations before autograd records their backward. Each transform must
+    return a fresh context manager from :meth:`TraceTimeTransform.activate`.
 
     ``_insert_runtime_asserts`` opts into materializing the ShapeEnv's deferred
     runtime asserts (from ``mark_unbacked()`` bounds and ``torch._check()``
@@ -464,9 +479,15 @@ def minimal_fx_tracer(
                 if prepared is not None:
                     user_args, user_kwargs = prepared
 
-            with _reparametrize_train_state(
-                module, optimizer, model_state_t, optim_state_t
-            ), torch.compiler._patch_engine_backward():
+            with contextlib.ExitStack() as stack:
+                for transform in trace_time_transforms or ():
+                    stack.enter_context(transform.activate())
+                stack.enter_context(
+                    _reparametrize_train_state(
+                        module, optimizer, model_state_t, optim_state_t
+                    )
+                )
+                stack.enter_context(torch.compiler._patch_engine_backward())
                 result = fn(*user_args, **user_kwargs)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
