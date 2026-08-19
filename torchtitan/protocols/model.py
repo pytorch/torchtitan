@@ -6,6 +6,7 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 from torchtitan.config import Configurable
 
@@ -91,3 +92,7 @@ class BaseModel(Module):
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass
+
+        # Accounts for batch-dependent work omitted by the per-token estimate.
+        def get_num_extra_flops_per_batch(self, input_dict: dict[str, Any]) -> int:
+            return 0

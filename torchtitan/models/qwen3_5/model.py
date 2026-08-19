@@ -7,7 +7,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import spmd_types as spmd
 import torch
@@ -25,7 +25,8 @@ from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Conv1d, Linear, vision_encoder as common_vision
+
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -722,12 +723,24 @@ class Qwen35Model(Decoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
+        def get_num_extra_flops_per_batch(self, input_dict: dict[str, Any]) -> int:
+            grids_N3 = common_vision.get_vision_grids(input_dict)
+            vision = self.vision_encoder
+            merge_unit = vision.spatial_merge_size**2
+            num_output_tokens = sum(t * h * w // merge_unit for t, h, w in grids_N3)
+            return common_vision.get_vision_encoder_flops(
+                patch_embed=vision.patch_embed_proj,
+                block=vision.block,
+                num_layers=vision.num_layers,
+                grids_N3=grids_N3,
+                num_output_tokens=num_output_tokens,
+                output_linears=(vision.merger.fc1, vision.merger.fc2),
+            )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            # The shared helper excludes the vision encoder from the per-token
-            # FLOP term (ViT cost scales with patches, not seq_len), so this MFU
-            # is decoder-only. TODO: add a per-batch vision FLOP term for VLMs.
+            # Keep this estimate decoder-only; the batch hook bills vision work.
             attn_cfg = self.first_attention
             # pyrefly: ignore [missing-attribute]
             n_heads = attn_cfg.n_heads

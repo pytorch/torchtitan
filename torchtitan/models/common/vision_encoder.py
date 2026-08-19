@@ -23,6 +23,7 @@ Shape suffixes:
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
@@ -168,3 +169,54 @@ class VisionTransformerBlock(Module):
         )
         x = x + self.mlp(self.norm2(x))
         return x
+
+
+def get_vision_grids(input_dict: dict[str, Any]) -> list[list[int]]:
+    return [
+        grid
+        for pixel_key, grid_key in (
+            ("pixel_values", "grid_thw"),
+            ("pixel_values_videos", "grid_thw_videos"),
+        )
+        if input_dict.get(pixel_key) is not None
+        and input_dict.get(grid_key) is not None
+        for grid in input_dict[grid_key].tolist()
+    ]
+
+
+# Counts logical forward/backward matmul work over valid, unpadded patches.
+def get_vision_encoder_flops(
+    *,
+    patch_embed: Linear.Config,
+    block: VisionTransformerBlock.Config,
+    num_layers: int,
+    grids_N3: list[list[int]],
+    num_output_tokens: int,
+    output_linears: tuple[Linear.Config, ...],
+) -> int:
+    patch_counts = [t * h * w for t, h, w in grids_N3]
+    num_patches = sum(patch_counts)
+    num_patch_pairs = sum(patch_count * patch_count for patch_count in patch_counts)
+    block_linears = (
+        block.attn.wq,
+        block.attn.wk,
+        block.attn.wv,
+        block.attn.proj,
+        block.mlp.fc1,
+        block.mlp.fc2,
+    )
+    num_pre_projection_params = (
+        patch_embed.in_features * patch_embed.out_features
+        + num_layers
+        * sum(linear.in_features * linear.out_features for linear in block_linears)
+    )
+    num_output_projection_params = sum(
+        linear.in_features * linear.out_features for linear in output_linears
+    )
+    return 6 * (
+        num_patches * num_pre_projection_params
+        + num_layers
+        * (block.attn.wq.out_features + block.attn.wv.out_features)
+        * num_patch_pairs
+        + num_output_tokens * num_output_projection_params
+    )

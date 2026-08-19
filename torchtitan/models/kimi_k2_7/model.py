@@ -9,11 +9,13 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common import vision_encoder as common_vision
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
@@ -74,6 +76,28 @@ class KimiK25Model(DeepSeekV3Model):
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
+        def get_num_extra_flops_per_batch(self, input_dict: dict[str, Any]) -> int:
+            if self.vision_encoder is None:
+                return 0
+
+            grids_N3 = common_vision.get_vision_grids(input_dict)
+            vision = self.vision_encoder
+            kernel_h, kernel_w = vision.merge_kernel_size
+            num_output_tokens = sum(
+                (h // kernel_h) * (w // kernel_w) for temporal, h, w in grids_N3
+            )
+            return common_vision.get_vision_encoder_flops(
+                patch_embed=vision.patch_embed_proj,
+                block=vision.block,
+                num_layers=vision.num_layers,
+                grids_N3=grids_N3,
+                num_output_tokens=num_output_tokens,
+                output_linears=(
+                    vision.projector.linear_1,
+                    vision.projector.linear_2,
+                ),
             )
 
     def __init__(self, config: Config):
