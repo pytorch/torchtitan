@@ -191,10 +191,7 @@ class TestKimiK3(unittest.TestCase):
                     tensor.detach().clone().requires_grad_() for tensor in actual_inputs
                 )
 
-                kernel = KimiKDAKernel.Config(
-                    head_dim=head_dim,
-                    lower_bound=lower_bound,
-                ).build()
+                kernel = KimiKDAKernel.Config(lower_bound=lower_bound).build()
                 actual_BLHV = kernel(*actual_inputs)
                 expected_BLHV = _kda_recurrent_reference(
                     *expected_inputs,
