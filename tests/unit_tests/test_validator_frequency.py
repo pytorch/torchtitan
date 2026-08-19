@@ -6,17 +6,18 @@
 
 import unittest
 
-from torchtitan.components.validate import BaseValidator
+from torchtitan.components.validate import BaseValidator, Validator
 
 
 class TestValidatorFrequency(unittest.TestCase):
     def test_frequency_must_be_positive(self):
-        for freq in (0, -1):
-            with self.subTest(freq=freq):
-                with self.assertRaisesRegex(
-                    ValueError, "validation frequency must be positive"
-                ):
-                    BaseValidator(config=BaseValidator.Config(freq=freq))
+        for config_cls in (BaseValidator.Config, Validator.Config):
+            for freq in (0, -1):
+                with self.subTest(config=config_cls.__qualname__, freq=freq):
+                    with self.assertRaisesRegex(
+                        ValueError, "validation frequency must be positive"
+                    ):
+                        config_cls(freq=freq)
 
     def test_should_validate_at_configured_frequency(self):
         validator = BaseValidator(config=BaseValidator.Config(freq=3))
