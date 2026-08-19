@@ -69,7 +69,7 @@ We look forward to your contributions!
 8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
-11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
+11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
 12. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
 13. Flexible learning rate scheduler (warmup-stable-decay)
 14. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage
@@ -108,10 +108,7 @@ This method requires the nightly build of PyTorch, or the latest PyTorch built [
 git clone https://github.com/pytorch/torchtitan
 cd torchtitan
 pip install -r requirements.txt
-pip install --pre torchdata --index-url https://download.pytorch.org/whl/nightly/cpu
 ```
-
-> **Note:** The nightly build of `torchdata` is required when using a PyTorch nightly. Install it from the nightly index as shown above.
 
 > **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
 

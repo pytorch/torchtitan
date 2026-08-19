@@ -7,6 +7,12 @@ import pytest
 import spmd_types as spmd
 import torch
 
+from torchtitan.components.data import (
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    SingleDatasetConfig,
+)
+from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.quantization import Float8Linear
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
@@ -242,9 +248,9 @@ def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
     assert config.parallelism.spmd_backend == "spmd_types"
 
     overridden = ConfigManager().parse_args(
-        [*base_args, "--parallelism.spmd_backend", "default"]
+        [*base_args, "--parallelism.spmd_backend", "partial_dtensor"]
     )
-    assert overridden.parallelism.spmd_backend == "default"
+    assert overridden.parallelism.spmd_backend == "partial_dtensor"
 
 
 @pytest.mark.parametrize(
@@ -263,7 +269,13 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
     config = ConfigManager().parse_args(["--module", "qwen3", "--config", recipe])
     assert config.model_spec.name == "qwen3"
     if recipe == "qwen3_8b_first_85_pct_layers_nvfp4":
-        assert config.dataloader.dataset_path == "openai/gsm8k"
+        assert isinstance(config.dataloader, GrainDataLoader.Config)
+        packed_dataset = config.dataloader.dataset
+        assert isinstance(packed_dataset, FirstFitPackingConfig)
+        dataset = packed_dataset.dataset
+        assert isinstance(dataset, SingleDatasetConfig)
+        assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
+        assert dataset.source.path == "openai/gsm8k"
         assert config.checkpoint.initial_load_in_hf
         assert config.compile.enable
         assert "model" in config.compile.components

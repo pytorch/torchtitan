@@ -58,19 +58,7 @@ def _structured_logger_disabled() -> bool:
     return _disabled
 
 
-class StrEnum(enum.Enum):
-    """Stand-in for ``enum.StrEnum`` (added in Python 3.11)
-
-    Mimics it for our use case: ``str(member)`` returns the value (e.g.
-    ``"event"``), not ``"LogType.EVENT"``. Drop in favor of ``enum.StrEnum``
-    once Python 3.10 support is no longer needed.
-    """
-
-    def __str__(self) -> str:
-        return self.value
-
-
-class LogType(StrEnum):
+class LogType(enum.StrEnum):
     """Record kind in the JSONL stream.
 
     - ``EVENT``: paired span record (``*_start`` / ``*_end`` from ``log_trace_span``).
@@ -83,7 +71,7 @@ class LogType(StrEnum):
     TEXT = "text"
 
 
-class ExtraFields(StrEnum):
+class ExtraFields(enum.StrEnum):
     """Keys for the ``extra`` dict passed to logging calls."""
 
     LOG_TYPE = "log_type"
