@@ -94,6 +94,7 @@ def _flux_validator(loader):
         save_img_count=0,
     )
     validator.parallel_dims = SimpleNamespace(
+        dp_enabled=False,
         cp_enabled=False,
         dp_cp_enabled=False,
     )
