@@ -224,6 +224,53 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_standalone_inductor_precompile(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            standalone_inductor_compilation_pass,
+        )
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+            run_traced,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_fx_trace_load,
+            precompile_fx_trace_save,
+        )
+
+        model = torch.nn.Sequential(
+            torch.nn.RMSNorm(8),
+            torch.nn.Linear(8, 4),
+        ).cuda()
+
+        def train_step(x, unused):
+            loss = model(x).square().sum()
+            return loss, *torch.autograd.grad(loss, tuple(model.parameters()))
+
+        x = torch.randn(2, 8, device="cuda")
+        unused = torch.randn(1, device="cuda")
+        expected = train_step(x, unused)
+        traced = minimal_fx_tracer(train_step, module=model)(x, unused)
+        traced.gm = standalone_inductor_compilation_pass(
+            traced.gm, traced.example_inputs
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            precompile_fx_trace_save(traced, storage)
+            loaded = precompile_fx_trace_load(storage, expected_fingerprint="")
+
+        with patch(
+            "torch._inductor.standalone_compile",
+            side_effect=AssertionError("precompiled graph must not compile again"),
+        ):
+            for _ in range(2):
+                actual = run_traced(loaded, module=model)(x, unused)
+                for actual_tensor, expected_tensor in zip(
+                    actual, expected, strict=True
+                ):
+                    torch.testing.assert_close(actual_tensor, expected_tensor)
+
     def test_artifact_pickle_roundtrip(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import SubclassLayout
         from torchtitan.experiments.graph_trainer.precompile import (

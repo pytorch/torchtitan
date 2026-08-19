@@ -6169,6 +6169,82 @@ class TestCanonicalizeGraphPass(TestCase):
         self.assertEqual(gm(x), x.reshape(2, 8))
 
 
+class TestStandaloneInductorCompilationPass(TestCase):
+    def test_prunes_unused_placeholders_and_restores_outer_signature(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            standalone_inductor_compilation_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x_node = graph.placeholder("x")
+        y_node = graph.placeholder("y")
+        unused_node = graph.placeholder("unused")
+        x_node.meta["marker"] = "x"
+        unused_node.meta["marker"] = "unused"
+        result = graph.call_function(torch.ops.aten.add.Tensor, args=(x_node, y_node))
+        graph.output(result)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        x = torch.ones(4)
+        y = torch.full((4,), 2.0)
+        unused = torch.full((4,), 3.0)
+        seen = {}
+
+        def fake_standalone_compile(compile_gm, compile_inputs, **kwargs):
+            import torch._inductor.config as ic
+
+            seen["placeholder_targets"] = [
+                node.target for node in compile_gm.graph.find_nodes(op="placeholder")
+            ]
+            seen["placeholder_meta"] = [
+                node.meta for node in compile_gm.graph.find_nodes(op="placeholder")
+            ]
+            seen["compile_inputs"] = compile_inputs
+            seen["kwargs"] = kwargs
+            seen["reorder_for_peak_memory"] = ic.reorder_for_peak_memory
+
+            def compiled_fn(a, b):
+                return a - b
+
+            seen["compiled_fn"] = compiled_fn
+            return compiled_fn
+
+        with patch(
+            "torch._inductor.standalone_compile", side_effect=fake_standalone_compile
+        ):
+            wrapped = standalone_inductor_compilation_pass(
+                gm,
+                (x, y, unused),
+                inductor_configs={"reorder_for_peak_memory": False},
+            )
+
+        self.assertEqual(seen["placeholder_targets"], ["x", "y"])
+        self.assertEqual(seen["placeholder_meta"][0]["marker"], "x")
+        self.assertEqual(len(seen["compile_inputs"]), 2)
+        self.assertIs(seen["compile_inputs"][0], x)
+        self.assertIs(seen["compile_inputs"][1], y)
+        self.assertEqual(
+            seen["kwargs"],
+            {
+                "dynamic_shapes": "from_tracing_context",
+                "aot": True,
+                "donate_graph_module": False,
+            },
+        )
+        self.assertFalse(seen["reorder_for_peak_memory"])
+
+        wrapped_placeholders = [
+            node.target for node in wrapped.graph.find_nodes(op="placeholder")
+        ]
+        self.assertEqual(wrapped_placeholders, ["x", "y", "unused"])
+        wrapped_call = next(
+            node for node in wrapped.graph.nodes if node.op == "call_function"
+        )
+        self.assertIs(wrapped_call.target.__wrapped__, seen["compiled_fn"])
+
+        torch.testing.assert_close(wrapped(x, y, unused), x - y)
+
+
 class TestAsyncTensorParallelPass(FSDPTest):
     """Verify async_tensor_parallel_pass produces fused ops."""
 
