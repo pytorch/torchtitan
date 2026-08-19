@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.models.common.linear import Linear
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module
 
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
@@ -49,9 +50,12 @@ class FeedForward(Module):
         self.w1 = config.w1.build()
         self.w2 = config.w2.build()
         self.w3 = config.w3.build()
+        tensor_logging.register_fwd_bwd(self, ["act_out"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        act_out = F.silu(self.w1(x)) * self.w3(x)
+        tensor_logging.log_fwd_bwd_stats(self, act_out=act_out)
+        return self.w2(act_out)
 
 
 class SigmoidGatedFeedForward(FeedForward):

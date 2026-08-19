@@ -38,6 +38,7 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
+from torchtitan.observability import tensor_logging
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -106,6 +107,15 @@ class GraphTrainer(Trainer):
         )
 
     def __init__(self, config):
+        if (
+            config.metrics.tensor_logging.enabled
+            and config.parallelism.pipeline_parallel_degree > 1
+        ):
+            # TODO: bind GraphPP's copied FX forward graphs to the live
+            # tensor-logging buffers. Current GraphPP runs omit forward rows.
+            raise NotImplementedError(
+                "tensor logging does not yet support GraphPP forward statistics"
+            )
         super().__init__(config)
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
@@ -205,7 +215,11 @@ class GraphTrainer(Trainer):
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
-                with self.train_context(), log_timer("minimal_fx_tracer"):
+                with (
+                    self.train_context(),
+                    tensor_logging.set_enabled(self.tensor_logging is not None),
+                    log_timer("minimal_fx_tracer"),
+                ):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,

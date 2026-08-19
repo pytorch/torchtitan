@@ -30,6 +30,7 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention, local_head_split
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
@@ -72,9 +73,12 @@ class VisionMLP(Module):
         self.linear_fc1 = config.fc1.build()
         self.linear_fc2 = config.fc2.build()
         self.act_fn = config.act_fn.build()
+        tensor_logging.register_fwd_bwd(self, ["act_out"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        act_out = self.act_fn(self.linear_fc1(x))
+        tensor_logging.log_fwd_bwd_stats(self, act_out=act_out)
+        return self.linear_fc2(act_out)
 
 
 class VisionAttention(Module):
@@ -109,6 +113,7 @@ class VisionAttention(Module):
         self.wv = config.wv.build()
         self.proj = config.proj.build()
         self.flex_attention = config.inner_attention.build()
+        tensor_logging.register_fwd_bwd(self, ["xq", "xk", "xv", "head_out"])
 
     def forward(
         self,
@@ -125,12 +130,19 @@ class VisionAttention(Module):
         q_NPHDh = local_head_split(self.wq(x), self.head_dim)
         k_NPHDh = local_head_split(self.wk(x), self.head_dim)
         v_NPHDh = local_head_split(self.wv(x), self.head_dim)
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            xq=q_NPHDh,
+            xk=k_NPHDh,
+            xv=v_NPHDh,
+        )
 
         q_NPHDh, k_NPHDh = rope_apply(q_NPHDh, k_NPHDh, rope_cache)
 
         out_NPHDh = self.flex_attention(
             q_NPHDh, k_NPHDh, v_NPHDh, attention_masks=attention_mask
         )
+        tensor_logging.log_fwd_bwd_stats(self, head_out=out_NPHDh)
         out_NPD = out_NPHDh.reshape(N, P, -1)
         return self.proj(out_NPD)
 
@@ -151,6 +163,19 @@ class VisionTransformerBlock(Module):
         self.norm2 = config.norm2.build()
         self.attn = config.attn.build()
         self.mlp = config.mlp.build()
+        # Record each normalized input, branch output, and post-residual stream.
+        # A residual sum's statistics cannot be reconstructed from its operands.
+        tensor_logging.register_fwd_bwd(
+            self,
+            [
+                "post_ln1",
+                "post_attn",
+                "post_attn_residual",
+                "post_ln2",
+                "post_mlp",
+                "post_mlp_residual",
+            ],
+        )
 
     def forward(
         self,
@@ -160,11 +185,24 @@ class VisionTransformerBlock(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x = x + self.attn(
-            self.norm1(x),
+        post_ln1 = self.norm1(x)
+        post_attn = self.attn(
+            post_ln1,
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x = x + self.mlp(self.norm2(x))
-        return x
+        post_attn_residual = x + post_attn
+        post_ln2 = self.norm2(post_attn_residual)
+        post_mlp = self.mlp(post_ln2)
+        post_mlp_residual = post_attn_residual + post_mlp
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            post_ln1=post_ln1,
+            post_attn=post_attn,
+            post_attn_residual=post_attn_residual,
+            post_ln2=post_ln2,
+            post_mlp=post_mlp,
+            post_mlp_residual=post_mlp_residual,
+        )
+        return post_mlp_residual

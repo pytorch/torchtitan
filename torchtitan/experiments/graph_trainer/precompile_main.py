@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.precompile import _FX_TRACE_ARTIFACT_K
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.observability import tensor_logging
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -201,6 +202,15 @@ def _precompile_aot_fx_trace(
     loss_fn = config.loss.build(compile_config=compile_config)
     _prepare_loss_for_precompile(model, loss_fn)
 
+    tensor_logging_state = None
+    tensor_logging_config = config.metrics.tensor_logging
+    if tensor_logging_config.enabled:
+        tensor_logging_state = tensor_logging.init(
+            model,
+            device=device,
+            publish_filter_regex=tensor_logging_config.publish_filter_regex,
+        )
+
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
     seq_len = config.training.seq_len
@@ -233,13 +243,12 @@ def _precompile_aot_fx_trace(
         positions = torch.arange(
             0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
         ).expand(dummy_inputs.shape)
+        extra_kwargs["positions"] = positions
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,
             )
-
-        extra_kwargs["positions"] = positions
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
@@ -283,7 +292,10 @@ def _precompile_aot_fx_trace(
         return args, kwargs
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
-    with loss_parallel_ctx:
+    with (
+        loss_parallel_ctx,
+        tensor_logging.set_enabled(tensor_logging_state is not None),
+    ):
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
@@ -328,6 +340,8 @@ def _precompile_aot_fx_trace(
         f"Precompile complete. Artifact saved to "
         f"{compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}.bin"
     )
+    if tensor_logging_state is not None:
+        tensor_logging_state.close()
 
 
 def main():

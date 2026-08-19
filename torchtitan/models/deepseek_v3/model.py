@@ -22,6 +22,7 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module
 
 
@@ -89,6 +90,7 @@ class Attention(BaseAttention):
 
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
+        tensor_logging.register_fwd_bwd(self, ["xq", "xk", "xv", "head_out"])
 
     def forward(
         self,
@@ -140,9 +142,11 @@ class Attention(BaseAttention):
                         {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
                     )
 
+        tensor_logging.log_fwd_bwd_stats(self, xq=q, xk=k, xv=v)
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
         ).contiguous()
+        tensor_logging.log_fwd_bwd_stats(self, head_out=output)
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 

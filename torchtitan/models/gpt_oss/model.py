@@ -28,6 +28,7 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module
 
 
@@ -82,6 +83,7 @@ class Attention(BaseAttention):
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
+        tensor_logging.register_fwd_bwd(self, ["xq", "xk", "xv", "head_out"])
 
     def forward(
         self,
@@ -103,6 +105,7 @@ class Attention(BaseAttention):
         bsz, seqlen, _ = x.size()
 
         q, k, v = self.qkv_linear(x)
+        tensor_logging.log_fwd_bwd_stats(self, xq=q, xk=k, xv=v)
 
         q, k = self.rope(q, k, positions)
 
@@ -115,6 +118,7 @@ class Attention(BaseAttention):
             enable_gqa=self.enable_gqa,
             out_transform=self._apply_sinks,
         )
+        tensor_logging.log_fwd_bwd_stats(self, head_out=output)
 
         # Reshape and project output
         output = output.reshape(
@@ -155,6 +159,10 @@ class GptOssTransformerBlock(TransformerBlock):
         assert config.moe is not None
         self.moe = config.moe.build()
         self.moe_enabled = True  # for composability with load balancing
+        tensor_logging.register_fwd_bwd(
+            self,
+            ["attn_stream", "attn_out", "ffn_stream", "ffn_out"],
+        )
 
     def forward(
         self,
@@ -181,9 +189,24 @@ class GptOssTransformerBlock(TransformerBlock):
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x))
-        return x
+        attn_stream = x
+        attn_out = self.attention(
+            self.attention_norm(attn_stream), attention_masks, positions
+        )
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            attn_stream=attn_stream,
+            attn_out=attn_out,
+        )
+
+        ffn_stream = attn_stream + attn_out
+        ffn_out = self.moe(self.ffn_norm(ffn_stream))
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            ffn_stream=ffn_stream,
+            ffn_out=ffn_out,
+        )
+        return ffn_stream + ffn_out
 
 
 class GptOssModel(Decoder):

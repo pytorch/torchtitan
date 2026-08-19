@@ -28,6 +28,7 @@ from torchtitan.models.flux.utils import (
     PATCH_WIDTH,
     preprocess_data,
 )
+from torchtitan.observability import tensor_logging
 from torchtitan.trainer import Trainer
 
 
@@ -329,6 +330,10 @@ class FluxTrainer(Trainer):
         if not self.metrics_processor.should_log(self.step):
             return
 
+        tensor_metrics: dict[str, int | float] = {}
+        if self.tensor_logging is not None and tensor_logging.is_enabled():
+            tensor_metrics = self.tensor_logging.collect()
+
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             loss_mesh = parallel_dims.get_optional_mesh("loss")
@@ -351,6 +356,7 @@ class FluxTrainer(Trainer):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
+            **tensor_metrics,
         }
         self.metrics_processor.log(
             self.step,

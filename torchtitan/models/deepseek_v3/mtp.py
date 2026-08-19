@@ -26,6 +26,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import ModuleList
 
 
@@ -237,6 +238,7 @@ class MTPDecoder(Decoder):
         # Keep this aligned with Decoder.forward(), but preserve the pre-norm
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(tokens)
+        tensor_logging.log_fwd_bwd_stats(self, input=h)
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)
 
@@ -273,9 +275,12 @@ class MTPDecoder(Decoder):
                 "skip_lm_head is not supported with MTP decoder until "
                 "ChunkedLoss supports MTP outputs."
             )
-        return [
-            self.lm_head(item) if self.lm_head is not None else item for item in outputs
-        ]
+        if self.lm_head is None:
+            return outputs
+        predictions = [self.lm_head(item) for item in outputs]
+        for output in predictions:
+            tensor_logging.log_fwd_bwd_stats(self.lm_head, output=output)
+        return predictions
 
 
 def apply_fsdp_to_mtp_decoder(

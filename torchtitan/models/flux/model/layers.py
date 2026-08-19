@@ -15,6 +15,7 @@ from torch import nn, Tensor
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
+from torchtitan.observability import tensor_logging
 from torchtitan.protocols.module import Module, Sequential
 
 
@@ -256,6 +257,21 @@ class DoubleStreamBlock(Module):
         )
 
         self.inner_attention = config.inner_attention.build()
+        # Each image/text stream has attention and feed-forward residual
+        # sublayers. Record the incoming stream and gated branch for both.
+        tensor_logging.register_fwd_bwd(
+            self,
+            [
+                "img_attn_stream",
+                "img_attn_branch",
+                "img_ffn_stream",
+                "img_ffn_branch",
+                "txt_attn_stream",
+                "txt_attn_branch",
+                "txt_ffn_stream",
+                "txt_ffn_branch",
+            ],
+        )
 
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
@@ -308,17 +324,32 @@ class DoubleStreamBlock(Module):
         txt_attn, img_attn = local_split_text_image(attn, txt.shape[1])
 
         # calculate the img blocks
-        img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp(
-            (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
+        img_attn_stream = img
+        img_attn_branch = img_mod1.gate * self.img_attn.proj(img_attn)
+        img_ffn_stream = img_attn_stream + img_attn_branch
+        img_ffn_branch = img_mod2.gate * self.img_mlp(
+            (1 + img_mod2.scale) * self.img_norm2(img_ffn_stream) + img_mod2.shift
         )
 
         # calculate the txt blocks
-        txt = txt + txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt = txt + txt_mod2.gate * self.txt_mlp(
-            (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
+        txt_attn_stream = txt
+        txt_attn_branch = txt_mod1.gate * self.txt_attn.proj(txt_attn)
+        txt_ffn_stream = txt_attn_stream + txt_attn_branch
+        txt_ffn_branch = txt_mod2.gate * self.txt_mlp(
+            (1 + txt_mod2.scale) * self.txt_norm2(txt_ffn_stream) + txt_mod2.shift
         )
-        return img, txt
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            img_attn_stream=img_attn_stream,
+            img_attn_branch=img_attn_branch,
+            img_ffn_stream=img_ffn_stream,
+            img_ffn_branch=img_ffn_branch,
+            txt_attn_stream=txt_attn_stream,
+            txt_attn_branch=txt_attn_branch,
+            txt_ffn_stream=txt_ffn_stream,
+            txt_ffn_branch=txt_ffn_branch,
+        )
+        return img_ffn_stream + img_ffn_branch, txt_ffn_stream + txt_ffn_branch
 
 
 class SingleStreamBlock(Module):
@@ -366,6 +397,7 @@ class SingleStreamBlock(Module):
         self.mlp_act = GELU.Config(approximate="tanh").build()
         self.modulation = config.modulation.build()
         self.inner_attention = config.inner_attention.build()
+        tensor_logging.register_fwd_bwd(self, ["stream", "parallel_branch"])
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
@@ -384,7 +416,13 @@ class SingleStreamBlock(Module):
 
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + mod.gate * output
+        parallel_branch = mod.gate * output
+        tensor_logging.log_fwd_bwd_stats(
+            self,
+            stream=x,
+            parallel_branch=parallel_branch,
+        )
+        return x + parallel_branch
 
 
 class LastLayer(Module):

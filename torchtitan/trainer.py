@@ -57,12 +57,21 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
-from torchtitan.observability import structured_logger as sl
+from torchtitan.observability import structured_logger as sl, tensor_logging
+from torchtitan.observability.tensor_logging.runtime import (
+    _wrap_fwd_bwd_for_tensor_logging_capture,
+)
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
+
+
+_SUPPORTED_TENSOR_LOGGING_PP_SCHEDULES = {
+    "1F1B",
+    "Interleaved1F1B",
+}
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -267,6 +276,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
     metrics_processor: MetricsProcessor
+    tensor_logging: tensor_logging.TensorLoggingState | None
     checkpointer: BaseCheckpointManager
 
     # runtime utilities
@@ -302,6 +312,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+
+        if (
+            config.metrics.tensor_logging.enabled
+            and parallel_dims.pp_enabled
+            and (
+                bool(config.parallelism.pipeline_parallel_schedule_csv)
+                or config.parallelism.pipeline_parallel_schedule
+                not in _SUPPORTED_TENSOR_LOGGING_PP_SCHEDULES
+            )
+        ):
+            # TODO: validate complete forward/backward metric coverage before
+            # enabling additional pipeline schedules.
+            raise NotImplementedError(
+                "tensor logging currently supports only the 1F1B and "
+                "Interleaved1F1B pipeline schedules"
+            )
 
         # validate dense activation sequence length evenness
         seq_len_divisor = (
@@ -551,6 +577,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
             )
+
+        self.tensor_logging = None
+        tensor_logging_config = config.metrics.tensor_logging
+        if tensor_logging_config.enabled:
+            effective_freq = math.lcm(
+                tensor_logging_config.freq,
+                config.metrics.log_freq,
+            )
+            if effective_freq != tensor_logging_config.freq:
+                logger.info(
+                    f"Tensor statistics publish every {effective_freq} steps: the "
+                    f"least common multiple of tensor cadence "
+                    f"{tensor_logging_config.freq} and metrics.log_freq "
+                    f"{config.metrics.log_freq}"
+                )
+
+            # Model buffers and parallel wrappers are final before slots are assigned.
+            self.tensor_logging = tensor_logging.init(
+                self.model_parts,
+                device=self.device,
+                publish_filter_regex=tensor_logging_config.publish_filter_regex,
+                pp_enabled=parallel_dims.pp_enabled,
+            )
+
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=config.training.steps,
@@ -611,6 +661,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
+            if self.tensor_logging is not None:
+                # Warmup and capture may happen on a non-logging step. Keep the
+                # logging operations in the CUDA graph. The existing
+                # `set_enabled()` scope still decides whether this step writes
+                # statistics.
+                self.fwd_bwd_fn = _wrap_fwd_bwd_for_tensor_logging_capture(
+                    self.fwd_bwd_fn
+                )
             self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
         # Build validator if validation is configured
@@ -954,6 +1012,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         assert accumulated_loss is not None
 
+        tensor_metrics: dict[str, int | float] = {}
+        if self.tensor_logging is not None and tensor_logging.is_enabled():
+            with sl.log_trace_span("tensor_logging_collect"):
+                tensor_metrics = self.tensor_logging.collect()
+
         with sl.log_trace_span("collect_dist_metrics"):
 
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
@@ -1000,14 +1063,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **tensor_metrics,
         }
-        self.metrics_processor.log(
-            self.step,
-            global_avg_loss,
-            global_max_loss,
-            float(grad_norm.item()),
-            extra_metrics=extra_metrics,
-        )
+        with sl.log_trace_span("metrics_publish"):
+            self.metrics_processor.log(
+                self.step,
+                global_avg_loss,
+                global_max_loss,
+                float(grad_norm.item()),
+                extra_metrics=extra_metrics,
+            )
 
     @record
     def train(self):
@@ -1035,8 +1100,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with sl.log_trace_span("step"):
                     self.gc_handler.run(self.step)
 
+                    is_tensor_logging_step = (
+                        self.tensor_logging is not None
+                        and self.metrics_processor.should_log(self.step)
+                        and self.step % config.metrics.tensor_logging.freq == 0
+                    )
                     try:
-                        self.train_step(data_iterator)
+                        with tensor_logging.set_enabled(is_tensor_logging_step):
+                            self.train_step(data_iterator)
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break
@@ -1087,5 +1158,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
+        if hasattr(self, "tensor_logging") and self.tensor_logging:
+            self.tensor_logging.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()

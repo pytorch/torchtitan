@@ -44,6 +44,7 @@ from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.observability import tensor_logging
 from torchtitan.tools.logging import logger
 
 
@@ -247,6 +248,7 @@ class AllGatherFusedFeedForward(FeedForward):
         )
         # Elementwise on feature-sharded activations: no collective.
         h = F.silu(h1) * h3
+        tensor_logging.log_fwd_bwd_stats(self, act_out=h)
         y_flat = LinearReduceScatter.apply(
             h,
             self.w2.weight,

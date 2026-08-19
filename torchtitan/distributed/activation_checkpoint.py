@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
+import contextlib
 import os
 from dataclasses import dataclass, field
 from typing import Annotated, cast
@@ -25,7 +26,100 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import Configurable
+from torchtitan.observability.tensor_logging.statistics import (
+    accumulate_tensor_statistics,
+)
 from torchtitan.tools.logging import logger
+
+
+_FORWARD_MUTATION_OPS = {accumulate_tensor_statistics._opoverload}
+_in_activation_checkpoint_recompute = False
+
+
+# ================= Tensor logging under activation checkpointing =================
+#
+# Full activation checkpointing runs each block twice:
+#
+#     original forward -> discard activations -> recompute forward -> backward
+#
+# Tensor logging updates statistic buffers during forward. The recompute must
+# not record the same observation a second time.
+#
+# Eager FullAC:
+#     `_mark_activation_checkpoint_recompute()` wraps only the recomputed
+#     forward and sets the recompute flag to True. `log_stats()` and
+#     `log_fwd_bwd_stats()` check the flag first and return before adding the
+#     recomputed tensor a second time.
+#
+# Compiled FullAC:
+#     Python state cannot control code already inside the compiled graph. The
+#     checkpoint policy marks `accumulate_tensor_statistics` as MUST_SAVE, so
+#     checkpoint recomputation does not execute that buffer update a second time.
+
+
+def _is_activation_checkpoint_recompute() -> bool:
+    return _in_activation_checkpoint_recompute
+
+
+def _mark_activation_checkpoint_recompute(contexts):
+    """Wrap the eager recompute context with shared recomputation state."""
+
+    # Compiled checkpoint contexts must remain a pair of TorchDispatchModes.
+    if torch.compiler.is_compiling():
+        return contexts
+    forward_context, recompute_context = contexts
+
+    @contextlib.contextmanager
+    def recompute():
+        global _in_activation_checkpoint_recompute
+        previous = _in_activation_checkpoint_recompute
+        _in_activation_checkpoint_recompute = True
+        try:
+            with recompute_context:
+                yield
+        finally:
+            _in_activation_checkpoint_recompute = previous
+
+    return forward_context, recompute()
+
+
+def _save_routing_and_forward_mutations():
+    """Save nondeterministic routing and metric mutations during recomputation."""
+
+    # `topk` can choose different experts during recompute. Reuse the choices
+    # made by the original forward.
+    must_save = _FORWARD_MUTATION_OPS | {torch.ops.aten.topk.default}
+
+    def policy_fn(_context, op, *args, **kwargs):
+        if op in must_save:
+            return CheckpointPolicy.MUST_SAVE
+        return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return create_selective_checkpoint_contexts(policy_fn)
+
+
+def _full_ac_contexts():
+    # Full-graph compile needs mutation ops preserved in its selective cache.
+    from torchtitan.observability.tensor_logging.runtime import _is_installed
+
+    if torch.compiler.is_compiling():
+        if _is_installed():
+            return _save_routing_and_forward_mutations()
+        # A compiled checkpoint context must return TorchDispatchModes even
+        # when tensor logging is disabled. This policy is the no-save form.
+        return create_selective_checkpoint_contexts(
+            lambda _context, _op, *args, **kwargs: CheckpointPolicy.PREFER_RECOMPUTE
+        )
+
+    # Eager FullAC can suppress replay directly. Keeping this a plain context is
+    # important for CP, whose FlexAttention operator is itself compiled and
+    # cannot be replayed through selective-checkpoint storage.
+    return _mark_activation_checkpoint_recompute(
+        (contextlib.nullcontext(), contextlib.nullcontext())
+    )
+
+
+# ========================== End of tensor logging utils ==========================
 
 
 def _get_default_save_ops() -> set:
@@ -91,6 +185,7 @@ def _get_default_save_ops() -> set:
     }
     save_ops.update(_resolve_ops(compute_ops))
     save_ops.update(_resolve_ops(comm_ops))
+    save_ops.update(_FORWARD_MUTATION_OPS)
     return save_ops
 
 
@@ -173,8 +268,10 @@ class FullAC(ActivationCheckpointing):
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
+        # Prevent FullAC replay from double-counting tensor statistics.
         return ptd_checkpoint_wrapper(
             module,
+            context_fn=_full_ac_contexts,
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
             early_stop=False,
@@ -216,6 +313,8 @@ class SelectiveAC(ActivationCheckpointing):
     ) -> nn.Module:
         config = cast("SelectiveAC.Config", self.config)
         save_ops = self.get_save_ops()
+        # Preserve forward mutations even when a subclass replaces the save set.
+        save_ops.update(_FORWARD_MUTATION_OPS)
 
         # Collect weight shapes to force-recompute, stored as mm RHS shape
         # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
@@ -277,8 +376,8 @@ class SelectiveAC(ActivationCheckpointing):
 
         return ptd_checkpoint_wrapper(
             module,
-            context_fn=lambda: create_selective_checkpoint_contexts(
-                _get_custom_policy()
+            context_fn=lambda: _mark_activation_checkpoint_recompute(
+                create_selective_checkpoint_contexts(_get_custom_policy())
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,

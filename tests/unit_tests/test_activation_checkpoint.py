@@ -4,12 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import subprocess
+import sys
 import unittest
 from copy import deepcopy
+from unittest.mock import patch
 
 import torch
+from torch.utils.checkpoint import CheckpointPolicy
 from torch.utils.flop_counter import FlopCounterMode
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    _full_ac_contexts,
+    _save_routing_and_forward_mutations,
+    FullAC,
+    SelectiveAC,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -44,6 +53,86 @@ class TransformerBlock(Module):
 
 
 class TestApplyAC(unittest.TestCase):
+    def test_forward_mutation_op_is_registered_with_activation_checkpointing(self):
+        code = """
+import torch
+from torchtitan.distributed.activation_checkpoint import _FORWARD_MUTATION_OPS
+
+assert _FORWARD_MUTATION_OPS == {
+    torch.ops.torchtitan.accumulate_tensor_statistics.default,
+}
+"""
+        subprocess.run([sys.executable, "-c", code], check=True)
+
+    def test_compiled_full_ac_saves_routing_and_statistic_mutations(self):
+        from torchtitan.observability.tensor_logging.statistics import (
+            accumulate_tensor_statistics,
+        )
+
+        self.assertIsNotNone(accumulate_tensor_statistics)
+        policies = []
+        contexts = object()
+        with patch(
+            "torchtitan.distributed.activation_checkpoint."
+            "create_selective_checkpoint_contexts",
+            side_effect=lambda policy: policies.append(policy) or contexts,
+        ):
+            self.assertIs(_save_routing_and_forward_mutations(), contexts)
+
+        policy = policies[0]
+        self.assertIs(
+            policy(
+                None,
+                torch.ops.torchtitan.accumulate_tensor_statistics.default,
+            ),
+            CheckpointPolicy.MUST_SAVE,
+        )
+        self.assertIs(
+            policy(None, torch.ops.aten.topk.default),
+            CheckpointPolicy.MUST_SAVE,
+        )
+        self.assertIs(
+            policy(None, torch.ops.aten.sin.default),
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        )
+
+    def test_eager_full_ac_does_not_use_selective_checkpoint_storage(self):
+        with patch(
+            "torchtitan.distributed.activation_checkpoint."
+            "create_selective_checkpoint_contexts"
+        ) as create_contexts:
+            forward_context, recompute_context = _full_ac_contexts()
+
+        create_contexts.assert_not_called()
+        with forward_context, recompute_context:
+            pass
+
+    def test_compiled_full_ac_without_tensor_logging_does_not_save_statistics(self):
+        policies = []
+        contexts = object()
+        with (
+            patch("torch.compiler.is_compiling", return_value=True),
+            patch(
+                "torchtitan.observability.tensor_logging.runtime._is_installed",
+                return_value=False,
+            ),
+            patch(
+                "torchtitan.distributed.activation_checkpoint."
+                "create_selective_checkpoint_contexts",
+                side_effect=lambda policy: policies.append(policy) or contexts,
+            ) as create_contexts,
+        ):
+            self.assertIs(_full_ac_contexts(), contexts)
+
+        create_contexts.assert_called_once()
+        self.assertIs(
+            policies[0](
+                None,
+                torch.ops.torchtitan.accumulate_tensor_statistics.default,
+            ),
+            CheckpointPolicy.PREFER_RECOMPUTE,
+        )
+
     def test_flops(self):
         def get_bw_flops(model_fn):
             x = torch.randn(512, 512, requires_grad=True)

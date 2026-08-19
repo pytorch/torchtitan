@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -101,7 +101,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 training=SimpleNamespace(
                     disable_cuda_graphs=False,
                     max_norm=1.0,
-                )
+                ),
             ),
             optimizers=MagicMock(),
             lr_schedulers=SimpleNamespace(
@@ -122,6 +122,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
+            tensor_logging=None,
             step=1,
             ntokens_seen=3,
         ),
@@ -158,6 +159,95 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         )
 
     metrics_processor.log.assert_not_called()
+
+
+def test_train_scopes_complete_steps_with_tensor_logging_cadence() -> None:
+    enabled_values = []
+
+    @contextmanager
+    def record_enabled(value: bool):
+        enabled_values.append(value)
+        yield
+
+    profiler = MagicMock()
+    profiler_context = MagicMock()
+    profiler_context.__enter__.return_value = profiler
+    config = SimpleNamespace(
+        dump_folder="/tmp/tensor-logging-test",
+        checkpoint=SimpleNamespace(load_step=-1),
+        profiler=SimpleNamespace(build=MagicMock(return_value=profiler_context)),
+        metrics=SimpleNamespace(tensor_logging=SimpleNamespace(freq=2)),
+        training=SimpleNamespace(steps=2),
+        validator=SimpleNamespace(enable=False),
+        comm=SimpleNamespace(train_timeout_seconds=10),
+    )
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=config,
+            checkpointer=SimpleNamespace(
+                load=MagicMock(),
+                save=MagicMock(),
+            ),
+            step=0,
+            tensor_logging=object(),
+            metrics_processor=SimpleNamespace(
+                should_log=MagicMock(return_value=True),
+            ),
+            dataloader=object(),
+            batch_generator=MagicMock(return_value=iter(())),
+            should_continue_training=MagicMock(side_effect=[True, True, False]),
+            gc_handler=SimpleNamespace(run=MagicMock()),
+            train_step=MagicMock(),
+            parallel_dims=SimpleNamespace(),
+        ),
+    )
+
+    with (
+        patch("torchtitan.trainer.tensor_logging.set_enabled", record_enabled),
+        patch("torchtitan.trainer.sl.log_trace_instant"),
+        patch("torchtitan.trainer.sl.set_step"),
+        patch("torchtitan.trainer.sl.log_trace_span", return_value=nullcontext()),
+        patch("torchtitan.trainer.dist_utils.set_pg_timeouts"),
+        patch("torch.distributed.get_rank", return_value=0),
+        patch("torchtitan.trainer.time.sleep"),
+    ):
+        Trainer.train(trainer)
+
+    assert enabled_values == [False, True]
+    assert trainer.train_step.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("schedule", "schedule_csv"),
+    [
+        ("ZBVZeroBubble", ""),
+        ("DualPipeV", ""),
+        ("UnknownSchedule", ""),
+        ("1F1B", "tests/assets/custom_schedule.csv"),
+    ],
+)
+def test_tensor_logging_rejects_unsupported_pipeline_schedule_before_model_setup(
+    schedule: str,
+    schedule_csv: str,
+) -> None:
+    config = SimpleNamespace(
+        model_spec=object(),
+        metrics=SimpleNamespace(tensor_logging=SimpleNamespace(enabled=True)),
+        parallelism=SimpleNamespace(
+            pipeline_parallel_schedule=schedule,
+            pipeline_parallel_schedule_csv=schedule_csv,
+        ),
+    )
+    parallel_dims = SimpleNamespace(pp_enabled=True)
+
+    with (
+        patch.object(Trainer, "init_distributed", return_value=parallel_dims),
+        patch("torchtitan.trainer.utils.get_local_device", return_value="cpu"),
+        patch("torchtitan.trainer.utils.device_module.set_device"),
+        pytest.raises(NotImplementedError, match="supports only the 1F1B"),
+    ):
+        Trainer(config)
 
 
 @pytest.mark.parametrize(

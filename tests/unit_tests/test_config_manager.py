@@ -113,6 +113,25 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.training.steps == 5
 
+    def test_tensor_logging_nested_cli_overrides(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--metrics.tensor-logging.enabled",
+                "--metrics.tensor-logging.freq",
+                "2",
+                "--metrics.tensor-logging.publish-filter-regex",
+                r"\.x\.abs_mean$",
+            ]
+        )
+
+        assert config.metrics.tensor_logging.enabled
+        assert config.metrics.tensor_logging.freq == 2
+        assert config.metrics.tensor_logging.publish_filter_regex == r"\.x\.abs_mean$"
+
     def test_pipeline_microbatch_size_must_divide_local_batch_size(self):
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="must be evenly divisible"):
