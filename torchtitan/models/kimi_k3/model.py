@@ -419,8 +419,9 @@ class KimiLatentMoE(MoE):
             -1, expert_ids_BLS, True
         )
         num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-        with torch.no_grad():
-            self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
+        if self.training:
+            with torch.no_grad():
+                self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
         routed_BLD = self.routed_experts(
             self.routed_down(x_BLD),

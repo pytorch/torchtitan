@@ -57,10 +57,8 @@ def parallelize_kimi_k3(
     if compile_config.enable and "model" in compile_config.components:
         raise NotImplementedError("Kimi K3 does not support model compilation.")
     if ac_config is not None:
-        # TODO: untested against the block's attention-residual tuple signature.
         raise NotImplementedError(
-            "Kimi K3 FSDP2 does not support activation checkpointing yet; "
-            "pass activation-checkpoint:none."
+            "Kimi K3 FSDP2 does not support activation checkpointing yet."
         )
     if training.enable_cpu_offload:
         raise NotImplementedError(
@@ -77,9 +75,7 @@ def parallelize_kimi_k3(
     if vision_encoder is not None:
         # TODO: An image batch on one DP rank and a text-only batch on another
         # execute different FSDP collectives, deadlock, and hit a 90-second
-        # timeout. Under CP the same deadlock is reachable even when every rank
-        # gets images, since a rank's sequence shard can hold no vision
-        # placeholders. A general solution is needed.
+        # timeout. A general solution is needed.
         apply_fsdp_to_vision_encoder(
             vision_encoder,
             dp_mesh,

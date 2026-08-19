@@ -47,7 +47,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 _HF_REPO_ID = "moonshotai/Kimi-K3"
 _HF_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
 _MEDIA_TOKEN_ID = 163605
-_VOCAB_SIZE = 163840
 _PATCH_SIZE = 14
 _MERGE_SIZE = 2
 _MAX_PATCHES = 65536
@@ -459,11 +458,6 @@ def main() -> None:
     )
 
     tt_config = cast(KimiK3Model.Config, model_registry(args.model_flavor).model)
-    # The released tokenizer emits ids across the full vocab, while debugmodel
-    # is sized for the test tokenizer.
-    tt_config.vocab_size = _VOCAB_SIZE
-    tt_config.tok_embeddings.num_embeddings = _VOCAB_SIZE
-    tt_config.lm_head.out_features = _VOCAB_SIZE
     torch.manual_seed(args.seed)
     tt_model = _build_tt_model(tt_config, dtype)
     hf_state_dict = KimiK3StateDictAdapter(tt_config, hf_assets_path=None).to_hf(
