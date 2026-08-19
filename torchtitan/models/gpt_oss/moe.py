@@ -14,9 +14,10 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.moe_metrics import GroupedGemmShapes
 from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common.moe import GroupedExperts, MoE
+from torchtitan.models.common.moe import GroupedExperts, local_param_shape, MoE
 from torchtitan.protocols.module import Module
 
 
@@ -92,6 +93,13 @@ class GptOssGroupedExperts(GroupedExperts):
             torch.empty((num_experts, dim, hidden_dim))
         )  # (num_experts, out_dim, in_dim)
         self.mlp2_bias_ED = nn.Parameter(torch.empty((num_experts, dim)))
+
+    def grouped_gemm_shapes(self) -> GroupedGemmShapes:
+        # mlp1 is (E, 2F, D): one GEMM producing gate and up interleaved.
+        # Report the two logical halves, as FusedGroupedExperts does.
+        G_local, D = local_param_shape(self.mlp1_weight_EGD)[-2:]
+        F_local = G_local // 2
+        return GroupedGemmShapes(gate=(D, F_local), up=(D, F_local), down=(F_local, D))
 
     def forward(
         self,

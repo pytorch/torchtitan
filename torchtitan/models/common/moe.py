@@ -14,11 +14,17 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.moe_metrics import (
+    GroupedGemmShapes,
+    maybe_record_grouped_gemm,
+    moe_metrics_collector_installed,
+)
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -30,6 +36,21 @@ from .token_dispatcher import LocalTokenDispatcher
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, N = routed tokens (T*K),
 #   R = routed tokens assigned to local experts
+
+
+def local_param_shape(param: torch.Tensor) -> torch.Size:
+    """Shape of the slice this rank actually owns.
+
+    ``DTensor.shape`` is the global shape, so under TP it would report the
+    unsharded hidden dimension. Reading ``_local_tensor`` is a plain attribute
+    access, unlike ``to_local()`` which is a dispatched op and so is not
+    allowed on the activation-checkpointed path this feeds (see the note in
+    ``maybe_record_grouped_gemm``).
+    """
+    return param._local_tensor.shape if isinstance(param, DTensor) else param.shape
+
+
+_WARNED_GROUPED_GEMM_UNSUPPORTED = False
 
 
 class GroupedExperts(Module):
@@ -51,6 +72,17 @@ class GroupedExperts(Module):
         self.w3_EFD = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
+
+    def grouped_gemm_shapes(self) -> GroupedGemmShapes:
+        """Local (in_features, out_features) of this variant's three GEMMs.
+
+        Only used for opt-in MoE metrics. Subclasses that lay their weights out
+        differently must override this so the metrics hook does not need to know
+        about each layout. Implementations must stay free of dispatched tensor
+        ops (see the note in ``maybe_record_grouped_gemm``): read shapes only.
+        """
+        F_local, D = local_param_shape(self.w1_EFD)[-2:]
+        return GroupedGemmShapes(gate=(D, F_local), up=(D, F_local), down=(F_local, D))
 
     def forward(
         self,
@@ -133,6 +165,13 @@ class RoutedExperts(Module):
         super().__init__()
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
+        # Index of the transformer layer this expert group belongs to. Set by
+        # Decoder.__init__ after construction; -1 means "unknown" (e.g. when the
+        # module is built outside a Decoder). Used only for metrics attribution.
+        self.layer_id: int = -1
+        # Router top_k for this MoE block, set by Decoder.__init__ alongside
+        # layer_id; -1 means "unknown". Used only for metrics attribution.
+        self.top_k: int = -1
 
     def forward(
         self,
@@ -157,6 +196,9 @@ class RoutedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        self._maybe_record_grouped_gemm(
+            routed_input_RD, num_global_tokens_per_local_expert_e, metadata
+        )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
@@ -167,6 +209,58 @@ class RoutedExperts(Module):
             x_TD,
         )
         return out_TD
+
+    def _maybe_record_grouped_gemm(
+        self,
+        routed_input_RD: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
+        dispatch_metadata: object,
+    ) -> None:
+        """Record grouped-GEMM shapes for the upcoming ``inner_experts`` call.
+
+        No-op unless a MoE metric collector is active. The expert module reports
+        its own GEMM shapes via ``grouped_gemm_shapes``, so every variant is
+        covered as long as it implements that method.
+
+        The installed-collector check comes first so the disabled path (the
+        default) does no work at all: without it the shape lookup below would
+        run every forward and would stay in the compiled graph.
+        """
+        if not moe_metrics_collector_installed():
+            return
+
+        shapes_fn = getattr(self.inner_experts, "grouped_gemm_shapes", None)
+        if shapes_fn is None:
+            self._warn_grouped_gemm_unsupported()
+            return
+
+        maybe_record_grouped_gemm(
+            x_RD=routed_input_RD,
+            gemm_shapes=shapes_fn(),
+            num_tokens_per_expert_E=num_tokens_per_expert_E,
+            token_dispatcher=self.token_dispatcher,
+            dispatch_metadata=dispatch_metadata,
+            layer_id=self.layer_id,
+            top_k=self.top_k,
+        )
+
+    def _warn_grouped_gemm_unsupported(self) -> None:
+        """Warn once that MoE metrics silently cover nothing for this variant.
+
+        Without this the user gets an empty metrics output with no explanation
+        after explicitly enabling collection.
+        """
+        global _WARNED_GROUPED_GEMM_UNSUPPORTED
+        if _WARNED_GROUPED_GEMM_UNSUPPORTED:
+            return
+        _WARNED_GROUPED_GEMM_UNSUPPORTED = True
+        logger.warning(
+            "MoE metrics are enabled but %s does not implement "
+            "grouped_gemm_shapes(), so no grouped-GEMM records will be "
+            "collected for it. Implement that method on the expert module to "
+            "enable collection.",
+            type(self.inner_experts).__name__,
+        )
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize the grouped experts, then wire the EP mesh on the
