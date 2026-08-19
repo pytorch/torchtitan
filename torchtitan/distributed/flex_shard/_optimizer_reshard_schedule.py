@@ -122,6 +122,8 @@ class _TensorRegion:
         return math.prod(self.shape)
 
 
+# A mapping is (holder ranks, logical region); a domain is
+# (transport-local logical shape, storage region mappings).
 _StorageRegionMapping: TypeAlias = tuple[tuple[int, ...], _TensorRegion]
 _DTensorStorageDomain: TypeAlias = tuple[
     tuple[int, ...], tuple[_StorageRegionMapping, ...]
