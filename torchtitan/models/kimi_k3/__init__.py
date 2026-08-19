@@ -206,10 +206,7 @@ def _kda_config(
         forget_b=_linear(head_dim, projection_dim),
         beta=_linear(dim, num_heads),
         output_gate=_linear(dim, projection_dim),
-        kernel=KimiKDAKernel.Config(
-            head_dim=head_dim,
-            lower_bound=-5.0,
-        ),
+        kernel=KimiKDAKernel.Config(lower_bound=-5.0),
         output_norm=KimiRMSNormGated.Config(
             dim=head_dim,
             eps=1e-5,
@@ -334,7 +331,6 @@ def _vision_encoder_config(
         block=block,
         final_norm=vision_norm,
         projector=KimiK3VisionProjector.Config(
-            merged_dim=merged_dim,
             linear_1=_linear(
                 merged_dim,
                 merged_dim,

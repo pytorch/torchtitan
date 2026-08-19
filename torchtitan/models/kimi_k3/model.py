@@ -194,20 +194,15 @@ class KimiKDAKernel(Module):
 
     The gate activation, the beta sigmoid, and the query/key L2 norm are all
     fused into the kernel rather than materialized here, so the decay never
-    exists as a full ``(B, L, H, K)`` tensor. ``ReferenceKimiKDAKernel`` in
-    ``tests/unit_tests/test_kimi_k3.py`` implements the same interface as an
-    explicit recurrence and is the numerical baseline for this kernel; it also
-    lets the CPU test suite exercise the surrounding model without Triton.
+    exists as a full ``(B, L, H, K)`` tensor. 
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        head_dim: int
         lower_bound: float | None = -5.0
 
     def __init__(self, config: Config):
         super().__init__()
-        self.head_dim = config.head_dim
         self.lower_bound = config.lower_bound
         if self.lower_bound is not None and not (-5.0 <= self.lower_bound < 0.0):
             raise ValueError("KDA lower_bound must be in the safe range [-5, 0).")
@@ -259,9 +254,6 @@ class KimiDeltaAttention(Module):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        # Typed as the base config so the KDA kernel stays swappable, matching
-        # how VisionAttention types its inner_attention. Anything assigned here
-        # must accept KimiKDAKernel.forward's arguments.
         kernel: Module.Config
         output_norm: KimiRMSNormGated.Config
         output_proj: Linear.Config
@@ -573,19 +565,7 @@ class KimiK3Model(Decoder):
         spatial_merge_size: int = 2
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            parallelism = config.parallelism
-            unsupported = {
-                "tensor parallel": parallelism.tensor_parallel_degree,
-                "pipeline parallel": parallelism.pipeline_parallel_degree,
-                "context parallel": parallelism.context_parallel_degree,
-                "expert parallel": parallelism.expert_parallel_degree,
-            }
-            enabled = [name for name, degree in unsupported.items() if degree > 1]
-            if enabled:
-                raise NotImplementedError(
-                    "Kimi K3 supports FSDP2 data parallelism only; "
-                    f"disable {', '.join(enabled)}."
-                )
+            # Unsupported parallelisms are rejected in parallelize_kimi_k3.
             dataloader = getattr(config, "dataloader", None)
             if getattr(dataloader, "packing_buffer_size", 0) > 0:
                 raise NotImplementedError(
@@ -671,10 +651,6 @@ class KimiK3Model(Decoder):
             num_tokens_per_item,
             special_tokens["image_id"],
         )
-        if not vision_positions:
-            raise ValueError(
-                "pixel_values were provided but no image placeholder tokens were found."
-            )
         return scatter_vision_embeds(
             embeddings,
             vision_embeds=vision_embeds,
