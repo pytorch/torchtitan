@@ -17,7 +17,9 @@ from torch_checkpointing.checkpoint_manager import (
 )
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
-from torch_checkpointing.dtensor_resharder import DTensorResharder
+from torch_checkpointing.dtensor_resharder import (  # pyrefly: ignore[missing-import]
+    DTensorResharder,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torchtitan.components.data.loader import BaseDataLoader
