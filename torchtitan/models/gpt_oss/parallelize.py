@@ -22,7 +22,6 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from torchtitan.distributed.spmd_types import validate_config
 from torchtitan.models.gpt_oss.model import GptOssModel
 
 
@@ -72,7 +71,6 @@ def parallelize_gptoss(
     )
 
     if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
         # CP: wrap inner attention forward BEFORE parallelize() so CP logic

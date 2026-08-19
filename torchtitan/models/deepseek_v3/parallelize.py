@@ -15,7 +15,6 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh, resolve_sparse_fsdp_mesh
-from torchtitan.distributed.spmd_types import validate_config
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import apply_fsdp_to_mtp_decoder
 
@@ -31,7 +30,6 @@ def parallelize_deepseekv3(
     dump_folder: str,
 ):
     if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)
     else:
         # CP: wrap inner attention forward BEFORE parallelize() so CP logic
