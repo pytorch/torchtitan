@@ -325,17 +325,29 @@ def _dist_muon_optimizer(
         tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
         for layer_ids in bucket_layer_ids
     )
-    bucket_configs = tuple(
-        BucketConfig(
-            name="layers." + "-".join(map(str, layer_ids)),
-            patterns=fqns,
+    bucket_configs_list = []
+    for layer_ids, fqns in zip(bucket_layer_ids, bucket_fqns, strict=True):
+        name = "layers." + "-".join(map(str, layer_ids))
+        routed_fqns = tuple(
+            fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is per_expert
         )
-        for layer_ids, fqns in zip(
-            bucket_layer_ids,
-            bucket_fqns,
-            strict=True,
+        non_routed_fqns = tuple(
+            fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is not per_expert
         )
-    )
+        bucket_configs_list.append(
+            BucketConfig(
+                name=name,
+                patterns=non_routed_fqns,
+            )
+        )
+        if routed_fqns:
+            bucket_configs_list.append(
+                BucketConfig(
+                    name=f"{name}.routed-experts",
+                    patterns=routed_fqns,
+                )
+            )
+    bucket_configs = tuple(bucket_configs_list)
     # Muon is designed for matrix parameters; Moonlight uses AdamW for
     # non-matrix parameters such as RMSNorm, LM head, and embeddings. Expert
     # tensors below are batch-first stacks of matrices. See Sec. 2.2:

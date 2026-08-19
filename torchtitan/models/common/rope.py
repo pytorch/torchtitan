@@ -56,7 +56,7 @@ def _yarn_inv_freq(
     convention: ``low <- beta_fast`` (extrapolation boundary), ``high <-
     beta_slow`` (interpolation boundary). ``truncate`` floors/ceils the cutoffs
     (DeepSeek style); ``truncate=False`` keeps fractional cutoffs (gpt-oss
-    style). The range is always clamped to ``[0, dim/2 - 1]``. The YaRN
+    style). The range is always clamped to ``[0, dim - 1]``. The YaRN
     attention "mscale" is intentionally NOT applied here -- the rope stays a
     pure rotation and the model folds mscale into its softmax scale.
     """
@@ -73,9 +73,8 @@ def _yarn_inv_freq(
         low = math.floor(low)
         high = math.ceil(high)
     low, high = max(low, 0), min(high, dim - 1)
-    assert (
-        0 < low < high < dim - 1
-    ), f"Invalid YaRN params: 0 < {low} < {high} < {dim - 1}"
+    if low == high:
+        high += 0.001
 
     ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(
         0, 1

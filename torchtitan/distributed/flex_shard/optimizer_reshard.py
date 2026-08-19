@@ -167,8 +167,8 @@ class BucketConfig:
     """Ordered optimizer-work bucket selected by canonical FQN patterns.
 
     Compute layouts determine communication topology. A bucket controls only
-    scheduling order and overlap. FlexShard internally splits its selected
-    parameters into adjacent homogeneous physical transport buckets.
+    scheduling order and overlap; all redistributed parameters it selects must
+    currently resolve to one homogeneous transport group.
     """
 
     patterns: tuple[str, ...]
@@ -177,13 +177,9 @@ class BucketConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "patterns", tuple(self.patterns))
 
-    def _bind(
-        self,
-        mesh: DeviceMesh | None,
-        fqns: tuple[str, ...],
-    ) -> _BucketSpec:
+    def _bind(self, mesh: DeviceMesh | None) -> _BucketSpec:
         return _BucketSpec(
-            fqns=fqns,
+            patterns=self.patterns,
             mesh=mesh,
             name=self.name,
         )
@@ -191,19 +187,20 @@ class BucketConfig:
 
 @dataclass(frozen=True, slots=True)
 class _BucketSpec:
-    """One resolved physical optimizer-work bucket.
+    """One ordered optimizer-work bucket selected by canonical FQN.
 
-    ``fqns`` are bound from one public ``BucketConfig`` after compute layouts
-    select concrete transport groups. ``mesh`` is the bucket's exact
-    one-dimensional communication mesh, or ``None`` when every parameter is
-    already compute-ready. ``name`` is diagnostic metadata only.
+    Patterns use case-sensitive ``fnmatch`` syntax. Every optimizer FQN must
+    match exactly one bucket, and sequence order controls execution order.
+    ``mesh`` is the bucket's exact one-dimensional communication mesh, or
+    ``None`` when every matched parameter is already compute-ready. ``name`` is
+    diagnostic metadata only.
     """
 
-    fqns: tuple[str, ...]
+    patterns: tuple[str, ...]
     mesh: DeviceMesh | None
     name: str = ""
 
     def __post_init__(self) -> None:
         if self.mesh is not None and self.mesh.ndim != 1:
             raise ValueError("bucket mesh must be one-dimensional")
-        object.__setattr__(self, "fqns", tuple(self.fqns))
+        object.__setattr__(self, "patterns", tuple(self.patterns))
