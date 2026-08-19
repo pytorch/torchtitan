@@ -15,7 +15,7 @@ from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
 )
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
-from torch_checkpointing.dtensor_resharder import DTensorResharder
+from torch_checkpointing.default_resharder import DefaultResharder
 
 from torchtitan.components.checkpointer import (
     BaseCheckpointManager,
@@ -111,7 +111,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         for spec in backend_config.items.values():
             self.assertTrue(spec.requires_copy)
             self.assertFalse(spec.required)
-            self.assertIsInstance(spec.resharder, DTensorResharder)
+            self.assertIsInstance(spec.resharder, DefaultResharder)
         self.assertIsNotNone(backend_config.default)
         self.assertFalse(backend_config.default.requires_copy)
         barrier_config = backend_config.save.writer_config.barrier_config
