@@ -67,6 +67,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
@@ -76,6 +77,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
@@ -361,9 +363,31 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             disabled=_JIT_DISABLED,
         ),
         # === aot_fx_trace mode tests ===
-        # Note: cudagraph is auto-skipped for DSv3 because MoE load-balancing
-        # introduces CUDA→CPU transfers incompatible with CUDA graph capture.
+        # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
+        # transfers incompatible with CUDA graph capture, so this fused test
+        # explicitly disables the cudagraph pass.
         #
+        # TODO: Re-enable FSDP bucketing when its stable topological sort
+        # supports the fused MLA Q kernel's mutating custom-op boundary.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.disable_passes "
+                    "joint_transformer_block_bucketing_reordering_pass,"
+                    "cudagraph_pass",
+                    "--override.imports torchtitan.overrides.fused_mla.fused_mla,"
+                    "torchtitan.overrides.fused_swiglu.fused_swiglu",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 fused MLA+SwiGLU FSDP+TP",
+            "aot_fx_trace_deepseek_v3_fused_mla_swiglu_fsdp_tp",
+            ngpu=4,
+        ),
         # TODO: FSDP+TP+CP+EP is disabled: tracing fails with "aten.add.Tensor
         # got mixed torch.Tensor and DTensor" — a separate CP+EP issue,
         # unrelated to the empty_strided shadow-node fix. Re-enable once fixed.
@@ -464,6 +488,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
@@ -481,6 +506,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
@@ -498,6 +524,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
