@@ -122,6 +122,28 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
         )
 
+    def test_remote_checkpoint_paths_are_rejected_at_construction(self) -> None:
+        # Path() would turn "gs://bucket/x" into "gs:/bucket/x". Rejecting the
+        # two roots up front is what lets every path derived from them be
+        # converted without a further check -- and a save with retention off
+        # reaches the backend having run no probe that could have caught it.
+        for field, kwargs in (
+            ("checkpoint.folder", {"folder": "gs://bucket/checkpoint"}),
+            (
+                "checkpoint.initial_load_path",
+                {"initial_load_path": "gs://bucket/pretrained"},
+            ),
+        ):
+            with self.subTest(field=field):
+                config = TorchCheckpointingManager.Config(
+                    enable=True,
+                    keep_latest_k=0,
+                    initial_load_model_only=True,
+                    **kwargs,
+                )
+                with self.assertRaisesRegex(ValueError, field):
+                    self._build_manager(config)
+
     def test_legacy_config_has_no_backend_selector(self) -> None:
         config = CheckpointManager.Config()
 
