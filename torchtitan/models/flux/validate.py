@@ -11,17 +11,21 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.components.validate import ValidationContext, Validator
+from torchtitan.components.validate import (
+    iterate_and_close_dataloader,
+    ValidationContext,
+    Validator,
+)
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
 
 from .configs import SamplingConfig
-from .flux_datasets import FluxDataLoader
+from .flux_datasets import FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
@@ -47,12 +51,7 @@ class FluxValidator(Validator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Validator.Config):
-        dataloader: BaseDataLoader.Config = field(
-            default_factory=lambda: FluxDataLoader.Config(
-                dataset="coco-validation",
-                generate_timesteps=True,
-            )
-        )
+        dataloader: GrainDataLoader.Config  # pyrefly: ignore [bad-override]
         """DataLoader configuration for Flux validation"""
 
         all_timesteps: bool = False
@@ -78,6 +77,7 @@ class FluxValidator(Validator):
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
+        seq_len: int,
         local_batch_size: int,
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
@@ -92,16 +92,24 @@ class FluxValidator(Validator):
         self.loss_fn = loss_fn
         self.all_timesteps = config.all_timesteps
 
-        assert isinstance(config.dataloader, FluxDataLoader.Config)
         assert isinstance(tokenizer, FluxTokenizerContainer)
 
+        dataset = config.dataloader.dataset
+        if isinstance(dataset, FluxValidationDatasetConfig):
+            dataset = dataset.dataset
+        # A bounded validation run repeats data; steps=-1 consumes one finite pass.
         self.dl_config = replace(
             config.dataloader,
-            infinite=config.steps != -1,
-            generate_timesteps=not config.all_timesteps,
+            dataset=(
+                dataset
+                if config.all_timesteps
+                else FluxValidationDatasetConfig(dataset=dataset)
+            ),
+            repeat=config.steps != -1,
         )
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
+        self.seq_len = seq_len
         self.local_batch_size = local_batch_size
         self.validation_context = validation_context
         # pyrefly: ignore [bad-assignment]
@@ -142,7 +150,8 @@ class FluxValidator(Validator):
         model.eval()
 
         assert isinstance(self.config, FluxValidator.Config)
-        save_img_count = self.config.save_img_count
+        max_saved_images = self.config.save_img_count
+        image_idx = 0
 
         parallel_dims = self.parallel_dims
 
@@ -156,27 +165,26 @@ class FluxValidator(Validator):
             dp_rank=self.dp_rank,
             local_batch_size=self.local_batch_size,
             tokenizer=self.tokenizer,
+            seq_len=self.seq_len,
         )
 
-        for input_dict, labels in validation_dataloader:
+        for input_dict, labels in iterate_and_close_dataloader(validation_dataloader):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
             prompt = input_dict.pop("prompt")
             if not isinstance(prompt, list):
                 prompt = [prompt]
+            img_height, img_width = labels.shape[-2:]
             for p in prompt:
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
-                if save_img_count != -1 and save_img_count <= 0:
+                if max_saved_images != -1 and image_idx >= max_saved_images:
                     break
-                img_size = (
-                    self.config.dataloader.img_size  # pyrefly: ignore [missing-attribute]
-                )
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
-                    img_height=16 * (img_size // 16),
-                    img_width=16 * (img_size // 16),
+                    img_height=img_height,
+                    img_width=img_width,
                     enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
                     denoising_steps=self.config.sampling.denoising_steps,
                     classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
@@ -191,7 +199,10 @@ class FluxValidator(Validator):
                 )
 
                 save_image(
-                    name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
+                    name=(
+                        f"image_rank{torch.distributed.get_rank()}_step{step}_"
+                        f"{image_idx:06d}.png"
+                    ),
                     output_dir=os.path.join(
                         self.dump_folder,
                         self.config.save_img_folder,
@@ -200,7 +211,7 @@ class FluxValidator(Validator):
                     add_sampling_metadata=True,
                     prompt=p,
                 )
-                save_img_count -= 1
+                image_idx += 1
 
             # generate t5 and clip embeddings
             input_dict["image"] = labels

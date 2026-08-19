@@ -31,7 +31,7 @@ from torchtitan.components.checkpoint import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter

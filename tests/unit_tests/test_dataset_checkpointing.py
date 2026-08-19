@@ -7,225 +7,93 @@
 import unittest
 
 import torch
-from datasets import load_dataset
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.hf_datasets.text_datasets import (
-    DATASETS,
-    HFDataSource,
-    HuggingFaceTextDataLoader,
-    HuggingFaceTextDataset,
-    InterleavedHuggingFaceTextDataLoader,
+
+from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
+from torchtitan.components.data.sources import (
+    HuggingFaceRandomAccessSource,
+    HuggingFaceStreamingSource,
 )
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.hf_datasets.text_datasets import TextProcessor
+
+
+_DATA_PATH = "tests/assets/sft_test/data.json"
+_TOKENIZER_PATH = "tests/assets/tokenizer"
+
+
+def _process_text(sample):
+    return f"{sample['question']} {sample['answer']}"
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
-    def setUp(self):
-        DATASETS["c4_test_streaming"] = DatasetConfig(
-            path="tests/assets/c4_test",
-            loader=lambda path: load_dataset(path, split="train").to_iterable_dataset(
-                num_shards=4
-            ),
-            sample_processor=lambda sample: sample["text"],
-        )
-
-    def tearDown(self):
-        del DATASETS["c4_test_streaming"]
-
     def test_c4_resumption(self):
-        for dataset_name in ["c4_test", "c4_test_streaming"]:
-            for world_size in [2, 4]:
-                for rank in range(world_size):
-                    batch_size = 1
-                    seq_len = 1024
+        for source_type in (
+            HuggingFaceRandomAccessSource,
+            HuggingFaceStreamingSource,
+        ):
+            for rank in range(2):
+                with self.subTest(source_type=source_type, rank=rank):
+                    dataloader = self._build_dataloader(source_type, rank)
+                    iterator = iter(dataloader)
 
-                    dl = self._build_dataloader(
-                        dataset_name, batch_size, seq_len, world_size, rank
-                    )
+                    # Eight source rows make fewer than 40 packed rows per rank,
+                    # so this crosses at least one repeat boundary.
+                    for _ in range(40):
+                        next(iterator)
+                    state = dataloader.state_dict()
 
-                    it = iter(dl)
-                    # consume and trigger re-looping
-                    for _ in range(2050):
-                        next(it)
-                    state = dl.state_dict()
+                    resumed = self._build_dataloader(source_type, rank)
+                    resumed.load_state_dict(state)
+                    resumed_iterator = iter(resumed)
 
-                    # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
-                    dl_resumed = self._build_dataloader(
-                        dataset_name, batch_size, seq_len, world_size, rank
-                    )
-                    dl_resumed.load_state_dict(state)
-                    it_resumed = iter(dl_resumed)
-
-                    for _ in range(500):
-                        expected_input_ids, expected_labels = next(it)
-                        input_ids, labels = next(it_resumed)
-                        assert torch.equal(
-                            input_ids["input"], expected_input_ids["input"]
+                    for _ in range(8):
+                        expected_inputs, expected_labels = next(iterator)
+                        actual_inputs, actual_labels = next(resumed_iterator)
+                        self.assertTrue(
+                            torch.equal(
+                                actual_inputs["input"], expected_inputs["input"]
+                            )
                         )
-                        assert torch.equal(
-                            input_ids["positions"],
-                            expected_input_ids["positions"],
+                        self.assertTrue(
+                            torch.equal(
+                                actual_inputs["positions"],
+                                expected_inputs["positions"],
+                            )
                         )
-                        assert torch.equal(labels, expected_labels)
+                        self.assertTrue(torch.equal(actual_labels, expected_labels))
 
-    def test_map_style_shuffle_on_reloop(self):
-        """Re-looping a map-style (``Dataset``) source should change order every
-        epoch; leaving it as-is meant the model kept seeing identical batches
-        (https://github.com/pytorch/torchtitan/issues/2733).
-
-        Validates three things end-to-end without having to drain a full epoch
-        of c4_test (which would be slow for a unit test):
-          1. After an epoch boundary, ``_data`` is a *shuffled* copy of
-             ``_original_data`` — not the same object.
-          2. ``state_dict()`` carries ``epoch`` so resume knows the shuffle
-             seed.
-          3. ``load_state_dict()`` replays the same ``shuffle(seed=42+epoch)``
-             so a resumed run observes the identical sample order.
-        """
-
-        def _build_ds():
-            return HuggingFaceTextDataset(
-                dataset_name="c4_test",
-                dataset_path=None,
-                tokenizer=HuggingFaceTokenizer.Config().build(
-                    tokenizer_path="./tests/assets/tokenizer"
+    def _build_dataloader(self, source_type, rank):
+        config = GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=source_type.Config(
+                        path="json",
+                        split="train",
+                        load_dataset_kwargs={
+                            "data_files": _DATA_PATH,
+                        },
+                    ),
+                    processor=TextProcessor.Config(
+                        text_fn=_process_text,
+                    ),
+                    post_filters=(lambda sample: sample is not None,),
                 ),
-                seq_len=128,
-                dp_rank=0,
-                dp_world_size=1,
-                infinite=True,
-            )
-
-        # 1) Simulate an epoch boundary directly — exercising the re-loop branch
-        # without having to drain 200k batches of c4_test.
-        ds = _build_ds()
-        original = ds._data
-        # Manually fast-forward to the last sample so the next iteration wraps.
-        ds._sample_idx = len(ds._data)
-        ds._epoch = 0
-        it = iter(ds)
-        # One next() is enough to trip the exhaustion branch and advance epoch.
-        next(it)
-        assert ds._epoch == 1, f"expected epoch=1 after wrap, got {ds._epoch}"
-        assert ds._data is not original, (
-            "map-style re-loop must re-shuffle _data from _original_data; "
-            "identity check failed"
-        )
-
-        # 2) state_dict persists epoch so resume can replay the shuffle.
-        state = ds.state_dict()
-        assert state.get("epoch") == 1, f"state_dict missing epoch: {state.keys()}"
-
-        # 3) load_state_dict on a fresh instance reproduces the shuffled view.
-        ds_resumed = _build_ds()
-        ds_resumed.load_state_dict(state)
-        assert ds_resumed._epoch == 1
-        assert ds_resumed._data is not ds_resumed._original_data
-        # Same seed → same first-N sample ids (datasets.shuffle is deterministic).
-        assert list(ds._data[:5]["text"]) == list(ds_resumed._data[:5]["text"])
-
-        # 4) Backward compatibility: old checkpoints without "epoch" still load
-        # and default to 0 (epoch-0 path is unshuffled, so no behavior change).
-        legacy_state = {
-            "inputs_buffer": [],
-            "labels_buffer": [],
-            "positions_buffer": [],
-            "sample_idx": 0,
-        }
-        ds_legacy = _build_ds()
-        ds_legacy.load_state_dict(legacy_state)
-        assert ds_legacy._epoch == 0
-        assert ds_legacy._data is ds_legacy._original_data
-
-    def test_interleaved_resumption(self):
-        """Checkpointing across re-loops works correctly for interleaved sources."""
-        for world_size in [2, 4]:
-            for rank in range(world_size):
-                batch_size = 1
-                seq_len = 1024
-
-                dl = self._build_interleaved_dataloader(
-                    batch_size, seq_len, world_size, rank
-                )
-
-                it = iter(dl)
-                # consume enough to trigger re-looping in at least one source
-                for _ in range(2050):
-                    next(it)
-                state = dl.state_dict()
-
-                dl_resumed = self._build_interleaved_dataloader(
-                    batch_size, seq_len, world_size, rank
-                )
-                dl_resumed.load_state_dict(state)
-                it_resumed = iter(dl_resumed)
-
-                for _ in range(500):
-                    expected_input_ids, expected_labels = next(it)
-                    input_ids, labels = next(it_resumed)
-                    assert torch.equal(input_ids["input"], expected_input_ids["input"])
-                    assert torch.equal(
-                        input_ids["positions"], expected_input_ids["positions"]
-                    )
-                    assert torch.equal(labels, expected_labels)
-
-    def test_interleaved_resumption_mid_epoch(self):
-        """Checkpointing mid-epoch (before any source exhausts) resumes correctly."""
-        batch_size = 1
-        seq_len = 512
-
-        dl = self._build_interleaved_dataloader(
-            batch_size, seq_len, world_size=1, rank=0
-        )
-        it = iter(dl)
-
-        # Consume a small number of batches — well within a single epoch
-        for _ in range(10):
-            next(it)
-        state = dl.state_dict()
-
-        dl_resumed = self._build_interleaved_dataloader(
-            batch_size, seq_len, world_size=1, rank=0
-        )
-        dl_resumed.load_state_dict(state)
-        it_resumed = iter(dl_resumed)
-
-        for _ in range(50):
-            expected_input_ids, expected_labels = next(it)
-            input_ids, labels = next(it_resumed)
-            assert torch.equal(input_ids["input"], expected_input_ids["input"])
-            assert torch.equal(input_ids["positions"], expected_input_ids["positions"])
-            assert torch.equal(labels, expected_labels)
-
-    def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
-        tokenizer_config = HuggingFaceTokenizer.Config()
-        dl_config = HuggingFaceTextDataLoader.Config(dataset=dataset_name)
-
-        return dl_config.build(
-            dp_world_size=world_size,
-            dp_rank=rank,
-            tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            seq_len=seq_len,
-            local_batch_size=batch_size,
-        )
-
-    def _build_interleaved_dataloader(self, batch_size, seq_len, world_size, rank):
-        tokenizer_config = HuggingFaceTokenizer.Config()
-        dl_config = InterleavedHuggingFaceTextDataLoader.Config(
-            sources=[
-                HFDataSource(dataset="c4_test", weight=1.0, infinite=True),
-                HFDataSource(dataset="c4_test_streaming", weight=2.0, infinite=True),
-            ],
+            ),
+            collator=TextCollator.Config(),
             seed=42,
-            num_workers=0,
+            shuffle=True,
+            repeat=True,
+            num_prefetch_batches=1,
         )
-
-        return dl_config.build(
-            dp_world_size=world_size,
+        return config.build(
+            dp_world_size=2,
             dp_rank=rank,
-            tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
-            seq_len=seq_len,
-            local_batch_size=batch_size,
+            tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
+            seq_len=128,
+            local_batch_size=1,
         )
 
 
