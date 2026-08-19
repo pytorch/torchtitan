@@ -15,7 +15,6 @@ from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
-import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed.utils import get_spmd_backend
@@ -40,7 +39,6 @@ __all__ = [
     "set_current_spmd_mesh",
     "set_spmd_meshes",
     "maybe_set_sparse_mesh",
-    "validate_config",
 ]
 
 
@@ -132,29 +130,6 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
     with set_current_spmd_mesh(mesh):
         yield
-
-
-def validate_config(parallel_dims: "ParallelDims", model: nn.Module) -> None:
-    """Validate that the current configuration is compatible with spmd_types.
-
-    Walks ``model`` to discover the actual attention modules in use and
-    raises ``NotImplementedError`` with a clear message if incompatible.
-    """
-    from torchtitan.models.common.attention import (
-        ScaledDotProductAttention,
-        VarlenAttention,
-    )
-
-    if parallel_dims.cp_enabled:
-        if any(
-            isinstance(m, (ScaledDotProductAttention, VarlenAttention))
-            for m in model.modules()
-        ):
-            raise NotImplementedError(
-                "spmd_types + CP is not supported with "
-                "ScaledDotProductAttention or VarlenAttention. "
-                "Use FlexAttention + CP or disable CP."
-            )
 
 
 def annotate_input_spmd_types(

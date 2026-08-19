@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
+    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
@@ -139,6 +140,23 @@ class Decoder(BaseModel):
             if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
+                )
+
+            # CP redistribution is declared in ShardingConfig and only
+            # FlexAttention consumes it: the CP-sharded BlockMask carries the
+            # global key positions that the other kernels cannot express.
+            if (
+                parallelism.spmd_backend == "spmd_types"
+                and parallelism.context_parallel_degree > 1
+                and (
+                    any(self.traverse(ScaledDotProductAttention.Config))
+                    or any(self.traverse(VarlenAttention.Config))
+                )
+            ):
+                raise NotImplementedError(
+                    "spmd_types + CP is not supported with "
+                    "ScaledDotProductAttention or VarlenAttention. "
+                    "Use FlexAttention + CP or disable CP."
                 )
 
             tp = parallelism.tensor_parallel_degree

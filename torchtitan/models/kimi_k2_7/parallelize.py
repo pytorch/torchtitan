@@ -31,7 +31,6 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from torchtitan.distributed.spmd_types import validate_config
 
 
 def parallelize_kimi_k2_5(
@@ -64,7 +63,6 @@ def parallelize_kimi_k2_5(
     )
 
     if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
     elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
