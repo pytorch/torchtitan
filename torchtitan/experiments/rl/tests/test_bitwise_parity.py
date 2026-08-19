@@ -107,6 +107,7 @@ def build_trainer_model(
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     parallel_dims = ParallelDims(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -115,6 +116,7 @@ def build_trainer_model(
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
         world_size=dist.get_world_size(),
+        spmd_backend=parallelism.spmd_backend,
     )
 
     dist_utils.set_determinism(
@@ -618,6 +620,8 @@ class BitwiseParityTestBase(unittest.TestCase):
             )
 
         config = cls.config_fn()
+        config.trainer.parallelism.spmd_backend = "partial_dtensor"
+        config.generator.parallelism.spmd_backend = "partial_dtensor"
         hf_path = os.environ.get(cls.hf_assets_env_var)
         if hf_path:
             config.hf_assets_path = hf_path
