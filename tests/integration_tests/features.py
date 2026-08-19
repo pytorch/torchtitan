@@ -593,7 +593,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--module llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "activation-checkpoint:selective",

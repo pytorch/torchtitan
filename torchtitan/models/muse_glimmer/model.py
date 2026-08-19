@@ -546,7 +546,10 @@ class MuseGlimmerModel(Decoder):
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
         if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions,
+                max_num_documents=inner_attn.max_num_documents,
+            )
         if not isinstance(inner_attn, FlexAttention.Config):
             raise TypeError(
                 "Muse Glimmer requires FlexAttention or VarlenAttention for "
