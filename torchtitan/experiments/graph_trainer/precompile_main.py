@@ -241,6 +241,8 @@ def _precompile_aot_fx_trace(
         # dataloader kwargs first, then attention_masks added below.
         extra_kwargs["positions"] = positions
 
+        extra_kwargs["positions"] = positions
+
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,

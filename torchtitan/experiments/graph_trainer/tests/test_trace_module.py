@@ -576,6 +576,17 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
             )
         )
 
+    def test_runtime_kwargs_are_reordered_to_trace_order(self):
+        def forward(*, a, b):
+            return a * 10 + b
+
+        a = torch.tensor([2.0])
+        b = torch.tensor([3.0])
+        traced = minimal_fx_tracer(forward)(a=a, b=b)
+
+        actual = run_traced(traced, _validate_runtime=True)(b=b, a=a)
+        torch.testing.assert_close(actual, forward(a=a, b=b))
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestTraceModule(unittest.TestCase):
@@ -761,9 +772,7 @@ class TestTraceModule(unittest.TestCase):
         out_traced = run_traced(traced)(state, tokens, scale=scale)
         self.assertTrue(torch.equal(out_ref, out_traced))
 
-    def test_kwargs_runtime_reorder_raises(self):
-        """Runtime kwargs in different order produce a different spec; with
-        ``_validate_runtime=True``, this raises."""
+    def test_kwargs_runtime_reorder(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         tokens = torch.randint(0, 256, (2, 32), device=self.DEVICE)
         a = torch.tensor(2.0, device=self.DEVICE)
@@ -775,8 +784,9 @@ class TestTraceModule(unittest.TestCase):
 
         state = extract_module_state(model)
         traced = minimal_fx_tracer(forward)(state, tokens, a=a, b=b)
-        with self.assertRaisesRegex(ValueError, "input spec mismatch"):
-            run_traced(traced, _validate_runtime=True)(state, tokens, b=b, a=a)
+        out_ref = forward(state, tokens, a=a, b=b)
+        out_traced = run_traced(traced, _validate_runtime=True)(state, tokens, b=b, a=a)
+        self.assertTrue(torch.equal(out_ref, out_traced))
 
     def test_kwargs_unknown_kwarg_raises(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)

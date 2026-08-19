@@ -224,6 +224,47 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    def test_loaded_artifact_reorders_nested_dict_inputs(self):
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            _build_user_inputs_spec,
+            run_traced,
+            TracedResult,
+        )
+
+        class FlatGraph(torch.nn.Module):
+            def forward(self, attention_masks, positions):
+                return [attention_masks * 10 + positions]
+
+        attention_masks = torch.tensor([2.0])
+        positions = torch.tensor([3.0])
+        trace_extra_kwargs = {
+            "attention_masks": attention_masks,
+            "positions": positions,
+        }
+        output_spec = torch.utils._pytree.tree_flatten(torch.empty(1))[1]
+        traced_result = TracedResult(
+            gm=torch.fx.symbolic_trace(FlatGraph()),
+            example_inputs=(),
+            num_flat_inputs=2,
+            input_subclass_layouts={},
+            user_inputs_spec=_build_user_inputs_spec((trace_extra_kwargs,), {}),
+            tensor_input_indices=[0, 1],
+            num_flat_outputs=1,
+            output_subclass_layouts={},
+            output_spec=output_spec,
+            state_fqns=[],
+        )
+
+        runtime_extra_kwargs = {
+            "positions": positions,
+            "attention_masks": attention_masks,
+        }
+        actual = run_traced(traced_result)(runtime_extra_kwargs)
+        torch.testing.assert_close(actual, attention_masks * 10 + positions)
+
+        with self.assertRaisesRegex(ValueError, "input spec mismatch"):
+            run_traced(traced_result)({"positions": positions})
+
     def test_artifact_pickle_roundtrip(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import SubclassLayout
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -256,20 +297,22 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         self.assertEqual(loaded.num_flat_outputs, 2)
         self.assertEqual(loaded.config_fingerprint, "test_fp_123")
 
-    def test_artifact_pickle_with_blockmask_treespec(self):
-        """Verify artifact pickles when user_inputs_spec contains BlockMask.
+    def test_artifact_pickle_with_blockmask_input_spec(self):
+        """Verify the serialized input spec excludes BlockMask context.
 
         BlockMask's pytree context stores a _MaskModWrapper holding the
-        mask_mod closure, which is not picklable. The artifact must not
-        serialize user_inputs_spec (the mask_mod is already compiled into
-        standalone Inductor HOPs baked into serialized_gm).
+        mask_mod closure, which is not picklable. The runtime binding spec
+        treats BlockMask as a leaf while retaining the surrounding dict keys.
         """
         from torch.nn.attention.flex_attention import create_block_mask
 
         from torchtitan.experiments.graph_trainer.common_utils import (
             maybe_register_blockmask_pytree_node,
         )
-        from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            _build_user_inputs_spec,
+            TracedResult,
+        )
         from torchtitan.experiments.graph_trainer.precompile import (
             PrecompiledFxTraceArtifact,
         )
@@ -280,19 +323,24 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         mask_mod = get_causal_mask_mod()
         block_mask = create_block_mask(mask_mod, B=1, H=1, Q_LEN=128, KV_LEN=128)
 
-        # Build a user_inputs_spec that includes BlockMask — this is what
-        # minimal_fx_tracer produces when FlexAttention is configured.
-        _, blockmask_spec = torch.utils._pytree.tree_flatten(
-            ((torch.zeros(2),), {"attention_masks": block_mask})
+        # The full trace-local spec includes BlockMask context.
+        user_inputs = (
+            (
+                torch.zeros(2),
+                {
+                    "attention_masks": block_mask,
+                    "positions": torch.arange(128).unsqueeze(0),
+                },
+            ),
+            {},
         )
+        _, blockmask_spec = torch.utils._pytree.tree_flatten(user_inputs)
 
         # Sanity: the raw TreeSpec itself is NOT picklable (the bug).
         with self.assertRaises((TypeError, AttributeError)):
             pickle.dumps(blockmask_spec)
 
-        # Build a TracedResult with the unpicklable spec, then create
-        # the artifact via from_traced_result — this must succeed because
-        # user_inputs_spec is excluded from serialization.
+        # TracedResult stores only the serialization-safe runtime binding spec.
         gm = torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
         dummy_spec = torch.utils._pytree.tree_flatten(((), {}))[1]
         traced_result = TracedResult(
@@ -300,7 +348,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
             example_inputs=(),
             num_flat_inputs=0,
             input_subclass_layouts={},
-            user_inputs_spec=blockmask_spec,
+            user_inputs_spec=_build_user_inputs_spec(*user_inputs),
             tensor_input_indices=[],
             num_flat_outputs=0,
             output_subclass_layouts={},
@@ -312,6 +360,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         data = pickle.dumps(artifact)
         loaded = pickle.loads(data)
         self.assertEqual(loaded.serialized_gm, artifact.serialized_gm)
+        self.assertEqual(loaded.user_inputs_spec, traced_result.user_inputs_spec)
 
     def test_fx_trace_save_load_fingerprint_mismatch(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -340,6 +389,35 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                 precompile_fx_trace_load(
                     storage,
                     expected_fingerprint="new_fp",
+                )
+
+    def test_fx_trace_load_rejects_missing_input_spec(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _FX_TRACE_ARTIFACT_KEY,
+            precompile_fx_trace_load,
+            PrecompiledFxTraceArtifact,
+        )
+
+        output_spec = torch.utils._pytree.tree_flatten(torch.zeros(2))[1]
+        artifact = PrecompiledFxTraceArtifact(
+            serialized_gm=b"fake",
+            state_fqns=[],
+            num_flat_inputs=1,
+            input_subclass_layouts={},
+            num_flat_outputs=1,
+            output_subclass_layouts={},
+            output_spec=output_spec,
+            tensor_input_indices=[0],
+            config_fingerprint="same_fp",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save(_FX_TRACE_ARTIFACT_KEY, pickle.dumps(artifact))
+
+            with self.assertRaisesRegex(ValueError, "no input binding metadata"):
+                precompile_fx_trace_load(
+                    storage,
+                    expected_fingerprint="same_fp",
                 )
 
 
