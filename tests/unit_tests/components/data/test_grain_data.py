@@ -545,6 +545,32 @@ def test_single_dataset_shuffle_shard_repeat_order():
     assert [row["value"] for row in rank_0] != [0, 2, 4, 6, 8, 10]
 
 
+def test_map_dataset_unshuffled_repeat_replays_order():
+    config = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"value": index} for index in range(4)),
+        ),
+    )
+    dataset = config.build(
+        context=CONTEXT,
+        dataset_iteration_policy=dataset_iteration_policy(
+            repeat=True,
+            shuffle=False,
+        ),
+    )
+
+    assert [dataset[index]["value"] for index in range(8)] == [
+        0,
+        1,
+        2,
+        3,
+        0,
+        1,
+        2,
+        3,
+    ]
+
+
 def test_weighted_map_mix_keeps_weight_with_dataset():
     left = SingleDatasetConfig(
         source=RowsSourceConfig(
