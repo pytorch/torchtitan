@@ -60,10 +60,6 @@ def parallelize_kimi_k3(
         raise NotImplementedError(
             "Kimi K3 FSDP2 does not support activation checkpointing yet."
         )
-    if training.enable_cpu_offload:
-        raise NotImplementedError(
-            "Kimi K3 FSDP2 does not support parameter CPU offload yet."
-        )
 
     dp_mesh_names = (
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]

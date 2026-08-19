@@ -194,7 +194,7 @@ class KimiKDAKernel(Module):
 
     The gate activation, the beta sigmoid, and the query/key L2 norm are all
     fused into the kernel rather than materialized here, so the decay never
-    exists as a full ``(B, L, H, K)`` tensor. 
+    exists as a full ``(B, L, H, K)`` tensor.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -507,12 +507,10 @@ class KimiK3TransformerBlock(Module):
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Keep the residual on every block output to preserve its FSDP gradient path.
         B, L, D = x_BLD.shape
-        prefix_sum_BLD: torch.Tensor | None = x_BLD
+        prefix_sum_BLD = x_BLD
 
         if block_residual_TND.shape[1] > 0:
-            assert prefix_sum_BLD is not None
             x_BLD = _apply_attention_residual(
                 prefix_sum_BLD.reshape(-1, D),
                 block_residual_TND,
@@ -520,8 +518,8 @@ class KimiK3TransformerBlock(Module):
                 self.attention_res_norm,
             ).view(B, L, D)
 
-        if self.layer_id % self.attn_res_block_size == 0:
-            assert prefix_sum_BLD is not None
+        opens_block = self.layer_id % self.attn_res_block_size == 0
+        if opens_block:
             block_residual_TND = torch.cat(
                 (
                     block_residual_TND,
@@ -529,7 +527,6 @@ class KimiK3TransformerBlock(Module):
                 ),
                 dim=1,
             )
-            prefix_sum_BLD = None
 
         h_BLD = self.attention_norm(x_BLD)
         if self.attention is not None:
@@ -537,9 +534,8 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_BLD = self.delta_attention(h_BLD, None, positions)
-        prefix_sum_BLD = h_BLD if prefix_sum_BLD is None else prefix_sum_BLD + h_BLD
+        prefix_sum_BLD = h_BLD if opens_block else prefix_sum_BLD + h_BLD
 
-        assert prefix_sum_BLD is not None
         h_BLD = _apply_attention_residual(
             prefix_sum_BLD.reshape(-1, D),
             block_residual_TND,
@@ -562,7 +558,6 @@ class KimiK3Model(Decoder):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
-        spatial_merge_size: int = 2
 
         def update_from_config(self, *, config, **kwargs) -> None:
             # Unsupported parallelisms are rejected in parallelize_kimi_k3.
@@ -601,23 +596,6 @@ class KimiK3Model(Decoder):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
-        self.spatial_merge_size = config.spatial_merge_size
-        if self.vision_encoder is not None:
-            # The decoder sizes each image's placeholder run from
-            # spatial_merge_size while the encoder merges patches with
-            # merge_kernel_size. A mismatch surfaces much later as a
-            # placeholder-run misalignment that blames the prompt.
-            merge_kernel_size = self.vision_encoder.merge_kernel_size
-            if merge_kernel_size != (
-                config.spatial_merge_size,
-                config.spatial_merge_size,
-            ):
-                raise ValueError(
-                    f"spatial_merge_size {config.spatial_merge_size} does not "
-                    f"match the vision encoder's merge_kernel_size "
-                    f"{merge_kernel_size}; each image would occupy a different "
-                    "number of text positions than the encoder produces."
-                )
 
     def _prepare_multimodal_embeds(
         self,
@@ -643,8 +621,11 @@ class KimiK3Model(Decoder):
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
-        num_tokens_per_item = (grid_thw[:, 1] // self.spatial_merge_size) * (
-            grid_thw[:, 2] // self.spatial_merge_size
+        # MoonViT collapses time and merges spatially, so the text-side token
+        # count per item is (h/kh)*(w/kw), independent of t.
+        kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+        num_tokens_per_item = (grid_thw[:, 1] // kernel_h) * (
+            grid_thw[:, 2] // kernel_w
         )
         vision_positions = get_vision_positions(
             tokens,
