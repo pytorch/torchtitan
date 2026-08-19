@@ -41,7 +41,7 @@ class TrainingConfig:
     """Max norm for gradient clipping"""
 
     steps: int = 10000
-    """How many train steps to run"""
+    """How many train steps to run; -1 uses one full pass over the dataset"""
 
     enable_cpu_offload: bool = False
     """
