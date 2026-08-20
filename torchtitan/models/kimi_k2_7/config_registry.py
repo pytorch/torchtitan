@@ -467,7 +467,15 @@ def _align_dist_muon_expert_compute_layouts(
     *,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    """Align routed-expert layouts with the final parallelism config."""
+    """Align routed-expert layouts with the final parallelism config.
+
+    The registry builds compute layouts from the recipe's declared parallelism,
+    but the CLI can still override ``expert_parallel_degree`` afterwards. That
+    override decides whether routed experts use the 1D ``dp_shard`` layout or
+    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
+    """
+    # TODO: Remove this function once parallelism can no longer be overridden
+    # from the CLI; the registry layouts are then already final.
     factory_kwargs_by_name = {
         name: dict(factory_kwargs)
         for name, factory_kwargs in (
