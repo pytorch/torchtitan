@@ -33,6 +33,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_keys
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    validate_memory_policy_config,
+)
 from torchtitan.experiments.graph_trainer.precompile import _FX_TRACE_ARTIFACT_KEY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -355,6 +358,7 @@ def main():
         device,
         tokenizer,
     ) = _common_setup(config)
+    validate_memory_policy_config(compile_config)
 
     _precompile_aot_fx_trace(
         config,
