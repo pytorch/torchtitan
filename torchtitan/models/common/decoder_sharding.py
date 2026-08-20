@@ -228,16 +228,15 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     to local tensors before the kernel runs, then wraps outputs back.
 
     Declares placements over the full dense SPMD axis set (DP/CP/TP) so
-    the LocalMap composes under ``full_dtensor`` (where the surrounding
-    mesh is multi-axis); under non-full_dtensor, the (tp,)-only mesh only
+    the LocalMap composes under ``spmd_types`` (where the surrounding mesh
+    is multi-axis); under ``partial_dtensor``, the (tp,)-only mesh only
     consumes the ``TP`` placement and the rest are ignored.
 
-    Under ``full_dtensor`` + CP, q stays seq-sharded on the CP axis
-    (``Shard(1)``) while k/v are ``Replicate`` on CP -- DTensor all-gathers
-    k/v at the local_map boundary so the kernel sees full-length keys
-    (matching the BlockMask's kv dimension). Q's local grad is naturally
-    seq-sharded; k/v's local grads accumulate as ``Partial`` on CP and
-    DTensor reduces them on the way out.
+    With CP, q stays seq-sharded on the CP axis (``S(1)``) while k/v are
+    unsharded (``R``) on CP -- the local_map boundary all-gathers k/v so the
+    kernel sees full-length keys (matching the BlockMask's kv dimension).
+    Q's local grad is naturally seq-sharded; k/v's local grads accumulate as
+    partial (``P``) on CP and are reduced on the way out.
     """
     q_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))
     kv_src_placements: SpmdLayout = dense_activation_placement(tp=spmd.S(2))

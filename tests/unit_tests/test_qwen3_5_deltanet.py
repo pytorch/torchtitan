@@ -105,7 +105,7 @@ def _reference_causal_conv1d_varlen(
 ) -> torch.Tensor:
     """Per-document depthwise causal conv + silu, matching the model's FLA
     varlen conv (which is triton/CUDA-only). Patched over
-    ``model._causal_conv1d_varlen`` for CPU runs.
+    ``gdn._causal_conv1d_varlen`` for CPU runs.
     """
     conv_kernel_size = weight.shape[-1]
     out_segments_BTD: list[torch.Tensor] = []
@@ -178,9 +178,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     ):
         try:
             from torchtitan.models.common import Conv1d, Linear
-            from torchtitan.models.qwen3_5.model import (
+            from torchtitan.models.qwen3_5.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
+                InnerGatedDeltaNet,
                 RMSNormGated,
             )
         except ModuleNotFoundError as exc:
@@ -220,10 +221,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            kernel=(
-                GatedDeltaKernel.Config()
-                if backend is None
-                else GatedDeltaKernel.Config(backend=backend)
+            inner_gated_delta_net=InnerGatedDeltaNet.Config(
+                kernel=(
+                    GatedDeltaKernel.Config()
+                    if backend is None
+                    else GatedDeltaKernel.Config(backend=backend)
+                ),
             ),
             norm=RMSNormGated.Config(dim=value_head_dim),
             out_proj=Linear.Config(
@@ -233,7 +236,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ),
         ).build()
         if backend is None:
-            model.kernel = ReferenceGatedDeltaKernel()
+            model.inner_gated_delta_net.kernel = ReferenceGatedDeltaKernel()
 
         model = model.to(device=device, dtype=dtype)
         with torch.no_grad():
@@ -251,6 +254,99 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             model.norm.weight.fill_(1.0)
         return model
 
+    def _main_forward_reference(self, model, x_BLD, attention_masks=None):
+        """Run the current main-branch GatedDeltaNet forward structure."""
+        batch_size, seq_len, _ = x_BLD.shape
+        cu_seqlens = None
+        cu_seqlens_cpu = None
+        if attention_masks is not None:
+            cu_seqlens = attention_masks.cu_seq_q.clone()
+            cu_seqlens_cpu = torch.tensor(
+                attention_masks.cu_seq_q_host,
+                dtype=cu_seqlens.dtype,
+                device="cpu",
+            )
+
+        def fold_bl_dim(tensor):
+            return tensor.reshape(1, batch_size * seq_len, *tensor.shape[2:])
+
+        def causal_conv(tensor, conv):
+            tensor = fold_bl_dim(tensor)
+            if cu_seqlens is not None:
+                return _reference_causal_conv1d_varlen(
+                    tensor,
+                    conv.weight,
+                    cu_seqlens,
+                    cu_seqlens_cpu,
+                )
+            tensor = F.pad(
+                tensor.transpose(1, 2),
+                [conv.weight.shape[-1] - 1, 0],
+            )
+            return F.silu(
+                F.conv1d(
+                    tensor,
+                    conv.weight,
+                    None,
+                    groups=conv.weight.size(0),
+                )
+            ).transpose(1, 2)
+
+        query_1TNK = causal_conv(model.in_proj_q(x_BLD), model.conv_q).reshape(
+            1, batch_size * seq_len, -1, model.key_head_dim
+        )
+        key_1TNK = causal_conv(model.in_proj_k(x_BLD), model.conv_k).reshape(
+            1, batch_size * seq_len, -1, model.key_head_dim
+        )
+        value_1TNV = causal_conv(model.in_proj_v(x_BLD), model.conv_v).reshape(
+            1, batch_size * seq_len, -1, model.value_head_dim
+        )
+        gate_1TNV = fold_bl_dim(model.in_proj_z(x_BLD)).reshape(
+            1, batch_size * seq_len, -1, model.value_head_dim
+        )
+        a_1TN = fold_bl_dim(model.in_proj_a(x_BLD))
+        b_1TN = fold_bl_dim(model.in_proj_b(x_BLD))
+        decay_1TN = -torch.exp(model.A_log.float()) * F.softplus(
+            a_1TN.float() + model.dt_bias
+        )
+        update_gate_1TN = torch.sigmoid(b_1TN)
+        output_1TNV = model.inner_gated_delta_net.kernel(
+            query_1TNK,
+            key_1TNK,
+            value_1TNV,
+            decay_1TN,
+            update_gate_1TN,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+        )
+        output_1TNV = model.norm(output_1TNV, gate_1TNV)
+        return model.out_proj(output_1TNV.reshape(batch_size, seq_len, -1))
+
+    def test_extracted_forward_matches_main(self):
+        torch.manual_seed(42)
+        model = self._make_deltanet()
+        x_BLD = torch.randn(2, 5, 4)
+        positions = torch.tensor(
+            [
+                [0, 1, 0, 1, 2],
+                [0, 1, 2, 0, 1],
+            ],
+            dtype=torch.int32,
+        )
+        attention_masks = create_varlen_metadata_for_document(
+            positions,
+            include_host_offsets=True,
+        )
+
+        for masks in (None, attention_masks):
+            with mock.patch(
+                "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
+                _reference_causal_conv1d_varlen,
+            ):
+                actual = model(x_BLD, masks)
+            expected = self._main_forward_reference(model, x_BLD, masks)
+            self.assertTrue(torch.equal(actual, expected))
+
     def _assert_packed_run_matches_per_document(self, model, x, positions, masks):
         """Packed forward under ``masks`` must equal stitched per-doc forwards.
 
@@ -259,7 +355,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         forwards below take the non-varlen conv path, which runs on CPU.
         """
         with mock.patch(
-            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
             _reference_causal_conv1d_varlen,
         ):
             actual = model(x, masks)
@@ -472,23 +568,21 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             )
 
         with mock.patch(
-            "torchtitan.models.qwen3_5.model._causal_conv1d_varlen",
+            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
             side_effect=record_cu_seqlens,
         ):
             model(x_BLD, attention_masks)
             model(x_BLD, attention_masks)
 
+        # Main runs separate Q/K/V convolutions, so each invocation uses the
+        # same cloned offsets three times.
         self.assertEqual(len(captured_cu_seqlens), 6)
-        first_invocation = captured_cu_seqlens[:3]
-        second_invocation = captured_cu_seqlens[3:]
-        self.assertTrue(
-            all(cu_seqlens is first_invocation[0] for cu_seqlens in first_invocation)
-        )
-        self.assertTrue(
-            all(cu_seqlens is second_invocation[0] for cu_seqlens in second_invocation)
-        )
-        self.assertIsNot(first_invocation[0], attention_masks.cu_seq_q)
-        self.assertIsNot(second_invocation[0], first_invocation[0])
+        first_invocation = captured_cu_seqlens[0]
+        second_invocation = captured_cu_seqlens[3]
+        self.assertTrue(all(x is first_invocation for x in captured_cu_seqlens[:3]))
+        self.assertTrue(all(x is second_invocation for x in captured_cu_seqlens[3:]))
+        self.assertIsNot(first_invocation, attention_masks.cu_seq_q)
+        self.assertIsNot(second_invocation, first_invocation)
 
 
 if __name__ == "__main__":
