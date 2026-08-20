@@ -34,7 +34,6 @@ def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
 
 def llama3_debugmodel_fsdp_symm_mem() -> Trainer.Config:
     config = llama3_debugmodel()
-    config.parallelism.spmd_backend = "full_dtensor"
     config.parallelism.enable_fsdp_symm_mem = True
     return config
 
