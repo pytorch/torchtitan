@@ -123,6 +123,13 @@ class FaultTolerantTrainer(Trainer):
         ):
             model = model_config.build()
 
+        # Validate optimizer param groups against the whole model here: this is
+        # the last point where every rank holds the complete parameter set, so
+        # the verdict is identical everywhere without a collective. Once PP
+        # splits the model, a stage can no longer tell a dead pattern from one
+        # owned by another stage.
+        config.optimizer.validate_against_model(model)
+
         # Verify all submodules satisfy the Module protocol
         model.verify_module_protocol()
 
@@ -273,10 +280,15 @@ class FaultTolerantTrainer(Trainer):
         # FT addition: pass ft_manager for TorchFTOptimizersContainer
         if isinstance(config.optimizer, TorchFTOptimizersContainer.Config):
             self.optimizers = config.optimizer.build(
-                model_parts=self.model_parts, ft_manager=self.ft_manager
+                model_parts=self.model_parts,
+                model_is_partial=parallel_dims.pp_enabled,
+                ft_manager=self.ft_manager,
             )
         else:
-            self.optimizers = config.optimizer.build(model_parts=self.model_parts)
+            self.optimizers = config.optimizer.build(
+                model_parts=self.model_parts,
+                model_is_partial=parallel_dims.pp_enabled,
+            )
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
