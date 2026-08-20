@@ -33,7 +33,7 @@ def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
         )
 
 
-def cp_shard_dims(input_sharding: dict[str, SpmdLayout]) -> dict[str, int]:
+def _cp_shard_dims(input_sharding: dict[str, SpmdLayout]) -> dict[str, int]:
     """Derive ``{name: seq_dim}`` for inputs whose CP mesh axis is a Shard.
 
     Inputs whose CP axis is Replicate/Partial (e.g. an image stream that is
@@ -69,7 +69,7 @@ def prepare_context_parallel_input(
             written back; 'attention_masks', if present, is sharded along its Q
             seq dim.
         input_shardings: Per-input SPMD layout; the CP sequence dim for each
-            input is derived via ``cp_shard_dims`` (inputs whose CP axis is
+            input is derived via ``_cp_shard_dims`` (inputs whose CP axis is
             Replicate/Partial are omitted and left untouched). When None,
             defaults to sharding ``{"input": 1, "labels": 1, "positions": 1}``
             (standard decoder inputs, for callers without a per-input layout).
@@ -87,7 +87,7 @@ def prepare_context_parallel_input(
         unchanged.
     """
     if input_shardings is not None:
-        shard_dims = cp_shard_dims(input_shardings)
+        shard_dims = _cp_shard_dims(input_shardings)
     else:
         shard_dims = {"input": 1, "labels": 1, "positions": 1}
 
