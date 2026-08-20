@@ -250,7 +250,8 @@ DSV3_PARALLELISM = (
     " --parallelism.expert_parallel_degree=2"
 )
 DSV3_EP_OVERLAP_GRAPH_PARALLELISM = (
-    "--parallelism.data_parallel_shard_degree=8"
+    "--training.disable_cuda_graphs"
+    " --parallelism.data_parallel_shard_degree=8"
     " --parallelism.tensor_parallel_degree=1"
     " --parallelism.expert_parallel_degree=2"
 )
@@ -469,7 +470,8 @@ def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
 
 
 QWEN3_MOE_PARALLELISM = (
-    "--parallelism.data_parallel_shard_degree=4"
+    "--training.disable_cuda_graphs"
+    " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.tensor_parallel_degree=2"
     " --parallelism.expert_parallel_degree=2"
 )
