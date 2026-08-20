@@ -160,8 +160,7 @@ class Validator(BaseValidator):
         inputs, labels, extra_kwargs, _ = cast(
             BaseModel, model_parts[0]
         ).preprocess_inputs(
-            input_dict,
-            labels,
+            {**input_dict, "labels": labels},
             parallel_dims=self.parallel_dims,
             device=input_dict["input"].device,
             parallelism=self.parallelism,

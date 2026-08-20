@@ -18,10 +18,10 @@ def test_hf_builds_cp_mask_under_cp(monkeypatch):
         HFTransformerModel, "get_attention_masks", lambda self, positions: "MASK"
     )
     m = object.__new__(HFTransformerModel)  # no heavy __init__
-    inputs, labels, extra, sharding = m._build_forward_inputs(
-        {"input": 0, "positions": 1}, "labels", parallel_dims=_CP()
+    input_dict, sharding = m._build_forward_inputs(
+        {"input": 0, "labels": "labels", "positions": 1}, parallel_dims=_CP()
     )
-    assert extra["attention_masks"] == "MASK"
+    assert input_dict["attention_masks"] == "MASK"
     assert sharding is None  # HF inherits base None sharding
 
 
@@ -32,8 +32,8 @@ def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
         HFTransformerModel, "get_attention_masks", lambda self, positions: None
     )
     m = object.__new__(HFTransformerModel)
-    _, _, extra, sharding = m._build_forward_inputs(
-        {"input": 0, "positions": 1}, "labels", parallel_dims=_CP()
+    input_dict, sharding = m._build_forward_inputs(
+        {"input": 0, "labels": "labels", "positions": 1}, parallel_dims=_CP()
     )
-    assert "attention_masks" not in extra
+    assert "attention_masks" not in input_dict
     assert sharding is None

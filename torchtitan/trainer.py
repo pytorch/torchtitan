@@ -692,14 +692,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         once per microbatch on the PP path, so token accounting matches the
         batch stream.
 
-        The 4th element (``local_ntokens``) is a transitional workaround; see
-        ``BaseModel.preprocess_inputs`` for the ``TODO(return-type)`` rationale.
+        The 4th returned value of ``model.preprocess_inputs`` (``local_ntokens``)
+        is a transitional workaround; see ``BaseModel.preprocess_inputs`` for the
+        ``TODO(return-type)`` rationale.
+
+        TODO: fold labels into the batch at the dataloader instead of here --
+        have the dataloader yield a single input_dict with "labels" already
+        included, so preprocess_inputs receives it directly and this merge
+        (and the separate `labels` param threaded through the microbatch/PP
+        paths) can go away.
         """
         inputs, labels, extra_kwargs, local_ntokens = cast(
             BaseModel, self.model_parts[0]
         ).preprocess_inputs(
-            input_dict,
-            labels,
+            {**input_dict, "labels": labels},
             parallel_dims=self.parallel_dims,
             device=self.device,
             parallelism=self.config.parallelism,

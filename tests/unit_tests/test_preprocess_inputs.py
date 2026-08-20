@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-
 from torchtitan.protocols.model import BaseModel
 
 
@@ -31,15 +30,19 @@ class _FakeParallelism:
 
 def test_build_forward_inputs_splits_and_returns_none_sharding():
     model = _DummyModel()
-    input_dict = {"input": torch.zeros(2, 4), "positions": torch.arange(4).repeat(2, 1)}
     labels = torch.ones(2, 4)
-    inputs, out_labels, extra, sharding = model._build_forward_inputs(
-        input_dict, labels, parallel_dims=_FakeParallelDims()
+    input_dict = {
+        "input": torch.zeros(2, 4),
+        "labels": labels,
+        "positions": torch.arange(4).repeat(2, 1),
+    }
+    out_dict, sharding = model._build_forward_inputs(
+        input_dict, parallel_dims=_FakeParallelDims()
     )
-    assert torch.equal(inputs, input_dict["input"])
-    assert torch.equal(out_labels, labels)
-    assert set(extra) == {"positions"}
-    assert "attention_masks" not in extra
+    assert torch.equal(out_dict["input"], input_dict["input"])
+    assert torch.equal(out_dict["labels"], labels)
+    assert set(out_dict) == {"input", "labels", "positions"}
+    assert "attention_masks" not in out_dict
     assert sharding is None
 
 
@@ -48,8 +51,7 @@ def test_preprocess_inputs_returns_local_ntokens_cp_disabled():
     input_dict = {"input": torch.zeros(2, 4)}
     labels = torch.ones(2, 4)
     inputs, out_labels, extra, ntok = model.preprocess_inputs(
-        input_dict,
-        labels,
+        {**input_dict, "labels": labels},
         parallel_dims=_FakeParallelDims(),
         device=torch.device("cpu"),
         parallelism=_FakeParallelism(),
@@ -68,8 +70,9 @@ def test_local_ntokens_counted_after_cp_shard(monkeypatch):
         def get_mesh(self, name):
             return None
 
-    def _fake_cp(inputs, labels, extra, mesh, device, lb, ptrr, *, input_sharding):
-        return inputs, labels[:, :2], extra
+    def _fake_cp(input_dict, input_shardings, mesh, lb, ptrr):
+        input_dict["labels"] = input_dict["labels"][:, :2]
+        return input_dict
 
     monkeypatch.setattr(cp_api, "prepare_context_parallel_input", _fake_cp)
 
@@ -77,8 +80,7 @@ def test_local_ntokens_counted_after_cp_shard(monkeypatch):
     input_dict = {"input": torch.zeros(2, 4)}
     labels = torch.ones(2, 4)
     _, _, _, ntok = model.preprocess_inputs(
-        input_dict,
-        labels,
+        {**input_dict, "labels": labels},
         parallel_dims=_CPDims(),
         device=torch.device("cpu"),
         parallelism=_FakeParallelism(),
