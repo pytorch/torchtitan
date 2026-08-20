@@ -103,9 +103,8 @@ def _vision_pos_embed(
     inv_w = 1.0 / grid_w
     ys = torch.linspace(-1 + inv_h, 1 - inv_h, grid_h, device=device, dtype=dtype)
     xs = torch.linspace(-1 + inv_w, 1 - inv_w, grid_w, device=device, dtype=dtype)
-    pos_xy = torch.stack(torch.meshgrid(ys, xs, indexing="xy"), dim=-1).reshape(-1, 2)[
-        None, None
-    ]
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    pos_xy = torch.stack((xx, yy), dim=-1).reshape(1, 1, grid_h * grid_w, 2)
     pos_xy = _annotate_vision_activation_type(pos_xy)
     sampled = F.grid_sample(pos_emb, pos_xy, mode="bilinear", align_corners=False)
     return sampled[0, :, 0, :].T
