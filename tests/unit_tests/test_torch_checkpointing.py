@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import logging
 import queue
 import unittest
 from concurrent.futures import Future
@@ -27,6 +28,7 @@ from torch_checkpointing.config import (
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torchtitan.components.checkpointer import (
     BaseCheckpointManager,
     CheckpointManager,
@@ -547,4 +549,115 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertTrue(sync_manager.closed)
         sync_config = build.call_args.args[0]
         self.assertIsNone(sync_config.pre_finalize_callback)
+        manager.close()
+
+    def test_save_stamps_the_step_on_backend_events(self) -> None:
+        # The backend reads this context when it builds its own events and
+        # exports it to the async save subprocess. Without it every forwarded
+        # backend metric carries step=None, which makes them hard to line up
+        # against the training step they belong to.
+        config = TorchCheckpointingManager.Config(
+            enable=True,
+            interval=1,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+        )
+        manager, backend_manager = self._build_manager(config)
+        self.addCleanup(checkpoint_logging_context.import_context, {})
+
+        self.assertTrue(manager.save(curr_step=7))
+
+        self.assertEqual(7, checkpoint_logging_context.get("step"))
+        backend_manager.save_result.set_result(None)
+        manager.close()
+
+    def test_subprocess_logging_initializes_and_delegates(self) -> None:
+        init_fn = mock.Mock()
+        with (
+            mock.patch.object(
+                manager_module.sl,
+                "init_structured_logger",
+            ) as init_structured_logger,
+            mock.patch.object(
+                manager_module.sl,
+                "install_forwarding_structured_logging_handler",
+            ) as install_forwarding,
+        ):
+            manager_module._init_subprocess_logging(
+                "/tmp/output",
+                init_fn,
+                ("argument",),
+            )
+
+        init_structured_logger.assert_called_once_with(
+            source="training",
+            output_dir="/tmp/output",
+        )
+        install_forwarding.assert_called_once_with("torch_checkpointing")
+        init_fn.assert_called_once_with("argument")
+
+    def _init_subprocess_logging(self) -> None:
+        with (
+            mock.patch.object(manager_module.sl, "init_structured_logger"),
+            mock.patch.object(
+                manager_module.sl,
+                "install_forwarding_structured_logging_handler",
+            ),
+        ):
+            manager_module._init_subprocess_logging("/tmp/output", None, ())
+
+    def test_subprocess_logging_admits_backend_info_records(self) -> None:
+        root_logger = logging.getLogger()
+        backend_logger = logging.getLogger(manager_module._BACKEND_LOGGER_NAME)
+        self.addCleanup(root_logger.setLevel, root_logger.level)
+        self.addCleanup(backend_logger.setLevel, backend_logger.level)
+        # A fresh save subprocess inherits no logging configuration: the root
+        # logger sits at WARNING and the backend logger is unset, so the INFO
+        # checkpoint metrics are dropped before any handler can forward them.
+        root_logger.setLevel(logging.WARNING)
+        backend_logger.setLevel(logging.NOTSET)
+        self.assertFalse(backend_logger.isEnabledFor(logging.INFO))
+
+        self._init_subprocess_logging()
+
+        self.assertTrue(backend_logger.isEnabledFor(logging.INFO))
+
+    def test_subprocess_logging_keeps_a_more_verbose_backend_level(self) -> None:
+        backend_logger = logging.getLogger(manager_module._BACKEND_LOGGER_NAME)
+        self.addCleanup(backend_logger.setLevel, backend_logger.level)
+        backend_logger.setLevel(logging.DEBUG)
+
+        self._init_subprocess_logging()
+
+        self.assertEqual(logging.DEBUG, backend_logger.level)
+
+    def test_async_manager_composes_subprocess_logging_initializer(self) -> None:
+        original_init_fn = mock.Mock()
+        config = TorchCheckpointingManager.Config(
+            enable=True,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+        )
+        backend_config = _default_backend_config()
+        backend_config.subprocess_init_fn = original_init_fn
+        backend_config.subprocess_init_args = ("argument",)
+
+        with mock.patch.object(
+            manager_module.sl,
+            "install_forwarding_structured_logging_handler",
+            return_value=True,
+        ):
+            manager, _ = self._build_manager(
+                config,
+                backend_config=backend_config,
+            )
+
+        self.assertIs(
+            manager._manager_config.subprocess_init_fn,
+            manager_module._init_subprocess_logging,
+        )
+        self.assertEqual(
+            ("/tmp", original_init_fn, ("argument",)),
+            manager._manager_config.subprocess_init_args,
+        )
         manager.close()
