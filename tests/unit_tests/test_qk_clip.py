@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor.debug import CommDebugMode
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -289,3 +290,63 @@ class QKClipDistributedTest(DTensorTestBase):
             torch.ones(1, v_head_dim, in_features, device=device),
         )
         self.assertFalse(attention.inner_attention.max_attention_logits_N)
+
+    @with_comms
+    def test_weight_scaling_is_communication_free(self) -> None:
+        """Per-head scaling must stay local for every clipped weight.
+
+        Building the replicated scales with ``distribute_tensor`` instead of
+        ``from_local`` would broadcast once per weight per step, so this asserts
+        the packed maxima all-reduce is the only collective ``qk_clip`` issues.
+        """
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        num_heads = self.world_size
+        qk_nope_head_dim, qk_rope_head_dim, v_head_dim, in_features = 2, 1, 2, 2
+        num_layers = 4
+
+        def weight_module(num_rows: int) -> nn.Module:
+            module = nn.Module()
+            module.register_parameter(
+                "weight",
+                nn.Parameter(
+                    distribute_tensor(
+                        torch.ones(num_rows, in_features, device=device),
+                        mesh,
+                        (Shard(0),),
+                    )
+                ),
+            )
+            return module
+
+        model = nn.Module()
+        for layer_id in range(num_layers):
+            attention = Attention.__new__(Attention)
+            nn.Module.__init__(attention)
+            attention.q_lora_rank = 1
+            attention.qk_nope_head_dim = qk_nope_head_dim
+            attention.qk_rope_head_dim = qk_rope_head_dim
+            attention.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+            attention.v_head_dim = v_head_dim
+            attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
+            attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
+            attention.inner_attention = QKClipFlexAttention.Config().build()
+            attention.inner_attention.max_attention_logits_N.append(
+                torch.full((num_heads,), 400.0, device=device)
+            )
+            model.add_module(f"layer_{layer_id}", attention)
+
+        with CommDebugMode() as comm_mode:
+            qk_clip([model], config=QKClipConfig(), reduction_mesh=mesh)
+
+        collectives = {
+            str(op): count for op, count in comm_mode.get_comm_counts().items() if count
+        }
+        total = sum(collectives.values())
+        # One packed MAX all-reduce covers every layer and head; the 8 weights
+        # this model clips must add nothing on top of it.
+        self.assertEqual(total, 1, f"expected one collective, got {collectives}")
