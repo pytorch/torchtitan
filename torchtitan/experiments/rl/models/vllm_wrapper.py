@@ -45,6 +45,7 @@ from vllm.utils import torch_utils as _torch_utils
 
 logger = init_logger(__name__)
 
+
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
 # on every subgraphoutput (see vllm/compilation/cuda_graph.py).
@@ -194,35 +195,57 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Replace inner_attention with VLLMAttentionWrapper in config
         model_config = model_spec.model
-        attn_config = model_config.layers[0].attention
-        n_heads = attn_config.n_heads
-        n_kv_heads = attn_config.n_kv_heads or n_heads
-        head_dim = (
-            attn_config.head_dim
-            if attn_config.head_dim is not None
-            else model_config.dim // n_heads
-        )
         new_layers = []
-        for layer_cfg in model_config.layers:
-            vllm_backend = VLLMAttentionWrapper.Config(
-                hidden_size=model_config.dim,
-                num_heads=n_heads,
-                num_kv_heads=n_kv_heads,
-                head_dim=head_dim,
-                sliding_window_size=getattr(
-                    layer_cfg.attention, "sliding_window_size", None
-                ),
-            )
-            new_layers.append(
-                dataclasses.replace(
-                    layer_cfg,
-                    attention=dataclasses.replace(
-                        layer_cfg.attention, inner_attention=vllm_backend
+        for layer_idx, layer_cfg in enumerate(model_config.layers):
+            new_layer_cfg = layer_cfg
+
+            attention_cfg = getattr(layer_cfg, "attention", None)
+            if attention_cfg is not None:
+                num_heads = attention_cfg.n_heads
+                num_kv_heads = attention_cfg.n_kv_heads or num_heads
+                head_dim = (
+                    attention_cfg.head_dim
+                    if attention_cfg.head_dim is not None
+                    else model_config.dim // num_heads
+                )
+                vllm_attention_cfg = VLLMAttentionWrapper.Config(
+                    hidden_size=model_config.dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    sliding_window_size=getattr(
+                        attention_cfg, "sliding_window_size", None
                     ),
                 )
-            )
+                new_layer_cfg = dataclasses.replace(
+                    new_layer_cfg,
+                    attention=dataclasses.replace(
+                        attention_cfg,
+                        inner_attention=vllm_attention_cfg,
+                    ),
+                )
+
+            kda_cfg = getattr(layer_cfg, "kda", None)
+            if kda_cfg is not None:
+                from torchtitan.experiments.rl.models.kda_attention import (
+                    VLLMKDAWrapper,
+                )
+
+                vllm_kda_cfg = VLLMKDAWrapper.Config(
+                    num_heads=kda_cfg.num_heads,
+                    head_dim=kda_cfg.head_dim,
+                    conv_kernel_size=kda_cfg.conv_qkv.kernel_size,
+                    gate_lower_bound=kda_cfg.attention.gate_lower_bound,
+                    layer_index=layer_idx,
+                )
+                new_layer_cfg = dataclasses.replace(
+                    new_layer_cfg,
+                    kda=dataclasses.replace(kda_cfg, attention=vllm_kda_cfg),
+                )
+
+            new_layers.append(new_layer_cfg)
+
         self.config = dataclasses.replace(model_config, layers=new_layers)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
