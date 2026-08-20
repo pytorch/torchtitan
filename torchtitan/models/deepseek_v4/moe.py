@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
 def _build_hash_routing_table(vocab_size, num_experts, top_k, device=None, chunk_size=8192):
@@ -73,24 +73,3 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
         return super()._select_experts(
             scores_BLE, expert_bias_E, **router_kwargs
         )
-
-
-
-class DeepSeekV4MoE(MoE):
-    """MoE wrapper that forwards token IDs to the DeepSeek V4 router."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MoE.Config):
-        pass
-
-    def forward(self, x_BLD: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-        """Run MoE dispatch, expert computation, and combine.
-
-        Args:
-            x_BLD: Token hidden states of shape ``[B, L, D]``.
-            input_ids: Token IDs of shape ``[B, L]`` used by hash routing.
-
-        Returns:
-            MoE output tensor of shape ``[B, L, D]``.
-        """
-        return super().forward(x_BLD, input_ids=input_ids)
