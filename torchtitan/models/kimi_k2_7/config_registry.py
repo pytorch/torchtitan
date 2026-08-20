@@ -333,7 +333,7 @@ def _dist_muon_optimizer(
         "lr": lr,
         "weight_decay": 0.1,
         "foreach": False,
-        # Kimi K2's MuonClip recipe uses 0.2 * sqrt(max(rows, columns))
+        # Kimi K2 uses 0.2 * sqrt(max(rows, columns))
         # for shape-consistent AdamW-scale updates instead of Muon's original
         # aspect-ratio scaling.
         "adjust_lr_fn": "match_rms_adamw",
