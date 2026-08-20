@@ -38,16 +38,14 @@ from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import (
+from .gdn import (
     GatedDeltaBackend,
     GatedDeltaKernel,
     GatedDeltaNet,
-    OffsetRMSNorm,
-    Qwen35Attention,
-    Qwen35Model,
-    Qwen35TransformerBlock,
+    InnerGatedDeltaNet,
     RMSNormGated,
 )
+from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 
 from .parallelize import parallelize_qwen3_5
 from .rope import MRoPE
@@ -303,7 +301,9 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        kernel=GatedDeltaKernel.Config(backend=fla_backend),
+        inner_gated_delta_net=InnerGatedDeltaNet.Config(
+            kernel=GatedDeltaKernel.Config(backend=fla_backend),
+        ),
         norm=RMSNormGated.Config(
             dim=value_head_dim,
             eps=1e-6,
