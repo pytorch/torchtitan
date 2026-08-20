@@ -30,13 +30,11 @@ import warnings
 from collections.abc import Callable
 
 import torch
-
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -145,6 +143,7 @@ def compile_time_passes(
     parallel_dims=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
+    model_parts: list | None = None,
 ) -> list[Callable]:
     """Cleanup, FlexAttention annotation, and regional_inductor passes.
 
@@ -257,6 +256,8 @@ def compile_time_passes(
             functools.partial(
                 tag_with_memory_policy_pass,
                 config=config,
+                trace=traced_result,
+                model_parts=model_parts,
             ),
             functools.partial(
                 apply_cpu_offload_pass,
@@ -412,6 +413,7 @@ def construct_default_graph_passes(
     config: "GraphTrainer.Config",
     *,
     parallel_dims=None,
+    model_parts: list | None = None,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -429,10 +431,11 @@ def construct_default_graph_passes(
     if not has_precompile_artifact:
         passes.extend(
             compile_time_passes(
-                traced_result,
-                config,
+                traced_result=traced_result,
+                config=config,
                 use_cudagraph=want_cudagraph,
                 parallel_dims=parallel_dims,
+                model_parts=model_parts,
             )
         )
 

@@ -94,7 +94,19 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
+    debug_memory_policy_solver: bool = False
+    """Log the memory policy solver's inputs and per-iteration decisions:
+    transfer bandwidth, per-layer byte pools, outer fractions, inner tag counts,
+    and each calibration iteration's measured peak. Warnings and the infeasible
+    budget error are always logged."""
+
+    memory_policy: Literal[
+        "default",
+        "full",
+        "eager",
+        "sac_and_offload",
+        "auto_perf_maxing",
+    ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
@@ -106,6 +118,9 @@ class GraphTrainerCompileConfig(CompileConfig):
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+        auto_perf_maxing: ILP-solver finds the best combination of SC and
+            offload given the peak memory budget while minimizing the runtime
+            cost.
     """
 
     full_recompute_save_ops: str = ""
@@ -138,13 +153,32 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Prefetch reloads this many layers ahead in the backward graph
     to overlap H2D transfers with compute."""
 
+    cpu_offload_bw: int = 10000
+    """CPU PCIe/NVLink bandwidth for activation offload/reload in GB/s."""
+
     cpu_offload_defer_n_layers: int = 1
     """Defer forward wait_tensor ops this many layers past the last consumer
     to overlap D2H transfers with compute."""
 
-    cpu_offload_budget_gb: float = 100.0
-    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
-    Tensors are selected largest-first until the budget is exhausted."""
+    cpu_offload_budget_gb: float = -1
+    """Maximum pinned CPU memory (GiB per rank) for offloaded activations.
+    -1 uses whatever the host allows, which is the usual choice: the safe value
+    depends on node memory and local rank count, not on the model. 0 disables
+    offload. A positive value above the host limit is an error, not a silent
+    clamp -- pinned pages are unswappable, so overcommitting fails in the
+    driver rather than degrading."""
+
+    memory_budget_gb: float = 1000.0
+    """Peak GPU memory budget (in GB per rank, 1 GB = 1e9 bytes to match the
+    runtime max_alloc measurement) for the ``whole_recompute_and_offload`` policy.
+    The whole-graph ILP minimizes runtime subject to peak <= this budget. The
+    default is effectively unbounded, so the policy is a no-op until a real
+    budget is set (e.g. --compile.memory_budget_gb 24)."""
+
+    runtime_est_mode: str = "cost_model"  # could be "benchmark" or "interpreter", too
+    """Runtime estimation mode for the ``auto_perf_maxing`` policy.
+    Selects the runtime estimator to use for the ILP. Options: `COST_MODEL`, `BENCHMARK`, `INTERPRETER`.
+    """
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
