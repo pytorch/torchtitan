@@ -15,6 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
+from torchtitan.models.common.moe import SeqwiseLoadBalanceLoss
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 
@@ -296,6 +297,45 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     )
 
 
+def _seqwise_counts_sharding_config(*, enable_ep: bool) -> ShardingConfig:
+    """Partial -> Invariant on CP (always) and TP (when EP is on).
+
+I keeps the backward identity (all ranks hold the reduced value). TP stays
+Replicate without EP: the gate then runs on the full token sequence.
+"""
+    router_out = (
+        dense_sequence_parallel_placement()
+        if enable_ep
+        else dense_activation_placement(tp=spmd.R)
+    )
+    out_src = SpmdLayout(
+        {
+            DP: spmd.S(0),
+            CP: spmd.P,
+            TP: spmd.P if enable_ep else spmd.R,
+        }
+    )
+    out_dst = SpmdLayout(
+        {
+            DP: spmd.S(0),
+            CP: spmd.I,
+            TP: spmd.I if enable_ep else spmd.R,
+        }
+    )
+    return ShardingConfig(
+        in_src_shardings={
+            "scores_BLE": router_out,
+            "topk_expert_ids_BLK": router_out,
+        },
+        in_dst_shardings={
+            "scores_BLE": router_out,
+            "topk_expert_ids_BLK": router_out,
+        },
+        out_src_shardings=out_src,
+        out_dst_shardings=out_dst,
+    )
+
+
 def set_moe_sharding_config(
     moe_cfg,
     *,
@@ -369,3 +409,9 @@ def set_moe_sharding_config(
     )
     moe_cfg.routed_experts.sharding_config = routed_experts_config
     moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
+
+    if isinstance(moe_cfg.aux_loss, SeqwiseLoadBalanceLoss.Config):
+        assert moe_cfg.aux_loss.counts is not None  # filled by __post_init__
+        moe_cfg.aux_loss.counts.sharding_config = _seqwise_counts_sharding_config(
+            enable_ep=enable_ep,
+        )
