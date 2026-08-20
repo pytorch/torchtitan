@@ -6,81 +6,37 @@
 
 
 from dataclasses import dataclass
-from typing import Literal
 
+import spmd_types as spmd
 import torch
-import torch.nn.functional as F
-
-from fla.ops.gated_delta_rule import (
-    chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
-)
 from torch import nn
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
+from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import AttentionMasksType, BaseAttention
+from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common import Linear
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    BaseAttention,
+    create_varlen_metadata_for_document,
+    local_head_split,
+    VarlenAttention,
+    VarlenMetadata,
+)
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.multimodal import (
+    get_vision_positions,
+    multimodal_context,
+    scatter_vision_embeds,
+)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
+from .gdn import GatedDeltaNet
 from .rope import MRoPE
-from .sharding import set_qwen35_sharding_config
+from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
-
-def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
-    """L2 norm using rsqrt(sum(x²) + eps), not x/max(norm, eps) like F.normalize, to match FLA kernel."""
-    return x * torch.rsqrt((x * x).sum(dim=dim, keepdim=True) + eps)
-
-
-def _torch_native_gated_delta(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    beta: torch.Tensor,
-) -> torch.Tensor:
-    """Standalone math reference for the gated delta rule recurrence.
-
-    Sequential O(seqlen) loop — use FLA kernels for GPU efficiency.
-
-    Args:
-        q, k: (bs, seqlen, n_heads, key_head_dim)
-        v: (bs, seqlen, n_heads, value_head_dim)
-        g: (bs, seqlen, n_heads) — log-space decay, always negative
-        beta: (bs, seqlen, n_heads) — update gate ∈ (0, 1)
-
-    Returns:
-        output: (bs, seqlen, n_heads, value_head_dim)
-    """
-    B, L, H, D_k = q.shape
-    D_v = v.shape[-1]
-    dtype = q.dtype
-
-    # Upcast to float32 — recurrence accumulates over seqlen steps
-    q = _l2norm(q.float(), dim=-1) * (D_k**-0.5)
-    k = _l2norm(k.float(), dim=-1)
-    v, g, beta = v.float(), g.float(), beta.float()
-
-    output = torch.zeros(B, L, H, D_v, dtype=torch.float32, device=q.device)
-    state = torch.zeros(B, H, D_k, D_v, dtype=torch.float32, device=q.device)
-
-    for t in range(L):
-        q_t = q[:, t]
-        k_t = k[:, t]
-        v_t = v[:, t]
-        g_t = g[:, t].exp().unsqueeze(-1).unsqueeze(-1)
-        b_t = beta[:, t].unsqueeze(-1)
-
-        state = state * g_t
-        kv_mem = torch.einsum("bhkv,bhk->bhv", state, k_t)
-        delta = (v_t - kv_mem) * b_t
-        state = state + torch.einsum("bhk,bhv->bhkv", k_t, delta)
-        output[:, t] = torch.einsum("bhkv,bhk->bhv", state, q_t)
-
-    return output.to(dtype)
+Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 
 class OffsetRMSNorm(Module):
@@ -106,225 +62,6 @@ class OffsetRMSNorm(Module):
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return ((1.0 + self.weight.float()) * x).to(input_dtype)
-
-
-class RMSNormGated(Module):
-    """Gated RMSNorm: ``silu(gate) * weight * norm(x)``.
-
-    Takes ``(x, gate)`` separately. Weight is ones-initialized.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-6
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        x = (self.weight.float() * x).to(input_dtype)
-        x = x * F.silu(gate.float())
-        return x.to(input_dtype)
-
-
-class GatedDeltaKernel(Module):
-    """Stateless dispatch to FLA kernel or pure-torch fallback.
-
-    Provides a module boundary for the sharding code to wrap forward with
-    DTensor→local conversion — same pattern as FlexAttention. Handles Q/K
-    head expansion for grouped linear attention internally so that
-    repeat_interleave runs on local tensors under TP.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        # "fla_chunked": parallel within chunks, fast for training (default)
-        # "fla_fused_recurrent": token-by-token, lower memory for long sequences
-        # "torch_native": pure-Python reference, for numerical testing only
-        backend: Literal[
-            "fla_chunked", "fla_fused_recurrent", "torch_native"
-        ] = "fla_chunked"
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.backend = config.backend
-
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        g: torch.Tensor,
-        beta: torch.Tensor,
-    ) -> torch.Tensor:
-        # Expand Q/K heads to match V when n_value_heads > n_key_heads
-        if q.shape[2] != v.shape[2]:
-            assert v.shape[2] % q.shape[2] == 0
-            repeat = v.shape[2] // q.shape[2]
-            q = q.repeat_interleave(repeat, dim=2)
-            k = k.repeat_interleave(repeat, dim=2)
-
-        if self.backend == "torch_native":
-            return _torch_native_gated_delta(q, k, v, g, beta)
-
-        if self.backend == "fla_chunked":
-            result = _fla_chunk_gated_delta_rule(
-                q,
-                k,
-                v,
-                g,
-                beta,
-                use_qk_l2norm_in_kernel=True,
-            )
-        elif self.backend == "fla_fused_recurrent":
-            result = _fla_fused_recurrent_gated_delta_rule(
-                q,
-                k,
-                v,
-                g,
-                beta=beta,
-                use_qk_l2norm_in_kernel=True,
-            )
-        else:
-            raise ValueError(
-                f"Unknown fla_backend '{self.backend}'. "
-                "Valid: 'fla_chunked', 'fla_fused_recurrent', 'torch_native'."
-            )
-
-        # FLA kernels return (output, final_state); we only need output
-        return result[0]
-
-
-class GatedDeltaNet(Module):
-    """Gated DeltaNet linear attention.
-
-    Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, no attention masks, different head structure from standard
-    attention.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        key_head_dim: int
-        value_head_dim: int
-        conv_kernel_size: int = 4
-
-        # Sub-module configs
-        in_proj_q: Linear.Config
-        in_proj_k: Linear.Config
-        in_proj_v: Linear.Config
-        in_proj_z: Linear.Config
-        in_proj_a: Linear.Config
-        in_proj_b: Linear.Config
-        conv_q: Conv1d.Config
-        conv_k: Conv1d.Config
-        conv_v: Conv1d.Config
-        kernel: GatedDeltaKernel.Config
-        norm: RMSNormGated.Config
-        out_proj: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.key_head_dim = config.key_head_dim
-        self.value_head_dim = config.value_head_dim
-        self.conv_kernel_size = config.conv_kernel_size
-
-        value_dim = config.in_proj_v.out_features
-
-        self.in_proj_q = config.in_proj_q.build()
-        self.in_proj_k = config.in_proj_k.build()
-        self.in_proj_v = config.in_proj_v.build()
-        self.in_proj_z = config.in_proj_z.build()
-        self.in_proj_a = config.in_proj_a.build()
-        self.in_proj_b = config.in_proj_b.build()
-
-        self.conv_q = config.conv_q.build()
-        self.conv_k = config.conv_k.build()
-        self.conv_v = config.conv_v.build()
-
-        n_value_heads = value_dim // config.value_head_dim
-        self.A_log = nn.Parameter(torch.empty(n_value_heads))
-        self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
-
-        self.kernel = config.kernel.build()
-        self.norm = config.norm.build()
-        self.out_proj = config.out_proj.build()
-
-    def _causal_conv(self, x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
-        x = F.pad(x.transpose(1, 2), [self.conv_kernel_size - 1, 0])
-        if isinstance(x, DTensor):
-            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-            # groups lands in a released torch. local_map runs the conv on
-            # local shards (channel-sharded input + Shard(0) weight) and
-            # restores DTensor-ness, with explicit gradient placements.
-            x_plc = x.placements
-            w = conv.weight
-            w_plc = w.placements  # pyrefly: ignore [missing-attribute]
-
-            def _conv(x_local: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-                # groups == local out-channels (depthwise, channel-sharded)
-                # pyrefly: ignore [no-matching-overload]
-                return F.conv1d(
-                    x_local,
-                    w_local,
-                    None,
-                    conv.stride,
-                    conv.padding,
-                    conv.dilation,
-                    w_local.size(0),
-                )
-
-            conv_dt = local_map(
-                _conv,
-                out_placements=(x_plc,),
-                in_placements=(x_plc, w_plc),
-                in_grad_placements=(x_plc, w_plc),
-                device_mesh=x.device_mesh,
-            )
-            x = conv_dt(x, w)  # pyrefly: ignore
-        else:
-            x = conv(x)
-        return F.silu(x).transpose(1, 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        bs, seqlen, _ = x.shape
-
-        # Shapes:
-        #   xq, xk: (bs, seqlen, n_key_heads * key_head_dim)
-        #   xv, xz: (bs, seqlen, n_value_heads * value_head_dim)
-        #   xa, xb: (bs, seqlen, n_value_heads)
-        xq = self._causal_conv(self.in_proj_q(x), self.conv_q)
-        xk = self._causal_conv(self.in_proj_k(x), self.conv_k)
-        xv = self._causal_conv(self.in_proj_v(x), self.conv_v)
-        xz = self.in_proj_z(x)
-        xa = self.in_proj_a(x)
-        xb = self.in_proj_b(x)
-
-        xq = xq.view(bs, seqlen, -1, self.key_head_dim)
-        xk = xk.view(bs, seqlen, -1, self.key_head_dim)
-        xv = xv.view(bs, seqlen, -1, self.value_head_dim)
-
-        # Gating signals, shape (bs, seqlen, n_value_heads):
-        #   g:    decay rate per head, always negative
-        #   beta: update gate ∈ (0, 1)
-        g = -torch.exp(self.A_log.float()) * F.softplus(xa.float() + self.dt_bias)
-        beta = torch.sigmoid(xb)
-
-        output = self.kernel(xq, xk, xv, g, beta)
-
-        xz = xz.view(bs, seqlen, -1, self.value_head_dim)
-        output = self.norm(output, xz)
-
-        output = output.reshape(bs, seqlen, -1)
-        return self.out_proj(output)
 
 
 class Qwen35Attention(BaseAttention):
@@ -380,43 +117,49 @@ class Qwen35Attention(BaseAttention):
 
     def forward(
         self,
-        x: torch.Tensor,
+        x_BLD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        bs, seqlen, _ = x.shape
+        B, L, _ = x_BLD.shape
 
         # wq is 2x wider: produces query + gate
-        xq_gate = self.wq(x).view(bs, seqlen, -1, self.head_dim * 2)
-        xq, gate = xq_gate.chunk(2, dim=-1)
-        xk = self.wk(x).view(bs, seqlen, -1, self.head_dim)
-        xv = self.wv(x).view(bs, seqlen, -1, self.head_dim)
+        xq_gate_BLN2H = local_head_split(self.wq(x_BLD), self.head_dim * 2)
+        xq_BLNH, gate_BLNH = xq_gate_BLN2H.chunk(2, dim=-1)
+        xk_BLNH = local_head_split(self.wk(x_BLD), self.head_dim)
+        xv_BLNH = local_head_split(self.wv(x_BLD), self.head_dim)
 
         # QK norm (before RoPE)
-        xq = self.q_norm(xq)
-        xk = self.k_norm(xk)
+        xq_BLNH = self.q_norm(xq_BLNH)
+        xk_BLNH = self.k_norm(xk_BLNH)
 
         # Partial RoPE: only first rotary_dim elements get positional encoding
         assert self.rotary_dim <= self.head_dim
-        xq_rot, xq_pass = xq[..., : self.rotary_dim], xq[..., self.rotary_dim :]
-        xk_rot, xk_pass = xk[..., : self.rotary_dim], xk[..., self.rotary_dim :]
-        xq_rot, xk_rot = self.rope(xq_rot, xk_rot, positions)
-        xq = torch.cat([xq_rot, xq_pass], dim=-1)
-        xk = torch.cat([xk_rot, xk_pass], dim=-1)
+        xq_BLNR, xq_BLNP = (
+            xq_BLNH[..., : self.rotary_dim],
+            xq_BLNH[..., self.rotary_dim :],
+        )
+        xk_BLNR, xk_BLNP = (
+            xk_BLNH[..., : self.rotary_dim],
+            xk_BLNH[..., self.rotary_dim :],
+        )
+        xq_BLNR, xk_BLNR = self.rope(xq_BLNR, xk_BLNR, positions)
+        xq_BLNH = torch.cat([xq_BLNR, xq_BLNP], dim=-1)
+        xk_BLNH = torch.cat([xk_BLNR, xk_BLNP], dim=-1)
 
-        output = self.inner_attention(
-            xq,
-            xk,
-            xv,
+        out_BLNH = self.inner_attention(
+            xq_BLNH,
+            xk_BLNH,
+            xv_BLNH,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
 
         # Output gating
-        output = output * torch.sigmoid(gate)
-        output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+        out_BLNH = out_BLNH * torch.sigmoid(gate_BLNH)
+        out_BLD = out_BLNH.view(B, L, -1)
+        return self.wo(out_BLD)
 
 
 class Qwen35TransformerBlock(Module):
@@ -439,6 +182,7 @@ class Qwen35TransformerBlock(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.full_attn = config.attention is not None
+        self.attn_mask_key = "quadratic_attention" if self.full_attn else "deltanet"
 
         if self.full_attn:
             self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
@@ -459,23 +203,27 @@ class Qwen35TransformerBlock(Module):
 
     def forward(
         self,
-        x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        x_BLD: torch.Tensor,
+        attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        h = self.attention_norm(x)
-        if self.full_attn:
-            h = self.attn(h, attention_masks, positions)
-        else:
-            h = self.attn(h)
-        x = x + h
+        layer_mask = (
+            attention_masks[self.attn_mask_key] if attention_masks is not None else None
+        )
 
-        h = self.ffn_norm(x)
-        if self.moe_enabled:
-            x = x + self.moe(h)
+        h_BLD = self.attention_norm(x_BLD)
+        if self.full_attn:
+            h_BLD = self.attn(h_BLD, layer_mask, positions)
         else:
-            x = x + self.feed_forward(h)
-        return x
+            h_BLD = self.attn(h_BLD, layer_mask)
+        x_BLD = x_BLD + h_BLD
+
+        h_BLD = self.ffn_norm(x_BLD)
+        if self.moe_enabled:
+            x_BLD = x_BLD + self.moe(h_BLD)
+        else:
+            x_BLD = x_BLD + self.feed_forward(h_BLD)
+        return x_BLD
 
 
 class Qwen35Model(Decoder):
@@ -534,7 +282,11 @@ class Qwen35Model(Decoder):
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 dn_cfg = next(
-                    (l.delta_net for l in self.layers if l.delta_net is not None),
+                    (
+                        layer_cfg.delta_net
+                        for layer_cfg in self.layers
+                        if layer_cfg.delta_net is not None
+                    ),
                     None,
                 )
                 if dn_cfg is not None:
@@ -551,12 +303,16 @@ class Qwen35Model(Decoder):
 
             set_qwen35_sharding_config(
                 self,
+                enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
+            # The shared helper excludes the vision encoder from the per-token
+            # FLOP term (ViT cost scales with patches, not seq_len), so this MFU
+            # is decoder-only. TODO: add a per-batch vision FLOP term for VLMs.
             attn_cfg = self.first_attention
             # pyrefly: ignore [missing-attribute]
             n_heads = attn_cfg.n_heads
@@ -575,6 +331,43 @@ class Qwen35Model(Decoder):
 
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+
+    def get_attention_masks(
+        self,
+        positions: torch.Tensor,
+    ) -> Qwen35AttentionMaskDict:
+        """Build the per-consumer mask dict for the hybrid stack.
+
+        A ``BlockMask`` isolates documents in the quadratic layers. The value
+        is ``None`` if the config has no quadratic layer. GatedDeltaNet uses
+        document offsets under the ``"deltanet"`` key. Each block selects its
+        value by ``attn_mask_key``. The trainer builds this dictionary for
+        each pipeline microbatch.
+        """
+        attn_config = self.config.first_attention
+
+        # Host offsets are a GatedDeltaNet-only need: the FLA varlen kernels
+        # take cu_seqlens as a CPU tensor to size their launches, whereas
+        # quadratic attention (torch.nn.attention.varlen) consumes the device
+        # tensor directly. They are stored as Python ints so SelectiveAC
+        # checkpoint metadata stays tensor-free.
+        deltanet_metadata = create_varlen_metadata_for_document(
+            positions,
+            include_host_offsets=True,
+        )
+        if attn_config is None:
+            quadratic_attention = None
+        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
+            # Under varlen both consumers read the same document offsets.
+            quadratic_attention = deltanet_metadata
+        else:
+            quadratic_masks = super().get_attention_masks(positions)
+            assert isinstance(quadratic_masks, BlockMask)
+            quadratic_attention = quadratic_masks
+        return {
+            "quadratic_attention": quadratic_attention,
+            "deltanet": deltanet_metadata,
+        }
 
     def _get_vision_positions(
         self,
@@ -623,42 +416,16 @@ class Qwen35Model(Decoder):
             grid_thw: Grid dimensions (num_items, 3) for [t, h, w]
 
         Returns:
-            merged_embeds: (num_items, max_tokens, dim) padded vision embeddings
+            vision_embeds: (num_items, max_tokens, dim) padded vision embeddings
             num_tokens_per_item: (num_items,) actual token count per item
         """
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        merged_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit
 
-        return merged_embeds, num_tokens_per_item
-
-    def _scatter_vision_embeds(
-        self,
-        inputs_embeds: torch.Tensor,
-        *,
-        merged_embeds: torch.Tensor,
-        vision_positions: list[tuple[int, int, int, int]],
-    ) -> torch.Tensor:
-        """Scatter vision embeddings into text embeddings at placeholder positions.
-
-        Copies directly from the padded vision encoder output into the text
-        sequence.
-
-        Args:
-            inputs_embeds: Text embeddings (batch, seq_len, dim)
-            merged_embeds: Padded vision embeddings (num_items, max_tokens, dim)
-            vision_positions: List of (item_idx, sample_idx, vision_start, n_tokens)
-
-        Returns:
-            Updated embeddings
-        """
-        for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-            inputs_embeds[
-                sample_idx, vision_start : vision_start + n_tokens, :
-            ] = merged_embeds[item_idx, :n_tokens, :]
-        return inputs_embeds
+        return vision_embeds, num_tokens_per_item
 
     def _prepare_multimodal_embeds(
         self,
@@ -668,7 +435,7 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run vision encoder, scatter vision into text.
 
@@ -683,38 +450,39 @@ class Qwen35Model(Decoder):
         Returns:
             (batch, seq_len, dim) embeddings with vision tokens scattered in
         """
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
 
         if pixel_values is not None and grid_thw is not None:
-            merged_embeds, num_tokens = self._get_vision_embeds(
+            if special_tokens is None:
+                raise ValueError("special_tokens is required for image inputs")
+            vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
-            image_positions = self._get_vision_positions(
-                tokens, num_tokens, image_token_id
+            image_positions = get_vision_positions(
+                tokens, num_tokens, special_tokens["image_id"]
             )
             if image_positions:
-                inputs_embeds = self._scatter_vision_embeds(
+                inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    merged_embeds=merged_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=image_positions,
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
-            merged_embeds, num_tokens = self._get_vision_embeds(
+            if special_tokens is None:
+                raise ValueError("special_tokens is required for video inputs")
+            vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
-            video_positions = self._get_vision_positions(
-                tokens, num_tokens, video_token_id
+            video_positions = get_vision_positions(
+                tokens, num_tokens, special_tokens["video_id"]
             )
             if video_positions:
-                inputs_embeds = self._scatter_vision_embeds(
+                inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
-                    merged_embeds=merged_embeds,
+                    vision_embeds=vision_embeds,
                     vision_positions=video_positions,
                 )
 
@@ -728,22 +496,38 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw=grid_thw,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+        with multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                annotate_qwen35_input_spmd_types(
+                    attention_masks=attention_masks,
+                    mrope_positions=mrope_positions,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                )
+
+            if self.tok_embeddings is not None:
+                x = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw=grid_thw,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,
+                )
+            else:
+                x = tokens
+
+        if spmd.is_type_checking():
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes as global batch sharding after the multimodal region.
+            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions

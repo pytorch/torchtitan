@@ -250,7 +250,8 @@ DSV3_PARALLELISM = (
     " --parallelism.expert_parallel_degree=2"
 )
 DSV3_EP_OVERLAP_GRAPH_PARALLELISM = (
-    "--parallelism.data_parallel_shard_degree=8"
+    "--training.disable_cuda_graphs"
+    " --parallelism.data_parallel_shard_degree=8"
     " --parallelism.tensor_parallel_degree=1"
     " --parallelism.expert_parallel_degree=2"
 )
@@ -345,7 +346,8 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
 
 
 GRAPH_PP_DSV3_PP_OPTIONS = (
-    "--parallelism.pipeline_parallel_degree=2"
+    "--training.disable_cuda_graphs"
+    " --parallelism.pipeline_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
     " --training.local_batch_size=8"
@@ -468,7 +470,8 @@ def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
 
 
 QWEN3_MOE_PARALLELISM = (
-    "--parallelism.data_parallel_shard_degree=4"
+    "--training.disable_cuda_graphs"
+    " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.tensor_parallel_degree=2"
     " --parallelism.expert_parallel_degree=2"
 )
@@ -691,6 +694,7 @@ class TestSimpleFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def get_input(self):

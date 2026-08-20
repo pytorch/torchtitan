@@ -9,13 +9,21 @@ Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
   - Profiler.Config                 (in tools/profiler.py)
-  - OptimizersContainer.Config      (in components/optimizer.py)
-  - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
+  - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
+  - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
   - MetricsProcessor.Config         (in components/metrics.py)
-  - CheckpointManager.Config        (in components/checkpoint.py)
+  - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
 Configs without a clear single owner (or with circular-import constraints)
 live here.
+
+Most knobs belong to a component or to the model, not here. But some options
+have no suitable home, e.g. ``local_batch_size``, and those can be placed here.
+Discuss with the maintainers first if you intend to add one.
+
+The command-line surface is frozen either way, so annotate a new field with
+``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``torchtitan/config/README.md``.
 """
 
 from dataclasses import dataclass, field
@@ -27,13 +35,20 @@ import torch
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
     local_batch_size: int = 8
-    """Local batch size (i.e., per-device batch size)"""
+    """
+    Batch size processed per data-parallel rank in one gradient accumulation step.
+    With pipeline parallelism, this is split into pipeline microbatches.
+    """
 
     global_batch_size: int = -1
     """
-    Global batch size (defaults to `training.local_batch_size * data-parallel degree`)
+    Global batch size across data-parallel ranks and gradient accumulation steps.
+    Defaults to `training.local_batch_size * data-parallel degree`.
     """
 
+    # TODO: Separate the packed model-input length from the per-document maximum.
+    # seq_len currently also controls document rejection, maximum position IDs,
+    # and the required RoPE cache length.
     seq_len: int = 2048
     """Sequence length"""
 
@@ -46,6 +61,18 @@ class TrainingConfig:
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
+    """
+
+    disable_cuda_graphs: bool = False
+    """
+    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    graphs require fixed-shape inputs and no CPU<->GPU synchronization during
+    the captured region. Expert parallelism is supported only with HybridEP
+    when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
+    EP backends synchronize with the host during dispatch. Pipeline parallelism
+    is not supported yet. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -130,18 +157,14 @@ class ParallelismConfig:
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
-    enable_async_tensor_parallel: bool = False
-    """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
-
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal["default", "full_dtensor", "spmd_types"] = "default"
+    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
     """
     SPMD backend selector.
 
-    - "default": use the existing TorchTitan parallelism paths.
-    - "full_dtensor": use the existing full DTensor path.
+    - "partial_dtensor": use DTensor for model-parallel axes only.
     - "spmd_types": use the spmd_types path.
     """
 
@@ -200,9 +223,7 @@ class ParallelismConfig:
     pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).
-    This value is used to compute the total number of microbatches by dividing local_batch_size with
-    pipeline_parallel_microbatch_size.
-    The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
+    `training.local_batch_size` must be evenly divisible by this value.
     """
 
     context_parallel_degree: int = 1
@@ -216,11 +237,20 @@ class ParallelismConfig:
     - None: Disable load balancing
     """
 
+    context_parallel_ptrr_mask_key: str | None = None
+    """
+    When the load balancer is "ptrr" and the attention masks are a
+    dict[str, BlockMask], this selects which mask in the dict the
+    PTRRLoadBalancer is built from. The chosen balancer is then used to shard
+    every mask in the dict as well as the inputs. Only relevant for the "ptrr"
+    load balancer with dict-valued attention masks; ignored otherwise.
+    """
+
     def __post_init__(self):
-        if self.spmd_backend not in {"default", "full_dtensor", "spmd_types"}:
+        if self.spmd_backend not in {"partial_dtensor", "spmd_types"}:
             raise ValueError(
-                "parallelism.spmd_backend must be one of "
-                "'default', 'full_dtensor', or 'spmd_types'."
+                "parallelism.spmd_backend must be either 'partial_dtensor' "
+                "or 'spmd_types'."
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
@@ -255,10 +285,22 @@ class CompileConfig:
     enable: bool = False
     """Whether to apply torch.compile"""
 
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
     components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
 
     backend: str = "inductor"
+
+    def __post_init__(self) -> None:
+        if self.enable_async_tensor_parallel and not (
+            self.enable and "model" in self.components
+        ):
+            raise ValueError(
+                "Async TP requires 'model' in --compile.components and "
+                "--compile.enable"
+            )
 
 
 @dataclass(kw_only=True, slots=True)

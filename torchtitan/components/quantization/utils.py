@@ -53,6 +53,8 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
             top_k=dispatcher.top_k,
             non_blocking_capacity_factor=dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
+            hidden_dim=dispatcher.hidden_dim,
+            num_max_tokens_per_rank=dispatcher.num_max_tokens_per_rank,
         )
     else:
         raise ValueError(
@@ -69,12 +71,15 @@ def has_quantization(model_config) -> bool:
         Float8Linear,
     )
     from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+    from torchtitan.components.quantization.nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []
     if Float8Linear is not None:
         quant_linear_types.append(Float8Linear.Config)
     if MXFP8Linear is not None:
         quant_linear_types.append(MXFP8Linear.Config)
+    if NVFP4Linear is not None:
+        quant_linear_types.append(NVFP4Linear.Config)
 
     has_quant_linear = bool(quant_linear_types) and any(
         isinstance(config, tuple(quant_linear_types))

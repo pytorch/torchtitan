@@ -12,7 +12,7 @@
 #   H = head dimension (per-head dim),
 #   T = packed tokens (B*L, used by VarlenAttention)
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -64,6 +64,7 @@ __all__ = [
     "get_efficient_causal_mask_mod_for_packed_document",
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
+    "local_head_split",
 ]
 
 
@@ -77,9 +78,32 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    cu_seq_q_host: tuple[int, ...] | None = None
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+# Mapping (not dict) lets covariant value types accept both BlockMask-only
+# dictionaries and mixed dictionaries. A None value marks an unused mask.
+AttentionMasksType = (
+    Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
+)
+
+
+def local_head_split(
+    t: torch.Tensor,
+    head_dim: int,
+    *,
+    dp_shard_dim: int = 0,
+) -> torch.Tensor:
+    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
+    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
+    tensor_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(2)}
+    with spmd.local():
+        if use_spmd:
+            spmd.assert_type(t, tensor_type)
+        out = t.view(t.shape[0], t.shape[1], -1, head_dim)
+        if use_spmd:
+            spmd.assert_type(out, tensor_type)
+    return out
 
 
 class VarlenAttention(Module):
@@ -101,12 +125,14 @@ class VarlenAttention(Module):
         super().__init__()
         self.window_size = config.window_size
 
-        from torchtitan.tools.utils import has_cuda_capability
+        from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
-        # Hopper (SM 9.0) uses FA3
-        if has_cuda_capability(9, 0):
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+        flash_attention_impl = get_cuda_flash_attention_impl()
+        if (
+            flash_attention_impl is not None
+            and current_flash_attention_impl() != flash_attention_impl
+        ):
+            activate_flash_attention_impl(flash_attention_impl)
 
     def forward(
         self,
@@ -130,13 +156,15 @@ class VarlenAttention(Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        B, L, _, H = q_BLNH.shape
+        B, L, _, qk_head_dim = q_BLNH.shape
+        value_head_dim = v_BLNH.shape[-1]
         T = B * L
 
-        # varlen attention expects (T, N, H)
-        q_TNH = q_BLNH.reshape(T, -1, H)
-        k_TNH = k_BLNH.reshape(T, -1, H)
-        v_TNH = v_BLNH.reshape(T, -1, H)
+        # varlen attention expects (T, N, H). The value head dimension may
+        # differ from the query/key head dimension, as in MLA.
+        q_TNH = q_BLNH.reshape(T, -1, qk_head_dim)
+        k_TNH = k_BLNH.reshape(T, -1, qk_head_dim)
+        v_TNH = v_BLNH.reshape(T, -1, value_head_dim)
 
         # Some operators can upcast under AMP, but varlen attention currently only
         # supports bf16/fp16 inputs. If this changes, or fp16 training support
@@ -193,7 +221,7 @@ class VarlenAttention(Module):
                 # rejected during q_TNH reshape propagation.
                 q_ps = get_partition_spec(q_TNH)
                 spmd.assert_type(result, q_local, q_ps)
-            out_BLNH = result.view(B, L, -1, H).to(q_BLNH.dtype)
+            out_BLNH = result.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
             return out_BLNH
 
         out_TNH, lse_NT = result
@@ -205,7 +233,7 @@ class VarlenAttention(Module):
             lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
             spmd.assert_type(lse_NT, q_local, lse_ps)
 
-        out_BLNH = out_TNH.view(B, L, -1, H).to(q_BLNH.dtype)
+        out_BLNH = out_TNH.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
         # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
         # out_transform can broadcast per (token, head).
         lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
@@ -601,6 +629,8 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -610,9 +640,12 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[b, s]``. Positions
             reset to 0 at each document start.
+        include_host_offsets: Also materialize cumulative sequence offsets as
+            host metadata for kernels that need it.
 
     Returns:
-        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
+        VarlenMetadata containing cumulative sequence length indices for q, k,
+        and max_seq_len.
     """
     batch_size, seq_len = positions.shape
     device = positions.device
@@ -636,19 +669,41 @@ def create_varlen_metadata_for_document(
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
     )
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        # Packed document boundaries are rank-local ragged metadata, so they
+        # vary across DP ranks even when construction initially infers R.
+        spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
 
-    max_seqlen: int = 0
-    if len(all_seq_lengths) > 0:
+    max_seqlen: int
+    packed_cu_seqlens_host = None
+    if include_host_offsets:
+        packed_cu_seqlens_host = tuple(
+            int(offset) for offset in packed_cu_seqlens.tolist()
+        )
+        max_seqlen = max(
+            (
+                end - start
+                for start, end in zip(
+                    packed_cu_seqlens_host[:-1],
+                    packed_cu_seqlens_host[1:],
+                    strict=False,
+                )
+            ),
+            default=0,
+        )
+    elif len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
-        # pyrefly: ignore[bad-assignment]
-        max_seqlen = all_seq_lengths.max().item()
+        max_seqlen = int(all_seq_lengths.max().item())
+    else:
+        max_seqlen = 0
 
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
+        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 
@@ -715,7 +770,7 @@ class QKVLinear(BaseQKVLinear):
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
                 x_ = x.view(bs, seqlen, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types":
+                if spmd.is_type_checking():
                     spmd.assert_type(
                         x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
                     )
@@ -775,7 +830,7 @@ class FusedQKVLinear(BaseQKVLinear):
         qkv = self.wqkv(x)
         with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
             qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types":
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
                 )
@@ -803,7 +858,8 @@ class FusedQKVLinear(BaseQKVLinear):
             # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
             # cat() inconsistent grad types in PP's backward metadata inference.
             # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards seq). TODO: remove it after spmd_types/full_dtensor
+            # head axis, CP shards seq). TODO: remove once the partial_dtensor
+            # backend is gone.
             _split = local_map(
                 _split,
                 out_placements=(qkv.placements,) * 3,
@@ -926,7 +982,6 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
         xq_BLNH, xk_BLNH, xv_BLNH = self.qkv_linear(x_BLD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -947,5 +1002,10 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        out_BLD = out_BLNH.view(B, L, -1)
+        # Fold from out_BLNH's own shape. The stock block declares an input
+        # all-gather, so x_BLD's L is already the full sequence; a qkv_linear that
+        # gathers the sequence itself declares none, leaving x_BLD SP-sharded while
+        # out_BLNH is full-length. A view(B, L, -1) would not raise there -- the
+        # element counts still match -- it would fold sequence into features.
+        out_BLD = out_BLNH.flatten(2)
         return self.wo(out_BLD)

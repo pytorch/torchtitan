@@ -27,6 +27,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
     TracedResult,
 )
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    validate_memory_policy_config,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
@@ -108,6 +111,8 @@ class GraphTrainer(Trainer):
     def __init__(self, config):
         super().__init__(config)
 
+        validate_memory_policy_config(self.config.compile)
+
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
         # Lazy state for aot_fx_trace mode
@@ -129,23 +134,19 @@ class GraphTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        global_valid_tokens: float,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
-        if self.config.compile.mode != "aot_fx_trace":
+        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
-        if self.parallel_dims.pp_enabled:
-            return self._graph_pp_forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                global_valid_tokens=global_valid_tokens,
-            )
 
+        assert isinstance(input_dict, dict)
+        assert isinstance(labels, torch.Tensor)
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
@@ -165,32 +166,6 @@ class GraphTrainer(Trainer):
             params,
             extra_kwargs,
         )
-
-    def _graph_pp_forward_backward_step(
-        self,
-        *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        global_valid_tokens: float,
-    ) -> torch.Tensor:
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
-        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
-        with self.train_context():
-            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
-            schedule_args = (inputs,) if self.pp_has_first_stage else ()
-            self.pp_schedule.step(
-                *schedule_args,
-                **extra_kwargs,
-                target=targets,
-                losses=losses,
-                loss_kwargs=loss_kwargs,
-                return_outputs=False,
-            )
-
-        if self.pp_has_last_stage:
-            assert losses is not None
-            return torch.sum(torch.stack(losses)).to(self.device)
-        return torch.tensor([-1.0], device=self.device)
 
     def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""
@@ -225,7 +200,7 @@ class GraphTrainer(Trainer):
         model: nn.Module,
         inputs: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: float,
+        global_valid_tokens: torch.Tensor,
         params: list[torch.Tensor],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:

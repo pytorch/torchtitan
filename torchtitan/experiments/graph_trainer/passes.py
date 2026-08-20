@@ -30,7 +30,6 @@ import warnings
 from collections.abc import Callable
 
 import torch
-
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
@@ -336,7 +335,7 @@ def compile_time_passes(
             )
         )
 
-    if config.parallelism.enable_async_tensor_parallel:
+    if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
     if not include_inductor:

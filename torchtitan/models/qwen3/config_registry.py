@@ -4,25 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from typing import cast
+
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     default_adamw,
+    LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.components.quantization import NVFP4LinearConverter
+from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
-    HuggingFaceTextDataLoader,
-)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import Qwen3Model
 
 
 def qwen3_debugmodel() -> Trainer.Config:
@@ -36,7 +45,10 @@ def qwen3_debugmodel() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -55,6 +67,51 @@ def qwen3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def qwen3_debugmodel_nvfp4() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.parallelism.spmd_backend = "spmd_types"
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # Convert every decoder-layer Linear while leaving the lm_head in bf16.
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=["layers"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
+
+
+def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
+    config = qwen3_debugmodel()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    # Keep the last 15% of decoder layers and the lm_head in bf16.
+    num_layers = len(cast(Qwen3Model.Config, config.model_spec.model).layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
+    fqns = nvfp4_bf16_tail_fqns(
+        num_layers,
+        _NVFP4_BF16_TAIL_FRACTION,
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=fqns,
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
 
 
 def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
@@ -102,7 +159,10 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -134,8 +194,8 @@ def qwen3_0_6b() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -163,8 +223,8 @@ def qwen3_1_7b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-1.7B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -182,6 +242,31 @@ def qwen3_1_7b() -> Trainer.Config:
     )
 
 
+def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
+    config = sft_qwen3_8b_math()
+    config.parallelism.spmd_backend = "spmd_types"
+    assert config.model_spec is not None
+    config.compile = CompileConfig(enable=True, components=["model"])
+    # Keep the last 15% of decoder layers and the lm_head in bf16.
+    num_layers = len(cast(Qwen3Model.Config, config.model_spec.model).layers)
+    _NVFP4_BF16_TAIL_FRACTION = 0.15
+    fqns = nvfp4_bf16_tail_fqns(
+        num_layers,
+        _NVFP4_BF16_TAIL_FRACTION,
+    )
+    config.model_spec = model_registry(
+        "8B",
+        attn_backend="varlen",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=fqns,
+                model_compile_enabled=True,
+            ),
+        ],
+    )
+    return config
+
+
 def qwen3_14b() -> Trainer.Config:
     model_spec = model_registry("14B")
     return Trainer.Config(
@@ -192,8 +277,8 @@ def qwen3_14b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-14B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -227,8 +312,8 @@ def qwen3_30b_a3b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-30B-A3B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -262,8 +347,8 @@ def qwen3_32b() -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-32B",
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
@@ -306,8 +391,9 @@ def qwen3_moe_debug() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4_test",
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            shuffle=False,
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
@@ -333,8 +419,8 @@ def qwen3_moe_deepep() -> Trainer.Config:
 
     The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
     takes the compact, host-synced, backward-able path. EP=4 (4 GPUs) so the dispatch is
-    actually exercised (EP=1 falls back to local); the compact path auto-sizes its buffer from
-    the per-rank token count. Numerics match the standard all-to-all backend (step-1 bitwise,
+    actually exercised (EP=1 falls back to local); the training shape determines the fixed
+    per-rank buffer capacity. Numerics match the standard all-to-all backend (step-1 bitwise,
     reduction-order drift thereafter). Needs deep_ep v2 (ElasticBuffer) in the env.
 
     Local devgpu (no RDMA NIC) needs these env vars so the ElasticBuffer inits NVLink-only:
@@ -354,10 +440,17 @@ def qwen3_moe_deepep() -> Trainer.Config:
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
-        training=TrainingConfig(local_batch_size=2, seq_len=512, steps=10),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=512,
+            steps=10,
+            disable_cuda_graphs=True,
+        ),
         parallelism=ParallelismConfig(expert_parallel_degree=4),
         checkpoint=CheckpointManager.Config(
             interval=1000, last_save_model_only=False, export_dtype="float16"
@@ -402,10 +495,18 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             seq_len=2048,
             steps=180,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="openai/gsm8k",
-            load_dataset_kwargs={"name": "main", "split": "train"},
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="openai/gsm8k",
+                        name="main",
+                        split="train",
+                    ),
+                    processor=ChatProcessor.Config(messages_fn=process_sample),
+                    post_filters=(lambda sample: sample is not None,),
+                ),
+            ),
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,

@@ -30,27 +30,28 @@ pip install -r requirements.txt
 To run the integration tests:
 
 ```bash
-python -m tests.integration_tests.run_tests <output_dir> [--module MODULE] [--config CONFIG] [--test_suite TEST_SUITE] [--test_name TEST_NAME] [--ngpu NGPU]
+python -m tests.integration_tests.run_tests <output_dir> [--test_suite TEST_SUITE] [--test_name TEST_NAME] [--ngpu NGPU]
 ```
 
 Arguments:
 - `output_dir`: (Required) Directory where test outputs will be stored
-- `--module`: (Optional) Model module to use for training (default: "llama3"). Passed as `MODULE` env var to `run_train.sh`.
-- `--config`: (Optional) Config function to use for training (default: "llama3_debugmodel"). Passed as `CONFIG` env var to `run_train.sh`.
 - `--test_suite`: (Optional) Specific test suite to run by name (default: "features")
 - `--test_name`: (Optional) Specific test to run by name (default: "all")
 - `--ngpu`: (Optional) Number of GPUs to use for testing (default: 8)
 
+Each test names the full configurations it runs, one per run, and the runner passes
+them to `run_train.sh` as the `MODULE` and `CONFIG` env vars. The configurations
+live in [torchtitan_recipes/tests](../torchtitan_recipes/tests/), one module per
+test suite. To run something else, add a configuration there and a test entry
+that names it.
+
 Examples:
 ```bash
-# Run all feature integration tests with default module/config (llama3/llama3_debugmodel)
+# Run all feature integration tests (features is the default suite)
 python -m tests.integration_tests.run_tests test_output
 
-# Run feature tests with a specific module and config
-python -m tests.integration_tests.run_tests test_output --module llama3 --config llama3_8b
-
-# Run only core functionality tests for features
-python -m tests.integration_tests.run_tests test_output --test_suite features
+# Run the model test suite
+python -m tests.integration_tests.run_tests test_output --test_suite models
 
 # Run a specific test with 2 GPUs
 python -m tests.integration_tests.run_tests test_output --test_suite features --test_name gradient_accumulation --ngpu 2

@@ -66,7 +66,7 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
                 torch.manual_seed(42)
                 B, D, V = 2, 32, 64
                 labels = torch.randint(0, V, (B, seq_len))
-                global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+                global_valid_tokens = (labels != IGNORE_INDEX).sum()
                 hidden_states = torch.randn(B, seq_len, D)
 
                 model_a, loss_a_fn = _make_model_and_loss(D, V, num_chunks)

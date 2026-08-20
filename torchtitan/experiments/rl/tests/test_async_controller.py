@@ -206,5 +206,71 @@ def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
         compute_policy_age_metrics(
             trainer_policy_version=4,
             min_policy_versions=[0],
+            target_offpolicy_steps=3,
             max_offpolicy_steps=3,
         )
+
+
+def test_compute_policy_age_metrics_uses_hard_offpolicy_limit() -> None:
+    metrics = compute_policy_age_metrics(
+        trainer_policy_version=4,
+        min_policy_versions=[0],
+        target_offpolicy_steps=3,
+        max_offpolicy_steps=4,
+    )
+    assert any(metric.key == "train_batch/policy_age_max" for metric in metrics)
+
+    with pytest.raises(RuntimeError, match="admitted stale training data"):
+        compute_policy_age_metrics(
+            trainer_policy_version=5,
+            min_policy_versions=[0],
+            target_offpolicy_steps=3,
+            max_offpolicy_steps=4,
+        )
+
+
+def _fifo_buffer(*, capacity: int, window_size: int = 1) -> RolloutGroupWorkBuffer:
+    return RolloutGroupWorkBuffer.Config().build(
+        max_active_rollout_groups=capacity,
+        window_size=window_size,
+    )
+
+
+def test_work_buffer_rejects_window_larger_than_capacity() -> None:
+    with pytest.raises(ValueError, match="window_size"):
+        _fifo_buffer(capacity=2, window_size=3)
+
+
+async def _admit(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
+    if not await buffer.wait_for_slot():
+        raise RuntimeError("buffer closed unexpectedly")
+    await buffer.add_work(RolloutGroupWork(group_id=group_id, sample=object()))
+
+
+async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
+    await buffer.finalize_work(RolloutGroup(group_id=group_id, rollouts=[]))
+
+
+def test_windowed_fifo_takes_within_anchored_window() -> None:
+    async def run() -> None:
+        # Window [g0, g3]: g1/g2/g3 may bypass stuck g0; g4 remains blocked.
+        buffer = _fifo_buffer(capacity=8, window_size=4)
+        for group_id in range(5):
+            await _admit(buffer, group_id)
+        await buffer.claim_next()  # g0 -> INFLIGHT and stuck
+        for group_id in (1, 2, 3, 4):
+            await _finalize(buffer, group_id)
+
+        assert (await buffer.take_finalized()).group_id == 1
+        assert (await buffer.take_finalized()).group_id == 2
+        assert (await buffer.take_finalized()).group_id == 3
+
+        taker = asyncio.create_task(buffer.take_finalized())
+        await asyncio.sleep(0)
+        assert not taker.done()  # g4 is finalized but outside the anchored window
+
+        await _finalize(buffer, 0)
+        assert (await taker).group_id == 0
+        assert (await buffer.take_finalized()).group_id == 4
+
+    asyncio.run(run())

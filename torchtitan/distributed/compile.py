@@ -5,14 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import warnings
 from collections.abc import Callable
 
 import torch
+import torch._inductor.config
 import torch.fx.traceback as fx_traceback
 import torch.nn as nn
 from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import CompileConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 
 
@@ -32,11 +36,21 @@ FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
 _regional_inductor_enabled: bool = False
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig) -> None:
+def apply_compile(
+    model: nn.Module,
+    *,
+    compile_config: CompileConfig,
+    parallel_dims: ParallelDims,
+) -> None:
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    _maybe_enable_async_tp(
+        compile_config,
+        parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
+    )
+
     # Needed for torch.compile to handle data-dependent dynamic shapes in
     # token-choice MoE dispatch. Harmless for dense models.
     torch._dynamo.config.capture_scalar_outputs = True
@@ -56,6 +70,30 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig) -> None:
         transformer_block.compile(backend=backend, fullgraph=True)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
+
+def _maybe_enable_async_tp(
+    compile_config: CompileConfig,
+    tp_mesh: DeviceMesh | None,
+) -> None:
+    """Configure Inductor's async TP pass for the provided TP mesh."""
+    if not compile_config.enable_async_tensor_parallel or tp_mesh is None:
+        return
+
+    group_name = tp_mesh.get_group().group_name
+    # TODO: Remove this call once PyTorch automatically registers symmetric
+    # memory for process groups used by async TP:
+    # https://github.com/pytorch/pytorch/issues/193027
+    from torch.distributed._symmetric_memory import (
+        enable_symm_mem_for_group,  # pyrefly: ignore [deprecated]
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        enable_symm_mem_for_group(group_name)  # pyrefly: ignore [deprecated]
+
+    torch._inductor.config._micro_pipeline_tp = True
+    logger.info("Async TP is enabled")
 
 
 def _maybe_regional_inductor_backend(model: nn.Module, backend: str) -> str | Callable:

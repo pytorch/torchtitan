@@ -158,9 +158,9 @@ class GptOssGroupedExperts(GroupedExperts):
         ).long()
 
         # G = gate+up dimension (2*F)
-        h_RG = torch._grouped_mm(
-            x_RD.bfloat16(),
-            mlp1_weight_EGD.transpose(-2, -1).bfloat16(),
+        h_RG = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            B_t=mlp1_weight_EGD.transpose(-2, -1).bfloat16(),
             offs=offsets_E,
         )
 
@@ -173,8 +173,8 @@ class GptOssGroupedExperts(GroupedExperts):
         h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
-        h_RD = torch._grouped_mm(
-            h_RF, mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
+        h_RD = self._grouped_mm(
+            A=h_RF, B_t=mlp2_weight_EDF.transpose(-2, -1).bfloat16(), offs=offsets_E
         )
 
         # Apply custom autograd function to scale bias in forward but not in backward

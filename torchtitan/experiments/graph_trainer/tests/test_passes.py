@@ -92,6 +92,8 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
     _make_full_memory_policy,
     tag_sac_policy,
+    tag_with_memory_policy_pass,
+    validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
@@ -133,7 +135,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
                 model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
-                parallelism=SimpleNamespace(enable_async_tensor_parallel=False),
+                parallelism=SimpleNamespace(),
             )
 
         traced_result = SimpleNamespace(state_fqns=[])
@@ -253,6 +255,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
@@ -1215,6 +1218,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def _get_fsdp_pg_name(self):
@@ -1694,6 +1698,93 @@ class TestFullMemoryPolicy(TestCase):
         node = self._get_call_function_nodes(gm)[0]
         self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_RECOMPUTE)
 
+    def test_selected_module_ops_saved(self):
+        policy_fn = _make_full_memory_policy(
+            "layers.*.moe.router.gate :: aten.mm.default | "
+            "layers.*.attention.inner_attention :: higher_order.flex_attention"
+        )
+        cases = (
+            (
+                torch.ops.aten.mm.default,
+                "layers.3.moe.router.gate",
+                CheckpointPolicy.MUST_SAVE,
+            ),
+            (
+                torch.ops.aten.mm.default,
+                "layers.3.attention.wkv_a",
+                CheckpointPolicy.MUST_RECOMPUTE,
+            ),
+            (
+                torch.ops.aten._to_copy.default,
+                "layers.3.moe.router.gate",
+                CheckpointPolicy.MUST_RECOMPUTE,
+            ),
+            (
+                torch.ops.higher_order.flex_attention,
+                "layers.3.attention.inner_attention",
+                CheckpointPolicy.MUST_SAVE,
+            ),
+        )
+
+        for target, fqn, expected in cases:
+            with self.subTest(target=target, fqn=fqn):
+                gm = self._build_gm([target], layer_fqns=[fqn])
+                node = self._get_call_function_nodes(gm)[0]
+                self.assertEqual(policy_fn(node), expected)
+
+    def test_selected_module_op_can_target_one_layer(self):
+        policy_fn = _make_full_memory_policy(
+            "layers.7.attention.wo :: torch.ops.aten.mm.default"
+        )
+        for layer_id, expected in (
+            (7, CheckpointPolicy.MUST_SAVE),
+            (8, CheckpointPolicy.MUST_RECOMPUTE),
+        ):
+            gm = self._build_gm(
+                [torch.ops.aten.mm.default],
+                layer_fqns=[f"layers.{layer_id}.attention.wo"],
+            )
+            node = self._get_call_function_nodes(gm)[0]
+            self.assertEqual(policy_fn(node), expected)
+
+    def test_full_policy_uses_configured_save_ops(self):
+        gm = self._build_gm(
+            [torch.ops.aten.mm.default],
+            layer_fqns=["layers.3.moe.router.gate"],
+        )
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                memory_policy="full",
+                full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+            )
+        )
+
+        tag_with_memory_policy_pass(gm, config=config)
+
+        node = self._get_call_function_nodes(gm)[0]
+        self.assertEqual(node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_save_ops_rejected_for_other_memory_policies(self):
+        compile_config = GraphTrainerCompileConfig(
+            memory_policy="default",
+            full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires.*memory_policy full"):
+            validate_memory_policy_config(compile_config)
+
+    def test_invalid_save_op_selectors_rejected(self):
+        invalid_values = (
+            "layers.*.moe.router.gate",
+            ":: aten.mm.default",
+            "layers.*.moe.router.gate ::",
+            "layers.*.moe.router.gate :: aten.not_an_op.default",
+            "layers.*.moe.router.gate :: aten.mm",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _make_full_memory_policy(value)
+
     def test_layer_boundary_forced_to_must_save(self):
         """Nodes at layer boundaries should still be forced to MUST_SAVE."""
         gm = self._build_gm(
@@ -1811,6 +1902,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
         model_spec = llama3_model_registry("debugmodel")
@@ -3378,7 +3470,6 @@ class TestChunkPasses(TestCase):
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(
-                enable_async_tensor_parallel=False,
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,

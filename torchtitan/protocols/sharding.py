@@ -14,12 +14,15 @@ meshes.
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
-
-from torchtitan.distributed.spmd_types import spmd_layout_to_dtensor_placements
+from torchtitan.distributed.parallel_dims import (
+    MeshAxisName,
+    SpmdLayout,
+    unfold_dp_axis,
+)
 
 
 __all__ = [
@@ -143,18 +146,22 @@ def resolve_placements(
     # TODO(fegin): remove the size-1 ``Shard(d)``/``Partial`` to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-    placements = spmd_layout_to_dtensor_placements(layout)
+    axis_types = {}
+    for axis_name, axis_type in layout.per_axis_spmd_types().items():
+        for concrete_axis_name in unfold_dp_axis(axis_name):
+            axis_types[concrete_axis_name] = axis_type
+
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
-        if key not in placements:
+        if key not in axis_types:
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
                 f"{sorted(k.value for k in layout.axes())}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
-        p = placements[key]
+        p = spmd.spmd_type_to_dtensor_placement(axis_types[key])
         if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)

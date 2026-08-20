@@ -11,7 +11,7 @@ A ``RoutingStrategy`` chooses one ``RoutingCandidate`` from a set given a
 ``reserved_load`` field plus object identity -- so the same strategy classes
 serve both routing layers in the RL generator:
 
-- Layer 1: ``InterGeneratorRouter`` (controller side) routes a call across
+- Layer 1: ``InterGeneratorRouter`` (router actor side) routes a call across
   generator *meshes* (replicas). See ``inter_generator_router.py``.
 - Layer 2: ``IntraGeneratorRouter`` (in-mesh, rank-0 side) routes a request
   across the *data-parallel ranks* within one generator mesh. See
@@ -77,21 +77,49 @@ class RoundRobinRoutingStrategy(RoutingStrategy):
 
 
 class LeastLoadedRoutingStrategy(RoutingStrategy):
-    """Pick the candidate with the least reserved load."""
+    """Pick the least loaded candidate, breaking ties by least recently chosen."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
+
+    def __init__(self, config: Config):
+        del config
+        self._selection_counter = itertools.count()
+        # id(candidate) -> the selection number of its most recent selection.
+        # Object identity is all a strategy gets from RoutingCandidate, and both
+        # routers build their handles once and own them for their own lifetime,
+        # so ids stay valid and the map stays bounded by the candidate count.
+        self._last_chosen: dict[int, int] = {}
 
     def choose(
         self,
         routing_ctx: RoutingContext,
         candidates: Sequence[RoutingCandidate],
     ) -> RoutingCandidate:
-        """Return the candidate with the lowest reserved load."""
+        """Return the least recently chosen of the lowest reserved load candidates.
+
+        Ties are common: a request arriving while the candidates are quiescent
+        sees all of them at zero load. Resolving every tie to the same candidate
+        is harmless on its own because the next request re-picks, but
+        ``StickySessionRoutingStrategy`` keeps a session on whichever candidate
+        this returns for the session's lifetime, so a fixed tie-break pins every
+        session started from an idle state onto one candidate.
+
+        The tie-break tracks per-candidate recency instead of cycling a counter
+        over the tied candidates, because generators drain for weight sync and
+        leave the candidate set: cycling by position over a list whose length
+        keeps changing can starve a candidate that is only sometimes present.
+        """
 
         del routing_ctx
-        return min(candidates, key=lambda h: h.reserved_load)
+        lowest_load = min(h.reserved_load for h in candidates)
+        chosen = min(
+            (h for h in candidates if h.reserved_load == lowest_load),
+            key=lambda h: self._last_chosen.get(id(h), -1),
+        )
+        self._last_chosen[id(chosen)] = next(self._selection_counter)
+        return chosen
 
 
 class StickySessionRoutingStrategy(RoutingStrategy):

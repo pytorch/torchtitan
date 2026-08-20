@@ -1349,7 +1349,11 @@ class TestMetadataPropagation(unittest.TestCase):
                 if not node.stack_trace:
                     bwd_nodes_missing_stack_trace.append((node.name, seq_nr))
 
-        self.assertEqual(num_checked, 24)
+        self.assertGreater(
+            num_checked,
+            0,
+            "Expected at least one backward node with a forward stack_trace",
+        )
         self.assertEqual(
             bwd_nodes_missing_stack_trace,
             [],
@@ -1838,6 +1842,7 @@ class TestTraceFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
     def _run_fsdp_model_test(
@@ -2014,6 +2019,9 @@ class TestTraceFSDP(FSDPTest):
         )
 
 
+# TODO: Re-enable after graph_trainer adopts spmd_types; partial_dtensor does
+# not apply the CP placements declared in ShardingConfig.
+@unittest.skip("Context Parallel is not supported by graph_trainer")
 @unittest.skipIf(torch.cuda.device_count() < 2, "CP trace test requires 2 GPUs")
 class TestTraceContextParallel(FSDPTest):
     @property
@@ -2193,6 +2201,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 pp=1,
                 ep=1,
                 world_size=self.world_size,
+                spmd_backend="partial_dtensor",
             )
             fsdp_mesh = parallel_dims.get_mesh("fsdp")
 

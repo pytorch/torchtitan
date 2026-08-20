@@ -6,6 +6,7 @@
 
 import contextlib
 import gc
+import os
 import subprocess
 import time
 from collections.abc import Generator
@@ -32,6 +33,16 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
+def get_cuda_flash_attention_impl() -> str | None:
+    """Return the FlashAttention implementation for the current CUDA architecture."""
+    # Blackwell (SM 10.0) and newer use FA4; Hopper (SM 9.0) uses FA3.
+    if has_cuda_capability(10, 0):
+        return "FA4"
+    if has_cuda_capability(9, 0):
+        return "FA3"
+    return None
+
+
 def has_rocm_capability(major: int, minor: int) -> bool:
     is_rocm = torch.cuda.is_available() and torch.version.hip is not None
     return is_rocm and torch.cuda.get_device_capability() >= (
@@ -47,6 +58,43 @@ def get_device_info() -> tuple[str, ModuleType]:
 
 
 device_type, device_module = get_device_info()
+
+
+def get_local_device() -> torch.device:
+    """Return this process's device under LOCAL_RANK or visible-device launch.
+
+    Launchers normally expose multiple accelerators per process and set
+    LOCAL_RANK to identify which local device the process should use. Some
+    launchers instead mask each process down to a single accelerator with
+    CUDA_VISIBLE_DEVICES or another backend-specific visible-device mask. When
+    exactly one device is visible, target device index 0; otherwise preserve
+    the existing LOCAL_RANK mapping.
+    """
+    local_rank_str = os.environ.get("LOCAL_RANK")
+    if local_rank_str is None:
+        raise ValueError("LOCAL_RANK must be set before selecting a local device.")
+    try:
+        local_rank = int(local_rank_str)
+    except ValueError as e:
+        raise ValueError(
+            "LOCAL_RANK environment variable must be a valid integer, "
+            f"got: {local_rank_str}"
+        ) from e
+    if local_rank < 0:
+        raise ValueError(f"LOCAL_RANK must be non-negative, got: {local_rank}")
+
+    num_devices = None
+    if hasattr(device_module, "device_count"):
+        num_devices = device_module.device_count()
+    device_index = 0 if num_devices == 1 else local_rank
+    if num_devices is not None and num_devices > 1 and device_index >= num_devices:
+        raise ValueError(
+            f"LOCAL_RANK={local_rank} is outside the visible {device_type} "
+            f"device count ({num_devices}). If each process is launched with a "
+            f"single visible {device_type} device, set the visible-device mask "
+            "per process so device_count() returns 1."
+        )
+    return torch.device(device_type, device_index)
 
 
 # used to avoid stragglers in garbage collection

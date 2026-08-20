@@ -12,11 +12,14 @@ Each saved forward activation can independently be tagged as MUST_SAVE,
 MUST_RECOMPUTE, or MUST_CPU_OFFLOAD.  The ``tag_with_memory_policy_pass``
 entry point selects a tagging strategy via ``--compile.memory_policy``.
 """
+
 from __future__ import annotations
 
 import operator
+import os
 from collections import defaultdict
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch.utils.checkpoint import CheckpointPolicy
@@ -25,14 +28,15 @@ from torchinsights.graph_estimation.runtime_estimator import (
     COST_MODEL,
     INTERPRETER,
 )
-
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
+    _get_module_fqn,
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
+    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
@@ -48,9 +52,73 @@ from torchtitan.experiments.graph_trainer.registry import (
     register_memory_policy,
 )
 from torchtitan.experiments.graph_trainer.two_level_ilp_memory_policy_pass import (
+    _is_recomputable,
+    HOST_MEMORY_FRACTION,
+    MEM_MULTIPLIER,
     two_level_ilp,
 )
 from torchtitan.tools.logging import logger
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+
+
+def resolve_host_offload_cap_gib(cpu_offload_budget_gb: float) -> float:
+    """Per-rank pinned-memory budget for offload, equal on every rank.
+
+    Offloaded activations are pinned on the host and every local rank pins its
+    own set, so the binding limit is the node's free memory shared across the
+    ranks on it, not the per-rank number alone. The returned value v satisfies
+    local_ranks * v <= fraction * MemFree by construction.
+
+    MemFree: only free memory on CPU. MemAvailable: PageCache+Free Mem, might take
+    longer to reclaim memory/pages.
+    """
+    local_ranks = max(1, int(os.environ.get("LOCAL_WORLD_SIZE", "1")))
+    avail_gib = 0.0
+    try:
+        with open("/proc/meminfo") as mi:
+            for line in mi:
+                if line.startswith("MemFree:"):
+                    avail_gib = float(line.split()[1]) * 1024 / MEM_MULTIPLIER
+                    break
+    except OSError:
+        pass
+    frac = HOST_MEMORY_FRACTION
+    host_limit = frac * avail_gib / local_ranks if avail_gib > 0 else float("inf")
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        _dev = "cuda" if torch.cuda.is_available() else "cpu"
+        t = torch.tensor([host_limit], dtype=torch.float64, device=_dev)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
+        host_limit = float(t.item())
+
+    requested = float(cpu_offload_budget_gb)
+    if requested < 0:
+        # Negative asks for whatever the host allows
+        cap = host_limit
+    elif requested > host_limit:
+        raise ValueError(
+            f"--compile.cpu_offload_budget_gb {requested:.1f} GiB/rank exceeds "
+            f"what this node can pin: {host_limit:.1f} GiB/rank "
+            f"({host_limit * local_ranks:.0f} GiB across {local_ranks} local "
+            f"ranks, {frac:.0%} of {avail_gib:.0f} GiB MemFree). Pinned "
+            f"pages cannot be swapped, so overcommitting them fails in the "
+            f"driver rather than degrading. Lower it to {host_limit:.1f} or "
+            f"less, set 0 to disable offload, or -1 to use the host limit."
+        )
+    else:
+        cap = requested
+    logger.info(
+        "Host (CPU) offload limit: %.2f GiB/rank x %d local ranks = %.0f GiB of "
+        "%.0f GiB MemFree (fraction %.2f, config cap %.1f)",
+        cap,
+        local_ranks,
+        cap * local_ranks,
+        avail_gib,
+        frac,
+        cpu_offload_budget_gb,
+    )
+    return cap
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -73,7 +141,63 @@ def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node
     return save_nodes
 
 
-def _make_full_memory_policy() -> Callable:
+def _resolve_op_target(op_name: str) -> object:
+    """Resolve ``aten.mm.default``-style names through ``torch.ops``."""
+    if op_name.startswith("torch.ops."):
+        op_name = op_name.removeprefix("torch.ops.")
+
+    target = torch.ops
+    try:
+        for component in op_name.split("."):
+            target = getattr(target, component)
+    except AttributeError as exc:
+        raise ValueError(
+            f"Unknown op in --compile.full_recompute_save_ops: {op_name!r}"
+        ) from exc
+
+    if not isinstance(target, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
+        raise ValueError(
+            "Ops in --compile.full_recompute_save_ops must name a specific "
+            f"overload or higher-order op, got {op_name!r}"
+        )
+    return target
+
+
+def _parse_full_recompute_save_ops(
+    value: str,
+) -> tuple[tuple[str, object], ...]:
+    """Parse ``FQN::OP | FQN::OP`` save selectors."""
+    if not value.strip():
+        return ()
+
+    selectors: list[tuple[str, object]] = []
+    for raw_selector in value.split("|"):
+        parts = raw_selector.split("::")
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ValueError(
+                "Invalid --compile.full_recompute_save_ops selector "
+                f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
+            )
+        module_fqn_pattern, op_name = (part.strip() for part in parts)
+        selectors.append((module_fqn_pattern, _resolve_op_target(op_name)))
+    return tuple(selectors)
+
+
+def validate_memory_policy_config(
+    compile_config: "GraphTrainerCompileConfig",
+) -> None:
+    """Validate memory-policy options before tracing the training graph."""
+    if (
+        compile_config.full_recompute_save_ops
+        and compile_config.memory_policy != "full"
+    ):
+        raise ValueError(
+            "--compile.full_recompute_save_ops requires --compile.memory_policy full"
+        )
+    _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
+
+
+def _make_full_memory_policy(save_ops: str = "") -> Callable:
     """Full recompute policy: mark everything as MUST_RECOMPUTE.
 
     The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
@@ -90,10 +214,21 @@ def _make_full_memory_policy() -> Callable:
     Higher-order ops (e.g. flex_attention) ARE recomputed: ``node_copy``
     duplicates them together with their ``get_attr`` subgraph references, and
     the subsequent regional_inductor pass compiles the duplicate as well.
+
+    ``save_ops`` can make exact module-FQN-pattern and op pairs exceptions to
+    full recompute. Matching nodes are marked MUST_SAVE.
     """
+
+    save_selectors = _parse_full_recompute_save_ops(save_ops)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            return CheckpointPolicy.MUST_SAVE
+        fqn = _get_module_fqn(node)
+        if any(
+            node.target == target and matches_module_fqn_pattern(fqn_pattern, fqn)
+            for fqn_pattern, target in save_selectors
+        ):
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.MUST_RECOMPUTE
 
@@ -307,8 +442,11 @@ def _full_memory_policy_pass(
     trace: TracedResult = None,
     model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
-    """Full recompute: only layer outputs are saved."""
-    tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+    """Full recompute except for user-selected module operations."""
+    tag_sac_policy(
+        gm,
+        policy_fn=_make_full_memory_policy(config.compile.full_recompute_save_ops),
+    )
     return gm
 
 
@@ -334,7 +472,6 @@ def _sac_and_offload_memory_policy_pass(
     model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC + CPU offload: apply default SAC, then offload within budget."""
-
     _default_memory_policy_pass(gm, config=config)
     tag_all_offloadable_activations(
         gm,
@@ -387,18 +524,28 @@ def two_level_ilp_memory_policy_pass(
         raise ValueError(
             f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
         )
+
+    cpu_offload_bw = int(config.compile.cpu_offload_bw)
     # each_layer_separately: True -> solve one ILP per layer;
     # False -> group layers by allocation and
     # solve once per group. The default path will be `False` for now.
     each_layer_separately = False  # no plan to make this configurable
     new_gm, metrics = two_level_ilp(
         trace,
-        int(budget_gb * 1e9),  # GB (1e9 bytes) to match units
+        int(budget_gb * (1 << 30)),  # GiB to match units
         config.optimizer,
         model_parts,
         runtime_estimation_mode=mode,
-        cpu_offload_budget_gb=config.compile.cpu_offload_budget_gb,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
         each_layer_separately=each_layer_separately,  # by default, false
+        # The calibration probe materializes the plan with the same offload
+        # pass settings the real pipeline uses, so its peak matches the run's.
+        prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+        defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        debug_logging=config.compile.debug_memory_policy_solver,
+        cpu_offload_bw=cpu_offload_bw,
     )
     # we can also dump the metrics to a file later
 
@@ -417,7 +564,7 @@ def tag_with_memory_policy_pass(
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
-        full: full recompute — only layer outputs are saved.
+        full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.
         sac_and_offload: SAC + CPU offload within budget.
 

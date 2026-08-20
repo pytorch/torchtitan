@@ -27,13 +27,13 @@ from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
 
 
-_spmd_backend = "default"
+_spmd_backend = "spmd_types"
 
 
 def set_spmd_backend(spmd_backend: str) -> None:
@@ -92,13 +92,20 @@ def _dist_reduce(
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
     """
+    return float(_dist_reduce_tensor(x, reduceOp, mesh, extra_pg).item())
+
+
+def _dist_reduce_tensor(
+    x: torch.Tensor,
+    reduceOp: str,
+    mesh: DeviceMesh | None,
+    extra_pg: dist.ProcessGroup | None,
+) -> torch.Tensor:
+    """Perform a distributed reduction without moving the result to the CPU."""
+    needs_wait = False
     if isinstance(x, DTensor):
-        # loss being a DTensor can be 1) full dtensor or 2) non-full dtensor but
-        # TP is enabled. For the former one, a single `full_tensor()` call is enough
-        # but for the later one, we need to treat it as a plain tensor. Since there
-        # is no robust way to distinguish the two and `full_tensor()` may result in
-        # multiple all_reduce() (one for dp_shard and one for CP), we always use
-        # `to_local()` to ensure loss parity in both cases.
+        # The loss is a DTensor only on the TP axis, so unwrap it to a plain
+        # tensor and let the reduction below run over ``mesh``.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."
@@ -113,10 +120,11 @@ def _dist_reduce(
     # Plain tensor path.
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
-    if mesh is None:
-        return float(x.item())
-    assert x.numel() == 1  # required by `.item()`
-    return float(funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item())
+        needs_wait = True
+    if mesh is not None:
+        x = funcol.all_reduce(x, reduceOp=reduceOp, group=mesh)
+        needs_wait = True
+    return funcol.wait_tensor(x) if needs_wait else x
 
 
 # TODO: rename this to maybe_dist_max
@@ -136,6 +144,17 @@ def dist_sum(
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
+        x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
+    )
+
+
+def dist_sum_tensor(
+    x: torch.Tensor,
+    mesh: DeviceMesh | None = None,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Sum a tensor across process groups and keep the result on its device."""
+    return _dist_reduce_tensor(
         x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
     )
 
@@ -189,20 +208,28 @@ def set_determinism(
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
-        # reproducibility, since the autotune results may not be deterministic. We disable
-        # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
-        # no options) so the regional-inductor scoop configs are preserved.
         from torch.nn.attention.flex_attention import flex_attention
 
         from torchtitan.models.common.attention import FlexAttention
 
-        FlexAttention.inductor_configs["max_autotune"] = False
-        FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
-        # pyrefly: ignore [no-matching-overload]
-        FlexAttention._compiled_flex_attn = torch.compile(
-            flex_attention, options=FlexAttention.inductor_configs
-        )
+        if torch.version.hip is not None:
+            # Compiled ROCm flex attention is not deterministic.
+            # Falling back to eager (non-compiled) flex_attention for determinism on ROCm.
+            logger.info(
+                "Using eager (non-compiled) flex_attention for determinism on ROCm."
+            )
+            FlexAttention._compiled_flex_attn = flex_attention
+        else:
+            # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
+            # reproducibility, since the autotune results may not be deterministic. We disable
+            # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
+            # no options) so the regional-inductor scoop configs are preserved.
+            FlexAttention.inductor_configs["max_autotune"] = False
+            FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
+            # pyrefly: ignore [no-matching-overload]
+            FlexAttention._compiled_flex_attn = torch.compile(
+                flex_attention, options=FlexAttention.inductor_configs
+            )
 
     if debug_config.detect_anomaly:
         logger.warning(
@@ -398,19 +425,23 @@ def get_spmd_context(
     return context
 
 
-def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
+def init_fake_mode(
+    world_size: int,
+    comm_mode: str = "fake_backend",
+    *,
+    rank: int = 0,
+) -> None:
     """Initialize fake backend
 
     Args:
         world_size: The number of GPUs to simulate
         comm_mode: Communication mode ("fake_backend" or "local_tensor")
+        rank: Global rank to simulate
 
-    Returns:
-        The world size
     """
     torch.distributed.init_process_group(
         "fake",
-        rank=0,
+        rank=rank,
         world_size=world_size,
     )
 
@@ -436,6 +467,11 @@ def init_distributed(
         )
         return torch.distributed.get_world_size()
 
+    # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
+    # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
+    # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
+    torch.autograd.set_multithreading_enabled(False)
+
     if comm_config.mode in ("fake_backend", "local_tensor"):
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:
@@ -448,7 +484,18 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
-        init_fake_mode(world_size, comm_config.mode)
+        rank_str = os.environ.get("RANK", "0")
+        try:
+            rank = int(rank_str)
+        except ValueError as e:
+            raise ValueError(
+                f"RANK environment variable must be a valid integer, got: {rank_str}"
+            ) from e
+        if not 0 <= rank < world_size:
+            raise ValueError(
+                f"RANK must be in [0, {world_size}) for fake mode, got: {rank}"
+            )
+        init_fake_mode(world_size, comm_config.mode, rank=rank)
         return world_size
 
     def _warn_overwrite_env(env, val):
@@ -490,11 +537,6 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
-    # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
-    # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
-    # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
-    torch.autograd.set_multithreading_enabled(False)
-
     device_id: torch.device | None = None
     if comm_config.mode == "torchcomms":
         try:
@@ -506,7 +548,7 @@ def init_distributed(
         import torch.distributed.config as dist_config
 
         dist_config.use_torchcomms = True
-        device_id = torch.device(device_type, int(os.environ["LOCAL_RANK"]))
+        device_id = get_local_device()
 
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),

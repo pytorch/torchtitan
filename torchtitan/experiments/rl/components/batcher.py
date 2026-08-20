@@ -155,13 +155,31 @@ class Batcher(Configurable):
         # Next-fit all taken training_samples into rows.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
+        num_global_valid_tokens = sum(
+            int(
+                (row["loss_mask"] & torch.isfinite(row["generator_logprobs"]))
+                .sum()
+                .item()
+            )
+            for row in packed_rows
+        )
+        num_response_tokens = sum(
+            int(row["loss_mask"].sum().item()) for row in packed_rows
+        )
         return TrainingBatch(
             microbatches=self._build_microbatch_grid(packed_rows),
-            num_global_valid_tokens=sum(
-                int(row["loss_mask"].sum().item()) for row in packed_rows
-            ),
+            num_global_valid_tokens=num_global_valid_tokens,
             metrics=[
                 *metrics,
+                # Keep this response-level metric exact without adding a second
+                # token-count field to TrainingBatch.
+                m.Metric(
+                    "loss/generator_logprob_nan_frac",
+                    m.NoReduce(
+                        (num_response_tokens - num_global_valid_tokens)
+                        / max(num_response_tokens, 1)
+                    ),
+                ),
                 *self._packing_metrics(
                     packed_rows,
                     training_samples,

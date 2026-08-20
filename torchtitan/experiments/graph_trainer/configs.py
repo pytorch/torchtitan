@@ -94,19 +94,41 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
+    debug_memory_policy_solver: bool = False
+    """Log the memory policy solver's inputs and per-iteration decisions:
+    transfer bandwidth, per-layer byte pools, outer fractions, inner tag counts,
+    and each calibration iteration's measured peak. Warnings and the infeasible
+    budget error are always logged."""
+
     memory_policy: Literal[
-        "default", "full", "eager", "sac_and_offload", "auto_perf_maxing"
+        "default",
+        "full",
+        "eager",
+        "sac_and_offload",
+        "auto_perf_maxing",
     ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
-        full: full recompute — only layer outputs are saved. Mirrors
-            eager's full AC (checkpoint_wrapper with no context_fn).
+        full: full recompute, saving layer outputs and operations selected by
+            full_recompute_save_ops. With no selectors, this mirrors eager's
+            full AC (checkpoint_wrapper with no context_fn).
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+        auto_perf_maxing: ILP-solver finds the best combination of SC and
+            offload given the peak memory budget while minimizing the runtime
+            cost.
+    """
+
+    full_recompute_save_ops: str = ""
+    """Operations to save instead of recomputing under the ``full`` policy.
+
+    Each selector has the form ``MODULE_FQN_PATTERN::OP``. Separate multiple
+    selectors with ``|`` and quote the full argument in the shell. For example:
+    ``layers.*.moe.router.gate::aten.mm.default | layers.*.attention.wkv_a::aten.mm.default``.
     """
 
     pass_pipeline: str = "default"
@@ -131,13 +153,20 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Prefetch reloads this many layers ahead in the backward graph
     to overlap H2D transfers with compute."""
 
+    cpu_offload_bw: int = 10000
+    """CPU PCIe/NVLink bandwidth for activation offload/reload in GB/s."""
+
     cpu_offload_defer_n_layers: int = 1
     """Defer forward wait_tensor ops this many layers past the last consumer
     to overlap D2H transfers with compute."""
 
-    cpu_offload_budget_gb: float = 100.0
-    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
-    Tensors are selected largest-first until the budget is exhausted."""
+    cpu_offload_budget_gb: float = -1
+    """Maximum pinned CPU memory (GiB per rank) for offloaded activations.
+    -1 uses whatever the host allows, which is the usual choice: the safe value
+    depends on node memory and local rank count, not on the model. 0 disables
+    offload. A positive value above the host limit is an error, not a silent
+    clamp -- pinned pages are unswappable, so overcommitting fails in the
+    driver rather than degrading."""
 
     memory_budget_gb: float = 1000.0
     """Peak GPU memory budget (in GB per rank, 1 GB = 1e9 bytes to match the
@@ -255,6 +284,12 @@ def to_graph_trainer_config(
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
+    # TODO: Adopt spmd_types to re-enable CP; partial_dtensor does not apply
+    # the CP placements declared in ShardingConfig.
+    d["parallelism"] = replace(
+        base_config.parallelism,
+        spmd_backend="partial_dtensor",
+    )
     graph_spec = model_registry(base_config.model_spec.flavor)
     # Wrap the base model config in the graph_trainer's model config class
     # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values
