@@ -692,13 +692,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         once per microbatch on the PP path, so token accounting matches the
         batch stream.
 
-        TODO(return-type): ``preprocess_inputs`` returns ``local_ntokens`` as a
-        4th element only because the ``full_dtensor`` backend turns ``labels``
-        into a DTensor whose ``.numel()`` reports the GLOBAL count, so we cannot
-        count here from the returned ``labels``. Once the DTensor path is
-        removed, drop that 4th element and count locally with
-        ``self.ntokens_seen += labels.numel()`` on the returned (plain,
-        CP-sharded) ``labels`` instead.
+        The 4th element (``local_ntokens``) is a transitional workaround; see
+        ``BaseModel.preprocess_inputs`` for the ``TODO(return-type)`` rationale.
         """
         inputs, labels, extra_kwargs, local_ntokens = cast(
             BaseModel, self.model_parts[0]

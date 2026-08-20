@@ -1053,16 +1053,12 @@ class HFTransformerModel(BaseModel):
     ]:
         """HF override of the input-build hook.
 
-        Two things to note about ``input_sharding`` here: this backend inherits
-        the base ``None`` (it declares no per-input SPMD layout), so the
-        SPMD-backend input wrapping in ``preprocess_inputs``
-        (``full_dtensor``/``spmd_types``) is a no-op for HF. That is consistent
-        with ``parallelize.py``, which only wires ``spmd_backend='default'`` and
-        raises ``NotImplementedError`` for the others -- so those backends are
-        never actually reached for this model. Context Parallel still applies:
-        ``input_sharding=None`` falls back to the default decoder shard dims in
-        ``prepare_context_parallel_input``, and the flex ``BlockMask`` below is
-        built from unsharded positions so CP can shard its Q axis.
+        Inherits the base ``None`` layout (no per-input SPMD types), so the
+        SPMD-backend wrapping in ``preprocess_inputs`` is a no-op -- consistent
+        with ``parallelize.py``, which only wires ``spmd_backend='default'``.
+        Context Parallel still applies: ``input_sharding=None`` falls back to the
+        default decoder shard dims, and the ``BlockMask`` below is built from
+        unsharded positions so CP can shard its Q axis.
         """
         inputs, labels, extra_kwargs, input_sharding = super()._build_forward_inputs(
             input_dict, labels, parallel_dims=parallel_dims
@@ -1154,10 +1150,8 @@ class HFTransformerModel(BaseModel):
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
             #
-            # The BlockMask is prebuilt in ``_build_forward_inputs`` (under CP it
-            # must be, so the CP step can shard its Q axis from unsharded
-            # positions) and passed in via ``attention_masks``; direct callers
-            # (e.g. the numerical tests) likewise pass it explicitly.
+            # The BlockMask is prebuilt in ``_build_forward_inputs`` and passed
+            # in via ``attention_masks``.
             kwargs["position_ids"] = positions
         else:
             local_seq_len = self.max_seq_len

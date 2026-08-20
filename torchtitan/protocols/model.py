@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import full_dtensor
 from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
@@ -74,12 +73,10 @@ class BaseModel(Module):
         TODO(return-type): the 4th element (local token count) is a transitional
         workaround. The ``full_dtensor`` backend wraps ``labels`` in a DTensor
         whose ``.numel()`` reports the GLOBAL count, so the trainer cannot count
-        from the returned labels. When the full_dtensor/DTensor path is removed,
-        drop this element and revert to a 3-tuple, letting the trainer do
+        from the returned labels. When the DTensor path is removed, drop this
+        element and revert to a 3-tuple, letting the trainer do
         ``self.ntokens_seen += labels.numel()`` on the returned (plain,
-        CP-sharded) labels directly. (The ``input_sharding`` returned by
-        ``_build_forward_inputs`` is intentional and permanent, unrelated to this
-        TODO.)
+        CP-sharded) labels.
         """
         # Imported function-locally to avoid a circular import
         # (context_parallel.api -> models.common -> decoder -> protocols.model).

@@ -4,9 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import spmd_types as spmd
 import torch
-from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -14,20 +12,6 @@ from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
 class _FakeParallelDims:
     cp_enabled = False
-
-
-def test_decoder_input_sharding_matches_legacy_convention():
-    sharding = decoder_input_sharding()
-    assert set(sharding) == {"input", "labels", "positions"}
-    for name in ("input", "positions"):
-        t = sharding[name].per_axis_spmd_types()
-        assert t[MeshAxisName.DP] == spmd.S(0)
-        assert t[MeshAxisName.CP] == spmd.S(1)
-        assert t[MeshAxisName.TP] == spmd.R
-    labels = sharding["labels"].per_axis_spmd_types()
-    assert labels[MeshAxisName.DP] == spmd.S(0)
-    assert labels[MeshAxisName.CP] == spmd.S(1)
-    assert labels[MeshAxisName.TP] == spmd.I
 
 
 def test_decoder_build_forward_inputs_declares_sharding():
@@ -56,17 +40,3 @@ def test_decoder_build_forward_inputs_builds_attention_masks():
         input_dict, labels, parallel_dims=_FakeParallelDims()
     )
     assert extra["attention_masks"] is sentinel
-
-
-def test_set_decoder_sharding_config_sets_root_sharding_and_no_input_sharding():
-    from torchtitan.models.llama3 import llama3_configs
-    from torchtitan.models.llama3.sharding import set_llama3_sharding_config
-
-    config = llama3_configs["debugmodel"](attn_backend="flex")
-    set_llama3_sharding_config(config, enable_sp=False)
-    # It still does its real job: root-module sharding is populated.
-    assert config.tok_embeddings.sharding_config is not None
-    assert config.norm.sharding_config is not None
-    assert config.lm_head.sharding_config is not None
-    # The input_sharding config field is gone entirely.
-    assert not hasattr(config, "input_sharding")

@@ -210,17 +210,32 @@ def annotate_input_spmd_types(
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """Annotate named inputs/labels/extras with SPMD types from ``input_sharding``.
 
-    Each named tensor is asserted against its own layout; a tensor without a
-    layout entry, and non-tensor kwargs, are left untouched.
+    Each named tensor is asserted against its own layout. Non-tensor kwargs
+    (e.g. ``attention_masks`` containers, ``special_tokens``) are left
+    untouched. Every *tensor* input, however, must have a layout entry: a
+    tensor with no entry raises rather than being silently left untyped.
+    Tensors nested inside container kwargs are not reachable here and must
+    be annotated at their construction site.
     """
     mesh = parallel_dims.spmd_dense_mesh()
     named: dict[str, Any] = {"input": inputs, "labels": labels, **extra_kwargs}
+    untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
         for name, value in named.items():
+            if not isinstance(value, torch.Tensor):
+                continue
             layout = input_sharding.get(name)
-            if layout is None or not isinstance(value, torch.Tensor):
+            if layout is None:
+                untyped.append(name)
                 continue
             spmd.assert_type(value, layout.per_axis_spmd_types())
+    if untyped:
+        raise ValueError(
+            "spmd_types backend requires an SPMD layout for every tensor input, "
+            f"but these have no entry in input_sharding: {sorted(untyped)}. Add "
+            "them to the input_sharding returned by _build_forward_inputs, or "
+            "annotate nested/container tensors at their construction site."
+        )
     return inputs, labels, extra_kwargs
 
 
