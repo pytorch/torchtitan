@@ -108,8 +108,6 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     if not dispatcher_cfgs:
         return
 
-    if parallelism.spmd_backend == "full_dtensor":
-        raise ValueError("MinimalAsyncEP does not support full_dtensor SPMD.")
     if parallelism.expert_parallel_degree == 1:
         raise ValueError(
             "MinimalAsyncEPTokenDispatcher.Config requires expert parallelism "

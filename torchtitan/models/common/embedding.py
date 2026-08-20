@@ -38,7 +38,7 @@ class Embedding(nn.Embedding, Module):
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
         # TODO(pianpwk): delete and rely on `current_spmd_mesh().get_group("tp")`
-        # once full_dtensor & legacy backends are removed.
+        # once the partial_dtensor backend is removed.
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if tp_mesh is not None:
             self.tp_group = tp_mesh.get_group("tp")

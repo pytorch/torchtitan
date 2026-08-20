@@ -1,0 +1,73 @@
+# Manual TestPyPI dry-run, mirrors release.yml but targets TestPyPI (staging) instead of PyPI.
+# Run this via "Run workflow" BEFORE cutting the real GitHub Release, verify the upload installs
+# and renders on test.pypi.org, then cut the release (which triggers release.yml -> real PyPI).
+
+name: Publish a Release to TestPyPI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: verify RC version
+        run: |
+          version=$(tr -d '\n' < assets/version.txt)
+          case "$version" in
+            *rc*) echo "Publishing RC version: $version" ;;
+            *) echo "Expected an RC version, got: $version"; exit 1 ;;
+          esac
+
+      - name: build release distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+
+      - name: check distributions render/metadata
+        run: python -m twine check --strict dist/*
+
+      - name: upload dists
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dists
+          path: dist/
+          if-no-files-found: error
+
+  testpypi-publish:
+    runs-on: ubuntu-latest
+    needs:
+      - release-build
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: test-release
+      url: https://test.pypi.org/project/torchtitan/
+
+    steps:
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Publish release distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1.13
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  validate-rc:
+    needs:
+      - testpypi-publish
+    uses: ./.github/workflows/validate_rc.yaml

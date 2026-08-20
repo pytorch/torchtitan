@@ -120,8 +120,8 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [num_blocks, num_kv_heads, block_size, 2 * head_size]
+            kv_cache: shape is ``[num_blocks, num_kv_heads, block_size,
+                2 * head_size]``, with K and V packed in the last dimension.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -165,9 +165,9 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
             AttentionType.ENCODER,
         ), "Encoder-only attention not supported yet."
 
-        # vLLM #44455 packs K and V into the content dim: the cache is stored as
-        # (num_blocks, num_kv_heads, block_size, 2 * head_size). Undo the packing
-        # to (num_blocks, block_size, num_kv_heads, head_size) per tensor.
+        # vLLM #44455 packs K and V into the content dimension for full-attention
+        # layers, including those in hybrid models. Restore the layout expected by
+        # varlen attention before splitting them.
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         assert not self.kv_cache_dtype.startswith(
