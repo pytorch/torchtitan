@@ -875,7 +875,7 @@ def _qwen3_30b_a3b_varlen_pg(
         converters = (
             [
                 MXFP8GroupedExpertsQATConverter.Config(
-                    pad_multiple=32, model_compile_enabled=False
+                    pad_multiple=128, model_compile_enabled=False
                 ),
             ]
             if mxfp8_experts
@@ -940,6 +940,61 @@ def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_gen1() -> Controller.Config:
     MoE all-to-all degenerates to a no-op and token groups are at their thinnest.
     """
     return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, gen_gpus=1)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts_gen1() -> Controller.Config:
+    """1-GPU generator (DP=1/EP=1), MXFP8 grouped experts, standard all-to-all.
+
+    DeepEP rejects EP=1, so this is the only way to get an mxfp8 data point at one
+    generator GPU.
+
+    Cudagraphs are on: at EP=1 ``TorchAOTokenDispatcher`` skips the all-to-all and
+    runs only the local padded permute, with no host sync, so the forward is
+    capturable (see that class's docstring). This mirrors
+    ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_gen1_local``, whose bf16 dispatcher
+    does the same local reorder without padding -- so the two differ only in
+    padding + quantization.
+    """
+    config = _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, mxfp8_experts=True, gen_gpus=1)
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_DECODE_ONLY"
+    )
+    return config
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_gen1_local() -> Controller.Config:
+    """1-GPU generator (DP=1/EP=1) with cudagraphs, no DeepEP."""
+    config = _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, gen_gpus=1)
+    # FULL_DECODE_ONLY is the mode that is both cheap and correct with the varlen/FA3
+    # attention backend; prefill/mixed batches stay eager.
+    config.generator.cudagraph = VLLMCudagraphConfig(
+        enable=True, mode="FULL_DECODE_ONLY"
+    )
+    return config
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs (DP=2/EP=2), trainer 4 GPUs, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True, gen_gpus=2)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs (DP=2/EP=2), MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(
+        32, 32, tp1=True, deepep=True, mxfp8_experts=True, gen_gpus=2
+    )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_gen1() -> Controller.Config:
+    """DeepEP + cudagraph generator on 1 GPU (DP=1/EP=1), trainer 4 GPUs, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True, gen_gpus=1)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts_gen1() -> Controller.Config:
+    """DeepEP + cudagraph generator on 1 GPU (DP=1/EP=1), MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(
+        32, 32, tp1=True, deepep=True, mxfp8_experts=True, gen_gpus=1
+    )
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep() -> Controller.Config:

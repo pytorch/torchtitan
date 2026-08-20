@@ -23,8 +23,8 @@ from .utils import swap_token_dispatcher
 
 try:
     from torchao.prototype.moe_training.mxfp8_linear import (
-        MXFP8Linear as TorchAOMXFP8Linear,
         mxfp8_mm_cached_weight,
+        MXFP8Linear as TorchAOMXFP8Linear,
         quantize_weight_for_mxfp8_cache,
     )
 
@@ -380,7 +380,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode
           when computing the e8m0 scale factors.
         """
-        pad_multiple: int = 32
+        pad_multiple: int = 128
         """
         Pad per-expert token groups to this multiple for MXFP8 grouped GEMM alignment.
         The CuTeDSL quantization kernel on sm_100 requires multiples of 128.
@@ -436,7 +436,7 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
 
     Like ``_get_mxfp8_grouped_experts_cls`` but the grouped GEMMs use the QAT
     autograd function via the ``bf16_bwd`` config (real mxfp8 forward, bf16
-    backward), with ``KernelPreference.TRITON`` to run pure Triton kernels for the
+    backward), using torchao's default quant kernels for the
     forward quantization.
     """
     if parent_cls in _mxfp8_qat_experts_cache:
@@ -456,19 +456,11 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
             from torchao.prototype.moe_training.config import MXFP8TrainingOpConfig
             from torchao.prototype.mx_formats.config import ScaleCalculationMode
             from torchao.quantization.quant_api import quantize_
-            from torchao.quantization.quantize_.common.kernel_preference import (
-                KernelPreference,
-            )
 
             # QAT: real mxfp8 forward, high-precision (bf16) backward.
-            # - kernel_preference=TRITON runs pure Triton kernels for the forward
-            #   activation quant. The cutedsl quant kernels are not compatible with
-            #   nvidia-cutlass-dsl 4.6.0+; see
-            #   https://github.com/pytorch/ao/issues/4647 for context.
             # - bf16_bwd=True routes to the autograd function whose backward is a
             #   plain bf16 torch._grouped_mm (straight-through estimator).
             op_config = MXFP8TrainingOpConfig(
-                kernel_preference=KernelPreference.TRITON,
                 scale_calculation_mode=ScaleCalculationMode.RCEIL,
                 bf16_bwd=True,
             )
@@ -488,7 +480,7 @@ class MXFP8GroupedExpertsQATConverter(QuantizationConverter):
     """MXFP8 QAT for MoE expert grouped GEMMs: real mxfp8 forward, bf16 backward.
 
     Uses the QAT autograd function (real mxfp8 forward, bf16 backward) with
-    ``KernelPreference.TRITON`` for the forward quantization. Intended for QAT
+    torchao's default kernel preference for the forward quantization. Intended for QAT
     (training a model to be robust to mxfp8 inference) where a low-precision backward
     is not needed; gradients flow in high precision (bf16).
     """
@@ -497,10 +489,12 @@ class MXFP8GroupedExpertsQATConverter(QuantizationConverter):
     class Config(QuantizationConverter.Config):
         recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
         """Recipe name for the forward quantization. Options: ["mxfp8_rceil"]."""
-        pad_multiple: int = 32
+        pad_multiple: int = 128
         """
         Pad per-expert token groups to this multiple for MXFP8 grouped GEMM
-        alignment. The Triton quant kernel uses the MXFP8 block size of 32.
+        alignment. torchao's default (cutedsl) quant kernel asserts each group is
+        a multiple of 128 (``cute_utils.validate_group_sizes``), so this must stay
+        at 128 for that kernel.
         """
 
     def __init__(self, config: Config):
@@ -534,7 +528,7 @@ class MXFP8GroupedExpertsQATConverter(QuantizationConverter):
 
         logger.info(
             "Converted GroupedExperts to MXFP8 QAT (mxfp8 forward, bf16 backward, "
-            "Triton kernels) for grouped_mm ops"
+            f"pad_multiple={self.config.pad_multiple}) for grouped_mm ops"
         )
         return model_config
 
