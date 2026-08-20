@@ -6,12 +6,15 @@
 
 
 from dataclasses import dataclass
+from typing import Any, Literal
 
 import spmd_types as spmd
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
-
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -332,6 +335,34 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+        inputs, labels, extra_kwargs, local_ntokens = super().preprocess_inputs(
+            input_dict,
+            labels,
+            parallel_dims=parallel_dims,
+            device=device,
+            parallelism=parallelism,
+        )
+        if parallelism.spmd_backend == "spmd_types":
+            with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+                annotate_qwen35_input_spmd_types(
+                    attention_masks=extra_kwargs.get("attention_masks"),
+                    mrope_positions=extra_kwargs.get("mrope_positions"),
+                    pixel_values=extra_kwargs.get("pixel_values"),
+                    pixel_values_videos=extra_kwargs.get("pixel_values_videos"),
+                    grid_thw=extra_kwargs.get("grid_thw"),
+                    grid_thw_videos=extra_kwargs.get("grid_thw_videos"),
+                )
+        return inputs, labels, extra_kwargs, local_ntokens
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
@@ -501,17 +532,7 @@ class Qwen35Model(Decoder):
         mrope_positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                annotate_qwen35_input_spmd_types(
-                    attention_masks=attention_masks,
-                    mrope_positions=mrope_positions,
-                    pixel_values=pixel_values,
-                    pixel_values_videos=pixel_values_videos,
-                    grid_thw=grid_thw,
-                    grid_thw_videos=grid_thw_videos,
-                )
-
+        with self.multimodal_context():
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,

@@ -9,10 +9,13 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import spmd_types as spmd
 import torch
-
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
@@ -81,6 +84,32 @@ class KimiK25Model(DeepSeekV3Model):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+        inputs, labels, extra_kwargs, local_ntokens = super().preprocess_inputs(
+            input_dict,
+            labels,
+            parallel_dims=parallel_dims,
+            device=device,
+            parallelism=parallelism,
+        )
+        if parallelism.spmd_backend == "spmd_types":
+            with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+                annotate_multimodal_input_spmd_types(
+                    pixel_values=extra_kwargs.get("pixel_values"),
+                    grid_thw=extra_kwargs.get("grid_thw"),
+                    pixel_values_videos=extra_kwargs.get("pixel_values_videos"),
+                    grid_thw_videos=extra_kwargs.get("grid_thw_videos"),
+                )
+        return inputs, labels, extra_kwargs, local_ntokens
 
     def _prepare_multimodal_embeds(
         self,
@@ -172,15 +201,7 @@ class KimiK25Model(DeepSeekV3Model):
         Returns:
             (batch, seq_len, vocab_size) logits.
         """
-        with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                annotate_multimodal_input_spmd_types(
-                    pixel_values=pixel_values,
-                    grid_thw=grid_thw,
-                    pixel_values_videos=pixel_values_videos,
-                    grid_thw_videos=grid_thw_videos,
-                )
-
+        with self.multimodal_context():
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,
