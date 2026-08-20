@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 # TODO: directly testing against PolicyTrainer with debug model to avoid OOM
 def build_trainer_model(
     config: Controller.Config,
-) -> tuple[torch.nn.Module, torch.device]:
+) -> tuple[torch.nn.Module, torch.device, dist_utils.SpmdContext]:
     """Build, parallelize, and load weights for the trainer model.
 
     Mirrors PolicyTrainer._build_model() without the Monarch actor framework.
@@ -119,6 +119,10 @@ def build_trainer_model(
         ep=parallelism.expert_parallel_degree,
         world_size=dist.get_world_size(),
         spmd_backend=parallelism.spmd_backend,
+    )
+    train_context = dist_utils.get_spmd_context(
+        parallel_dims=parallel_dims,
+        spmd_typechecking=False,
     )
 
     dist_utils.set_determinism(
@@ -173,7 +177,7 @@ def build_trainer_model(
             )
 
     model.eval()
-    return model, device
+    return model, device, train_context
 
 
 # TODO: directly testing against VLLMGenerator with debug model to avoid OOM
@@ -607,8 +611,6 @@ class BitwiseParityTestBase(unittest.TestCase):
             )
 
         config = cls.config_fn()
-        config.trainer.parallelism.spmd_backend = "partial_dtensor"
-        config.generator.parallelism.spmd_backend = "partial_dtensor"
         hf_path = os.environ.get(cls.hf_assets_env_var)
         if hf_path:
             config.hf_assets_path = hf_path
@@ -665,7 +667,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         # GPU memory for vLLM to leave room for the trainer model.
         config.generator.gpu_memory_limit = 0.5
 
-        cls.model, cls.device = build_trainer_model(config)
+        cls.model, cls.device, cls.train_context = build_trainer_model(config)
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
@@ -735,7 +737,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         n = len(self.prompt_ids)
         mid = max(1, n // 2)
 
-        with torch.no_grad():
+        with type(self).train_context(), torch.no_grad():
             lps_partial = compute_trainer_prefill_logprobs(
                 model,
                 self.prompt_ids[:mid],
@@ -769,7 +771,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         model = self.model
         engine = self.engine
 
-        with torch.no_grad():
+        with type(self).train_context(), torch.no_grad():
             trainer_lps = compute_trainer_prefill_logprobs(
                 model, self.prompt_ids, self.device, attn_backend=self.attn_backend
             )
