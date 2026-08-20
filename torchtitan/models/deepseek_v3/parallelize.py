@@ -13,7 +13,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh, resolve_sparse_fsdp_mesh
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import apply_fsdp_to_mtp_decoder
@@ -29,19 +28,12 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    if parallelism.spmd_backend == "spmd_types":
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)
-    else:
-        # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-        # runs inside the local_map boundary on local tensors.
-        if parallel_dims.cp_enabled:
-            apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute]
-                [block.attention.inner_attention for block in model.layers.values()],
-                parallel_dims.get_mesh("cp"),
-            )
-        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-            model.parallelize(parallel_dims)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
