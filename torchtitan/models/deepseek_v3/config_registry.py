@@ -207,6 +207,11 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
 
 
 def deepseek_v3_671b() -> Trainer.Config:
+    # The batch and parallel layout (TP1, PP8, CP1, EP32, VPP4, MBS1, GBS4096;
+    # with DP32 this gives a local batch of 128) matches the 256-GPU GB200 BF16
+    # configuration published in Appendix B of the Megatron-Core MoE technical
+    # report (arXiv:2603.07685). SelectiveAC is the closest available policy to
+    # the report's MLP-only recomputation but is not equivalent.
     model_spec = model_registry(
         "671B",
         attn_backend="flex",
@@ -230,14 +235,17 @@ def deepseek_v3_671b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
+            local_batch_size=128,
+            global_batch_size=4096,
             seq_len=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
+            pipeline_parallel_degree=8,
             pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=2,
+            pipeline_parallel_layers_per_stage=2,
+            expert_parallel_degree=32,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=SelectiveAC.Config(),
