@@ -17,16 +17,17 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
-from torchtitan.components.checkpoint_utils import (
-    canonical_fqn,
-    get_flat_optim_state_dict,
-    init_optim_state,
-    load_flat_optim_state_dict,
-)
+from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.flex_shard import build_dist_muon
 from torchtitan.tools.logging import logger
+
+from .utils import (
+    get_flat_optim_state_dict,
+    init_optim_state,
+    load_flat_optim_state_dict,
+)
 
 __all__ = [
     "OptimizersContainer",
@@ -451,8 +452,12 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
+        dtensor_mesh = None
         for transformer_block, moe in _iter_moe_layers(model_parts):
             tokens_per_expert_E = moe.tokens_per_expert_E
+            if isinstance(tokens_per_expert_E, torch.distributed.tensor.DTensor):
+                dtensor_mesh = tokens_per_expert_E.device_mesh
+                tokens_per_expert_E = tokens_per_expert_E.to_local()
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                 # This does not affect to expert choice, but affects the experts usage metrics.
@@ -466,46 +471,24 @@ def register_moe_load_balancing_hook(
 
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
-        if parallel_dims.spmd_backend == "full_dtensor":
-            # full_dtensor: DTensor mesh includes all axes (DP/CP/TP/EP).
-            # redistribute Partial→Replicate covers everything.
-            assert isinstance(
-                tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
+        if parallel_dims.ep_enabled and parallel_dims.tp > 1:
+            torch.distributed.all_reduce(
+                tokens_per_expert_E_by_layer,
+                group=parallel_dims.get_mesh("tp").get_group(),
             )
-            dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
-            # TODO: This incurs multiple sequential all-reduces, one per
-            # SPMD mesh axis. We should provide a utility to do a single all-reduce
-            # on the flattened global SPMD mesh.
-            tokens_per_expert_E_by_layer = tokens_per_expert_E_by_layer.redistribute(
-                placements=[Replicate()] * dtensor_mesh.ndim
+        if loss_mesh is not None:
+            torch.distributed.all_reduce(
+                tokens_per_expert_E_by_layer,
+                group=loss_mesh.get_group(),
+                op=torch.distributed.ReduceOp.SUM,
             )
-        else:
-            # non-full_dtensor: DTensor mesh only has TP/EP (if enabled).
-            # full_tensor() reduces on TP/EP, then all-reduce on loss_mesh
-            # covers DP/CP separately.
-            is_dtensor = isinstance(
-                tokens_per_expert_E_by_layer, torch.distributed.tensor.DTensor
+        if dtensor_mesh is not None:
+            tokens_per_expert_E_by_layer = torch.distributed.tensor.DTensor.from_local(
+                tokens_per_expert_E_by_layer,
+                device_mesh=dtensor_mesh,
+                placements=[Replicate()] * dtensor_mesh.ndim,
+                run_check=False,
             )
-            if is_dtensor:
-                dtensor_mesh = tokens_per_expert_E_by_layer.device_mesh
-                tokens_per_expert_E_by_layer = (
-                    tokens_per_expert_E_by_layer.full_tensor()
-                )
-            if loss_mesh is not None:
-                torch.distributed.all_reduce(
-                    tokens_per_expert_E_by_layer,
-                    group=loss_mesh.get_group(),
-                    op=torch.distributed.ReduceOp.SUM,
-                )
-            if is_dtensor:
-                tokens_per_expert_E_by_layer = torch.distributed.tensor.DTensor.from_local(
-                    tokens_per_expert_E_by_layer,
-                    # pyrefly: ignore [unbound-name]
-                    device_mesh=dtensor_mesh,
-                    # pyrefly: ignore [unbound-name]
-                    placements=[Replicate()] * dtensor_mesh.ndim,
-                    run_check=False,
-                )
 
         moe_layer_idx = 0
         with torch.no_grad():

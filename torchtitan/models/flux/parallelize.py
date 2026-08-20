@@ -28,12 +28,11 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
+    resolve_fsdp_mesh,
 )
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.models.flux.sharding import annotate_dp_cp_params_as_r
@@ -56,8 +55,6 @@ def parallelize_flux(
     if parallelism.spmd_backend == "spmd_types":
         model.parallelize(parallel_dims)
         annotate_dp_cp_params_as_r(model, parallel_dims)
-    elif parallel_dims.cp_enabled:
-        apply_cp(model, parallel_dims.get_mesh("cp"))
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
@@ -186,40 +183,6 @@ def apply_ac(model: nn.Module):
         model.single_blocks.register_module(layer_id, block)
 
     logger.info("Applied full activation checkpointing to the model")
-
-
-def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
-    """
-    Apply context parallelism to the Flux model.
-
-    Args:
-        model: The Flux model with double_blocks and single_blocks containing
-            inner attention modules.
-        cp_mesh: Device mesh for context parallel dimension
-
-    Note:
-        - Uses SDPA attention type
-        - Applies to all inner_attention modules in double_blocks and single_blocks
-    """
-    # Collect all inner_attention modules from the Flux model
-    attention_modules = []
-
-    # pyrefly: ignore [not-iterable]
-    for double_block in model.double_blocks:
-        # pyrefly: ignore [missing-attribute]
-        attention_modules.append(double_block.img_attn.inner_attention)
-        # pyrefly: ignore [missing-attribute]
-        attention_modules.append(double_block.txt_attn.inner_attention)
-        # pyrefly: ignore [missing-attribute]
-        attention_modules.append(double_block.inner_attention)
-
-    # pyrefly: ignore [not-iterable]
-    for single_block in model.single_blocks:
-        # pyrefly: ignore [missing-attribute]
-        attention_modules.append(single_block.inner_attention)
-
-    # Apply CP using direct forward wrapping (always uses SDPA for Flux)
-    apply_cp_to_forward(attention_modules, cp_mesh)
 
 
 def parallelize_encoders(

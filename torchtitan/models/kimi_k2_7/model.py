@@ -8,18 +8,17 @@
 https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b0638a0/python/sglang/srt/models/kimi_k25.py
 """
 
-import contextlib
 from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
@@ -82,12 +81,6 @@ class KimiK25Model(DeepSeekV3Model):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
-
-    def multimodal_context(self) -> contextlib.AbstractContextManager[None]:
-        """Use local DP typechecking while preparing multimodal inputs."""
-        if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
-            return spmd.set_current_mesh(local_axes=("dp",))
-        return contextlib.nullcontext()
 
     def _prepare_multimodal_embeds(
         self,
@@ -179,7 +172,7 @@ class KimiK25Model(DeepSeekV3Model):
         Returns:
             (batch, seq_len, vocab_size) logits.
         """
-        with self.multimodal_context():
+        with multimodal_context():
             if get_spmd_backend() == "spmd_types":
                 annotate_multimodal_input_spmd_types(
                     pixel_values=pixel_values,
@@ -200,7 +193,7 @@ class KimiK25Model(DeepSeekV3Model):
             else:
                 x = tokens
 
-        if get_spmd_backend() == "spmd_types":
+        if spmd.is_type_checking():
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})

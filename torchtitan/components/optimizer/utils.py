@@ -4,23 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""State-dict helpers for distributed checkpointing.
+"""Optimizer state-dict helpers for distributed checkpointing.
 
-These utilities operate directly on ``nn.Module`` and ``torch.optim.Optimizer``
-state dicts; they are model-agnostic and optimizer-agnostic.
+These utilities operate directly on ``torch.optim.Optimizer`` state dicts; they
+are model-agnostic and optimizer-agnostic.
 
-The helpers are:
-
-- ``canonical_fqn`` strips the activation-checkpoint wrapper segment
-  (``_checkpoint_wrapped_module``) from a single FQN. The model state dict is
-  already canonical -- ``torch.compile`` is applied in place (no segment) and the
-  activation-checkpoint wrapper strips its own segment via a state_dict hook -- but
-  ``nn.Module.named_parameters()`` is not, so optimizer construction uses this to
-  produce FQN-keyed optimizer state that matches the model keys.
-- ``get_flat_optim_state_dict`` / ``load_flat_optim_state_dict`` convert between
-  an optimizer's native (integer-indexed) state dict and a flat, FQN-keyed dict
-  that DCP can save and reshard. ``init_optim_state`` materializes optimizer
-  state and is a precondition for both.
+``get_flat_optim_state_dict`` / ``load_flat_optim_state_dict`` convert between an
+optimizer's native (integer-indexed) state dict and a flat, FQN-keyed dict that
+DCP can save and reshard. ``init_optim_state`` materializes optimizer state and
+is a precondition for both.
 """
 
 from typing import Any
@@ -28,26 +20,10 @@ from typing import Any
 import torch
 
 __all__ = [
-    "canonical_fqn",
     "init_optim_state",
     "get_flat_optim_state_dict",
     "load_flat_optim_state_dict",
 ]
-
-# Segment inserted by the activation checkpoint wrapper (checkpoint_wrapper) in
-# named_parameters(). It can appear at any level of the FQN and is not part of the
-# canonical model contract. torch.compile is applied in place and adds no segment.
-_WRAPPER_PREFIXES: tuple[str, ...] = ("_checkpoint_wrapped_module",)
-
-
-def canonical_fqn(name: str, prefixes: tuple[str, ...] = _WRAPPER_PREFIXES) -> str:
-    """Strip wrapper segments from a dotted FQN.
-
-    A segment may appear at any level, e.g.
-    ``layers.0._checkpoint_wrapped_module.attention.wq.weight`` ->
-    ``layers.0.attention.wq.weight``.
-    """
-    return ".".join(p for p in name.split(".") if p not in prefixes)
 
 
 def init_optim_state(optim: torch.optim.Optimizer) -> None:

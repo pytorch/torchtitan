@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
+    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
@@ -101,6 +102,32 @@ class Decoder(BaseModel):
             )
 
         @property
+        def first_full_attention_backend(self) -> Module.Config | None:
+            """Backend config of the first full-attention layer, else None."""
+            attention = self.first_attention
+            return attention.inner_attention if attention is not None else None
+
+        @property
+        def first_feed_forward(self) -> FeedForward.Config | None:
+            """First dense feed-forward config, else None."""
+            return next(
+                (
+                    layer.feed_forward
+                    for layer in self.layers
+                    if layer.feed_forward is not None
+                ),
+                None,
+            )
+
+        @property
+        def first_moe(self) -> MoE.Config | None:
+            """First mixture-of-experts config, else None."""
+            return next(
+                (layer.moe for layer in self.layers if layer.moe is not None),
+                None,
+            )
+
+        @property
         def max_seq_len(self) -> int:
             # The first full-attention layer's RoPE defines the context length.
             rope_cfg = getattr(self.first_attention, "rope", None)
@@ -124,6 +151,7 @@ class Decoder(BaseModel):
             field; in that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
+            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -140,6 +168,18 @@ class Decoder(BaseModel):
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
+
+            if parallelism.context_parallel_degree > 1:
+                # ShardingConfig-based CP requires the spmd_types backend.
+                validate_cp_backend(parallelism)
+                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
+                    self.traverse(VarlenAttention.Config)
+                ):
+                    raise NotImplementedError(
+                        "Context Parallel is not supported with "
+                        "ScaledDotProductAttention or VarlenAttention. "
+                        "Use FlexAttention or disable CP."
+                    )
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention

@@ -41,7 +41,7 @@ case "$COMMAND" in
     model_tests)
         python -m tests.integration_tests.run_tests \
             --test_suite models \
-            --exclude "qwen3_5_moe_fsdp+tp+ep+pp_spmd_types" \
+            --exclude "qwen3_5_moe_fsdp+tp+ep+pp" \
             --ngpu "$NGPU" \
             "$OUTPUT_DIR"
         ;;

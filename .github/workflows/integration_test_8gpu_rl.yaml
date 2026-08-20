@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
+      - 'torchtitan/models/qwen3_5/**'
       - '.github/workflows/integration_test_8gpu_rl.yaml'
   pull_request:
     types: [labeled, synchronize]
@@ -68,10 +69,8 @@ jobs:
         pip install uv
 
         # 1. Install Monarch, TorchStore, and Renderers
-        uv pip install torchmonarch
+        uv pip install -r torchtitan/experiments/rl/requirements.txt
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-        uv pip install pygtrie portpicker
-        uv pip install "git+https://github.com/PrimeIntellect-ai/renderers.git@main"
 
         # 2. Install batch-invariant ops
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
@@ -83,10 +82,14 @@ jobs:
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match
 
-        # 4. Make the checkout importable for subprocesses spawned by the test.
+        # 4. Install the pinned GDN kernels without replacing nightly PyTorch.
+        uv pip install --no-deps \
+          "git+https://github.com/fla-org/flash-linear-attention.git@v0.5.2"
+
+        # 5. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # 5. Download HF model checkpoint for tests
+        # 6. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
@@ -114,16 +117,18 @@ jobs:
           --assert-equal \
           --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
 
-        # Bitwise trainer/generator parity tests (batch-invariant). Varlen and Flex
-        # (both TP=2) run as separate torchrun invocations so each backend gets a
-        # fresh process group and vLLM engine; nproc matches each config's
-        # tensor_parallel_degree (the test builds ParallelDims from it).
+        # Bitwise trainer/generator parity tests (batch-invariant). Each TP=2 case
+        # runs in a separate torchrun invocation so it gets a fresh process group
+        # and vLLM engine.
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
           torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          torchrun --nproc-per-node=2 -m pytest \
+          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
