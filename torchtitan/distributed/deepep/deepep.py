@@ -183,12 +183,27 @@ def _dispatch_op_impl(
     # Per-local-expert received-token counts for the grouped GEMM.
     if cudagraphable:
         # Expand mode: no host sync allowed. Recover per-expert counts from the
-        # device-side inclusive prefix sum (expert_alignment defaults to 1, so this is
-        # a plain prefix sum). GroupedExperts.forward cumsums these back into grouped-mm offs.
+        # device-side prefix sum. GroupedExperts.forward cumsums these back into
+        # grouped-mm offs.
+        #
+        # Padding: with expert_alignment > 1 DeepEP pads each expert's region, and psum
+        # is not a plain prefix sum -- ``psum[i] == align(psum[i-1], A) + count[i]``.
+        # The GEMM indexes the padded buffer, so it needs the diffs of the ALIGNED
+        # prefix sums; a plain diff gives the real counts, which describe a packed
+        # layout. Unpadded (A=1) is unchanged, since
+        #
+        #     torch.div(psum + 0, 1, rounding_mode="floor") * 1 == psum
+        #
         psum = handle.psum_num_recv_tokens_per_expert
-        num_recv_per_expert = torch.diff(psum, prepend=psum.new_zeros(1)).to(
-            torch.int32
+        aligned_psum = (
+            torch.div(
+                psum + (expert_alignment - 1), expert_alignment, rounding_mode="floor"
+            )
+            * expert_alignment
         )
+        num_recv_per_expert = torch.diff(
+            aligned_psum, prepend=aligned_psum.new_zeros(1)
+        ).to(torch.int32)
         # Expand layout is already expert-grouped; no gather needed -> empty placeholder
         # (a torch.library op must return a Tensor, not None).
         recv_topk_idx = recv_x.new_empty(0, dtype=torch.long)
