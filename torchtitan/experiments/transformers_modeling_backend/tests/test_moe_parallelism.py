@@ -329,7 +329,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
             native_moe = moe_config.build()
 
         self.assertIsInstance(native_moe, MoE)
-        w1, w2, w3 = _expert_weights(native_moe.experts)
+        w1, w2, w3 = _expert_weights(native_moe.routed_experts.inner_experts)
         self.assertEqual(w1.shape, (4, 32, 64))
         self.assertEqual(w2.shape, (4, 64, 32))
         self.assertEqual(w3.shape, (4, 32, 64))
@@ -355,12 +355,18 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         with torch.device("meta"):
             native_moe = moe_config.build()
 
-        self.assertTrue(_expert_weights(native_moe.experts)[0].device.type == "meta")
+        self.assertTrue(
+            _expert_weights(native_moe.routed_experts.inner_experts)[0].device.type
+            == "meta"
+        )
 
         native_moe.to_empty(device=torch.device("cpu"))
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
-        self.assertTrue(_expert_weights(native_moe.experts)[0].device.type == "cpu")
+        self.assertTrue(
+            _expert_weights(native_moe.routed_experts.inner_experts)[0].device.type
+            == "cpu"
+        )
         self.assertTrue(native_moe.router.gate.weight.device.type == "cpu")
         self.assertTrue(
             _moe_buffer(native_moe, "tokens_per_expert").device.type == "cpu"
@@ -423,7 +429,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         output.sum().backward()
 
         self.assertIsNotNone(x.grad)
-        w1, w2, w3 = _expert_weights(native_moe.experts)
+        w1, w2, w3 = _expert_weights(native_moe.routed_experts.inner_experts)
         self.assertIsNotNone(w1.grad)
         self.assertIsNotNone(w2.grad)
         self.assertIsNotNone(w3.grad)
