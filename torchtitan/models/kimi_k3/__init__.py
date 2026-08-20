@@ -21,17 +21,9 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import (
-    KimiDeltaAttention,
-    KimiFeedForward,
-    KimiGroupedExperts,
-    KimiK3Model,
-    KimiK3TransformerBlock,
-    KimiKDAKernel,
-    KimiLatentMoE,
-    KimiMLAAttention,
-    KimiRMSNormGated,
-)
+from .kda import KimiDeltaAttention, KimiKDAKernel, KimiRMSNormGated
+from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
+from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import (

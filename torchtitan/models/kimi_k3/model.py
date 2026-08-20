@@ -7,93 +7,31 @@
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn.functional as F
-
-from fla.ops.kda import chunk_kda
 from torch import nn
-from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.kimi_k3.vision_encoder import KimiK3VisionEncoder
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
+from .kda import KimiDeltaAttention
+from .moe import KimiFeedForward, KimiLatentMoE
+from .vision_encoder import KimiK3VisionEncoder
+
 # Shape suffixes:
 # B = batch, L = sequence length, D = model dimension, H = heads,
-# K = key head dimension, V = value head dimension, E = experts,
-# C = projection channels, F = expert hidden dimension, R = routed tokens,
-# S = selected experts per token, T = flattened tokens,
+# K = key head dimension, V = value head dimension, T = flattened tokens,
 # N = attention-residual entries.
-
-
-class KimiRMSNormGated(Module):
-    """Per-head RMSNorm followed by a sigmoid output gate."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-5
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_float = x_float * torch.rsqrt(variance + self.eps)
-        x_float = self.weight.float() * x_float
-        return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
-
-
-def _situ_glu(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    beta: float,
-    linear_beta: float | None,
-) -> torch.Tensor:
-    """Kimi's SiTU-GLU activation, evaluated in FP32."""
-    input_dtype = gate.dtype
-    gate = gate.float()
-    up = up.float()
-    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
-    if linear_beta is not None:
-        up = linear_beta * torch.tanh(up / linear_beta)
-    return (gate * up).to(input_dtype)
-
-
-class KimiFeedForward(FeedForward):
-    """FeedForward with Kimi's SiTU activation"""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        beta: float = 1.0
-        linear_beta: float | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.beta = config.beta
-        self.linear_beta = config.linear_beta
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(
-            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
-        )
 
 
 class KimiMLAAttention(BaseAttention):
@@ -187,244 +125,6 @@ class KimiMLAAttention(BaseAttention):
         out_BLD = out_BLHV.reshape(B, L, self.n_heads * self.v_head_dim)
         out_BLD = out_BLD * torch.sigmoid(self.gate(x_BLD))
         return self.wo(out_BLD)
-
-
-class KimiKDAKernel(Module):
-    """Stateless dispatch to FLA's chunked KDA kernel.
-
-    The gate activation, the beta sigmoid, and the query/key L2 norm are all
-    fused into the kernel rather than materialized here, so the decay never
-    exists as a full ``(B, L, H, K)`` tensor.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        lower_bound: float | None = -5.0
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.lower_bound = config.lower_bound
-        if self.lower_bound is not None and not (-5.0 <= self.lower_bound < 0.0):
-            raise ValueError("KDA lower_bound must be in the safe range [-5, 0).")
-
-    def forward(
-        self,
-        q_BLHK: torch.Tensor,
-        k_BLHK: torch.Tensor,
-        v_BLHV: torch.Tensor,
-        gate_BLHK: torch.Tensor,
-        beta_BLH: torch.Tensor,
-        A_log_H: torch.Tensor,
-        dt_bias_HK: torch.Tensor,
-    ) -> torch.Tensor:
-        # safe_gate selects the bounded gate activation
-        # lower_bound * sigmoid(exp(A_log) * (gate + dt_bias)); without it the
-        # kernel applies -exp(A_log) * softplus(gate + dt_bias).
-        out_BLHV, _ = chunk_kda(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            gate_BLHK,
-            beta_BLH,
-            A_log=A_log_H,
-            dt_bias=dt_bias_HK.reshape(-1),
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=True,
-            safe_gate=self.lower_bound is not None,
-            lower_bound=self.lower_bound,
-        )
-        return out_BLHV
-
-
-class KimiDeltaAttention(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        num_heads: int
-        head_dim: int
-        conv_kernel_size: int
-        q_proj: Linear.Config
-        k_proj: Linear.Config
-        v_proj: Linear.Config
-        q_conv: Conv1d.Config
-        k_conv: Conv1d.Config
-        v_conv: Conv1d.Config
-        forget_a: Linear.Config
-        forget_b: Linear.Config
-        beta: Linear.Config
-        output_gate: Linear.Config
-        kernel: Module.Config
-        output_norm: KimiRMSNormGated.Config
-        output_proj: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.num_heads = config.num_heads
-        self.head_dim = config.head_dim
-        self.conv_kernel_size = config.conv_kernel_size
-
-        self.q_proj = config.q_proj.build()
-        self.k_proj = config.k_proj.build()
-        self.v_proj = config.v_proj.build()
-        self.q_conv = config.q_conv.build()
-        self.k_conv = config.k_conv.build()
-        self.v_conv = config.v_conv.build()
-        self.forget_a = config.forget_a.build()
-        self.forget_b = config.forget_b.build()
-        self.beta = config.beta.build()
-        self.output_gate = config.output_gate.build()
-        self.kernel = config.kernel.build()
-        self.output_norm = config.output_norm.build()
-        self.output_proj = config.output_proj.build()
-
-        self.A_log = nn.Parameter(torch.empty(config.num_heads))
-        self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
-
-    def _causal_conv(self, x_BLC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
-        x_BCL = F.pad(x_BLC.transpose(1, 2), (self.conv_kernel_size - 1, 0))
-        return F.silu(conv(x_BCL)).transpose(1, 2)
-
-    def forward(
-        self,
-        x_BLD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del positions
-        if attention_masks is not None:
-            raise NotImplementedError(
-                "Kimi K3 reference KDA does not support packed-document masks."
-            )
-
-        B, L, _ = x_BLD.shape
-        q_BLHK = self._causal_conv(self.q_proj(x_BLD), self.q_conv).view(
-            B, L, self.num_heads, self.head_dim
-        )
-        k_BLHK = self._causal_conv(self.k_proj(x_BLD), self.k_conv).view(
-            B, L, self.num_heads, self.head_dim
-        )
-        v_BLHV = self._causal_conv(self.v_proj(x_BLD), self.v_conv).view(
-            B, L, self.num_heads, self.head_dim
-        )
-        forget_BLHK = self.forget_b(self.forget_a(x_BLD)).view(
-            B, L, self.num_heads, self.head_dim
-        )
-        beta_BLH = self.beta(x_BLD).float()
-
-        out_BLHV = self.kernel(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            forget_BLHK,
-            beta_BLH,
-            self.A_log,
-            self.dt_bias,
-        )
-        output_gate_BLHV = self.output_gate(x_BLD).view(
-            B, L, self.num_heads, self.head_dim
-        )
-        out_BLHV = self.output_norm(out_BLHV, output_gate_BLHV)
-        return self.output_proj(out_BLHV.reshape(B, L, -1))
-
-
-class KimiGroupedExperts(GroupedExperts):
-    """``common/moe.py::GroupedExperts`` with Kimi's SiTU activation.
-
-    Inherits its stacked-weight shape (``w1_EFD``/``w2_EDF``/``w3_EFD``) and
-    parameter allocation; only ``forward`` differs, since the activation is
-    baked into the ``_grouped_mm`` call sequence rather than being a
-    swappable argument.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GroupedExperts.Config):
-        beta: float = 1.0
-        linear_beta: float | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.beta = config.beta
-        self.linear_beta = config.linear_beta
-
-    def forward(
-        self,
-        x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
-    ) -> torch.Tensor:
-        if isinstance(self.w1_EFD, DTensor):
-            w1_EFD = self.w1_EFD.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
-        else:
-            w1_EFD = self.w1_EFD
-            w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
-
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-
-        gate_RF = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            B_t=w1_EFD.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
-        )
-        up_RF = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            B_t=w3_EFD.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
-        )
-
-        h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
-
-        return self._grouped_mm(
-            A=h_RF,
-            B_t=w2_EDF.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
-        ).type_as(x_RD)
-
-
-class KimiLatentMoE(MoE):
-    """``common/moe.py::MoE`` with Kimi's latent routed-expert path.
-
-    Routed tokens are projected down to the expert latent width, run through
-    the experts, then normed and projected back up to the model dimension.
-    Shared experts still see the full-width input.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MoE.Config):
-        routed_down: Linear.Config
-        routed_norm: RMSNorm.Config
-        routed_up: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.routed_down = config.routed_down.build()
-        self.routed_norm = config.routed_norm.build()
-        self.routed_up = config.routed_up.build()
-
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        weights_BLS, expert_ids_BLS, scores_BLE = self.router(x_BLD, self.expert_bias_E)
-        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-            -1, expert_ids_BLS, True
-        )
-        num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
-
-        routed_BLD = self.routed_experts(
-            self.routed_down(x_BLD),
-            weights_BLS,
-            expert_ids_BLS,
-            num_tokens_per_expert_E,
-        )
-        out_BLD = self.routed_up(self.routed_norm(routed_BLD))
-        if self.shared_experts is not None:
-            out_BLD = out_BLD + self.shared_experts(x_BLD)
-        return out_BLD
 
 
 def _apply_attention_residual(

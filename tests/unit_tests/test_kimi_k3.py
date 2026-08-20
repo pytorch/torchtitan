@@ -26,7 +26,8 @@ from torchtitan.models.kimi_k3 import (
     _vision_encoder_config,
     parallelize_kimi_k3,
 )
-from torchtitan.models.kimi_k3.model import KimiK3Model, KimiKDAKernel
+from torchtitan.models.kimi_k3.kda import KimiKDAKernel
+from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
 
@@ -264,7 +265,7 @@ class TestKimiK3FSDP(DTensorTestBase):
         torch.manual_seed(3)
         config = _small_model_config(
             attn_res_block_size=2,
-            full_attention_layers={0, 1},
+            full_attention_layers={1},
         )
         with torch.device("meta"):
             model = config.build()

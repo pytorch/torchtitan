@@ -18,7 +18,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
 )
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from .model import KimiK3Model
 
 
 def parallelize_kimi_k3(
