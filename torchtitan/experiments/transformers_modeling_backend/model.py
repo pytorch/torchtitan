@@ -16,12 +16,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn import init
 from torch.nn.attention.flex_attention import and_masks
-from transformers import AutoConfig
-from transformers.configuration_utils import PretrainedConfig
-from transformers.integrations.flex_attention import flex_attention_forward
-from transformers.modeling_utils import AttentionInterface, PreTrainedModel
-
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -32,6 +28,10 @@ from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.logging import logger
+from transformers import AutoConfig
+from transformers.configuration_utils import PretrainedConfig
+from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 
 class HFFlexKernel(Module):
@@ -339,12 +339,12 @@ class HFTransformerModel(BaseModel):
             needed. The custom impl name only exists to bypass HF's per-model
             ``_supports_flex_attn`` gate.
             """
-            AttentionInterface._global_mapping[
+            AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = (
+                _flex_attention_torchtitan
+            )
+            self._titan_injected_model_args["attn_implementation"] = (
                 _ATTN_IMPLEMENTATION
-            ] = _flex_attention_torchtitan
-            self._titan_injected_model_args[
-                "attn_implementation"
-            ] = _ATTN_IMPLEMENTATION
+            )
             self.attn_implementation = _ATTN_IMPLEMENTATION
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
@@ -1042,36 +1042,45 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
-    def _build_forward_inputs(
+    def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
         *,
         parallel_dims: ParallelDims,
-    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
-        """HF override of the input-build hook.
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+        """Build the attention mask (when positions are present), CP-shard, return.
 
-        Inherits the base ``None`` layout (no per-input SPMD types), so the
-        SPMD-backend wrapping in ``preprocess_inputs`` is a no-op -- consistent
-        with ``parallelize.py``, which only wires ``spmd_backend='default'``.
-        Context Parallel still applies: ``input_sharding=None`` falls back to the
-        default decoder shard dims, and the ``BlockMask`` below is built from
-        unsharded positions so CP can shard its Q axis.
+        Fully self-contained (no ``super()``). Declares no per-input SPMD layout
+        (default backend only, per ``parallelize.py``), so there is no SPMD-wrap
+        step; the mask is built from unsharded positions before CP-sharding.
         """
-        input_dict, input_sharding = super()._build_forward_inputs(
-            input_dict, parallel_dims=parallel_dims
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
         )
-        # Build the attention mask here (mirroring `Decoder._build_forward_inputs`)
-        # whenever positions are present. Under CP this must happen before
-        # sharding so `prepare_context_parallel_input` can shard the mask's Q
-        # axis from unsharded positions; outside CP it means `forward()` receives
-        # a prebuilt mask and doesn't have to build one itself.
-        if "attention_masks" not in input_dict:
-            positions = input_dict.get("positions")
+
+        batch: dict[str, Any] = dict(input_dict)
+        if "attention_masks" not in batch:
+            positions = batch.get("positions")
             if positions is not None:
                 masks = self.get_attention_masks(positions=positions)
                 if masks is not None:
-                    input_dict["attention_masks"] = masks
-        return input_dict, input_sharding
+                    batch["attention_masks"] = masks
+
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                None,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        local_ntokens = batch["labels"].numel()
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch, local_ntokens
 
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
@@ -1147,7 +1156,7 @@ class HFTransformerModel(BaseModel):
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
             #
-            # The BlockMask is prebuilt in ``_build_forward_inputs`` and passed
+            # The BlockMask is prebuilt in ``preprocess_inputs`` and passed
             # in via ``attention_masks``.
             kwargs["position_ids"] = positions
         else:

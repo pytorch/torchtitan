@@ -11,8 +11,10 @@ from typing import Any
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
-
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed import full_dtensor
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -332,29 +334,55 @@ class Decoder(BaseModel):
             ],
         )
 
-    def _build_forward_inputs(
+    def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
         *,
         parallel_dims: ParallelDims,
-    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
-        """Decoder default: build inputs, then build attention masks.
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+        """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch.
 
-        Masks are built only for the masked backends (Flex/Varlen) and only
-        when ``positions`` is present. A maskless backend (SDPA) still receives
-        positions for RoPE and relies on ``is_causal``.
+        Fully self-contained (no ``super()``): masks are built from unsharded
+        ``positions`` before CP-sharding; the decoder's static SPMD input layout
+        (``decoder_input_sharding()``) drives CP shard-dims and the SPMD-backend
+        wrap. A maskless backend (SDPA) relies on ``is_causal``.
         """
-        input_dict, _ = super()._build_forward_inputs(
-            input_dict, parallel_dims=parallel_dims
+        # Function-local import avoids a circular import
+        # (context_parallel.api -> models.common -> decoder).
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
         )
-        positions = input_dict.get("positions", None)
+
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                )
-        return input_dict, decoder_input_sharding()
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = decoder_input_sharding()
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        local_ntokens = batch["labels"].numel()
+
+        if parallelism.spmd_backend == "full_dtensor":
+            batch = full_dtensor.parallelize_inputs(
+                parallel_dims, batch, input_sharding
+            )
+        elif parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch, local_ntokens
 
     def get_attention_masks(
         self,

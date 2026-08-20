@@ -4,36 +4,62 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
+import torch
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
 
 
-class _CP:
-    cp_enabled = True
+def _run(m: HFTransformerModel):
+    B, S = 2, 4
+    batch = cast(
+        "dict[str, torch.Tensor]",
+        {
+            "input": torch.zeros(B, S),
+            "positions": torch.arange(S).repeat(B, 1),
+            "labels": torch.zeros(B, S),
+        },
+    )
+    pd = ParallelDims(dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1)
+    return (
+        m.preprocess_inputs(
+            batch,
+            parallel_dims=pd,
+            device=torch.device("cpu"),
+            parallelism=ParallelismConfig(),
+        ),
+        B,
+        S,
+    )
 
 
-def test_hf_builds_cp_mask_under_cp(monkeypatch):
+def test_hf_has_no_build_forward_inputs():
+    assert not hasattr(HFTransformerModel, "_build_forward_inputs")
+
+
+def test_hf_has_no_input_sharding():
+    assert not hasattr(HFTransformerModel, "input_sharding")
+
+
+def test_hf_builds_mask_when_present(monkeypatch):
     monkeypatch.setattr(
         HFTransformerModel, "get_attention_masks", lambda self, positions: "MASK"
     )
-    m = object.__new__(HFTransformerModel)  # no heavy __init__
-    input_dict, sharding = m._build_forward_inputs(
-        {"input": 0, "labels": "labels", "positions": 1}, parallel_dims=_CP()
-    )
-    assert input_dict["attention_masks"] == "MASK"
-    assert sharding is None  # HF inherits base None sharding
+    m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
+    (inputs, labels, extra, ntok), B, S = _run(m)
+    assert extra["attention_masks"] == "MASK"
+    assert ntok == B * S
+    assert "input" not in extra and "labels" not in extra
 
 
-# The mask is now built in `_build_forward_inputs` for all cases (CP and
-# non-CP); `parallel_dims` is not read, so one CP case covers both.
 def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
     monkeypatch.setattr(
         HFTransformerModel, "get_attention_masks", lambda self, positions: None
     )
-    m = object.__new__(HFTransformerModel)
-    input_dict, sharding = m._build_forward_inputs(
-        {"input": 0, "labels": "labels", "positions": 1}, parallel_dims=_CP()
-    )
-    assert "attention_masks" not in input_dict
-    assert sharding is None
+    m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
+    (inputs, labels, extra, ntok), B, S = _run(m)
+    assert "attention_masks" not in extra

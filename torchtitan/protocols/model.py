@@ -10,9 +10,7 @@ from typing import Any
 
 import torch
 from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import full_dtensor
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
 
@@ -63,13 +61,14 @@ class BaseModel(Module):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
-        """Prepare a dataloader batch for the model forward pass.
+        """Minimal default input pipeline: copy, CP-shard, count tokens, return.
 
-        ``input_dict`` is the batch with ``labels`` folded in (the caller merges
-        the dataloader's separate labels tensor under the ``'labels'`` key).
-        Template: build forward inputs + their layout (``_build_forward_inputs``),
-        CP-shard, then SPMD-wrap. Returns ``(inputs, labels, extra_kwargs,
-        local_ntokens)``.
+        Used by simple models (e.g. ``FluxModel``) that build no attention masks
+        and declare no per-input SPMD layout. Models that need masks or an SPMD
+        input layout override this method fully (no ``super()`` call).
+
+        ``input_dict`` is the batch with ``labels`` folded in. Returns
+        ``(inputs, labels, extra_kwargs, local_ntokens)``.
 
         TODO(return-type): the 4th return value (local token count) is a transitional
         workaround. The ``full_dtensor`` backend wraps ``labels`` in a DTensor
@@ -85,52 +84,19 @@ class BaseModel(Module):
             prepare_context_parallel_input,
         )
 
-        input_dict, input_sharding = self._build_forward_inputs(
-            input_dict, parallel_dims=parallel_dims
-        )
+        batch: dict[str, Any] = dict(input_dict)
         if parallel_dims.cp_enabled:
-            input_dict = prepare_context_parallel_input(
-                input_dict,
-                input_sharding,
+            batch = prepare_context_parallel_input(
+                batch,
+                None,
                 parallel_dims.get_mesh("cp"),
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        local_ntokens = input_dict["labels"].numel()
-
-        if input_sharding is not None:
-            if parallelism.spmd_backend == "full_dtensor":
-                input_dict = full_dtensor.parallelize_inputs(
-                    parallel_dims, input_dict, input_sharding
-                )
-            elif parallelism.spmd_backend == "spmd_types":
-                input_dict = annotate_input_spmd_types(
-                    parallel_dims, input_dict, input_sharding
-                )
-        inputs = input_dict.pop("input")
-        labels = input_dict.pop("labels")
-        return inputs, labels, input_dict, local_ntokens
-
-    def _build_forward_inputs(
-        self,
-        input_dict: dict[str, torch.Tensor],
-        *,
-        parallel_dims: ParallelDims,
-    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
-        """Build the forward-inputs dict and declare its SPMD layout.
-
-        ``input_dict`` maps each name to its value: ``'input'`` (the positional
-        input), ``'labels'``, and every other batch key as a forward kwarg.
-        Returns ``(input_dict, input_sharding)`` where ``input_dict`` is a fresh
-        copy (so downstream mask-building / sharding never mutates the caller's
-        batch). Base declares no layout (``None``); override to build
-        masks/derived inputs and return the matching ``input_sharding`` for any
-        tensors added to ``input_dict``.
-
-        ``parallel_dims`` is provided for overrides (e.g. CP-conditional mask
-        building) and is unused by the base build.
-        """
-        return dict(input_dict), None
+        local_ntokens = batch["labels"].numel()
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch, local_ntokens
 
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.

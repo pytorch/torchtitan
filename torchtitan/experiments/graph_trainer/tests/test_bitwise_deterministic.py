@@ -24,7 +24,6 @@ import torch.nn as nn
 from expecttest import assert_expected_inline
 from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
-
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -164,7 +163,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
     def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
-        """Build extra_kwargs matching what the model's _build_forward_inputs produces.
+        """Build extra_kwargs matching what the model's preprocess_inputs produces.
 
         For FlexAttention models, this generates the BlockMask attention
         masks. For SDPA models, returns an empty dict.

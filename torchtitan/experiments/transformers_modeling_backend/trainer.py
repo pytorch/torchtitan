@@ -13,7 +13,7 @@ class HFTransformerTrainer(Trainer):
     """Trainer for the HF transformers backend.
 
     The flex ``BlockMask`` used under context parallelism is now built inside
-    ``HFTransformerModel._build_forward_inputs`` (the model), so this trainer no
+    ``HFTransformerModel.preprocess_inputs`` (the model), so this trainer no
     longer overrides the dataloading hook to inject it.
 
     Its only remaining behavior over the core ``Trainer`` is to fail loud when a

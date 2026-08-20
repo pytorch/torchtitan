@@ -13,19 +13,26 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed import full_dtensor
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    set_current_spmd_mesh,
+    spmd_mesh_size,
+)
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
+    FlexAttention,
     local_head_split,
     VarlenAttention,
     VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     multimodal_context,
@@ -339,19 +346,6 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
-    def _build_forward_inputs(
-        self,
-        input_dict: dict[str, torch.Tensor],
-        *,
-        parallel_dims: ParallelDims,
-    ) -> tuple[dict[str, Any], dict[str, SpmdLayout] | None]:
-        input_dict, input_sharding = super()._build_forward_inputs(
-            input_dict, parallel_dims=parallel_dims
-        )
-        if input_sharding is not None:
-            input_sharding = {**input_sharding, **qwen35_input_sharding()}
-        return input_dict, input_sharding
-
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
@@ -360,21 +354,52 @@ class Qwen35Model(Decoder):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
-        inputs, labels, extra_kwargs, local_ntokens = super().preprocess_inputs(
-            input_dict,
-            parallel_dims=parallel_dims,
-            device=device,
-            parallelism=parallelism,
+        """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return.
+
+        Fully self-contained (no ``super()``). Layout merges the decoder base
+        with qwen3.5 additions. Under ``spmd_types``, the GatedDeltaNet
+        ``cu_seq_q`` (nested in ``attention_masks``) is annotated at its
+        container after the plain-tensor annotation.
+        """
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
         )
-        # Plain-tensor inputs are typed by the base template via input_sharding
-        # (see qwen35_input_sharding). Only the GatedDeltaNet cu_seq_q, nested
-        # inside attention_masks, must be annotated here at its container.
-        if parallelism.spmd_backend == "spmd_types":
-            attention_masks = extra_kwargs.get("attention_masks")
+
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions", None)
+        if positions is not None:
+            inner = getattr(self.config.first_attention, "inner_attention", None)
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = {**decoder_input_sharding(), **qwen35_input_sharding()}
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        local_ntokens = batch["labels"].numel()
+
+        if parallelism.spmd_backend == "full_dtensor":
+            batch = full_dtensor.parallelize_inputs(
+                parallel_dims, batch, input_sharding
+            )
+        elif parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+            # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
+            # nested inside attention_masks, must be annotated at its container.
+            attention_masks = batch.get("attention_masks")
             if attention_masks is not None:
                 with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
                     annotate_deltanet_cu_seqlens(attention_masks)
-        return inputs, labels, extra_kwargs, local_ntokens
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch, local_ntokens
 
     def get_attention_masks(
         self,

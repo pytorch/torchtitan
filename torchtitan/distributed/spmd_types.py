@@ -207,8 +207,8 @@ def annotate_input_spmd_types(
         raise ValueError(
             "spmd_types backend requires an SPMD layout for every tensor input, "
             f"but these have no entry in input_sharding: {sorted(untyped)}. Add "
-            "them to the input_sharding returned by _build_forward_inputs, or "
-            "annotate nested/container tensors at their construction site."
+            "them to the input layout the model declares in ``preprocess_inputs``, "
+            "or annotate nested/container tensors at their construction site."
         )
     return input_dict
 
