@@ -1,0 +1,291 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+# @lint-ignore-every CITRINE
+
+import unittest
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
+
+import torch
+import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.tensor import distribute_tensor, Shard
+from torch.nn.attention.flex_attention import create_block_mask
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.distributed import ParallelDims
+from torchtitan.models.deepseek_v3.model import Attention
+
+from torchtitan.models.kimi_k2_7.qk_clip import (
+    qk_clip,
+    QKClipConfig,
+    QKClipFlexAttention,
+    register_qk_clip_hook,
+)
+
+
+class QKClipTest(unittest.TestCase):
+    def test_attention_records_training_maxima_only(self) -> None:
+        attention = QKClipFlexAttention.Config().build()
+        q_BLNH = torch.randn(1, 2, 2, 4)
+        max_scores_BNL = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
+        block_mask = create_block_mask(
+            lambda _b, _h, q_idx, kv_idx: q_idx >= kv_idx,
+            1,
+            2,
+            2,
+            2,
+            device="cpu",
+            _compile=False,
+        )
+        aux = SimpleNamespace(lse=None, max_scores=max_scores_BNL)
+
+        attention.train()
+        with patch(
+            "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
+            return_value=(q_BLNH.transpose(1, 2), aux),
+        ):
+            attention(
+                q_BLNH,
+                q_BLNH,
+                q_BLNH,
+                attention_masks=block_mask,
+            )
+
+        self.assertEqual(len(attention.max_attention_logits_N), 1)
+        torch.testing.assert_close(
+            attention.max_attention_logits_N[0],
+            torch.tensor([3.0, 4.0]),
+        )
+
+        attention.max_attention_logits_N.clear()
+        attention.eval()
+        with patch(
+            "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
+            return_value=(q_BLNH.transpose(1, 2), aux),
+        ):
+            attention(
+                q_BLNH,
+                q_BLNH,
+                q_BLNH,
+                attention_masks=block_mask,
+            )
+
+        self.assertFalse(attention.max_attention_logits_N)
+
+    def test_optimizer_hook_scales_q_and_k_but_not_v(self) -> None:
+        num_heads = 2
+        qk_nope_head_dim = 2
+        qk_rope_head_dim = 1
+        v_head_dim = 2
+        in_features = 3
+        q_projection = nn.Linear(
+            in_features,
+            num_heads * (qk_nope_head_dim + qk_rope_head_dim),
+            bias=False,
+        )
+        kv_projection = nn.Linear(
+            in_features,
+            num_heads * (qk_nope_head_dim + v_head_dim),
+            bias=False,
+        )
+        nn.init.ones_(q_projection.weight)
+        nn.init.ones_(kv_projection.weight)
+        attention = Attention.__new__(Attention)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 1
+        attention.qk_nope_head_dim = qk_nope_head_dim
+        attention.qk_rope_head_dim = qk_rope_head_dim
+        attention.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        attention.v_head_dim = v_head_dim
+        attention.wq_b = q_projection
+        attention.wkv_b = kv_projection
+        attention.inner_attention = QKClipFlexAttention.Config().build()
+        attention.inner_attention.max_attention_logits_N.append(
+            torch.tensor([100.0, 400.0])
+        )
+        model = nn.Module()
+        model.add_module("attention", attention)
+        optimizers = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={
+                        "lr": 0.0,
+                        "weight_decay": 0.0,
+                    },
+                )
+            ],
+        ).build(model_parts=[model])
+        reduction_mesh = cast(
+            DeviceMesh,
+            SimpleNamespace(size=lambda: 1),
+        )
+
+        def get_mesh(mesh_name: str) -> DeviceMesh:
+            self.assertEqual(mesh_name, "loss")
+            return reduction_mesh
+
+        parallel_dims = cast(
+            ParallelDims,
+            SimpleNamespace(get_mesh=get_mesh),
+        )
+        config = QKClipConfig(threshold=200.0, alpha=0.25)
+        register_qk_clip_hook(
+            optimizers,
+            [model],
+            parallel_dims,
+            config=config,
+        )
+        for parameter in model.parameters():
+            parameter.grad = torch.zeros_like(parameter)
+        scales_N = torch.tensor([1.0, 0.5])
+
+        optimizers.step()
+
+        q_weight_NDI = q_projection.weight.view(
+            num_heads,
+            qk_nope_head_dim + qk_rope_head_dim,
+            in_features,
+        )
+        kv_weight_NDI = kv_projection.weight.view(
+            num_heads,
+            qk_nope_head_dim + v_head_dim,
+            in_features,
+        )
+        torch.testing.assert_close(
+            q_weight_NDI[:, :qk_nope_head_dim],
+            scales_N.pow(config.alpha)
+            .view(-1, 1, 1)
+            .expand(-1, qk_nope_head_dim, in_features),
+        )
+        torch.testing.assert_close(
+            q_weight_NDI[:, qk_nope_head_dim:],
+            scales_N.view(-1, 1, 1).expand(-1, qk_rope_head_dim, in_features),
+        )
+        torch.testing.assert_close(
+            kv_weight_NDI[:, :qk_nope_head_dim],
+            scales_N.pow(1.0 - config.alpha)
+            .view(-1, 1, 1)
+            .expand(-1, qk_nope_head_dim, in_features),
+        )
+        torch.testing.assert_close(
+            kv_weight_NDI[:, qk_nope_head_dim:],
+            torch.ones(num_heads, v_head_dim, in_features),
+        )
+        self.assertFalse(attention.inner_attention.max_attention_logits_N)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class QKClipDistributedTest(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @property
+    def device_type(self) -> str:
+        return "cuda"
+
+    @with_comms
+    def test_reduces_head_maxima_and_clips_local_dtensor_weights(self) -> None:
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        num_heads = self.world_size
+        qk_nope_head_dim = 2
+        qk_rope_head_dim = 1
+        v_head_dim = 2
+        in_features = 2
+
+        def weight_module(num_rows: int) -> nn.Module:
+            module = nn.Module()
+            module.register_parameter(
+                "weight",
+                nn.Parameter(
+                    distribute_tensor(
+                        torch.ones(num_rows, in_features, device=device),
+                        mesh,
+                        (Shard(0),),
+                    )
+                ),
+            )
+            return module
+
+        attention = Attention.__new__(Attention)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 1
+        attention.qk_nope_head_dim = qk_nope_head_dim
+        attention.qk_rope_head_dim = qk_rope_head_dim
+        attention.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        attention.v_head_dim = v_head_dim
+        attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
+        attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
+        attention.inner_attention = QKClipFlexAttention.Config().build()
+        rank_maxima = (
+            torch.tensor([50.0, 400.0], device=device)
+            if self.rank == 0
+            else torch.tensor([200.0, 50.0], device=device)
+        )
+        attention.inner_attention.max_attention_logits_N.append(rank_maxima)
+        model = nn.Module()
+        model.add_module("attention", attention)
+
+        qk_clip(
+            [model],
+            config=QKClipConfig(),
+            reduction_mesh=mesh,
+        )
+
+        local_scale = 0.5 if self.rank == 0 else 0.25
+        q_weight_NDI = attention.wq_b.weight.to_local().view(
+            1,
+            attention.qk_head_dim,
+            in_features,
+        )
+        kv_weight_NDI = attention.wkv_b.weight.to_local().view(
+            1,
+            qk_nope_head_dim + v_head_dim,
+            in_features,
+        )
+        torch.testing.assert_close(
+            q_weight_NDI[:, :qk_nope_head_dim],
+            torch.full(
+                (1, qk_nope_head_dim, in_features),
+                local_scale**0.5,
+                device=device,
+            ),
+        )
+        torch.testing.assert_close(
+            q_weight_NDI[:, qk_nope_head_dim:],
+            torch.full(
+                (1, qk_rope_head_dim, in_features),
+                local_scale,
+                device=device,
+            ),
+        )
+        torch.testing.assert_close(
+            kv_weight_NDI[:, :qk_nope_head_dim],
+            torch.full(
+                (1, qk_nope_head_dim, in_features),
+                local_scale**0.5,
+                device=device,
+            ),
+        )
+        torch.testing.assert_close(
+            kv_weight_NDI[:, qk_nope_head_dim:],
+            torch.ones(1, v_head_dim, in_features, device=device),
+        )
+        self.assertFalse(attention.inner_attention.max_attention_logits_N)
