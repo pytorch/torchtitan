@@ -44,7 +44,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
-from torchtitan.tools.utils import round_up
 
 
 __all__ = [
@@ -476,34 +475,18 @@ def get_efficient_causal_mask_mod_for_packed_document(
     causal packed-document masking, which is why it coexists with the generic
     document-id mask.
 
-    The causal mask supplies the upper bound, ``kv_idx <= q_idx``, and this
-    mask supplies the lower bound, ``doc_start[q_idx] <= kv_idx``.
+    The causal mask supplies the upper bound, ``kv_idx <= q_idx``. Since each
+    position is the token's offset within its document, ``q_idx - positions[q_idx]``
+    is the document start and supplies the lower bound.
 
     The result is same-document causal masking. This mask is not intended for
     non-causal use.
     """
-    seq_len = positions.shape[0]
-    document_starts = positions == 0
-    document_id = torch.cumsum(document_starts.int(), dim=0).to(torch.int32) - 1
-    token_idx = torch.arange(seq_len, device=positions.device, dtype=torch.int32)
-    offsets = torch.full(
-        (round_up(seq_len + 1, 128),),
-        seq_len,
-        device=positions.device,
-        dtype=torch.int32,
-    )
-    offsets.scatter_(
-        0,
-        torch.where(
-            document_starts, document_id, torch.full_like(document_id, seq_len)
-        ).to(torch.int64),
-        torch.where(document_starts, token_idx, torch.full_like(token_idx, seq_len)),
-    )
 
     def packed_document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        return kv_idx >= offsets[document_id[q_idx]]
+        return kv_idx >= q_idx - positions[q_idx]
 
     return packed_document_mask
 
