@@ -82,11 +82,13 @@ class NoParallel(ParallelStyle):
             module,
             device_mesh,
             None,
+            # pyrefly: ignore [bad-argument-type]
             partial(
                 self._prepare_input_fn,
                 self.input_layout,
                 self.desired_input_layout,
             ),
+            # pyrefly: ignore [bad-argument-type]
             partial(
                 self._prepare_output_fn,
                 self.output_layout,

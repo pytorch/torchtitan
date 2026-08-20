@@ -108,7 +108,7 @@ class AllGatherLinear(torch.autograd.Function):
         return result
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         x_shard_m: torch.Tensor,
         w_shard_n: torch.Tensor,
@@ -213,7 +213,7 @@ class AllGatherLinearMulti(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         x_shard_m: torch.Tensor,
         wa_shard_n: torch.Tensor,
@@ -357,7 +357,7 @@ class LinearReduceScatter(torch.autograd.Function):
         return result
 
     @staticmethod
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         ctx,
         x_shard_k: torch.Tensor,
         w_shard_k: torch.Tensor,

@@ -8,7 +8,12 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
+from torch.distributed.tensor.placement_types import (
+    _StridedShard,
+    Placement,
+    Replicate,
+    Shard,
+)
 
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
@@ -124,6 +129,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_i_placements = []
 
         # Find all the device mesh dimensios that shard on dim-i
+        # pyrefly: ignore [not-iterable]
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
             if placement.dim == dim:
@@ -223,7 +229,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         # exclude expert dimension
         # and build new sub-mesh/placements for individual expert weights
         sub_mesh_names = []
-        sub_placements = []
+        sub_placements: list[Placement] = []
 
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]

@@ -369,6 +369,7 @@ class Qwen35Model(Decoder):
             quadratic_attention = delta_net_metadata
         else:
             quadratic_attention = super().get_attention_masks(positions)
+            assert isinstance(quadratic_attention, BlockMask)
         return {
             "quadratic_attention": quadratic_attention,
             "deltanet": delta_net_metadata,

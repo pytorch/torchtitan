@@ -15,7 +15,8 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
@@ -105,6 +106,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return result
 
     @staticmethod
+    # pyrefly: ignore [bad-override]
     def forward(
         ctx,
         logits: torch.Tensor,
@@ -780,6 +782,7 @@ class _DecoderOutputGradientBackProp(torch.autograd.Function):
     """
 
     @staticmethod
+    # pyrefly: ignore [bad-override]
     def forward(
         ctx,
         hidden_states: torch.Tensor,

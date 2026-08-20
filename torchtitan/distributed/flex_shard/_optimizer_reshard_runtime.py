@@ -316,6 +316,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
         self,
         device: torch.device,
     ) -> None:
+        # pyrefly: ignore [read-only]
         self._device = device
         self._context: _CommunicationContext | None = None
         self._local_slot = _BufferSlot()

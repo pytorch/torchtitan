@@ -315,10 +315,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         config.maybe_log()
 
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
+            dp_mesh = parallel_dims.get_mesh("batch")
+            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
-            batch_degree, batch_rank = 1, 0
+            dp_degree, dp_rank = 1, 0
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -415,16 +415,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         num_tokens_per_train_step = config.training.num_tokens_per_train_step
         if num_tokens_per_train_step < 0:
-            num_tokens_per_train_step = num_tokens_per_dp_rank * batch_degree
-        if num_tokens_per_train_step % (num_tokens_per_dp_rank * batch_degree) != 0:
+            num_tokens_per_train_step = num_tokens_per_dp_rank * dp_degree
+        if num_tokens_per_train_step % (num_tokens_per_dp_rank * dp_degree) != 0:
             raise ValueError(
                 "training.num_tokens_per_train_step "
                 f"({num_tokens_per_train_step}) must be divisible by the number "
                 "of tokens processed globally in one gradient accumulation "
-                f"iteration ({num_tokens_per_dp_rank * batch_degree})."
+                f"iteration ({num_tokens_per_dp_rank * dp_degree})."
             )
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
-            num_tokens_per_dp_rank * batch_degree
+            num_tokens_per_dp_rank * dp_degree
         )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
@@ -557,8 +557,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # build dataloader
         num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
         self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
+            dp_world_size=dp_degree,
+            dp_rank=dp_rank,
             tokenizer=self.tokenizer,
             max_context_length=config.training.max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
@@ -604,8 +604,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.validator = config.validator.build(
                 parallelism=config.parallelism,
-                dp_world_size=batch_degree,
-                dp_rank=batch_rank,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
@@ -866,9 +866,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
+            dp_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum_tensor(
-                local_valid_tokens.to(self.device), batch_mesh
+                local_valid_tokens.to(self.device), dp_mesh
             )
         else:
             global_valid_tokens = local_valid_tokens.to(self.device)

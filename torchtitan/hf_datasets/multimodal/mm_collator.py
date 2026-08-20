@@ -93,6 +93,7 @@ class MultiModalCollator(Collator):
             input_ids = torch.nn.functional.pad(
                 input_ids,
                 (0, pad_len),
+                # pyrefly: ignore [missing-attribute]
                 value=self.tokenizer.pad_id,
             )
             labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
