@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
@@ -36,7 +37,8 @@ from .attention import (
     SlidingWindowAttention,
 )
 from .mhc import HcHead, HcPost, HcPre
-from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock, MTPBlock
+from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
+from .mtp import MTPBlock
 from .moe import DeepSeekV4MoE, DeepSeekV4Router
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
@@ -252,7 +254,7 @@ def _make_v4_attn_config(
         index_n_heads=index_n_heads,
         index_head_dim=index_head_dim,
         n_layers=n_layers,
-        layer_id=actual_layer_id,
+        layer_id=layer_id,
         inner_attention=inner_attention_cfg,
         rope=dataclasses.replace(rope),
         wq_a=Linear.Config(
@@ -342,7 +344,7 @@ def _make_v4_moe_config(
             route_norm=route_norm,
             vocab_size=vocab_size,
             n_hash_layers=n_hash_layers,
-            layer_id=actual_layer_id,
+            layer_id=layer_id,
         ),
         experts=make_experts_config(
             dim=dim,
@@ -508,93 +510,70 @@ def _build_v4_layers(
     return layers
 
 
-def _build_mtp_layers(
-    *,
-    n_layers: int,
-    layer_offset: int,
-    dim: int,
-    n_heads: int,
-    head_dim: int,
-    rope_head_dim: int,
-    q_lora_rank: int,
-    o_lora_rank: int,
-    n_groups: int,
-    compress_ratios: tuple[int, ...],
-    window_size: int,
-    norm_eps: float,
-    index_n_heads: int,
-    index_head_dim: int,
-    index_topk: int,
-    moe_inter_dim: int,
-    num_experts: int,
-    num_shared_experts: int,
-    top_k: int,
-    vocab_size: int,
-    n_hash_layers: int,
-    route_norm: bool,
-    route_scale: float,
-    load_balance_coeff: float,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None,
+def _make_mtp_inner_block(
+    inner_cfg: DeepSeekV4TransformerBlock.Config,
     rope: RoPE.Config,
-    rope_compress: RoPE.Config,
+) -> DeepSeekV4TransformerBlock.Config:
+    block_cfg = copy.deepcopy(inner_cfg)
+    attn_cfg = block_cfg.attention
+    inner_attn_cfg = attn_cfg.inner_attention
+    attn_cfg.compress_ratio = 1
+    attn_cfg.compressor = None
+    attn_cfg.compressor_128 = None
+    attn_cfg.indexer = None
+    attn_cfg.rope = copy.deepcopy(rope)
+    attn_cfg.inner_attention = SlidingWindowAttention.Config(
+        window_size=inner_attn_cfg.window_size,
+        compress_ratio=1,
+        softmax_scale=inner_attn_cfg.softmax_scale,
+        index_topk=inner_attn_cfg.index_topk,
+    )
+    return block_cfg
+
+
+def _build_mtp_layers(
+    inner_cfg: DeepSeekV4TransformerBlock.Config,
+    *,
+    dim: int,
+    n_main_layers: int,
+    num_mtp_layers: int,
     hc_mult: int = 4,
-    sinkhorn_iters: int = 20,
+    norm_eps: float = 1e-6,
     hc_eps: float = 1e-6,
-    dense_hidden_dim: int | None = None,
-    dense_layers: set[int] | None = None,
+    rope: RoPE.Config,
 ) -> list[MTPBlock.Config]:
     mtp_layers = []
-    for block_cfg in _build_v4_layers(
-        n_layers=n_layers,
-        layer_offset=layer_offset,
-        dim=dim,
-        n_heads=n_heads,
-        head_dim=head_dim,
-        rope_head_dim=rope_head_dim,
-        q_lora_rank=q_lora_rank,
-        o_lora_rank=o_lora_rank,
-        n_groups=n_groups,
-        compress_ratios=compress_ratios,
-        window_size=window_size,
-        norm_eps=norm_eps,
-        index_n_heads=index_n_heads,
-        index_head_dim=index_head_dim,
-        index_topk=index_topk,
-        moe_inter_dim=moe_inter_dim,
-        num_experts=num_experts,
-        num_shared_experts=num_shared_experts,
-        top_k=top_k,
-        vocab_size=vocab_size,
-        n_hash_layers=n_hash_layers,
-        route_norm=route_norm,
-        route_scale=route_scale,
-        load_balance_coeff=load_balance_coeff,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=rope,
-        rope_compress=rope_compress,
-        hc_mult=hc_mult,
-        sinkhorn_iters=sinkhorn_iters,
-        hc_eps=hc_eps,
-        dense_hidden_dim=dense_hidden_dim,
-        dense_layers=dense_layers,
-    ):
+    for depth in range(num_mtp_layers):
+        layer_id = n_main_layers + depth
+        block_cfg = _make_mtp_inner_block(inner_cfg, rope)
+        if block_cfg.moe is not None:
+            block_cfg.moe.router.gate.param_init = _depth_init(layer_id)
+            block_cfg.moe.router.layer_id = layer_id
+            block_cfg.moe.experts.param_init = _depth_experts_init(layer_id)
+            if block_cfg.moe.shared_experts is not None:
+                depth_init = _depth_init(layer_id)
+                block_cfg.moe.shared_experts.w2.param_init = depth_init
+                block_cfg.moe.shared_experts.w3.param_init = depth_init
         mtp_layers.append(
             MTPBlock.Config(
-                block=block_cfg,
-                dim=dim,
-                hc_mult=hc_mult,
-                norm_eps=norm_eps,
-                eps=hc_eps,
+                attention=block_cfg.attention,
+                attention_norm=block_cfg.attention_norm,
+                ffn_norm=block_cfg.ffn_norm,
+                feed_forward=block_cfg.feed_forward,
+                moe=block_cfg.moe,
+                hc_attn_pre=block_cfg.hc_attn_pre,
+                hc_ffn_pre=block_cfg.hc_ffn_pre,
+                hc_post=block_cfg.hc_post,
                 e_proj=Linear.Config(
                     in_features=dim,
                     out_features=dim,
+                    bias=False,
                     param_init=_LINEAR_INIT,
                 ),
                 h_proj=Linear.Config(
                     in_features=dim,
                     out_features=dim,
+                    bias=False,
                     param_init=_LINEAR_INIT,
                 ),
                 enorm=RMSNorm.Config(
@@ -607,10 +586,17 @@ def _build_mtp_layers(
                     eps=norm_eps,
                     param_init=_NORM_INIT,
                 ),
-                norm=RMSNorm.Config(
+                mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=norm_eps,
                     param_init=_NORM_INIT,
+                ),
+                hc_head=HcHead.Config(
+                    hc_mult=hc_mult,
+                    dim=dim,
+                    norm_eps=norm_eps,
+                    eps=hc_eps,
+                    param_init=_HC_INIT,
                 ),
                 param_init=_HC_INIT,
             )
@@ -734,38 +720,15 @@ def _debugmodel(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                n_layers=n_mtp_layers,
-                layer_offset=n_layers,
+                # pyrefly: ignore [bad-argument-type]
+                layers[-1],
                 dim=dim,
-                n_heads=n_heads,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                q_lora_rank=q_lora_rank,
-                o_lora_rank=o_lora_rank,
-                n_groups=n_groups,
-                compress_ratios=compress_ratios[n_layers : n_layers + n_mtp_layers],
-                window_size=window_size,
-                norm_eps=norm_eps,
-                index_n_heads=index_n_heads,
-                index_head_dim=index_head_dim,
-                index_topk=index_topk,
-                moe_inter_dim=moe_inter_dim,
-                num_experts=num_experts,
-                num_shared_experts=num_shared_experts,
-                top_k=top_k,
-                vocab_size=vocab_size,
-                n_hash_layers=n_hash_layers,
-                route_norm=route_norm,
-                route_scale=route_scale,
-                load_balance_coeff=load_balance_coeff,
-                moe_comm_backend=moe_comm_backend,
-                non_blocking_capacity_factor=non_blocking_capacity_factor,
-                rope=rope,
-                rope_compress=rope_compress,
+                num_mtp_layers=n_mtp_layers,
+                n_main_layers=n_layers,
                 hc_mult=hc_mult,
-                sinkhorn_iters=sinkhorn_iters,
+                norm_eps=norm_eps,
                 hc_eps=hc_eps,
-                dense_layers=dense_layers,
+                rope=rope,
             )
             if n_mtp_layers > 0
             else None
@@ -889,38 +852,15 @@ def _deepseek_v4_flash(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                n_layers=n_mtp_layers,
-                layer_offset=n_layers,
+                # pyrefly: ignore [bad-argument-type]
+                layers[-1],
                 dim=dim,
-                n_heads=n_heads,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                q_lora_rank=q_lora_rank,
-                o_lora_rank=o_lora_rank,
-                n_groups=n_groups,
-                compress_ratios=compress_ratios[n_layers : n_layers + n_mtp_layers],
-                window_size=window_size,
-                norm_eps=norm_eps,
-                index_n_heads=index_n_heads,
-                index_head_dim=index_head_dim,
-                index_topk=index_topk,
-                moe_inter_dim=moe_inter_dim,
-                num_experts=num_experts,
-                num_shared_experts=num_shared_experts,
-                top_k=top_k,
-                vocab_size=vocab_size,
-                n_hash_layers=n_hash_layers,
-                route_norm=route_norm,
-                route_scale=route_scale,
-                load_balance_coeff=load_balance_coeff,
-                moe_comm_backend=moe_comm_backend,
-                non_blocking_capacity_factor=non_blocking_capacity_factor,
-                rope=rope,
-                rope_compress=rope_compress,
+                num_mtp_layers=n_mtp_layers,
+                n_main_layers=n_layers,
                 hc_mult=hc_mult,
-                sinkhorn_iters=sinkhorn_iters,
+                norm_eps=norm_eps,
                 hc_eps=hc_eps,
-                dense_layers=dense_layers,
+                rope=rope,
             )
             if n_mtp_layers > 0
             else None
@@ -954,7 +894,7 @@ def _deepseek_v4_pro(
     top_k = 6
     n_hash_layers = 3
     route_norm = True
-    route_scale = 1.5
+    route_scale = 2.5
     load_balance_coeff = 1e-3
     hc_mult = 4
     sinkhorn_iters = 20
@@ -1044,38 +984,15 @@ def _deepseek_v4_pro(
         n_mtp_layers=n_mtp_layers,
         mtp_layers=(
             _build_mtp_layers(
-                n_layers=n_mtp_layers,
-                layer_offset=n_layers,
+                # pyrefly: ignore [bad-argument-type]
+                layers[-1],
                 dim=dim,
-                n_heads=n_heads,
-                head_dim=head_dim,
-                rope_head_dim=rope_head_dim,
-                q_lora_rank=q_lora_rank,
-                o_lora_rank=o_lora_rank,
-                n_groups=n_groups,
-                compress_ratios=compress_ratios[n_layers : n_layers + n_mtp_layers],
-                window_size=window_size,
-                norm_eps=norm_eps,
-                index_n_heads=index_n_heads,
-                index_head_dim=index_head_dim,
-                index_topk=index_topk,
-                moe_inter_dim=moe_inter_dim,
-                num_experts=num_experts,
-                num_shared_experts=num_shared_experts,
-                top_k=top_k,
-                vocab_size=vocab_size,
-                n_hash_layers=n_hash_layers,
-                route_norm=route_norm,
-                route_scale=route_scale,
-                load_balance_coeff=load_balance_coeff,
-                moe_comm_backend=moe_comm_backend,
-                non_blocking_capacity_factor=non_blocking_capacity_factor,
-                rope=rope,
-                rope_compress=rope_compress,
+                num_mtp_layers=n_mtp_layers,
+                n_main_layers=n_layers,
                 hc_mult=hc_mult,
-                sinkhorn_iters=sinkhorn_iters,
+                norm_eps=norm_eps,
                 hc_eps=hc_eps,
-                dense_layers=dense_layers,
+                rope=rope,
             )
             if n_mtp_layers > 0
             else None
