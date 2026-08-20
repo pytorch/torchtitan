@@ -181,8 +181,6 @@ class MultiModalCollator(Collator):
         Returns:
             (batch, seq_len, 3) MRoPE position IDs.
         """
-        # TODO(data-qwen-video-mrope): Per-frame grid expansion here conflicts with
-        # the one-video/one-placeholder-run contract; reconcile before video input.
         # MRoPE position IDs are laid out in block order; a raster patch order
         # would desync them from the patch sequence.
         if self.patch_order != "block":
@@ -190,13 +188,10 @@ class MultiModalCollator(Collator):
                 f"MRoPE requires patch_order='block', got {self.patch_order!r}."
             )
 
-        # Expand each video [T, H, W] into T rows of [1, H, W] so each frame is
-        # treated like an image; temporal position comes from frame ordering.
-        if grid_thw_videos is not None:
-            grid_thw_videos = torch.repeat_interleave(
-                grid_thw_videos, grid_thw_videos[:, 0], dim=0
-            )
-            grid_thw_videos[:, 0] = 1
+        # Transformers splits Qwen3.5 video grids into per-frame entries because
+        # timestamps split its video tokens into matching modality runs. Our data
+        # pipeline emits one contiguous placeholder run per video instead, so each
+        # run must consume the original [T, H, W] grid as a single 3D region.
 
         spatial_merge_size = self.spatial_merge_size
 

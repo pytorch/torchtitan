@@ -299,6 +299,10 @@ class MetricsProcessor(Configurable):
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
 
+        def __post_init__(self) -> None:
+            if self.log_freq <= 0:
+                raise ValueError("metrics.log_freq must be greater than 0.")
+
     config: Config
     logger: BaseLogger
     parallel_dims: ParallelDims

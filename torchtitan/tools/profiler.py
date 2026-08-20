@@ -192,6 +192,15 @@ class Profiler(Configurable):
         Set programmatically (not via CLI) — tyro cannot parse Callable types.
         """
 
+        def __post_init__(self) -> None:
+            if self.enable_profiling and self.profile_freq < (
+                self.profiler_warmup + self.profiler_active
+            ):
+                raise ValueError(
+                    "profiler.profile_freq must be greater than or equal to "
+                    "profiler_warmup + profiler_active."
+                )
+
     def __init__(
         self,
         config: Config,
@@ -325,9 +334,6 @@ class Profiler(Configurable):
         }
 
         wait = profile_freq - (active + warmup)
-        assert (
-            wait >= 0
-        ), "profile_freq must be greater than or equal to warmup + active"
         activities = [torch.profiler.ProfilerActivity.CPU]
         if torch.cuda.is_available():
             activities.append(torch.profiler.ProfilerActivity.CUDA)

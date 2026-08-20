@@ -39,7 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
     resize_to_patch_budget,

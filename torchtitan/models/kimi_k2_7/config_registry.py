@@ -9,7 +9,7 @@ from typing import cast
 
 from torch.distributed.tensor import Shard
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,

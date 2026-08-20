@@ -30,7 +30,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -109,8 +109,12 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    inner_attn = model_spec.model.layers[0].attention.inner_attention
-    if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
+    attention_backend = model_spec.model.first_full_attention_backend
+    if attention_backend is None:
+        raise ValueError("No full-attention layer found in the model spec.")
+    if not isinstance(
+        attention_backend, (VarlenAttention.Config, FlexAttention.Config)
+    ):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
@@ -153,7 +157,7 @@ def generate() -> None:
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(inner_attn, FlexAttention.Config)
+                if isinstance(attention_backend, FlexAttention.Config)
                 else AttentionBackendEnum.CUSTOM
             ),
         ),

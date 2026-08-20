@@ -20,8 +20,8 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
+    resolve_fsdp_mesh,
 )
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
 from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel
@@ -70,7 +70,6 @@ def parallelize_muse_glimmer(
                 f"divisible by TP degree ({parallel_dims.tp})"
             )
 
-    validate_config(parallel_dims, model)
     model.parallelize(parallel_dims)
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
