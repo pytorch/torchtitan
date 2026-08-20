@@ -37,7 +37,7 @@ pip install av torchvision
 |---------|-------|
 | FSDP / HSDP | Decoder sharded per-layer. Without PP, the vision encoder is a separate FSDP unit; with PP, it belongs to the first-stage root FSDP unit |
 | Tensor Parallelism (TP) | Model support exists, but DistMuon recipes currently reject TP-produced `_StridedShard` layouts ([#3353](https://github.com/pytorch/torchtitan/issues/3353)) |
-| Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts. DistMuon initially requires routed-expert storage `Shard(0)` on both `efsdp` and `ep`; it rejects the `efsdp` `Shard(1)` layout selected when `efsdp_size * ep_size > num_experts` ([#4122](https://github.com/pytorch/torchtitan/pull/4122)) |
+| Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts. DistMuon preserves the EP-axis `Shard(0)` storage placement while redistributing the EFSDP-axis storage placement from `Shard(1)` to compute `Shard(0)` ordered after EP when `efsdp_size * ep_size > num_experts` ([#4122](https://github.com/pytorch/torchtitan/pull/4122)) |
 | Pipeline Parallel (PP) | Model support exists; DistMuon PP support follows in [#4102](https://github.com/pytorch/torchtitan/pull/4102) |
 
 ## Numerical Checks
