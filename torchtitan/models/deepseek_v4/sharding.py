@@ -70,6 +70,17 @@ def hc_head_input_sequence_parallel_placement() -> SpmdLayout:
     )
 
 
+def hc_mix_sequence_parallel_placement() -> SpmdLayout:
+    return SpmdLayout(
+        {
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.V,
+        },
+        partition_spec=(DP, (CP, TP), None),
+    )
+
+
 def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
     query_states = dense_activation_placement(tp=spmd.S(2))
     replicated_activation = dense_activation_placement(tp=spmd.R)
@@ -214,15 +225,41 @@ def set_deepseek_v4_layer_sharding(
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
+    hc_branch_layout = (
+        hc_head_input_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    hc_dense_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
+    hc_mix_layout = (
+        hc_mix_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I)
+    )
     hc_pre_sharding = ShardingConfig(
         state_shardings={
             "hc_fn": _dense_param_rep,
             "hc_base": _dense_param_rep,
             "hc_scale": _dense_param_rep,
         },
+        in_src_shardings={"x": hc_branch_layout},
+        out_src_shardings=(hc_dense_layout, hc_mix_layout, hc_branch_layout),
     )
     layer_cfg.hc_attn_pre.sharding_config = hc_pre_sharding
     layer_cfg.hc_ffn_pre.sharding_config = hc_pre_sharding
+    layer_cfg.hc_post.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "x": hc_dense_layout,
+            "residual": hc_branch_layout,
+            "post": hc_mix_layout,
+            "comb": hc_branch_layout,
+        },
+        out_src_shardings=hc_branch_layout,
+    )
 
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
@@ -318,6 +355,8 @@ def set_deepseek_v4_sharding_config(
                     "hc_base": _dense_param_rep,
                     "hc_scale": _dense_param_rep,
                 },
+                in_src_shardings={"x": replicated_activation},
+                out_src_shardings=replicated_activation,
             )
             mtp_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={

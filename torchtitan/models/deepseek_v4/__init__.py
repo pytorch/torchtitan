@@ -23,6 +23,7 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import make_experts_config, make_ffn_config
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -39,7 +40,7 @@ from .attention import (
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .mtp import MTPBlock
-from .moe import DeepSeekV4MoE, DeepSeekV4Router
+from .moe import DeepSeekV4Router
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 __all__ = [
@@ -328,7 +329,7 @@ def _make_v4_moe_config(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ):
-    return DeepSeekV4MoE.Config(
+    return MoE.Config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,

@@ -55,7 +55,7 @@ class HcSplitSinkhorn(Module):
 
         row_max = comb.max(dim=-1, keepdim=True).values
         comb = torch.exp(comb - row_max)
-        comb = comb / comb.sum(dim=-1, keepdim=True) + self.eps
+        comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
         comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         for _ in range(self.sinkhorn_iters - 1):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)

@@ -75,7 +75,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
-            x = self.moe(self.ffn_norm(x), input_ids)
+            x = self.moe(self.ffn_norm(x), input_ids=input_ids)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
