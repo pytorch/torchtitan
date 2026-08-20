@@ -18,6 +18,7 @@ from __future__ import annotations
 import operator
 from collections import defaultdict
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from torch.utils.checkpoint import CheckpointPolicy
@@ -26,9 +27,11 @@ from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
+    _get_module_fqn,
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
+    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
@@ -44,6 +47,9 @@ from torchtitan.experiments.graph_trainer.registry import (
     register_memory_policy,
 )
 from torchtitan.tools.logging import logger
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -66,7 +72,63 @@ def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node
     return save_nodes
 
 
-def _make_full_memory_policy() -> Callable:
+def _resolve_op_target(op_name: str) -> object:
+    """Resolve ``aten.mm.default``-style names through ``torch.ops``."""
+    if op_name.startswith("torch.ops."):
+        op_name = op_name.removeprefix("torch.ops.")
+
+    target = torch.ops
+    try:
+        for component in op_name.split("."):
+            target = getattr(target, component)
+    except AttributeError as exc:
+        raise ValueError(
+            f"Unknown op in --compile.full_recompute_save_ops: {op_name!r}"
+        ) from exc
+
+    if not isinstance(target, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
+        raise ValueError(
+            "Ops in --compile.full_recompute_save_ops must name a specific "
+            f"overload or higher-order op, got {op_name!r}"
+        )
+    return target
+
+
+def _parse_full_recompute_save_ops(
+    value: str,
+) -> tuple[tuple[str, object], ...]:
+    """Parse ``FQN::OP | FQN::OP`` save selectors."""
+    if not value.strip():
+        return ()
+
+    selectors: list[tuple[str, object]] = []
+    for raw_selector in value.split("|"):
+        parts = raw_selector.split("::")
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ValueError(
+                "Invalid --compile.full_recompute_save_ops selector "
+                f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
+            )
+        module_fqn_pattern, op_name = (part.strip() for part in parts)
+        selectors.append((module_fqn_pattern, _resolve_op_target(op_name)))
+    return tuple(selectors)
+
+
+def validate_memory_policy_config(
+    compile_config: "GraphTrainerCompileConfig",
+) -> None:
+    """Validate memory-policy options before tracing the training graph."""
+    if (
+        compile_config.full_recompute_save_ops
+        and compile_config.memory_policy != "full"
+    ):
+        raise ValueError(
+            "--compile.full_recompute_save_ops requires --compile.memory_policy full"
+        )
+    _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
+
+
+def _make_full_memory_policy(save_ops: str = "") -> Callable:
     """Full recompute policy: mark everything as MUST_RECOMPUTE.
 
     The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
@@ -83,10 +145,21 @@ def _make_full_memory_policy() -> Callable:
     Higher-order ops (e.g. flex_attention) ARE recomputed: ``node_copy``
     duplicates them together with their ``get_attr`` subgraph references, and
     the subsequent regional_inductor pass compiles the duplicate as well.
+
+    ``save_ops`` can make exact module-FQN-pattern and op pairs exceptions to
+    full recompute. Matching nodes are marked MUST_SAVE.
     """
+
+    save_selectors = _parse_full_recompute_save_ops(save_ops)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            return CheckpointPolicy.MUST_SAVE
+        fqn = _get_module_fqn(node)
+        if any(
+            node.target == target and matches_module_fqn_pattern(fqn_pattern, fqn)
+            for fqn_pattern, target in save_selectors
+        ):
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.MUST_RECOMPUTE
 
@@ -296,8 +369,11 @@ def _full_memory_policy_pass(
     *,
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
-    """Full recompute: only layer outputs are saved."""
-    tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+    """Full recompute except for user-selected module operations."""
+    tag_sac_policy(
+        gm,
+        policy_fn=_make_full_memory_policy(config.compile.full_recompute_save_ops),
+    )
     return gm
 
 
@@ -337,7 +413,7 @@ def tag_with_memory_policy_pass(
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
-        full: full recompute — only layer outputs are saved.
+        full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.
         sac_and_offload: SAC + CPU offload within budget.
 

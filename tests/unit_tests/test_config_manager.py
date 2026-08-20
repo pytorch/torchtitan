@@ -65,7 +65,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             [
                 "--module",
-                "torchtitan_recipes.tests",
+                "torchtitan_recipes.tests.features",
                 "--config",
                 "llama3_debugmodel_fsdp2_cp2",
             ]
