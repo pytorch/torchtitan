@@ -1049,7 +1049,7 @@ class HFTransformerModel(BaseModel):
         parallel_dims: ParallelDims,
         device: torch.device,
         parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return.
 
         Fully self-contained (no ``super()``). Declares no per-input SPMD layout
@@ -1077,10 +1077,9 @@ class HFTransformerModel(BaseModel):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        local_ntokens = batch["labels"].numel()
         inputs = batch.pop("input")
         labels = batch.pop("labels")
-        return inputs, labels, batch, local_ntokens
+        return inputs, labels, batch
 
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).

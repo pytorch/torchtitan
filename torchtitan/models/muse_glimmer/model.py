@@ -5,13 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import Any
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
-
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -25,6 +28,7 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import multimodal_context
@@ -32,6 +36,7 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
+from .sharding import muse_glimmer_input_sharding
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
 
@@ -356,6 +361,43 @@ class MuseGlimmerModel(Decoder):
             config.vision_adapter.build() if config.vision_adapter is not None else None
         )
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build masks, CP-shard, SPMD-annotate, and return the batch."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions", None)
+        if positions is not None:
+            inner = getattr(self.config.first_attention, "inner_attention", None)
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = {**decoder_input_sharding(), **muse_glimmer_input_sharding()}
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
+
     def _get_vision_features(
         self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
     ) -> torch.Tensor:
@@ -463,14 +505,6 @@ class MuseGlimmerModel(Decoder):
         # On non-embedding pipeline stages tok_embeddings is None and the input
         # is already hidden states, so injection is skipped there.
         with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                from .sharding import annotate_muse_glimmer_input_spmd_types
-
-                annotate_muse_glimmer_input_spmd_types(
-                    pixel_values=pixel_values,
-                    grid_thw=grid_thw,
-                )
-
             if self.tok_embeddings is not None:
                 h = self.tok_embeddings(tokens)
                 # The model owns the encoder: when padded pixel_values are passed,

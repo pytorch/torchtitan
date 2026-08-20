@@ -114,11 +114,6 @@ class SpmdLayout:
                     result[axis_name] = spmd.S(dim)
         return result
 
-    def shard_dim(self, axis: "MeshAxisName") -> int | None:
-        """Tensor dim sharded by ``axis``, or None if that axis is not a Shard."""
-        axis_type = self.per_axis_spmd_types().get(axis)
-        return axis_type.dim if isinstance(axis_type, spmd.Shard) else None
-
 
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
     """Expand logical ``dp`` into concrete dense storage mesh axes."""

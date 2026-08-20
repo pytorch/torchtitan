@@ -14,7 +14,6 @@ from typing import Any
 import spmd_types as spmd
 import torch
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed import full_dtensor
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
@@ -95,7 +94,7 @@ class KimiK25Model(DeepSeekV3Model):
         parallel_dims: ParallelDims,
         device: torch.device,
         parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch.
 
         Fully self-contained (no ``super()``). Layout merges the decoder base
@@ -123,18 +122,12 @@ class KimiK25Model(DeepSeekV3Model):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        local_ntokens = batch["labels"].numel()
-
-        if parallelism.spmd_backend == "full_dtensor":
-            batch = full_dtensor.parallelize_inputs(
-                parallel_dims, batch, input_sharding
-            )
-        elif parallelism.spmd_backend == "spmd_types":
+        if parallelism.spmd_backend == "spmd_types":
             batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
-        return inputs, labels, batch, local_ntokens
+        return inputs, labels, batch
 
     def _prepare_multimodal_embeds(
         self,

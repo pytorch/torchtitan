@@ -13,7 +13,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed import full_dtensor
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -353,7 +352,7 @@ class Qwen35Model(Decoder):
         parallel_dims: ParallelDims,
         device: torch.device,
         parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return.
 
         Fully self-contained (no ``super()``). Layout merges the decoder base
@@ -382,13 +381,7 @@ class Qwen35Model(Decoder):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        local_ntokens = batch["labels"].numel()
-
-        if parallelism.spmd_backend == "full_dtensor":
-            batch = full_dtensor.parallelize_inputs(
-                parallel_dims, batch, input_sharding
-            )
-        elif parallelism.spmd_backend == "spmd_types":
+        if parallelism.spmd_backend == "spmd_types":
             batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
             # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
             # nested inside attention_masks, must be annotated at its container.
@@ -399,7 +392,7 @@ class Qwen35Model(Decoder):
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
-        return inputs, labels, batch, local_ntokens
+        return inputs, labels, batch
 
     def get_attention_masks(
         self,

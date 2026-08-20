@@ -37,22 +37,14 @@ def _run(m: HFTransformerModel):
     )
 
 
-def test_hf_has_no_build_forward_inputs():
-    assert not hasattr(HFTransformerModel, "_build_forward_inputs")
-
-
-def test_hf_has_no_input_sharding():
-    assert not hasattr(HFTransformerModel, "input_sharding")
-
-
 def test_hf_builds_mask_when_present(monkeypatch):
     monkeypatch.setattr(
         HFTransformerModel, "get_attention_masks", lambda self, positions: "MASK"
     )
     m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
-    (inputs, labels, extra, ntok), B, S = _run(m)
+    (inputs, labels, extra), B, S = _run(m)
     assert extra["attention_masks"] == "MASK"
-    assert ntok == B * S
+    assert labels.numel() == B * S
     assert "input" not in extra and "labels" not in extra
 
 
@@ -61,5 +53,5 @@ def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
         HFTransformerModel, "get_attention_masks", lambda self, positions: None
     )
     m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
-    (inputs, labels, extra, ntok), B, S = _run(m)
+    (inputs, labels, extra), B, S = _run(m)
     assert "attention_masks" not in extra

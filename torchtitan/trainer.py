@@ -687,14 +687,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         """Run the model's input pipeline and accumulate token accounting.
 
         Delegates to ``model.preprocess_inputs`` (which builds forward inputs,
-        CP-shards, and SPMD-wraps) and folds the returned per-rank token count
-        into ``self.ntokens_seen``. Called once per step on the non-PP path and
-        once per microbatch on the PP path, so token accounting matches the
-        batch stream.
-
-        The 4th returned value of ``model.preprocess_inputs`` (``local_ntokens``)
-        is a transitional workaround; see ``BaseModel.preprocess_inputs`` for the
-        ``TODO(return-type)`` rationale.
+        CP-shards, and SPMD-wraps) and folds the CP-sharded label token count
+        (``labels.numel()``) into ``self.ntokens_seen``. Called once per step on
+        the non-PP path and once per microbatch on the PP path, so token
+        accounting matches the batch stream.
 
         TODO: fold labels into the batch at the dataloader instead of here --
         have the dataloader yield a single input_dict with "labels" already
@@ -702,7 +698,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (and the separate `labels` param threaded through the microbatch/PP
         paths) can go away.
         """
-        inputs, labels, extra_kwargs, local_ntokens = cast(
+        inputs, labels, extra_kwargs = cast(
             BaseModel, self.model_parts[0]
         ).preprocess_inputs(
             {**input_dict, "labels": labels},
@@ -710,7 +706,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             device=self.device,
             parallelism=self.config.parallelism,
         )
-        self.ntokens_seen += local_ntokens
+        self.ntokens_seen += labels.numel()
         return inputs, labels, extra_kwargs
 
     @sl.log_trace_span("fwd_bwd")

@@ -13,14 +13,6 @@ from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.decoder import Decoder
 
 
-def test_decoder_has_no_build_forward_inputs():
-    assert not hasattr(Decoder, "_build_forward_inputs")
-
-
-def test_decoder_has_no_input_sharding():
-    assert not hasattr(Decoder, "input_sharding")
-
-
 def test_decoder_preprocess_builds_mask_and_returns(monkeypatch):
     monkeypatch.setattr(Decoder, "get_attention_masks", lambda self, positions: "MASK")
     m = cast(Decoder, object.__new__(Decoder))
@@ -41,13 +33,13 @@ def test_decoder_preprocess_builds_mask_and_returns(monkeypatch):
         },
     )
     pd = ParallelDims(dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1)
-    inputs, labels, extra, ntok = m.preprocess_inputs(
+    inputs, labels, extra = m.preprocess_inputs(
         batch,
         parallel_dims=pd,
         device=torch.device("cpu"),
         parallelism=ParallelismConfig(),
     )
     assert extra["attention_masks"] == "MASK"
-    assert ntok == B * S
+    assert labels.numel() == B * S
     assert "input" not in extra and "labels" not in extra
     assert tuple(inputs.shape) == (B, S)

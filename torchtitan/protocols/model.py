@@ -60,43 +60,21 @@ class BaseModel(Module):
         parallel_dims: ParallelDims,
         device: torch.device,
         parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
-        """Minimal default input pipeline: copy, CP-shard, count tokens, return.
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Minimal default input pipeline: split ``input``/``labels`` and return.
 
-        Used by simple models (e.g. ``FluxModel``) that build no attention masks
-        and declare no per-input SPMD layout. Models that need masks or an SPMD
-        input layout override this method fully (no ``super()`` call).
+        Default for simple models that need no context-parallel sharding,
+        attention masks, or per-input SPMD layout. Models that require any of
+        those override this method fully (no ``super()`` call) and apply CP
+        sharding themselves.
 
         ``input_dict`` is the batch with ``labels`` folded in. Returns
-        ``(inputs, labels, extra_kwargs, local_ntokens)``.
-
-        TODO(return-type): the 4th return value (local token count) is a transitional
-        workaround. The ``full_dtensor`` backend wraps ``labels`` in a DTensor
-        whose ``.numel()`` reports the GLOBAL count, so the trainer cannot count
-        from the returned labels. When the DTensor path is removed, drop this
-        element and revert to a 3-tuple, letting the trainer do
-        ``self.ntokens_seen += labels.numel()`` on the returned (plain,
-        CP-sharded) labels.
+        ``(inputs, labels, extra_kwargs)``.
         """
-        # Imported function-locally to avoid a circular import
-        # (context_parallel.api -> models.common -> decoder -> protocols.model).
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         batch: dict[str, Any] = dict(input_dict)
-        if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                None,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
-            )
-        local_ntokens = batch["labels"].numel()
         inputs = batch.pop("input")
         labels = batch.pop("labels")
-        return inputs, labels, batch, local_ntokens
+        return inputs, labels, batch
 
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.

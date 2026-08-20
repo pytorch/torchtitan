@@ -6,16 +6,17 @@
 
 from types import SimpleNamespace
 
+import torch
 from torchtitan.trainer import Trainer
 
 
-def test_prepare_batch_accumulates_local_ntokens_and_returns_triple():
+def test_prepare_batch_accumulates_tokens_and_returns_triple():
     captured = {}
 
     class _FakeModel:
-        def preprocess_inputs(self, input_dict, labels, **kw):
+        def preprocess_inputs(self, input_dict, **kw):
             captured.update(kw)
-            return ("INPUTS", "LABELS", {"positions": 1}, 7)
+            return ("INPUTS", torch.ones(7), {"positions": 1})
 
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
@@ -24,7 +25,9 @@ def test_prepare_batch_accumulates_local_ntokens_and_returns_triple():
         config=SimpleNamespace(parallelism="PARA"),
         ntokens_seen=100,
     )
-    out = Trainer._prepare_batch(fake, {"input": 0}, "labels")
-    assert out == ("INPUTS", "LABELS", {"positions": 1})  # 3-tuple, 4th dropped
-    assert fake.ntokens_seen == 107  # local_ntokens (7) folded in
+    inputs, labels, extra = Trainer._prepare_batch(fake, {"input": 0}, "labels")
+    assert inputs == "INPUTS"
+    assert extra == {"positions": 1}
+    assert labels.numel() == 7
+    assert fake.ntokens_seen == 107  # labels.numel() (7) folded in
     assert captured == {"parallel_dims": "PD", "device": "cpu", "parallelism": "PARA"}

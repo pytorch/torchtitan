@@ -6,6 +6,7 @@
 
 from typing import Any, cast, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._attention import (
@@ -41,9 +42,9 @@ def _cp_shard_dims(input_sharding: dict[str, SpmdLayout]) -> dict[str, int]:
     """
     dims: dict[str, int] = {}
     for name, layout in input_sharding.items():
-        cp_dim = layout.shard_dim(MeshAxisName.CP)
-        if cp_dim is not None:
-            dims[name] = cp_dim
+        axis_type = layout.per_axis_spmd_types().get(MeshAxisName.CP)
+        if isinstance(axis_type, spmd.Shard):
+            dims[name] = axis_type.dim
     return dims
 
 

@@ -7,7 +7,6 @@
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
@@ -37,24 +36,21 @@ DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
 
-def annotate_muse_glimmer_input_spmd_types(
-    *,
-    pixel_values: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-) -> None:
-    """Annotate Muse Glimmer multimodal inputs with their local SPMD types.
+def muse_glimmer_input_sharding() -> dict[str, SpmdLayout]:
+    """SPMD layouts for Muse Glimmer multimodal inputs (folded into input_sharding).
 
-    Called inside ``MuseGlimmerModel.multimodal_context`` (a DP-local mesh), so
-    the pixel/grid tensors carry per-rank (``V@DP``) types the vision encoder can
-    consume. Mirrors kimi_k2_7's ``annotate_multimodal_input_spmd_types``.
+    The vision tensors are DP-local (``V@DP``) -- each DP rank owns its own
+    images -- and TP-invariant (``I@TP``); ``MuseGlimmerModel.forward`` consumes
+    them inside ``multimodal_context`` (a DP-local mesh) and the vision encoder
+    runs per-rank.
     """
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
+    multimodal_layout = SpmdLayout({DP: spmd.V, TP: spmd.I})
+    return {
+        "pixel_values": multimodal_layout,
+        "grid_thw": multimodal_layout,
+        "pixel_values_videos": multimodal_layout,
+        "grid_thw_videos": multimodal_layout,
     }
-    for tensor in (pixel_values, grid_thw):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
 
 
 def set_muse_glimmer_sharding_config(

@@ -137,12 +137,6 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
 
-        if config.steps == -1:
-            logger.warning(
-                "Setting validation steps to -1 might cause hangs because of "
-                "unequal sample counts across ranks when dataset is exhausted."
-            )
-
     def _prepare_batch(
         self,
         input_dict: dict[str, torch.Tensor],
@@ -153,11 +147,10 @@ class Validator(BaseValidator):
 
         Validation counterpart of ``Trainer._prepare_batch``: delegates to
         ``model.preprocess_inputs`` and returns the forward inputs. Takes
-        ``model_parts`` explicitly (the validator is not the model owner) and
-        drops the token count (the validator tracks its own).
+        ``model_parts`` explicitly (the validator is not the model owner). The
+        validator tracks its own token count, so no token accounting happens here.
         """
-        # validator tracks its own tokens; local_ntokens (4th element) unused
-        inputs, labels, extra_kwargs, _ = cast(
+        inputs, labels, extra_kwargs = cast(
             BaseModel, model_parts[0]
         ).preprocess_inputs(
             {**input_dict, "labels": labels},
