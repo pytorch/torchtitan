@@ -858,7 +858,8 @@ class FusedQKVLinear(BaseQKVLinear):
             # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
             # cat() inconsistent grad types in PP's backward metadata inference.
             # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards seq). TODO: remove it after spmd_types/full_dtensor
+            # head axis, CP shards seq). TODO: remove once the partial_dtensor
+            # backend is gone.
             _split = local_map(
                 _split,
                 out_placements=(qkv.placements,) * 3,
