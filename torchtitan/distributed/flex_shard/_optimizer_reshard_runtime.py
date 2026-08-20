@@ -684,11 +684,14 @@ def _prepare_redistributed(
         )
         prepare(item, prepared)
         spans = schedule.input_spans_by_parameter[index]
-        for span in spans:
-            packed = storage_buffer[
-                span.buffer_offset : span.buffer_offset + span.numel
-            ]
-            packed.copy_(_tensor_region_view(prepared, span.region).reshape(-1))
+        packed_views = tuple(
+            storage_buffer[span.buffer_offset : span.buffer_offset + span.numel]
+            for span in spans
+        )
+        prepared_views = tuple(
+            _tensor_region_view(prepared, span.region).reshape(-1) for span in spans
+        )
+        _foreach_copy_or_fallback_(packed_views, prepared_views)
 
 
 def _compute_redistributed(
@@ -717,21 +720,31 @@ def _compute_redistributed(
             dtype=plan.dtype,
             device=plan.device,
         )
-        for span in received_spans:
-            received = work.compute_fragment_buffer[
+        compute_views = tuple(
+            _tensor_region_view(compute_tensor, span.region) for span in received_spans
+        )
+        received_views = tuple(
+            work.compute_fragment_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
-            ]
-            _tensor_region_view(compute_tensor, span.region).copy_(
-                received.view(span.region.shape)
-            )
+            ].view(span.region.shape)
+            for span in received_spans
+        )
+        _foreach_copy_or_fallback_(compute_views, received_views)
 
         compute(item, compute_tensor)
 
-        for span in to_storage.input_spans_by_parameter[index]:
-            packed = work.compute_fragment_buffer[
+        output_spans = to_storage.input_spans_by_parameter[index]
+        packed_views = tuple(
+            work.compute_fragment_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
             ]
-            packed.copy_(_tensor_region_view(compute_tensor, span.region).reshape(-1))
+            for span in output_spans
+        )
+        compute_output_views = tuple(
+            _tensor_region_view(compute_tensor, span.region).reshape(-1)
+            for span in output_spans
+        )
+        _foreach_copy_or_fallback_(packed_views, compute_output_views)
 
 
 def _finalize_redistributed(
@@ -757,14 +770,46 @@ def _finalize_redistributed(
             device=plan.device,
         )
         spans = schedule.output_spans_by_parameter[index]
-        for span in spans:
-            packed = work.storage_buffer[
+        update_views = tuple(_tensor_region_view(update, span.region) for span in spans)
+        packed_views = tuple(
+            work.storage_buffer[
                 span.buffer_offset : span.buffer_offset + span.numel
-            ]
-            _tensor_region_view(update, span.region).copy_(
-                packed.view(span.region.shape)
-            )
+            ].view(span.region.shape)
+            for span in spans
+        )
+        _foreach_copy_or_fallback_(update_views, packed_views)
         finalize(item, update)
+
+
+def _foreach_copy_or_fallback_(
+    destinations: tuple[Tensor, ...],
+    sources: tuple[Tensor, ...],
+) -> None:
+    """Copy aligned tensor views with one foreach launch when supported."""
+    if len(destinations) != len(sources):
+        raise ValueError("destinations and sources must have equal length")
+    if not destinations:
+        return
+    if len(destinations) == 1:
+        destinations[0].copy_(sources[0])
+        return
+
+    reference_device = destinations[0].device
+    reference_dtype = destinations[0].dtype
+    foreach_compatible = all(
+        destination.layout is torch.strided
+        and source.layout is torch.strided
+        and destination.shape == source.shape
+        and destination.device == source.device == reference_device
+        and destination.dtype == source.dtype == reference_dtype
+        for destination, source in zip(destinations, sources, strict=True)
+    )
+    if foreach_compatible:
+        torch._foreach_copy_(destinations, sources)
+        return
+
+    for destination, source in zip(destinations, sources, strict=True):
+        destination.copy_(source)
 
 
 def _tensor_region_view(tensor: Tensor, region: _TensorRegion) -> Tensor:
