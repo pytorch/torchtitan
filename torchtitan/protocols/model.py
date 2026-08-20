@@ -61,20 +61,20 @@ class BaseModel(Module):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Minimal default input pipeline: split ``input``/``labels`` and return.
+        """Prepare the forward inputs from a dataloader batch.
 
-        Default for simple models that need no context-parallel sharding,
-        attention masks, or per-input SPMD layout. Models that require any of
-        those override this method fully (no ``super()`` call) and apply CP
-        sharding themselves.
+        Every concrete model must implement this: build any attention masks,
+        apply context-parallel sharding and SPMD annotation as needed, and split
+        ``input``/``labels`` out of the batch. ``input_dict`` is the batch with
+        ``labels`` folded in; return ``(inputs, labels, extra_kwargs)``.
 
-        ``input_dict`` is the batch with ``labels`` folded in. Returns
-        ``(inputs, labels, extra_kwargs)``.
+        The trainer calls this via ``cast(BaseModel, model).preprocess_inputs``,
+        so the declaration lives here for typing, but there is no meaningful
+        default -- subclasses provide the model-specific pipeline.
         """
-        batch: dict[str, Any] = dict(input_dict)
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement preprocess_inputs()."
+        )
 
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.

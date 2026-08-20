@@ -1050,12 +1050,7 @@ class HFTransformerModel(BaseModel):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Build the attention mask (when positions are present), CP-shard, return.
-
-        Fully self-contained (no ``super()``). Declares no per-input SPMD layout
-        (default backend only, per ``parallelize.py``), so there is no SPMD-wrap
-        step; the mask is built from unsharded positions before CP-sharding.
-        """
+        """Build the attention mask (when positions are present), CP-shard, return."""
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,

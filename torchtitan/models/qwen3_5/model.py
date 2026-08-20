@@ -17,9 +17,7 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     set_current_spmd_mesh,
-    spmd_mesh_size,
 )
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -353,13 +351,7 @@ class Qwen35Model(Decoder):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return.
-
-        Fully self-contained (no ``super()``). Layout merges the decoder base
-        with qwen3.5 additions. Under ``spmd_types``, the GatedDeltaNet
-        ``cu_seq_q`` (nested in ``attention_masks``) is annotated at its
-        container after the plain-tensor annotation.
-        """
+        """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,

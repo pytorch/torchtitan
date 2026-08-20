@@ -341,13 +341,7 @@ class Decoder(BaseModel):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch.
-
-        Fully self-contained (no ``super()``): masks are built from unsharded
-        ``positions`` before CP-sharding; the decoder's static SPMD input layout
-        (``decoder_input_sharding()``) drives CP shard-dims and the SPMD-backend
-        wrap. A maskless backend (SDPA) relies on ``is_causal``.
-        """
+        """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
         # Function-local import avoids a circular import
         # (context_parallel.api -> models.common -> decoder).
         from torchtitan.distributed.context_parallel.api import (

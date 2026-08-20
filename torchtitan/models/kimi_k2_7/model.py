@@ -95,12 +95,7 @@ class KimiK25Model(DeepSeekV3Model):
         device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Build masks, CP-shard, SPMD-wrap, and return the batch.
-
-        Fully self-contained (no ``super()``). Layout merges the decoder base
-        with the multimodal additions; masks are built from unsharded
-        ``positions`` before CP-sharding.
-        """
+        """Build masks, CP-shard, SPMD-wrap, and return the batch."""
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,
