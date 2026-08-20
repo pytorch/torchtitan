@@ -454,6 +454,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             OverrideDefinitions(
                 [
                     [
+                        "--training.disable_cuda_graphs",
                         "--module graph_trainer.deepseek_v3",
                         "--config graph_trainer_deepseek_v3_debugmodel",
                         "--compile.mode aot_fx_trace",
@@ -612,6 +613,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.qwen3",
                     "--config graph_trainer_qwen3_debugmodel_moe",
                     "--compile.mode aot_fx_trace",
