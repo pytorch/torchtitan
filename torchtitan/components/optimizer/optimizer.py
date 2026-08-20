@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
+import torch.distributed as dist
 import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
@@ -97,6 +98,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     Args:
         config (Config): Optimizer configuration with param group definitions.
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        pp_process_group (ProcessGroup, optional): Pipeline-parallel process group.
+            Pass it under PP so param-group validation can reduce across stages;
+            see ``_validate_pp_assignments`` for why that has to be collective.
+            None selects the stage-local validation path.
+        device (torch.device, optional): Device for the PP validation flag
+            tensor; required when ``pp_process_group`` is provided.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -135,6 +142,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         ``ParamGroupConfig.optimizer_kwargs``.
         """
 
+        def build(self, **kwargs):
+            """Build with PP context only when PP is enabled.
+
+            Omitting the new keywords for non-PP construction preserves the
+            constructor contract of existing ``OptimizersContainer`` subclasses.
+            """
+            if kwargs.get("pp_process_group") is None:
+                kwargs.pop("pp_process_group", None)
+                kwargs.pop("device", None)
+            return Configurable.Config.build(self, **kwargs)
+
     optimizers: list[T]
     model_parts: list[nn.Module]
 
@@ -164,31 +182,41 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "foreach": config.implementation == "foreach",
         }
 
-    @staticmethod
+    @classmethod
     def _build_param_groups(
+        cls,
         model: nn.Module,
         param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
     ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
-        """Build PyTorch param groups from model parameters, partitioned by optimizer.
+        """Build groups for a single non-PP model, retaining local validation."""
+        groups, patterns, matches = cls._resolve_param_groups(
+            model, param_group_configs, impl_kwargs
+        )
+        cls._validate_param_group_matches(param_group_configs, matches)
+        return groups, patterns
+
+    @staticmethod
+    def _resolve_param_groups(
+        model: nn.Module,
+        param_group_configs: list[ParamGroupConfig],
+        impl_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]], list[bool]]:
+        """Resolve configs against one model part.
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
-
-        Returns two dicts keyed by optimizer name and aligned by index: the param
-        group dicts to pass to the optimizer constructor, and the regex pattern of
-        each group. Patterns are returned separately (not stored on the group) so
-        they stay out of the saved optimizer state dict; they are logging-only.
-
-        Each param group dict carries a ``param_names`` list (canonical FQNs
-        aligned with ``params``) so PyTorch records the names on the group; the
-        checkpoint utilities use those names to build FQN-keyed optimizer state.
+        Empty groups are omitted locally, since ``torch.optim.Optimizer`` rejects
+        a group with no params. The returned match bitmap keeps an entry for them
+        so it stays index-aligned with ``param_group_configs``, which is what lets
+        ranks reduce it elementwise in ``_validate_pp_assignments``.
         """
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         patterns: dict[str, list[str]] = defaultdict(list)
+        matches: list[bool] = []
         claimed: set[str] = set()  # first-match-wins
 
-        for pg in param_group_configs:
-            pattern = re.compile(pg.pattern)
+        for config in param_group_configs:
+            pattern = re.compile(config.pattern)
             params: list[nn.Parameter] = []
             param_names: list[str] = []
             for name, param in model.named_parameters():
@@ -197,50 +225,87 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     param_names.append(canonical_fqn(name))
                     claimed.add(name)
 
+            matches.append(bool(params))
             if not params:
-                raise ValueError(
-                    f"Optimizer param_groups pattern '{pg.pattern}' "
-                    f"matched no parameters"
-                )
+                continue
 
-            groups[pg.optimizer_name].append(
+            groups[config.optimizer_name].append(
                 {
                     "params": params,
                     "param_names": param_names,
                     **impl_kwargs,
-                    **pg.optimizer_kwargs,
+                    **config.optimizer_kwargs,
                 }
             )
-            patterns[pg.optimizer_name].append(pg.pattern)
+            patterns[config.optimizer_name].append(config.pattern)
 
-        return groups, patterns
+        return groups, patterns, matches
 
-    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        model_parts: list[nn.Module],
+        pp_process_group: dist.ProcessGroup | None = None,
+        device: torch.device | None = None,
+    ) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
         param_group_configs = config.param_groups
-        all_params = []
         self.optimizers = []
         self.model_parts = model_parts
 
-        for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
-                model, param_group_configs, impl_kwargs
+        # Without PP a stage owns the whole model, so both validations are local.
+        if pp_process_group is None:
+            param_groups_by_part = [
+                self._build_param_groups(model, param_group_configs, impl_kwargs)
+                for model in self.model_parts
+            ]
+            assigned_params = self._collect_assigned_params(param_groups_by_part)
+            self._validate_params(assigned_params)
+        else:
+            if device is None:
+                raise ValueError("device is required with pp_process_group")
+            resolved_by_part = [
+                self._resolve_param_groups(model, param_group_configs, impl_kwargs)
+                for model in self.model_parts
+            ]
+            param_groups_by_part = [
+                (groups_by_opt_name, patterns_by_opt_name)
+                for groups_by_opt_name, patterns_by_opt_name, _ in resolved_by_part
+            ]
+            assigned_params = self._collect_assigned_params(param_groups_by_part)
+            local_matches = [
+                any(matches[config_idx] for _, _, matches in resolved_by_part)
+                for config_idx in range(len(param_group_configs))
+            ]
+            self._validate_pp_assignments(
+                param_group_configs,
+                local_matches,
+                assigned_params,
+                pp_process_group,
+                device,
             )
+
+        # Resolve all configured factories before any stage constructs an
+        # optimizer, so invalid names fail consistently across PP ranks.
+        optimizer_factories = {
+            group.optimizer_name: self._resolve_optimizer_factory(group.optimizer_name)
+            for group in param_group_configs
+        }
+        for part_idx, (groups_by_opt_name, patterns_by_opt_name) in enumerate(
+            param_groups_by_part
+        ):
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = self._resolve_optimizer_factory(opt_name)(
+                optimizer = optimizer_factories[opt_name](
                     opt_param_groups,
                     **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
                 )
                 self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
-                for group in opt_param_groups:
-                    all_params.extend(group["params"])
-
-        self._validate_params(all_params)
 
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
-        self._post_init(all_params)
+        self._post_init(assigned_params)
 
     def _log_optimizer(
         self, optimizer: Optimizer, part_idx: int, patterns: list[str]
@@ -278,6 +343,92 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             f"Parameter mismatch: {len(expected)} trainable params in model, "
             f"{len(actual)} in optimizers"
         )
+
+    @staticmethod
+    def _collect_assigned_params(
+        param_groups_by_part: list[
+            tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]
+        ],
+    ) -> list[nn.Parameter]:
+        return [
+            param
+            for groups_by_opt_name, _ in param_groups_by_part
+            for opt_param_groups in groups_by_opt_name.values()
+            for group in opt_param_groups
+            for param in group["params"]
+        ]
+
+    @staticmethod
+    def _validate_param_group_matches(
+        param_group_configs: list[ParamGroupConfig],
+        matches: list[bool],
+    ) -> None:
+        """Require every config to claim at least one parameter.
+
+        ``strict`` enforces the index alignment the match bitmap depends on: a
+        short bitmap would otherwise truncate the zip and skip validating the
+        tail configs entirely.
+        """
+        for param_group_config, matched in zip(
+            param_group_configs, matches, strict=True
+        ):
+            if not matched:
+                raise ValueError(
+                    "Optimizer param_groups pattern "
+                    f"{param_group_config.pattern!r} matched no parameters"
+                )
+
+    def _validate_pp_assignments(
+        self,
+        param_group_configs: list[ParamGroupConfig],
+        local_matches: list[bool],
+        all_params: list[nn.Parameter],
+        pp_process_group: dist.ProcessGroup,
+        device: torch.device,
+    ) -> None:
+        """Validate global group matches and local coverage with one PP collective.
+
+        Two build-time invariants need a PP-wide view:
+
+        1. Every ``param_groups`` pattern must claim a parameter. Without PP the
+           rank owns the whole model, so a pattern matching nothing is a config
+           bug. Under PP the config still describes the global model while each
+           rank holds only its stage, so e.g. an lm_head pattern legitimately
+           matches nothing on stage 0. The predicate has to weaken from "matched
+           locally" to "matched on some stage", which only a collective decides.
+        2. Every trainable parameter must be assigned to an optimizer. This stays
+           stage-local, but it rides the same all-reduce so a violation raises on
+           every rank: raising on only the offending rank would leave the others
+           to hang in the next collective instead of reporting the error.
+
+        Both ride one ``MAX`` all-reduce over a flag bitmap: one entry per param
+        group config, plus a trailing local-coverage flag.
+        """
+        expected = {
+            id(param)
+            for model in self.model_parts
+            for param in model.parameters()
+            if param.requires_grad
+        }
+        actual = {id(param) for param in all_params}
+        flags = torch.tensor(
+            [*local_matches, expected != actual], dtype=torch.int32, device=device
+        )
+        dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=pp_process_group)
+        global_flags = [bool(flag) for flag in flags.tolist()]
+
+        # A group may be absent locally, but must claim a parameter on some PP
+        # stage. This retains typo/stale-pattern detection without requiring
+        # every stage to own every global optimizer group.
+        self._validate_param_group_matches(
+            param_group_configs,
+            global_flags[:-1],
+        )
+        if global_flags[-1]:
+            raise RuntimeError(
+                "Parameter mismatch on at least one pipeline stage: every "
+                "trainable parameter must be assigned to an optimizer"
+            )
 
     def __iter__(self) -> Iterator[T]:
         return iter(self.optimizers)

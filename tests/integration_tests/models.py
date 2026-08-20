@@ -116,10 +116,11 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Cases for Kimi K2.7
         OverrideDefinitions(
-            configs=[recipes.kimi_k2_5_debugmodel_muon_fsdp4_ep2],
-            test_descr="Kimi K2.7 DistMuon spmd_types FSDP+EP",
-            test_name="kimi_k2_5_muon_fsdp+ep",
+            configs=[recipes.kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2],
+            test_descr="Kimi K2.7 DistMuon PP+FSDP+EP",
+            test_name="kimi_k2_5_muon_pp+fsdp+ep",
             ngpu=4,
+            timeout=600,
         ),
         # Integration Test Cases for Muse Glimmer
         OverrideDefinitions(
