@@ -19,8 +19,6 @@ tensors via local_map.
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
-
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
@@ -60,42 +58,37 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def annotate_qwen35_input_spmd_types(
-    *,
-    attention_masks: "Qwen35AttentionMaskDict | None",
-    mrope_positions: torch.Tensor | None,
-    pixel_values: torch.Tensor | None,
-    pixel_values_videos: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-    grid_thw_videos: torch.Tensor | None,
-) -> None:
-    """Annotate Qwen3.5 structured inputs with their local SPMD types."""
-    token_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.TP: spmd.R,
-    }
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
+def qwen35_input_sharding() -> dict[str, SpmdLayout]:
+    """SPMD layouts for Qwen3.5 structured inputs (folded into input_sharding).
+
+    The GatedDeltaNet ``cu_seq_q`` offsets live nested inside ``attention_masks``
+    and cannot be typed by name here; they are annotated at construction
+    (see ``annotate_deltanet_cu_seqlens``).
+    """
+    token_layout = SpmdLayout({DP: spmd.S(0), TP: spmd.R})
+    multimodal_layout = SpmdLayout({DP: spmd.V, TP: spmd.I})
+    return {
+        "mrope_positions": token_layout,
+        "pixel_values": multimodal_layout,
+        "pixel_values_videos": multimodal_layout,
+        "grid_thw": multimodal_layout,
+        "grid_thw_videos": multimodal_layout,
     }
 
-    if mrope_positions is not None:
-        spmd.assert_type(mrope_positions, token_type)
-    if attention_masks is not None:
-        deltanet_metadata = attention_masks["deltanet"]
-        assert isinstance(deltanet_metadata, VarlenMetadata)
-        spmd.assert_type(
-            deltanet_metadata.cu_seq_q,
-            {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
-        )
-    for tensor in (
-        pixel_values,
-        pixel_values_videos,
-        grid_thw,
-        grid_thw_videos,
-    ):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
+
+def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> None:
+    """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
+
+    ``cu_seq_q`` sits inside a ``VarlenMetadata`` inside the attention-mask
+    dict, so it is unreachable by name through ``input_sharding``; the caller
+    invokes this under the dense SPMD mesh.
+    """
+    deltanet_metadata = attention_masks["deltanet"]
+    assert isinstance(deltanet_metadata, VarlenMetadata)
+    spmd.assert_type(
+        deltanet_metadata.cu_seq_q,
+        {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
+    )
 
 
 def _qk_norm_sharding() -> ShardingConfig:

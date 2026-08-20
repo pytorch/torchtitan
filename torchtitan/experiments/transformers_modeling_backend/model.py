@@ -9,17 +9,15 @@ import importlib
 import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
+from typing import Any
 
 import torch
 import torch.distributed as dist
 from torch import nn
 from torch.nn import init
 from torch.nn.attention.flex_attention import and_masks
-from transformers import AutoConfig
-from transformers.configuration_utils import PretrainedConfig
-from transformers.integrations.flex_attention import flex_attention_forward
-from transformers.modeling_utils import AttentionInterface, PreTrainedModel
-
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -30,6 +28,10 @@ from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.logging import logger
+from transformers import AutoConfig
+from transformers.configuration_utils import PretrainedConfig
+from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 
 class HFFlexKernel(Module):
@@ -337,12 +339,12 @@ class HFTransformerModel(BaseModel):
             needed. The custom impl name only exists to bypass HF's per-model
             ``_supports_flex_attn`` gate.
             """
-            AttentionInterface._global_mapping[
+            AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = (
+                _flex_attention_torchtitan
+            )
+            self._titan_injected_model_args["attn_implementation"] = (
                 _ATTN_IMPLEMENTATION
-            ] = _flex_attention_torchtitan
-            self._titan_injected_model_args[
-                "attn_implementation"
-            ] = _ATTN_IMPLEMENTATION
+            )
             self.attn_implementation = _ATTN_IMPLEMENTATION
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
@@ -1040,6 +1042,40 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build the attention mask (when positions are present), CP-shard, return."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        if "attention_masks" not in batch:
+            positions = batch.get("positions")
+            if positions is not None:
+                masks = self.get_attention_masks(positions=positions)
+                if masks is not None:
+                    batch["attention_masks"] = masks
+
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                None,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
+
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
 
@@ -1113,15 +1149,10 @@ class HFTransformerModel(BaseModel):
             # the sequence-sharded global positions (load-balancer permuted),
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
+            #
+            # The BlockMask is prebuilt in ``preprocess_inputs`` and passed
+            # in via ``attention_masks``.
             kwargs["position_ids"] = positions
-            # Build the BlockMask here rather than in the core
-            # trainer: the trainer only builds masks for Decoder.Config models,
-            # so this backend opts in by building its own (keeps trainer.py free
-            # of HF-backend special-casing). This outer forward runs eager (only
-            # the inner transformer blocks are compiled), so BlockMask creation
-            # here is safe.
-            if attention_masks is None:
-                attention_masks = self.get_attention_masks(positions)
         else:
             local_seq_len = self.max_seq_len
             local_seq_len //= (
