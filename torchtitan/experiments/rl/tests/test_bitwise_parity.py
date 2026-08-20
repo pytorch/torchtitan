@@ -58,6 +58,10 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.spmd_types import (
+    dtensor_to_plain_tensor_state_dict,
+    plain_tensor_to_dtensor_state_dict,
+)
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
@@ -288,9 +292,16 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    vllm_sd = vllm_model.state_dict()
+    if wrapper.parallel_dims.spmd_backend == "spmd_types":
+        vllm_sd = plain_tensor_to_dtensor_state_dict(
+            vllm_sd,
+            state_dict_layouts=wrapper.get_state_dict_layouts(),
+            parallel_dims=wrapper.parallel_dims,
+        )
 
     missing = []
-    for name, vparam in vllm_model.state_dict().items():
+    for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
         if tparam is None:
             missing.append(name)
@@ -303,6 +314,11 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
                 )
             else:
                 vparam.copy_(full)
+
+    if wrapper.parallel_dims.spmd_backend == "spmd_types":
+        vllm_model.load_state_dict(
+            dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
+        )
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
