@@ -14,11 +14,7 @@ from torchtitan.trainer import Trainer
 
 
 class TestInvalidLoss(unittest.TestCase):
-    """Trainer.train_step crashes on a non-finite loss, aligned with logging.
-
-    The finiteness check reuses the device-to-host copy that logging already
-    performs, so it only runs on steps where metrics are logged.
-    """
+    """Trainer.train_step crashes on a non-finite step before updates."""
 
     def _make_trainer(self, loss_value: float, should_log: bool) -> Trainer:
         # Build a bare Trainer and inject only the collaborators train_step
@@ -40,6 +36,7 @@ class TestInvalidLoss(unittest.TestCase):
 
         parallel_dims = MagicMock()
         parallel_dims.dp_enabled = False
+        parallel_dims.pp_enabled = False
         parallel_dims.dp_cp_enabled = False
         parallel_dims.ep_enabled = False
         parallel_dims.get_optional_mesh.return_value = None
@@ -80,10 +77,10 @@ class TestInvalidLoss(unittest.TestCase):
     def test_finite_loss_does_not_raise(self):
         self._run_step(1.5, should_log=True)
 
-    def test_nan_loss_ignored_when_not_logging(self):
-        # Detection is gated on logging, so a non-log step must not raise even
-        # when the loss is NaN.
-        self._run_step(float("nan"), should_log=False)
+    def test_nan_loss_raises_when_not_logging(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run_step(float("nan"), should_log=False)
+        self.assertIn("not finite", str(ctx.exception))
 
 
 if __name__ == "__main__":

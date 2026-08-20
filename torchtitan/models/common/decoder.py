@@ -151,6 +151,7 @@ class Decoder(BaseModel):
             field; in that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
+            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -168,22 +169,17 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            # CP redistribution is declared in ShardingConfig and only
-            # FlexAttention consumes it: the CP-sharded BlockMask carries the
-            # global key positions that the other kernels cannot express.
-            if (
-                parallelism.spmd_backend == "spmd_types"
-                and parallelism.context_parallel_degree > 1
-                and (
-                    any(self.traverse(ScaledDotProductAttention.Config))
-                    or any(self.traverse(VarlenAttention.Config))
-                )
-            ):
-                raise NotImplementedError(
-                    "spmd_types + CP is not supported with "
-                    "ScaledDotProductAttention or VarlenAttention. "
-                    "Use FlexAttention + CP or disable CP."
-                )
+            if parallelism.context_parallel_degree > 1:
+                # ShardingConfig-based CP requires the spmd_types backend.
+                validate_cp_backend(parallelism)
+                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
+                    self.traverse(VarlenAttention.Config)
+                ):
+                    raise NotImplementedError(
+                        "Context Parallel is not supported with "
+                        "ScaledDotProductAttention or VarlenAttention. "
+                        "Use FlexAttention or disable CP."
+                    )
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
