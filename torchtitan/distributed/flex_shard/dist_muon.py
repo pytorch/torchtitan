@@ -919,12 +919,21 @@ class _RedistributionTransition:
 _StorageToComputeTransition = _NoRedistributionTransition | _RedistributionTransition
 
 
-# Per-mesh-axis tensor sharding while resolving ``ComputeLayout``. ``BlockShard``
-# remains explicit here, while ``Owned`` is handled separately.
+# A per-mesh-axis compute sharding takes three successive forms while
+# ``ComputeLayout`` resolves. The layout itself declares ``Owned``,
+# ``Replicate``, ``Shard``, or ``BlockShard`` on each axis it names.
+
+# Lowered: ``shard_order_by_tensor_dim`` has become DTensor placements, so an
+# axis the layout applies later than storage-mesh order is now
+# ``_StridedShard``. ``Owned`` passes through that lowering untouched.
+_LoweredComputeSharding = Owned | Replicate | Shard | _StridedShard | BlockShard
+
+# Per axis: ``Owned`` axes have been split out and are tracked separately, so
+# every remaining axis carries a tensor sharding. ``BlockShard`` stays explicit.
 _AxisComputeSharding = Replicate | Shard | _StridedShard | BlockShard
 
-# Executor strategy after per-axis shardings are resolved. ``BlockShard`` has
-# become ``Shard(0)`` plus ``_MatrixBatchView``; ``Owned`` remains valid here.
+# Resolved: ``BlockShard`` has become ``Shard(0)`` plus ``_MatrixBatchView``, so
+# what is left is the executor strategy. ``Owned`` is valid again here.
 _ResolvedComputeSharding = Owned | Replicate | Shard
 
 
@@ -1265,12 +1274,53 @@ def _build_batched_matrix_redistribution_plan(
     )
 
 
-def _validate_strided_compute_targets(
+def _lower_shard_order_to_strided_shards(
+    param: DTensor,
+    compute_layout: ComputeLayout,
+    storage_axis_by_name: Mapping[str, int],
+    shardings_by_storage_mesh_axis: Mapping[int, _LoweredComputeSharding],
+) -> dict[int, _LoweredComputeSharding]:
+    """Encode a declared shard order as DTensor placements.
+
+    DTensor applies same-dimension shard axes in storage-mesh order, so an axis
+    that the compute layout applies later than that default becomes a
+    ``_StridedShard`` whose split factor is the product of the mesh sizes of the
+    axes it now follows but that sit to its right in the storage mesh. Axes the
+    layout declares for other mesh variants are absent here and drop out of the
+    order.
+    """
+    lowered_shardings = dict(shardings_by_storage_mesh_axis)
+    for tensor_dim, axis_names in compute_layout.shard_order_by_tensor_dim.items():
+        ordered_mesh_axes = [
+            storage_axis_by_name[axis_name]
+            for axis_name in axis_names
+            if axis_name in storage_axis_by_name
+        ]
+        for order_index, storage_mesh_axis in enumerate(ordered_mesh_axes):
+            split_factor = math.prod(
+                param.device_mesh.size(preceding_mesh_axis)
+                for preceding_mesh_axis in ordered_mesh_axes[:order_index]
+                if preceding_mesh_axis > storage_mesh_axis
+            )
+            if split_factor > 1:
+                lowered_shardings[storage_mesh_axis] = _StridedShard(
+                    tensor_dim, split_factor=split_factor
+                )
+    return lowered_shardings
+
+
+def _validate_shard_order_compute_targets(
     fqn: str,
     param: DTensor,
     target_sharding_by_storage_mesh_axis: Mapping[int, _AxisComputeSharding],
     owned_storage_mesh_axes: Sequence[int],
 ) -> None:
+    """Reject declared shard orders that DistMuon cannot lower to a transport plan.
+
+    DistMuon supports reordering a mesh axis behind exactly one later mesh axis
+    that shards the same tensor dimension, because that axis is the one whose
+    storage ownership the redistribution preserves.
+    """
     mesh_axis_names = param.device_mesh.mesh_dim_names
     assert mesh_axis_names is not None
     owned_axis_set = set(owned_storage_mesh_axes)
@@ -1305,16 +1355,19 @@ def _validate_strided_compute_targets(
 
         if len(rightward_shard_axes) != 1:
             raise ValueError(
-                f"Muon parameter {fqn!r} _StridedShard compute on mesh axis "
-                f"{mesh_axis_names[storage_mesh_axis]!r} requires exactly one "
-                "rightward Shard axis on the same tensor dimension"
+                f"Muon parameter {fqn!r} orders mesh axis "
+                f"{mesh_axis_names[storage_mesh_axis]!r} after another axis on "
+                f"tensor dimension {target_dim}; DistMuon requires exactly one "
+                "later mesh axis to shard that dimension"
             )
         preserved_mesh_axis_size = param.device_mesh.size(rightward_shard_axes[0])
         if target_sharding.split_factor != preserved_mesh_axis_size:
             raise ValueError(
-                f"Muon parameter {fqn!r} _StridedShard split_factor must equal "
-                f"the preserved mesh axis size {preserved_mesh_axis_size}; got "
-                f"{target_sharding.split_factor}"
+                f"Muon parameter {fqn!r} must order mesh axis "
+                f"{mesh_axis_names[storage_mesh_axis]!r} directly after "
+                f"{mesh_axis_names[rightward_shard_axes[0]]!r} on tensor "
+                f"dimension {target_dim}; DistMuon does not support ordering it "
+                "after further mesh axes"
             )
 
 
@@ -1367,7 +1420,9 @@ def _resolve_storage_to_compute_transition(
         axis_name: storage_mesh_axis
         for storage_mesh_axis, axis_name in enumerate(mesh_axis_names)
     }
-    applicable_compute_shardings_by_storage_mesh_axis = {
+    applicable_compute_shardings_by_storage_mesh_axis: dict[
+        int, _LoweredComputeSharding
+    ] = {
         storage_axis_by_name[axis_name]: sharding
         for axis_name, sharding in compute_layout.shardings_by_mesh_axis.items()
         if axis_name in storage_axis_by_name
@@ -1378,6 +1433,14 @@ def _resolve_storage_to_compute_transition(
             f"Muon compute layout for parameter {fqn!r} declares no axis in "
             f"storage mesh {list(mesh_axis_names)}; declared axes: {declared_axes}"
         )
+    applicable_compute_shardings_by_storage_mesh_axis = (
+        _lower_shard_order_to_strided_shards(
+            param,
+            compute_layout,
+            storage_axis_by_name,
+            applicable_compute_shardings_by_storage_mesh_axis,
+        )
+    )
 
     applicable_owned_storage_mesh_axes = tuple(
         storage_mesh_axis
@@ -1402,8 +1465,7 @@ def _resolve_storage_to_compute_transition(
         if shard_axes:
             raise ValueError(
                 f"Muon parameter {fqn!r} with matrix-batch compute requires "
-                f"BlockShard instead of Shard or _StridedShard on mesh axes "
-                f"{shard_axes}"
+                f"BlockShard instead of Shard on mesh axes {shard_axes}"
             )
 
     replicated_axes = [
@@ -1445,7 +1507,7 @@ def _resolve_storage_to_compute_transition(
             storage_mesh_axis
         ] = target_sharding
 
-    _validate_strided_compute_targets(
+    _validate_shard_order_compute_targets(
         fqn,
         param,
         normalized_target_sharding_by_storage_mesh_axis,
@@ -1537,13 +1599,13 @@ def _resolve_storage_to_compute_transition(
                         and type(redistribution_compute_sharding) is Shard
                         and redistribution_storage_mesh_axis < storage_mesh_axis
                     ):
+                        preserved_axis_name = mesh_axis_names[storage_mesh_axis]
                         raise ValueError(
-                            f"Muon parameter {fqn!r} must use "
-                            f"_StridedShard(0, split_factor="
-                            f"{param.device_mesh.size(storage_mesh_axis)}) on "
-                            f"mesh axis {redistribution_axis_name!r} when "
-                            f"preserving Shard(0) on mesh axis "
-                            f"{mesh_axis_names[storage_mesh_axis]!r}"
+                            f"Muon parameter {fqn!r} must declare "
+                            "shard_order_by_tensor_dim={0: "
+                            f"({preserved_axis_name!r}, "
+                            f"{redistribution_axis_name!r})}} when preserving "
+                            f"Shard(0) on mesh axis {preserved_axis_name!r}"
                         )
                     raise NotImplementedError(
                         f"Muon parameter {fqn!r} cannot redistribute storage on "
@@ -1562,7 +1624,7 @@ def _resolve_storage_to_compute_transition(
                     "other storage mesh axis to be replicated"
                 )
 
-    active_strided_axis_names = [
+    reordered_axis_names = [
         mesh_axis_names[storage_mesh_axis]
         for storage_mesh_axis, target_sharding in (
             normalized_target_sharding_by_storage_mesh_axis.items()
@@ -1570,15 +1632,15 @@ def _resolve_storage_to_compute_transition(
         if type(target_sharding) is _StridedShard
     ]
     if (
-        active_strided_axis_names
+        reordered_axis_names
         and redistribution_storage_mesh_axis is not None
         and not uses_supported_orthogonal_shard_redistribution
     ):
         raise ValueError(
-            f"Muon parameter {fqn!r} has unsupported _StridedShard compute on "
-            f"mesh axes {active_strided_axis_names}; DistMuon currently supports "
-            "_StridedShard only when a preceding redistribution axis preserves "
-            "one rightward Shard axis on the same tensor dimension"
+            f"Muon parameter {fqn!r} has an unsupported shard order on mesh "
+            f"axes {reordered_axis_names}; DistMuon currently reorders a mesh "
+            "axis only when a preceding redistribution axis preserves one "
+            "rightward Shard axis on the same tensor dimension"
         )
 
     resolved_target_signature = []

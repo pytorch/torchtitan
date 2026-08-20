@@ -271,16 +271,12 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             .div_(13)
         )
         storage_placements = (Shard(1), Shard(0))
-        target_placements = (
-            _StridedShard(0, split_factor=mesh["ep"].size()),
-            Shard(0),
-        )
         parameter = torch.nn.Parameter(
             distribute_tensor(value.clone(), mesh, storage_placements)
         )
         fqn = "layers.0.routed_experts.inner_experts.w1_EFD"
 
-        def make_optimizer(param, efsdp_sharding):
+        def make_optimizer(param, shard_order_by_tensor_dim):
             return build_dist_muon(
                 [{"params": [param], "param_names": [fqn]}],
                 lr=lr,
@@ -291,26 +287,26 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "efsdp": efsdp_sharding,
+                            "efsdp": Shard(0),
                             "ep": Shard(0),
                         },
+                        shard_order_by_tensor_dim=shard_order_by_tensor_dim,
                     )
                 },
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
             )
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "split_factor must equal the preserved mesh axis size 2; got 3",
-        ):
-            make_optimizer(parameter, _StridedShard(0, split_factor=3))
-        with self.assertRaisesRegex(
-            ValueError,
-            r"must use _StridedShard\(0, split_factor=2\)",
-        ):
-            make_optimizer(parameter, Shard(0))
+        expected_shard_order = {0: ("ep", "efsdp")}
+        # The storage-mesh order shards over EFSDP first, which loses the exact
+        # EP-axis ownership that the redistribution has to preserve.
+        for default_order in ({}, {0: ("efsdp", "ep")}):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"must declare shard_order_by_tensor_dim=\{0: \('ep', 'efsdp'\)\}",
+            ):
+                make_optimizer(parameter, default_order)
 
-        optimizer = make_optimizer(parameter, target_placements[0])
+        optimizer = make_optimizer(parameter, expected_shard_order)
         grad = (
             torch.arange(value.numel(), device=device)
             .reshape_as(value)
@@ -384,11 +380,12 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             compute_offset,
             efsdp_num_experts,
         ).contiguous()
+        # The compute-ready storage already carries the declared shard order.
         compute_ready_parameter = torch.nn.Parameter(
             DTensor.from_local(
                 compute_ready_local,
                 mesh,
-                target_placements,
+                (_StridedShard(0, split_factor=mesh["ep"].size()), Shard(0)),
                 shape=value.shape,
                 stride=value.stride(),
                 run_check=False,
@@ -396,7 +393,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         compute_ready_optimizer = make_optimizer(
             compute_ready_parameter,
-            target_placements[0],
+            expected_shard_order,
         )
         compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)

@@ -8,7 +8,6 @@ from dataclasses import dataclass, replace
 from typing import cast
 
 from torch.distributed.tensor import Shard
-from torch.distributed.tensor.placement_types import _StridedShard
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.data import (
@@ -274,8 +273,13 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     # benchmarks show that the fixed nonempty EFSDP coordinates are a hotspot.
     return ComputeLayout(
         shardings_by_mesh_axis={
-            MeshAxisName.EFSDP.value: _StridedShard(0, split_factor=ep_size),
+            MeshAxisName.EFSDP.value: Shard(0),
             MeshAxisName.EP.value: Shard(0),
+        },
+        # EP splits the expert dimension first, then EFSDP repartitions each
+        # EP-local expert domain, which reverses the storage-mesh axis order.
+        shard_order_by_tensor_dim={
+            0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
         },
     )
 
