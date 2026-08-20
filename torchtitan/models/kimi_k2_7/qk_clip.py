@@ -55,51 +55,69 @@ class QKClipFlexAttention(FlexAttention):
             self.max_attention_logits_N.append(max_scores_BNL.amax(dim=(0, 2)).detach())
 
 
-def _local_head_range(
-    param: torch.Tensor,
+def _validate_head_sharding(weight: torch.Tensor) -> None:
+    """Reject storage layouts that would remap heads under a head-dim view."""
+    if not isinstance(weight, DTensor):
+        return
+    for placement in weight.placements:
+        if type(placement) is Replicate:
+            continue
+        # ``_StridedShard`` subclasses ``Shard``, so an exact type check rejects
+        # it: its non-default shard order would pair heads with the wrong rows.
+        if type(placement) is not Shard or placement.dim != 0:
+            raise ValueError(
+                "QK clipping requires MLA weights sharded only on tensor "
+                "dimension 0."
+            )
+
+
+def _replicated_scales(scales_N: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Return ``scales_N`` as an operand that broadcasts against ``weight``.
+
+    ``qk_clip`` derives the scales from a MAX all-reduce, so every rank already
+    holds identical values. Recording that with ``from_local`` avoids the
+    broadcast that ``distribute_tensor`` performs to establish ``Replicate``,
+    which would otherwise cost one collective per weight per step.
+    """
+    if not isinstance(weight, DTensor):
+        return scales_N
+    return DTensor.from_local(
+        scales_N,
+        weight.device_mesh,
+        tuple(Replicate() for _ in weight.placements),
+        run_check=False,
+    )
+
+
+@torch.no_grad()
+def _scale_mla_heads(
+    weight: torch.Tensor,
     scales_N: torch.Tensor,
     *,
     head_extent: int,
-) -> tuple[int, int]:
-    global_shape = param.shape
-    if len(global_shape) != 2 or global_shape[0] != scales_N.numel() * head_extent:
+    head_split: int,
+    leading_exponent: float,
+    trailing_exponent: float | None,
+) -> None:
+    """Scale each head's leading and trailing row block of ``weight`` in place.
+
+    ``weight`` is ``[num_heads * head_extent, in_features]``. Viewing it as
+    ``[num_heads, head_extent, in_features]`` keeps the head dimension on the
+    weight's own ``Shard(0)``, and a replicated ``scales_N`` is sliced locally
+    against it, so every rank scales exactly the heads it stores without
+    exchanging data. ``trailing_exponent`` of ``None`` leaves the trailing rows
+    untouched.
+    """
+    num_heads = scales_N.numel()
+    if weight.ndim != 2 or weight.shape[0] != num_heads * head_extent:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
+    _validate_head_sharding(weight)
 
-    if isinstance(param, DTensor):
-        local_param = param.to_local()
-        local_rows = global_shape[0]
-        row_offset = 0
-        for mesh_axis, (mesh_axis_size, placement) in enumerate(
-            zip(param.device_mesh.shape, param.placements, strict=True)
-        ):
-            if type(placement) is Replicate:
-                continue
-            if type(placement) is not Shard or placement.dim % param.ndim != 0:
-                raise ValueError(
-                    "QK clipping requires MLA weights sharded only on tensor "
-                    "dimension 0."
-                )
-            local_rows, local_offset = Shard.local_shard_size_and_offset(
-                local_rows,
-                mesh_axis_size,
-                param.device_mesh.get_local_rank(mesh_axis),
-            )
-            row_offset += local_offset
-    else:
-        local_param = param
-        local_rows = global_shape[0]
-        row_offset = 0
-
-    if (
-        local_rows % head_extent
-        or row_offset % head_extent
-        or tuple(local_param.shape) != (local_rows, global_shape[1])
-    ):
-        raise ValueError("QK clip storage shards must align to complete MLA heads.")
-
-    num_local_heads = local_rows // head_extent
-    first_local_head = row_offset // head_extent
-    return first_local_head, num_local_heads
+    scales_N11 = _replicated_scales(scales_N, weight).view(-1, 1, 1)
+    heads_NDI = weight.view(num_heads, head_extent, weight.shape[1])
+    heads_NDI[:, :head_split].mul_(scales_N11.pow(leading_exponent))
+    if trailing_exponent is not None:
+        heads_NDI[:, head_split:].mul_(scales_N11.pow(trailing_exponent))
 
 
 @torch.no_grad()
@@ -110,58 +128,25 @@ def _clip_mla_weights(
     alpha: float,
 ) -> None:
     q_projection = attention.wq if attention.q_lora_rank == 0 else attention.wq_b
-    first_local_head, num_local_heads = _local_head_range(
+    # Query: NoPE rows take ``scale ** alpha``, RoPE rows take the full scale.
+    _scale_mla_heads(
         q_projection.weight,
         scales_N,
         head_extent=attention.qk_head_dim,
+        head_split=attention.qk_nope_head_dim,
+        leading_exponent=alpha,
+        trailing_exponent=1.0,
     )
-    q_local = (
-        q_projection.weight.to_local()
-        if isinstance(q_projection.weight, DTensor)
-        else q_projection.weight
-    )
-    q_weight_NDI = q_local.view(
-        num_local_heads,
-        attention.qk_head_dim,
-        q_projection.weight.shape[1],
-    )
-    local_scales_N = scales_N.narrow(
-        0,
-        first_local_head,
-        num_local_heads,
-    )
-    local_scales_N11 = local_scales_N.view(-1, 1, 1)
-    q_weight_NDI[:, : attention.qk_nope_head_dim].mul_(local_scales_N11.pow(alpha))
-    q_weight_NDI[:, attention.qk_nope_head_dim :].mul_(local_scales_N11)
-
-    first_local_head, num_local_heads = _local_head_range(
+    # Key/value: the K rows take the remaining ``scale ** (1 - alpha)``, and the
+    # V rows stay unchanged.
+    _scale_mla_heads(
         attention.wkv_b.weight,
         scales_N,
         head_extent=attention.qk_nope_head_dim + attention.v_head_dim,
+        head_split=attention.qk_nope_head_dim,
+        leading_exponent=1.0 - alpha,
+        trailing_exponent=None,
     )
-    kv_local = (
-        attention.wkv_b.weight.to_local()
-        if isinstance(attention.wkv_b.weight, DTensor)
-        else attention.wkv_b.weight
-    )
-    kv_weight_NDI = kv_local.view(
-        num_local_heads,
-        attention.qk_nope_head_dim + attention.v_head_dim,
-        attention.wkv_b.weight.shape[1],
-    )
-    local_scales_N = scales_N.narrow(
-        0,
-        first_local_head,
-        num_local_heads,
-    )
-    kv_weight_NDI[:, : attention.qk_nope_head_dim].mul_(
-        local_scales_N.view(-1, 1, 1).pow(1.0 - alpha)
-    )
-
-    if isinstance(q_projection.weight, DTensor):
-        torch.autograd.graph.increment_version(q_projection.weight)
-    if isinstance(attention.wkv_b.weight, DTensor):
-        torch.autograd.graph.increment_version(attention.wkv_b.weight)
 
 
 @torch.no_grad()
