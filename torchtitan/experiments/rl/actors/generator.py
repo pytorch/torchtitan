@@ -27,7 +27,6 @@ from monarch.actor import (
     Port,
     PortReceiver,
 )
-from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.spmd_types import (
