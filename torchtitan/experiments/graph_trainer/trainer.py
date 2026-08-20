@@ -150,7 +150,7 @@ class GraphTrainer(Trainer):
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        inputs, labels, extra_kwargs = self._prepare_batch(input_dict, labels)
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [

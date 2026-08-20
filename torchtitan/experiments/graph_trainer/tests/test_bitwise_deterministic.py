@@ -164,7 +164,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
     def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
-        """Build extra_kwargs matching what post_dataloading_process produces.
+        """Build extra_kwargs matching what the model's _build_forward_inputs produces.
 
         For FlexAttention models, this generates the BlockMask attention
         masks. For SDPA models, returns an empty dict.
