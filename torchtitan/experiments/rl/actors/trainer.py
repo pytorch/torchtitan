@@ -11,9 +11,9 @@ from typing import Any
 
 import torch
 import torchstore as ts
-from monarch.actor import Actor, current_rank, endpoint
-from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.checkpoint_utils import canonical_fqn
+from monarch.actor import Actor, concurrent_endpoint, current_rank
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
@@ -221,13 +221,13 @@ class PolicyTrainer(Actor, Configurable):
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.policy_version = state_dict["policy_version"]
 
-    @endpoint
+    @concurrent_endpoint
     async def get_policy_version(self) -> int:
         """Current policy version: after load(), the step a resume restored from
         (0 if fresh). The controller uses it to resume and re-sync generators."""
         return self.policy_version
 
-    @endpoint
+    @concurrent_endpoint
     async def close(self) -> None:
         """Close actor-local resources before the process mesh stops.
 
@@ -261,8 +261,9 @@ class PolicyTrainer(Actor, Configurable):
 
         from torchtitan.models.common.attention import VarlenAttention
 
+        attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention,
+            attention_backend,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
@@ -311,7 +312,7 @@ class PolicyTrainer(Actor, Configurable):
 
         return model
 
-    @endpoint
+    @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
@@ -350,7 +351,7 @@ class PolicyTrainer(Actor, Configurable):
         )
         return out
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
@@ -362,9 +363,8 @@ class PolicyTrainer(Actor, Configurable):
         Args:
             training_data: List of TrainingMicrobatch, one per DP rank. Local rank
                 picks training_data[self.dp_rank].
-            num_global_valid_tokens: Total response tokens across all DP
-                ranks for this step. The controller computes this before
-                sharding training_samples.
+            num_global_valid_tokens: Total response tokens with finite generator
+                logprobs across all DP ranks and microbatches for this step.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -428,7 +428,7 @@ class PolicyTrainer(Actor, Configurable):
             max_reduced_metrics=max_reduced_metrics,
         )
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("optim_step")
     async def optim_step(self) -> OptimStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
@@ -474,7 +474,7 @@ class PolicyTrainer(Actor, Configurable):
             },
         )
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("save_checkpoint")
     async def save_checkpoint(self, step: int, last_step: bool = False) -> bool:
         """Save checkpoint via CheckpointManager.
@@ -488,7 +488,7 @@ class PolicyTrainer(Actor, Configurable):
         """
         return self.checkpointer.save(step, last_step=last_step)
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:
         """Stage model weights to a CPU StorageVolume for the generators to pull (TorchStore).

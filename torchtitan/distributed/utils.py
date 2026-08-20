@@ -104,12 +104,8 @@ def _dist_reduce_tensor(
     """Perform a distributed reduction without moving the result to the CPU."""
     needs_wait = False
     if isinstance(x, DTensor):
-        # loss being a DTensor can be 1) full dtensor or 2) non-full dtensor but
-        # TP is enabled. For the former one, a single `full_tensor()` call is enough
-        # but for the later one, we need to treat it as a plain tensor. Since there
-        # is no robust way to distinguish the two and `full_tensor()` may result in
-        # multiple all_reduce() (one for dp_shard and one for CP), we always use
-        # `to_local()` to ensure loss parity in both cases.
+        # The loss is a DTensor only on the TP axis, so unwrap it to a plain
+        # tensor and let the reduction below run over ``mesh``.
         assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
             f"_dist_reduce received a DTensor with unsupported placements "
             f"{x.placements}; only Replicate/Partial are supported."

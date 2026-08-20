@@ -4,7 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    HuggingFaceRandomAccessSource,
+    SingleDatasetConfig,
+)
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -13,10 +20,7 @@ from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
-from torchtitan.hf_datasets.text_datasets import (
-    ChatDataLoader,
-    HuggingFaceTextDataLoader,
-)
+from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.tools.profiler import Profiler
 from . import model_registry
 from .tokenizer import HFBackendTokenizer
@@ -43,7 +47,9 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -77,7 +83,9 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -109,7 +117,9 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
             seq_len=2048,
             steps=1000,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         metrics=MetricsProcessor.Config(log_freq=10),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -143,7 +153,9 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
@@ -184,13 +196,20 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="json",
+                        split="train",
+                        load_dataset_kwargs={
+                            "data_files": "tests/assets/sft_test/data.json",
+                        },
+                    ),
+                    processor=ChatProcessor.Config(messages_fn=process_sample),
+                    post_filters=(lambda sample: sample is not None,),
+                ),
+            ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
@@ -209,7 +228,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
 
 
 def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
-    """SFT debug config for the transformers backend using ChatDataLoader."""
+    """SFT debug config for the transformers backend."""
 
     def process_sample(sample):
         return [
@@ -239,13 +258,20 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             seq_len=1024,
             steps=10,
         ),
-        dataloader=ChatDataLoader.Config(
-            dataset_path="json",
-            load_dataset_kwargs={
-                "data_files": "tests/assets/sft_test/data.json",
-                "split": "train",
-            },
-            sample_processor=process_sample,
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="json",
+                        split="train",
+                        load_dataset_kwargs={
+                            "data_files": "tests/assets/sft_test/data.json",
+                        },
+                    ),
+                    processor=ChatProcessor.Config(messages_fn=process_sample),
+                    post_filters=(lambda sample: sample is not None,),
+                ),
+            ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(

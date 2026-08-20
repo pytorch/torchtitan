@@ -4,7 +4,31 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Full text+image e2e logit parity: torchtitan Kimi-VL vs the released HF model."""
+"""Full text+image e2e logit parity: torchtitan Kimi-VL vs the released HF model.
+
+Runs the released HF Kimi-VL (``trust_remote_code``) and torchtitan in ONE
+process on the same text+image prompt and compares last-token logits. torchtitan
+does its OWN Kimi image processing (``process_image`` + ``vision_to_patches``,
+raster order), so the full pipeline is exercised (preprocessing + vision +
+projector + scatter + DeepSeek-V3 text tower), not just the forward.
+
+The released remote code targets transformers ~4.50.x and does NOT import on 5.x,
+so run this in an env with ``transformers==4.50.3`` + ``tiktoken`` + ``blobfile``.
+
+Precision: the HF reference runs at ``--hf_dtype`` (default float32, the model's
+"true" output); torchtitan runs at ``--dtype`` (text) with ``--vision_dtype``
+overriding only its vision encoder. ``--dtype float32`` is the correctness gate;
+``--dtype bfloat16 --vision_dtype float16`` is the realistic config (~1e-2 KL).
+
+Usage:
+    CUDA_VISIBLE_DEVICES=0 python -m \\
+        scripts.checkpoint_conversion.numerical_tests_kimi \\
+        --hf_model_path ~/hf_assets/moonshotai/Kimi-VL-A3B-Instruct \\
+        --tt_checkpoint_path outputs/kimi/kimi_vl_a3b_dcp --dtype float32
+
+Add ``--force-hf-routing`` to make titan use HF's exact per-token expert
+selections (diagnostic: removes the MoE routing-flip divergence).
+"""
 
 import argparse
 import os
@@ -15,7 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
     resize_to_patch_budget,

@@ -6,7 +6,6 @@
 
 import dataclasses
 import json
-import math
 import os
 import time
 from collections.abc import Iterable, Iterator
@@ -19,9 +18,10 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
-from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
@@ -37,7 +37,7 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     MemoryBudgetAC,
@@ -578,13 +578,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             tokenizer=self.tokenizer,
             seq_len=config.training.seq_len,
             local_batch_size=dataloader_batch_size,
-            snapshot_every_n_steps=(
-                config.checkpoint.interval
-                * self.gradient_accumulation_steps
-                * self.num_pipeline_parallel_microbatches
-                if config.checkpoint.enable
-                else None
-            ),
         )
 
         # build checkpointer
@@ -736,11 +729,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
         if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                self.model_config.first_attention, "inner_attention", None
-            )
+            attention_backend = self.model_config.first_full_attention_backend
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
                 model = cast(Decoder, self.model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
@@ -762,11 +753,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.spmd_backend == "full_dtensor":
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
-            )
-        elif self.config.parallelism.spmd_backend == "spmd_types":
+        if self.config.parallelism.spmd_backend == "spmd_types":
             inputs, labels, extra_kwargs = annotate_input_spmd_types(
                 self.parallel_dims,
                 inputs,
@@ -904,6 +891,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
+        # int32 is supported by NCCL reductions, unlike bool.
+        loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
         for microbatches in microbatch_groups:
             input_dict_mbs = []
             label_mbs = []
@@ -927,14 +916,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 labels=fwd_bwd_labels,
                 global_valid_tokens=global_valid_tokens,
             )
+            detached_loss = loss.detach()
+            local_loss = (
+                detached_loss.to_local()
+                if isinstance(detached_loss, DTensor)
+                else detached_loss
+            )
+            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
             if should_log:
-                loss = loss.detach()
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the
                     # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = loss.clone()
+                    accumulated_loss = detached_loss.clone()
                 else:
-                    accumulated_loss.add_(loss)
+                    accumulated_loss.add_(detached_loss)
 
         with sl.log_trace_span("optim"):
             grad_norm = dist_utils.clip_grad_norm_(
@@ -943,6 +938,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 foreach=True,
                 pp_mesh=parallel_dims.get_optional_mesh("pp"),
                 ep_enabled=parallel_dims.ep_enabled,
+            )
+            # Only the last PP stage owns the loss. First combine its DP/CP
+            # replicas, then propagate the result across PP. TP replicas have
+            # identical loss values, and grad_norm is already world-reduced by
+            # clip_grad_norm_.
+            if not parallel_dims.pp_enabled or self.pp_has_last_stage:
+                loss_mesh = parallel_dims.get_optional_mesh("loss")
+                if loss_mesh is not None:
+                    torch.distributed.all_reduce(
+                        loss_is_finite,
+                        op=torch.distributed.ReduceOp.MIN,
+                        group=loss_mesh.get_group(),
+                    )
+            pp_mesh = parallel_dims.get_optional_mesh("pp")
+            if pp_mesh is not None:
+                torch.distributed.all_reduce(
+                    loss_is_finite,
+                    op=torch.distributed.ReduceOp.MIN,
+                    group=pp_mesh.get_group(),
+                )
+
+            step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
+            # Keep the check and optimizer kernels ordered on the device without
+            # synchronizing the host on every step. The RuntimeError is catchable
+            # on CPU, while a failed CUDA assertion invalidates the process.
+            torch._assert_async(
+                step_is_finite,
+                "Loss or gradient norm is not finite on at least one rank at "
+                f"step {self.step}. Stopping training before the optimizer update.",
             )
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
@@ -986,16 +1010,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = self.ntokens_seen
-
-        # Crash on invalid loss. global_avg_loss is a SUM reduction, so a infinite
-        # loss on any rank propagates here. This reuses the D2H copy already done
-        # for logging, so it adds no extra sync.
-        # TODO: make this step work even logging is off.
-        if not math.isfinite(global_avg_loss):
-            raise RuntimeError(
-                f"Loss is not finite (global_avg_loss={global_avg_loss}) at "
-                f"step {self.step}. Stopping training."
-            )
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -1083,6 +1097,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if hasattr(self, "dataloader") and self.dataloader:
+            self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:

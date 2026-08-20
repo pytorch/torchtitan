@@ -15,17 +15,16 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.checkpoint_utils import (
+from torchtitan.components.optimizer.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
     load_flat_optim_state_dict,
 )
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
+    BlockShard,
     BucketConfig,
     build_dist_muon,
     ComputeLayout,
-    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
@@ -47,6 +46,10 @@ class TestDistMuon(DTensorTestBase):
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
         lr = 0.03
+        num_matrices = 3
+        matrix_rows = 4
+        # Two storage shards each own six rows, so their boundary splits the
+        # middle four-row matrix and exercises overshard redistribution.
         weight_decay = 0.2
         mesh = init_device_mesh(
             self.device_type,
@@ -75,20 +78,18 @@ class TestDistMuon(DTensorTestBase):
                     }
                 ],
                 compute_sharding_by_fqn={
-                    redistributed_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "dp_shard": Owned(),
-                            },
-                        )
+                    redistributed_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "dp_shard": Owned(),
+                        },
                     ),
-                    local_blocks_fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={"dp_shard": Shard(0)},
-                        ),
-                        compute_view=AttentionPerHeadComputeView(
-                            num_heads=self.world_size,
-                        ),
+                    local_blocks_fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "dp_shard": BlockShard(
+                                dim=0,
+                                block_size=matrix_rows,
+                            )
+                        },
                     ),
                 },
                 bucket_configs=[
@@ -108,7 +109,10 @@ class TestDistMuon(DTensorTestBase):
             torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
         )
         local_blocks_value = (
-            torch.arange(12, 24, device=device).reshape(4, 3).float().div_(10)
+            torch.arange(12, 48, device=device)
+            .reshape(num_matrices * matrix_rows, 3)
+            .float()
+            .div_(10)
         )
         redistributed = make_parameter(redistributed_value)
         local_blocks = make_parameter(local_blocks_value)
@@ -120,7 +124,7 @@ class TestDistMuon(DTensorTestBase):
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
         reference_local_blocks = tuple(
             torch.nn.Parameter(block.clone())
-            for block in local_blocks_value.chunk(self.world_size, dim=0)
+            for block in local_blocks_value.view(num_matrices, matrix_rows, 3)
         )
         reference_optimizer = torch.optim.Muon(
             [reference_redistributed, *reference_local_blocks],
@@ -151,7 +155,7 @@ class TestDistMuon(DTensorTestBase):
             reference_redistributed.grad = redistributed_grad.clone()
             for parameter, grad in zip(
                 reference_local_blocks,
-                local_blocks_grad.chunk(self.world_size, dim=0),
+                local_blocks_grad.view(num_matrices, matrix_rows, 3),
                 strict=True,
             ):
                 parameter.grad = grad.clone()
@@ -170,16 +174,21 @@ class TestDistMuon(DTensorTestBase):
                 atol=0,
             )
 
-            expected_local_blocks = reference_local_blocks[rank].detach()
+            expected_local_blocks = torch.cat(
+                tuple(parameter.detach() for parameter in reference_local_blocks)
+            ).chunk(self.world_size)[rank]
+            expected_local_blocks_before = torch.cat(
+                reference_local_blocks_before
+            ).chunk(self.world_size)[rank]
             decay = 1 - lr * weight_decay
             adjusted_lr = _adjust_muon_learning_rate(
-                lr, None, expected_local_blocks.shape
+                lr, None, reference_local_blocks[0].shape
             )
             actual_update = (
                 local_blocks_before * decay - current_local_blocks.to_local()
             ) / adjusted_lr
             expected_update = (
-                reference_local_blocks_before[rank] * decay - expected_local_blocks
+                expected_local_blocks_before * decay - expected_local_blocks
             ) / adjusted_lr
             # Batched BF16 Newton-Schulz can differ slightly across GEMM schedules.
             torch.testing.assert_close(
@@ -193,7 +202,10 @@ class TestDistMuon(DTensorTestBase):
             torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
         )
         first_local_blocks_grad = (
-            torch.arange(13, 25, device=device).reshape(4, 3).float().div_(19)
+            torch.arange(13, 49, device=device)
+            .reshape(num_matrices * matrix_rows, 3)
+            .float()
+            .div_(19)
         )
         step_and_assert(
             optimizer,
@@ -264,13 +276,11 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             build_dist_muon(
                 [{"params": [parameter], "param_names": [fqn]}],
                 compute_sharding_by_fqn={
-                    fqn: MuonComputeShardingConfig(
-                        compute_layout=ComputeLayout(
-                            shardings_by_mesh_axis={
-                                "efsdp": Shard(0),
-                                "ep": Shard(0),
-                            },
-                        )
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={
+                            "efsdp": Shard(0),
+                            "ep": Shard(0),
+                        },
                     )
                 },
                 bucket_configs=[BucketConfig(patterns=(fqn,))],

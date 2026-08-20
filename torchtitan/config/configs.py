@@ -160,14 +160,11 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal[
-        "partial_dtensor", "full_dtensor", "spmd_types"
-    ] = "spmd_types"
+    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
     """
     SPMD backend selector.
 
     - "partial_dtensor": use DTensor for model-parallel axes only.
-    - "full_dtensor": use the existing full DTensor path.
     - "spmd_types": use the spmd_types path.
     """
 
@@ -250,14 +247,10 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.spmd_backend not in {
-            "partial_dtensor",
-            "full_dtensor",
-            "spmd_types",
-        }:
+        if self.spmd_backend not in {"partial_dtensor", "spmd_types"}:
             raise ValueError(
-                "parallelism.spmd_backend must be one of "
-                "'partial_dtensor', 'full_dtensor', or 'spmd_types'."
+                "parallelism.spmd_backend must be either 'partial_dtensor' "
+                "or 'spmd_types'."
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
