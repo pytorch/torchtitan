@@ -8,9 +8,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
@@ -56,25 +56,35 @@ class BlockShard:
             raise ValueError("BlockShard.block_size must be a positive integer")
 
 
-class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard | BlockShard]):
-    """Small immutable mapping that remains safe to copy with configs."""
+_ComputeSharding = Owned | Replicate | Shard | BlockShard
+
+_KeyT = TypeVar("_KeyT")
+_ValueT = TypeVar("_ValueT")
+
+
+class _FrozenConfigMapping(Mapping[_KeyT, _ValueT]):
+    """Small immutable mapping that remains safe to copy with configs.
+
+    ``ComputeLayout`` normalizes both of its mapping fields into this type:
+    ``shardings_by_mesh_axis`` keyed by mesh axis name, and
+    ``shard_order_by_tensor_dim`` keyed by tensor dimension. Both must stay
+    hashable and must survive a deep copy of the surrounding config without
+    becoming a mutable alias.
+    """
 
     __slots__ = ("_items",)
 
-    def __init__(
-        self,
-        shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard | BlockShard],
-    ) -> None:
-        self._items = tuple(shardings_by_mesh_axis.items())
+    def __init__(self, items: Mapping[_KeyT, _ValueT]) -> None:
+        self._items = tuple(items.items())
 
-    def __getitem__(self, axis_name: str) -> Owned | Replicate | Shard | BlockShard:
-        for candidate_axis_name, sharding in self._items:
-            if candidate_axis_name == axis_name:
-                return sharding
-        raise KeyError(axis_name)
+    def __getitem__(self, key: _KeyT) -> _ValueT:
+        for candidate_key, value in self._items:
+            if candidate_key == key:
+                return value
+        raise KeyError(key)
 
-    def __iter__(self) -> Iterator[str]:
-        return (axis_name for axis_name, _ in self._items)
+    def __iter__(self) -> Iterator[_KeyT]:
+        return (key for key, _ in self._items)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -85,8 +95,16 @@ class _FrozenShardingsByMeshAxis(Mapping[str, Owned | Replicate | Shard | BlockS
     def __repr__(self) -> str:
         return repr(dict(self._items))
 
-    def __deepcopy__(self, memo: dict[int, Any]) -> _FrozenShardingsByMeshAxis:
+    def __deepcopy__(
+        self, memo: dict[int, Any]
+    ) -> _FrozenConfigMapping[_KeyT, _ValueT]:
         return self
+
+
+_ShardingsByMeshAxis = _FrozenConfigMapping[str, _ComputeSharding]
+_ShardOrderByTensorDim = _FrozenConfigMapping[int, tuple[str, ...]]
+
+_DEFAULT_SHARD_ORDER = _ShardOrderByTensorDim({})
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,14 +124,24 @@ class ComputeLayout:
     mesh variants not used by a particular parameter, but at least one declaration
     must apply when the layout is resolved.
 
+    ``shard_order_by_tensor_dim`` maps a tensor dimension to the mesh axes that
+    shard it, outermost first: the leading axis partitions the whole dimension
+    and every following axis partitions its predecessor's shard. Declaring an
+    order is only necessary when it differs from the default, which applies the
+    axes in storage-mesh order. Each named axis must declare ``Shard`` on that
+    same tensor dimension, written as a non-negative index.
+
     Examples:
-        Shard a logical batch of matrices across the EFSDP and EP axes::
+        Shard a logical batch of matrices over EP first, then split each
+        EP-local batch over EFSDP even though EFSDP precedes EP in the storage
+        mesh::
 
             ComputeLayout(
                 shardings_by_mesh_axis={
                     "efsdp": Shard(0),
                     "ep": Shard(0),
-                }
+                },
+                shard_order_by_tensor_dim={0: ("ep", "efsdp")},
             )
 
         Assign the complete subgroup-local logical tensor to one owner rank
@@ -134,7 +162,8 @@ class ComputeLayout:
             )
     """
 
-    shardings_by_mesh_axis: Mapping[str, Owned | Replicate | Shard | BlockShard]
+    shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
+    shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
 
     def __post_init__(self) -> None:
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
@@ -154,8 +183,65 @@ class ComputeLayout:
         object.__setattr__(
             self,
             "shardings_by_mesh_axis",
-            _FrozenShardingsByMeshAxis(normalized_shardings_by_mesh_axis),
+            _ShardingsByMeshAxis(normalized_shardings_by_mesh_axis),
         )
+        object.__setattr__(
+            self,
+            "shard_order_by_tensor_dim",
+            _ShardOrderByTensorDim(
+                self._validated_shard_order(normalized_shardings_by_mesh_axis)
+            ),
+        )
+
+    def _validated_shard_order(
+        self,
+        shardings_by_mesh_axis: Mapping[str, _ComputeSharding],
+    ) -> dict[int, tuple[str, ...]]:
+        validated_shard_order: dict[int, tuple[str, ...]] = {}
+        for tensor_dim, axis_names in dict(self.shard_order_by_tensor_dim).items():
+            if (
+                isinstance(tensor_dim, bool)
+                or not isinstance(tensor_dim, int)
+                or tensor_dim < 0
+            ):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim keys must be "
+                    f"non-negative tensor dimensions; got {tensor_dim!r}"
+                )
+            if isinstance(axis_names, str) or not isinstance(axis_names, Sequence):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim values must be "
+                    f"sequences of mesh axis names; got {axis_names!r}"
+                )
+            ordered_axis_names = tuple(axis_names)
+            if len(ordered_axis_names) < 2:
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim must order at least "
+                    f"two mesh axes; tensor dimension {tensor_dim} lists "
+                    f"{list(ordered_axis_names)}"
+                )
+            if len(set(ordered_axis_names)) != len(ordered_axis_names):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim must not repeat a "
+                    f"mesh axis; tensor dimension {tensor_dim} lists "
+                    f"{list(ordered_axis_names)}"
+                )
+            for axis_name in ordered_axis_names:
+                sharding = shardings_by_mesh_axis.get(axis_name)
+                if sharding is None:
+                    raise ValueError(
+                        "ComputeLayout.shard_order_by_tensor_dim names mesh axis "
+                        f"{axis_name!r}, which shardings_by_mesh_axis does not "
+                        "declare"
+                    )
+                if type(sharding) is not Shard or sharding.dim != tensor_dim:
+                    raise ValueError(
+                        "ComputeLayout.shard_order_by_tensor_dim requires "
+                        f"Shard({tensor_dim}) on mesh axis {axis_name!r}; got "
+                        f"{sharding!r}"
+                    )
+            validated_shard_order[tensor_dim] = ordered_axis_names
+        return dict(sorted(validated_shard_order.items()))
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging."""

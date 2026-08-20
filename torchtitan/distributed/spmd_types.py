@@ -142,8 +142,6 @@ def annotate_input_spmd_types(
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
-    Analogous to ``full_dtensor.parallelize_inputs()`` but for the
-    ``spmd_types`` path.
     """
     from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -182,7 +180,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
     or we should write collective-based (not placement-based) redistributions
-    after full_dtensor backend is removed.
+    once the partial_dtensor backend is removed.
     """
 
     def _normalize_partition_spec(

@@ -118,6 +118,12 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 # Numerics-changing optimizations (e.g. RMSNorm Inductor fusion)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.numerics_changing_optim
 
+# Full recompute while saving selected module operations
+MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_671b ./run_train.sh \
+  --compile.memory_policy full \
+  --compile.full_recompute_save_ops \
+  'layers.*.moe.router.gate::aten.mm.default | layers.*.attention.wkv_a::aten.mm.default'
+
 # CPU activation offloading
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.memory_policy cpu_offload_all
 
