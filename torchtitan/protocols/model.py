@@ -6,8 +6,13 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
-from torchtitan.config import Configurable
+import torch
+from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.distributed import full_dtensor
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 
 from .module import Module
 
@@ -49,6 +54,88 @@ class BaseModel(Module):
         # TODO: remove this once autoparallel has wrap_init_states
         buffer_device = kwargs.get("buffer_device")
         self.init_states(buffer_device=buffer_device)
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+        """Prepare a dataloader batch for the model forward pass.
+
+        Template: build forward inputs + their layout (``_build_forward_inputs``),
+        CP-shard, then SPMD-wrap. Returns ``(inputs, labels, extra_kwargs,
+        local_ntokens)``.
+
+        TODO(return-type): the 4th element (local token count) is a transitional
+        workaround. The ``full_dtensor`` backend wraps ``labels`` in a DTensor
+        whose ``.numel()`` reports the GLOBAL count, so the trainer cannot count
+        from the returned labels. When the DTensor path is removed, drop this
+        element and revert to a 3-tuple, letting the trainer do
+        ``self.ntokens_seen += labels.numel()`` on the returned (plain,
+        CP-sharded) labels.
+        """
+        # Imported function-locally to avoid a circular import
+        # (context_parallel.api -> models.common -> decoder -> protocols.model).
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        inputs, labels, extra_kwargs, input_sharding = self._build_forward_inputs(
+            input_dict, labels, parallel_dims=parallel_dims
+        )
+        if parallel_dims.cp_enabled:
+            inputs, labels, extra_kwargs = prepare_context_parallel_input(
+                inputs,
+                labels,
+                extra_kwargs,
+                parallel_dims.get_mesh("cp"),
+                device,
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+                input_sharding=input_sharding,
+            )
+        local_ntokens = labels.numel()
+        # Wrap/annotate inputs for the active SPMD backend (no-op without a layout).
+        if input_sharding is not None:
+            if parallelism.spmd_backend == "full_dtensor":
+                inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
+                    parallel_dims, inputs, labels, extra_kwargs, input_sharding
+                )
+            elif parallelism.spmd_backend == "spmd_types":
+                inputs, labels, extra_kwargs = annotate_input_spmd_types(
+                    parallel_dims, inputs, labels, extra_kwargs, input_sharding
+                )
+        return inputs, labels, extra_kwargs, local_ntokens
+
+    def _build_forward_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
+    ]:
+        """Split inputs from forward kwargs and declare their SPMD layout.
+
+        Returns ``(inputs, labels, extra_kwargs, input_sharding)``. Default:
+        ``input_dict['input']`` is the positional input; every other key becomes
+        a forward kwarg; base declares no layout (``None``). Override to build
+        masks/derived inputs and return the matching ``input_sharding`` for any
+        inputs added to ``extra_kwargs``.
+
+        ``parallel_dims`` is provided for overrides (e.g. CP-conditional mask
+        building) and is unused by the base split.
+        """
+        inputs = input_dict["input"]
+        extra_kwargs: dict[str, Any] = {
+            k: v for k, v in input_dict.items() if k != "input"
+        }
+        return inputs, labels, extra_kwargs, None
 
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.

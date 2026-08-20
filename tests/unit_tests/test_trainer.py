@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.trainer import Trainer
 
@@ -24,7 +23,7 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             pp_has_last_stage=False,
             pp_schedule=SimpleNamespace(step=lambda **kwargs: None),
             train_context=nullcontext,
-            post_dataloading_process=lambda input_dict, labels: (
+            _prepare_batch=lambda input_dict, labels: (
                 input_dict["input"],
                 labels,
                 {},

@@ -6,12 +6,15 @@
 
 
 from dataclasses import dataclass
+from typing import Any, Literal
 
 import spmd_types as spmd
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
-
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -33,7 +36,11 @@ from torchtitan.protocols.module import Module
 
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
-from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
+from .sharding import (
+    annotate_deltanet_cu_seqlens,
+    qwen35_input_sharding,
+    set_qwen35_sharding_config,
+)
 from .vision_encoder import Qwen35VisionEncoder
 
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -332,6 +339,48 @@ class Qwen35Model(Decoder):
         self.vision_encoder = config.vision_encoder.build()
         self.spatial_merge_size = config.vision_encoder.spatial_merge_size
 
+    def _build_forward_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, dict[str, Any], dict[str, SpmdLayout] | None
+    ]:
+        inputs, labels, extra_kwargs, input_sharding = super()._build_forward_inputs(
+            input_dict, labels, parallel_dims=parallel_dims
+        )
+        if input_sharding is not None:
+            input_sharding = {**input_sharding, **qwen35_input_sharding()}
+        return inputs, labels, extra_kwargs, input_sharding
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        *,
+        parallel_dims: ParallelDims,
+        device: torch.device,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], int]:
+        inputs, labels, extra_kwargs, local_ntokens = super().preprocess_inputs(
+            input_dict,
+            labels,
+            parallel_dims=parallel_dims,
+            device=device,
+            parallelism=parallelism,
+        )
+        # Plain-tensor inputs are typed by the base template via input_sharding
+        # (see qwen35_input_sharding). Only the GatedDeltaNet cu_seq_q, nested
+        # inside attention_masks, must be annotated here at its container.
+        if parallelism.spmd_backend == "spmd_types":
+            attention_masks = extra_kwargs.get("attention_masks")
+            if attention_masks is not None:
+                with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+                    annotate_deltanet_cu_seqlens(attention_masks)
+        return inputs, labels, extra_kwargs, local_ntokens
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
@@ -502,16 +551,6 @@ class Qwen35Model(Decoder):
         special_tokens: dict[str, int] | None = None,
     ):
         with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                annotate_qwen35_input_spmd_types(
-                    attention_masks=attention_masks,
-                    mrope_positions=mrope_positions,
-                    pixel_values=pixel_values,
-                    pixel_values_videos=pixel_values_videos,
-                    grid_thw=grid_thw,
-                    grid_thw_videos=grid_thw_videos,
-                )
-
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,

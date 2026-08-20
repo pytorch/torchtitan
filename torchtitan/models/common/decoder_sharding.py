@@ -7,7 +7,6 @@
 import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedFeedForward,
@@ -65,6 +64,20 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
         },
         partition_spec=(DP, (CP, TP), None),
     )
+
+
+def decoder_input_sharding() -> dict[str, SpmdLayout]:
+    """Default ``input_sharding`` for decoder-only models.
+
+    The standard decoder convention (formerly hardcoded in the SPMD backends):
+    tokens and positions are S(0)@DP, S(1)@CP, R@TP; labels are S(0)@DP,
+    S(1)@CP, I@TP.
+    """
+    return {
+        "input": dense_activation_placement(tp=spmd.R),
+        "positions": dense_activation_placement(tp=spmd.R),
+        "labels": dense_activation_placement(tp=spmd.I),
+    }
 
 
 def colwise_config() -> ShardingConfig:

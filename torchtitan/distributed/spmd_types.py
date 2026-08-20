@@ -16,8 +16,7 @@ from typing import Any, TYPE_CHECKING
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
-
+from torch.distributed.tensor import DTensor, Partial, Placement, Replicate, Shard
 from torchtitan.distributed.utils import get_spmd_backend
 
 # Avoid circular import: protocols.__init__ imports module.py, which imports us.
@@ -178,38 +177,65 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
         yield
 
 
+def spmd_layout_to_dtensor_placements(
+    layout: "SpmdLayout",
+) -> dict["MeshAxisName", Placement]:
+    """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+
+    result: dict[MeshAxisName, Placement] = {}
+    for axis_name, axis_type in layout.per_axis_spmd_types().items():
+        if axis_type == spmd.R or axis_type == spmd.I:
+            dtensor_placement: Placement = Replicate()
+        elif axis_type == spmd.P:
+            dtensor_placement = Partial()
+        else:
+            assert isinstance(axis_type, spmd.Shard)
+            dtensor_placement = Shard(axis_type.dim)
+
+        if axis_name == MeshAxisName.DP:
+            result[MeshAxisName.DP_REPLICATE] = dtensor_placement
+            result[MeshAxisName.DP_SHARD] = dtensor_placement
+        else:
+            result[axis_name] = dtensor_placement
+    return result
+
+
 def annotate_input_spmd_types(
     parallel_dims: "ParallelDims",
     inputs: torch.Tensor,
     labels: torch.Tensor,
     extra_kwargs: dict[str, Any],
+    input_sharding: dict[str, "SpmdLayout"],
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-    """Annotate decoder inputs/labels with SPMD types.
+    """Annotate named inputs/labels/extras with SPMD types from ``input_sharding``.
 
-    Hardcodes the standard decoder convention: inputs and positions are
-    ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
+    Each named tensor is asserted against its own layout. Non-tensor kwargs
+    (e.g. ``attention_masks`` containers, ``special_tokens``) are left
+    untouched. Every *tensor* input, however, must have a layout entry: a
+    tensor with no entry raises rather than being silently left untyped.
+    Tensors nested inside container kwargs are not reachable here and must
+    be annotated at their construction site.
     """
-    from torchtitan.distributed.parallel_dims import MeshAxisName
-
-    token_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.R,
-    }
-    label_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.I,
-    }
-
     mesh = parallel_dims.spmd_dense_mesh()
+    named: dict[str, Any] = {"input": inputs, "labels": labels, **extra_kwargs}
+    untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
-        spmd.assert_type(inputs, token_type)
-        spmd.assert_type(labels, label_type)
-        if "positions" in extra_kwargs and isinstance(
-            extra_kwargs["positions"], torch.Tensor
-        ):
-            spmd.assert_type(extra_kwargs["positions"], token_type)
+        for name, value in named.items():
+            if not isinstance(value, torch.Tensor):
+                continue
+            layout = input_sharding.get(name)
+            if layout is None:
+                untyped.append(name)
+                continue
+            spmd.assert_type(value, layout.per_axis_spmd_types())
+    if untyped:
+        raise ValueError(
+            "spmd_types backend requires an SPMD layout for every tensor input, "
+            f"but these have no entry in input_sharding: {sorted(untyped)}. Add "
+            "them to the input_sharding returned by _build_forward_inputs, or "
+            "annotate nested/container tensors at their construction site."
+        )
     return inputs, labels, extra_kwargs
 
 
@@ -314,16 +340,12 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
             src_axes = (
                 ()
                 if src_entry is None
-                else src_entry
-                if isinstance(src_entry, tuple)
-                else (src_entry,)
+                else src_entry if isinstance(src_entry, tuple) else (src_entry,)
             )
             dst_axes = (
                 ()
                 if dst_entry is None
-                else dst_entry
-                if isinstance(dst_entry, tuple)
-                else (dst_entry,)
+                else dst_entry if isinstance(dst_entry, tuple) else (dst_entry,)
             )
             if src_axes == dst_axes:
                 continue
