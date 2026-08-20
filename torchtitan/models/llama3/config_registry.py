@@ -6,7 +6,7 @@
 
 from typing import cast
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     FirstFitPackingConfig,
