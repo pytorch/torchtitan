@@ -134,7 +134,14 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
     # first layers, MoE later); scan the layer list for a representative
     # of each component rather than relying on layer 0.
-    attn = cfg.layers[0].attention
+    attn = cfg.first_attention
+    if attn is None:
+        raise ValueError(
+            f"ModelSpec {spec.name!r} has no full-attention layer. vLLM's engine "
+            "reads num_attention_heads / head_dim / max_position_embeddings before "
+            "any model class is built, and a linear-attention layer (KDA) carries "
+            "none of them."
+        )
     ffn = next(
         (
             ff
@@ -192,6 +199,72 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         hf.setdefault("norm_topk_prob", True)
 
     return hf
+
+
+def _configure_kda_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains KDA layers.
+
+    vLLM sizes the convolution and recurrent state pages from the model class,
+    before any instance exists, and only when ``is_hybrid`` is set. Without this
+    no ``MambaSpec`` is created, ``MambaBase.bind_kv_cache`` never runs, and the
+    KDA layer has no state cache to read.
+
+    vLLM exposes one model-level recurrent-state shape. KDA layers may differ
+    otherwise, but every field that determines that state shape must match.
+    """
+    kda_configs = [
+        layer.kda
+        for layer in model_spec.model.layers
+        if getattr(layer, "kda", None) is not None
+    ]
+    if not kda_configs:
+        return
+
+    state_shapes = {
+        (
+            kda_config.num_heads,
+            kda_config.head_dim,
+            kda_config.conv_qkv.kernel_size,
+        )
+        for kda_config in kda_configs
+    }
+    if len(state_shapes) != 1:
+        raise ValueError(
+            f"All KDA layers must use the same state shape, got {state_shapes}"
+        )
+    (state_shape,) = state_shapes
+
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFuncCalculator,
+        MambaStateDtypeCalculator,
+        MambaStateShapeCalculator,
+    )
+
+    num_heads, head_dim, conv_kernel_size = state_shape
+
+    model_cls.is_hybrid = True
+    model_cls.get_mamba_state_shape_from_config = classmethod(
+        lambda cls, vllm_config: MambaStateShapeCalculator.kda_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_heads,
+            head_dim,
+            conv_kernel_size=conv_kernel_size,
+            num_spec=(
+                vllm_config.speculative_config.num_speculative_tokens
+                if vllm_config.speculative_config
+                else 0
+            ),
+        )
+    )
+    model_cls.get_mamba_state_dtype_from_config = classmethod(
+        lambda cls, vllm_config: MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+        )
+    )
+    model_cls.get_mamba_state_copy_func = classmethod(
+        lambda cls: MambaStateCopyFuncCalculator.kda_state_copy_func()
+    )
 
 
 def register_to_vllm(
@@ -267,6 +340,7 @@ def register_to_vllm(
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
     VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
+    _configure_kda_hybrid_model(VLLMModelFromSpec, model_spec)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing ModelSpec in the closure. This
