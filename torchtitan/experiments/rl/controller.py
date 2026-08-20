@@ -1022,10 +1022,6 @@ class Controller(Configurable):
                     training_sample_group=training_sample_group,
                 )
             if maybe_training_batch is not None:
-                if maybe_training_batch.num_global_valid_tokens == 0:
-                    raise RuntimeError(
-                        "Batcher produced a training batch with no valid loss tokens"
-                    )
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)
         # TODO(async-rl): if finite datasets are supported, drain a final partial batch here.
