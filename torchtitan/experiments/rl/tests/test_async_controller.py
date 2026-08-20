@@ -30,14 +30,20 @@ from torchtitan.experiments.rl.types import (
 )
 
 
-def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
+def _training_sample(
+    *,
+    group_id: int,
+    rollout_id: int,
+    loss_mask: list[bool] | None = None,
+    logprobs: list[float] | None = None,
+) -> TrainingSample:
     return TrainingSample(
         min_policy_version=0,
         max_policy_version=0,
         rollout_id=RolloutTurnID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
         token_ids=[1, 2, 3],
-        loss_mask=[False, True, True],
-        logprobs=[0.0, 0.1, 0.2],
+        loss_mask=[False, True, True] if loss_mask is None else loss_mask,
+        logprobs=[0.0, 0.1, 0.2] if logprobs is None else logprobs,
         advantage=[0.0, 1.0, 1.0],
     )
 
@@ -88,6 +94,66 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     )
     assert batch is not None
     assert batch.num_global_valid_tokens > 0
+
+
+@pytest.mark.parametrize(
+    ("loss_mask", "logprobs"),
+    [
+        ([False, False, False], [0.0, 0.1, 0.2]),
+        ([False, True, True], [0.0, float("nan"), float("inf")]),
+    ],
+)
+def test_batcher_does_not_count_zero_valid_token_groups(
+    loss_mask: list[bool], logprobs: list[float]
+) -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=1)
+    group = TrainingSampleGroup(
+        group_id=0,
+        training_samples=[
+            _training_sample(
+                group_id=0,
+                rollout_id=0,
+                loss_mask=loss_mask,
+                logprobs=logprobs,
+            )
+        ],
+        metrics=[],
+    )
+
+    prepared = batcher.prepare_training_sample_group(training_sample_group=group)
+
+    assert prepared.training_samples == []
+    assert any(
+        metric.key == "batcher/num_groups_dropped_no_valid_tokens"
+        for metric in prepared.metrics
+    )
+    assert batcher.add_training_samples(training_sample_group=prepared) is None
+
+
+def test_batcher_counts_group_with_valid_token_and_invalid_sibling() -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=1)
+    group = TrainingSampleGroup(
+        group_id=0,
+        training_samples=[
+            _training_sample(group_id=0, rollout_id=0),
+            _training_sample(
+                group_id=0,
+                rollout_id=1,
+                logprobs=[0.0, float("nan"), float("inf")],
+            ),
+        ],
+        metrics=[],
+    )
+
+    batch = batcher.add_training_samples(training_sample_group=group)
+
+    assert batch is not None
+    assert batch.num_global_valid_tokens == 2
+    assert len(batch.min_policy_versions) == 2
+    assert not any(
+        metric.key == "batcher/num_groups_dropped_no_valid_tokens"
+        for metric in batch.metrics
+    )
 
 
 def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
@@ -189,9 +255,20 @@ def test_untrainable_group_releases_before_training() -> None:
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
 
-        training_sample_group = TrainingSampleGroup(
-            group_id=0, training_samples=[], metrics=[]
+        training_sample_group = batcher.prepare_training_sample_group(
+            training_sample_group=TrainingSampleGroup(
+                group_id=0,
+                training_samples=[
+                    _training_sample(
+                        group_id=0,
+                        rollout_id=0,
+                        loss_mask=[False, False, False],
+                    )
+                ],
+                metrics=[],
+            )
         )
+        assert training_sample_group.training_samples == []
         await buffer.release_active_groups(1, reason="untrainable_group")
         assert (
             batcher.add_training_samples(training_sample_group=training_sample_group)

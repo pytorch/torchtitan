@@ -67,7 +67,8 @@ class Batcher(Configurable):
 
     Example:
         # num_prompts_per_train_step=2, dp_degree=2, local_batch_size=2
-        # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
+        # The trigger is 2 GROUPS with at least one valid loss token, regardless of how many
+        # samples/tokens each contains.
         batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
             num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
@@ -113,29 +114,9 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group0)  # -> None
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
-        # Drop samples longer than seq_len: can't fill a row
-        samples = training_sample_group.training_samples
-        kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
-        num_dropped = len(samples) - len(kept)
-        if num_dropped:
-            logger.warning(
-                "Batcher dropped %d/%d sample(s) exceeding seq_len=%d.",
-                num_dropped,
-                len(samples),
-                self.seq_len,
-            )
-            training_sample_group = replace(
-                training_sample_group,
-                training_samples=kept,
-                metrics=[
-                    *training_sample_group.metrics,
-                    m.Metric(
-                        "batcher/num_samples_dropped_oversized",
-                        m.Sum(float(num_dropped)),
-                    ),
-                ],
-            )
-
+        training_sample_group = self.prepare_training_sample_group(
+            training_sample_group=training_sample_group
+        )
         self._groups_for_next_batch.append(training_sample_group)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
@@ -143,6 +124,64 @@ class Batcher(Configurable):
         if num_trainable_groups < self._num_prompts_per_train_step:
             return None  # accumulate until one full batch is ready
         return self._pack_one_training_batch()
+
+    def prepare_training_sample_group(
+        self, *, training_sample_group: TrainingSampleGroup
+    ) -> TrainingSampleGroup:
+        """Drop oversized samples and groups with no valid loss token.
+
+        This method is idempotent. The controller calls it before deciding
+        whether a rollout group is trainable so zero-valid-token groups release
+        their active slots immediately; :meth:`add_training_samples` also calls
+        it to keep direct users of the batcher safe.
+        """
+        samples = training_sample_group.training_samples
+        kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
+        num_dropped = len(samples) - len(kept)
+        metrics = list(training_sample_group.metrics)
+        if num_dropped:
+            logger.warning(
+                "Batcher dropped %d/%d sample(s) exceeding seq_len=%d.",
+                num_dropped,
+                len(samples),
+                self.seq_len,
+            )
+            metrics.append(
+                m.Metric(
+                    "batcher/num_samples_dropped_oversized",
+                    m.Sum(float(num_dropped)),
+                )
+            )
+
+        if kept and not any(self._has_valid_loss_token(sample) for sample in kept):
+            metrics.append(
+                m.Metric(
+                    "batcher/num_samples_dropped_no_valid_tokens",
+                    m.Sum(float(len(kept))),
+                )
+            )
+            metrics.append(
+                m.Metric("batcher/num_groups_dropped_no_valid_tokens", m.Sum(1.0))
+            )
+            kept = []
+
+        return replace(
+            training_sample_group,
+            training_samples=kept,
+            metrics=metrics,
+        )
+
+    @staticmethod
+    def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
+        """Whether the shifted sample contains a token used by the RL loss."""
+        return any(
+            include_in_loss and math.isfinite(generator_logprob)
+            for include_in_loss, generator_logprob in zip(
+                training_sample.loss_mask[1:],
+                training_sample.logprobs[1:],
+                strict=True,
+            )
+        )
 
     def _pack_one_training_batch(self) -> TrainingBatch:
         """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""

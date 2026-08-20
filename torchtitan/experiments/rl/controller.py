@@ -1007,6 +1007,10 @@ class Controller(Configurable):
                     rollout_group=rollout_group
                 )
 
+            training_sample_group = await asyncio.to_thread(
+                batcher.prepare_training_sample_group,
+                training_sample_group=training_sample_group,
+            )
             if not training_sample_group.training_samples:
                 await group_buffer.release_active_groups(1, reason="untrainable_group")
 
@@ -1018,6 +1022,10 @@ class Controller(Configurable):
                     training_sample_group=training_sample_group,
                 )
             if maybe_training_batch is not None:
+                if maybe_training_batch.num_global_valid_tokens == 0:
+                    raise RuntimeError(
+                        "Batcher produced a training batch with no valid loss tokens"
+                    )
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)
         # TODO(async-rl): if finite datasets are supported, drain a final partial batch here.
