@@ -36,7 +36,7 @@ from .attention import (
     SlidingWindowAttention,
 )
 from .mhc import HcHead, HcPost, HcPre
-from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
+from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock, MTPBlock
 from .moe import DeepSeekV4MoE, DeepSeekV4Router
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
@@ -252,7 +252,7 @@ def _make_v4_attn_config(
         index_n_heads=index_n_heads,
         index_head_dim=index_head_dim,
         n_layers=n_layers,
-        layer_id=layer_id,
+        layer_id=actual_layer_id,
         inner_attention=inner_attention_cfg,
         rope=dataclasses.replace(rope),
         wq_a=Linear.Config(
@@ -342,7 +342,7 @@ def _make_v4_moe_config(
             route_norm=route_norm,
             vocab_size=vocab_size,
             n_hash_layers=n_hash_layers,
-            layer_id=layer_id,
+            layer_id=actual_layer_id,
         ),
         experts=make_experts_config(
             dim=dim,
@@ -384,6 +384,7 @@ def _make_v4_dense_config(
 def _build_v4_layers(
     *,
     n_layers: int,
+    layer_offset: int = 0,
     dim: int,
     n_heads: int,
     head_dim: int,
@@ -423,10 +424,11 @@ def _build_v4_layers(
 
     layers = []
     for layer_id in range(n_layers):
+        actual_layer_id = layer_offset + layer_id
         cr = compress_ratios[layer_id] if layer_id < len(compress_ratios) else 1
 
         attn_cfg = _make_v4_attn_config(
-            layer_id=layer_id,
+            layer_id=actual_layer_id,
             dim=dim,
             n_heads=n_heads,
             head_dim=head_dim,
@@ -446,7 +448,7 @@ def _build_v4_layers(
 
         if layer_id in dense_layers:
             ffn_cfg = _make_v4_dense_config(
-                layer_id=layer_id,
+                layer_id=actual_layer_id,
                 dim=dim,
                 hidden_dim=dense_hidden_dim,
             )
@@ -454,7 +456,7 @@ def _build_v4_layers(
         else:
             ffn_cfg = None
             moe_cfg = _make_v4_moe_config(
-                layer_id=layer_id,
+                layer_id=actual_layer_id,
                 dim=dim,
                 moe_inter_dim=moe_inter_dim,
                 num_experts=num_experts,
@@ -506,9 +508,120 @@ def _build_v4_layers(
     return layers
 
 
+def _build_mtp_layers(
+    *,
+    n_layers: int,
+    layer_offset: int,
+    dim: int,
+    n_heads: int,
+    head_dim: int,
+    rope_head_dim: int,
+    q_lora_rank: int,
+    o_lora_rank: int,
+    n_groups: int,
+    compress_ratios: tuple[int, ...],
+    window_size: int,
+    norm_eps: float,
+    index_n_heads: int,
+    index_head_dim: int,
+    index_topk: int,
+    moe_inter_dim: int,
+    num_experts: int,
+    num_shared_experts: int,
+    top_k: int,
+    vocab_size: int,
+    n_hash_layers: int,
+    route_norm: bool,
+    route_scale: float,
+    load_balance_coeff: float,
+    moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None,
+    rope: RoPE.Config,
+    rope_compress: RoPE.Config,
+    hc_mult: int = 4,
+    sinkhorn_iters: int = 20,
+    hc_eps: float = 1e-6,
+    dense_hidden_dim: int | None = None,
+    dense_layers: set[int] | None = None,
+) -> list[MTPBlock.Config]:
+    mtp_layers = []
+    for block_cfg in _build_v4_layers(
+        n_layers=n_layers,
+        layer_offset=layer_offset,
+        dim=dim,
+        n_heads=n_heads,
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        q_lora_rank=q_lora_rank,
+        o_lora_rank=o_lora_rank,
+        n_groups=n_groups,
+        compress_ratios=compress_ratios,
+        window_size=window_size,
+        norm_eps=norm_eps,
+        index_n_heads=index_n_heads,
+        index_head_dim=index_head_dim,
+        index_topk=index_topk,
+        moe_inter_dim=moe_inter_dim,
+        num_experts=num_experts,
+        num_shared_experts=num_shared_experts,
+        top_k=top_k,
+        vocab_size=vocab_size,
+        n_hash_layers=n_hash_layers,
+        route_norm=route_norm,
+        route_scale=route_scale,
+        load_balance_coeff=load_balance_coeff,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+        rope=rope,
+        rope_compress=rope_compress,
+        hc_mult=hc_mult,
+        sinkhorn_iters=sinkhorn_iters,
+        hc_eps=hc_eps,
+        dense_hidden_dim=dense_hidden_dim,
+        dense_layers=dense_layers,
+    ):
+        mtp_layers.append(
+            MTPBlock.Config(
+                block=block_cfg,
+                dim=dim,
+                hc_mult=hc_mult,
+                norm_eps=norm_eps,
+                eps=hc_eps,
+                e_proj=Linear.Config(
+                    in_features=dim,
+                    out_features=dim,
+                    param_init=_LINEAR_INIT,
+                ),
+                h_proj=Linear.Config(
+                    in_features=dim,
+                    out_features=dim,
+                    param_init=_LINEAR_INIT,
+                ),
+                enorm=RMSNorm.Config(
+                    normalized_shape=dim,
+                    eps=norm_eps,
+                    param_init=_NORM_INIT,
+                ),
+                hnorm=RMSNorm.Config(
+                    normalized_shape=dim,
+                    eps=norm_eps,
+                    param_init=_NORM_INIT,
+                ),
+                norm=RMSNorm.Config(
+                    normalized_shape=dim,
+                    eps=norm_eps,
+                    param_init=_NORM_INIT,
+                ),
+                param_init=_HC_INIT,
+            )
+        )
+    return mtp_layers
+
+
 def _debugmodel(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    n_mtp_layers: int = 0,
 ) -> DeepSeekV4Model.Config:
     dim = 256
     n_layers = 4
@@ -618,12 +731,52 @@ def _debugmodel(
             eps=hc_eps,
             param_init=_HC_INIT,
         ),
+        n_mtp_layers=n_mtp_layers,
+        mtp_layers=(
+            _build_mtp_layers(
+                n_layers=n_mtp_layers,
+                layer_offset=n_layers,
+                dim=dim,
+                n_heads=n_heads,
+                head_dim=head_dim,
+                rope_head_dim=rope_head_dim,
+                q_lora_rank=q_lora_rank,
+                o_lora_rank=o_lora_rank,
+                n_groups=n_groups,
+                compress_ratios=compress_ratios[n_layers : n_layers + n_mtp_layers],
+                window_size=window_size,
+                norm_eps=norm_eps,
+                index_n_heads=index_n_heads,
+                index_head_dim=index_head_dim,
+                index_topk=index_topk,
+                moe_inter_dim=moe_inter_dim,
+                num_experts=num_experts,
+                num_shared_experts=num_shared_experts,
+                top_k=top_k,
+                vocab_size=vocab_size,
+                n_hash_layers=n_hash_layers,
+                route_norm=route_norm,
+                route_scale=route_scale,
+                load_balance_coeff=load_balance_coeff,
+                moe_comm_backend=moe_comm_backend,
+                non_blocking_capacity_factor=non_blocking_capacity_factor,
+                rope=rope,
+                rope_compress=rope_compress,
+                hc_mult=hc_mult,
+                sinkhorn_iters=sinkhorn_iters,
+                hc_eps=hc_eps,
+                dense_layers=dense_layers,
+            )
+            if n_mtp_layers > 0
+            else None
+        ),
     )
 
 
 def _deepseek_v4_flash(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    n_mtp_layers: int = 0,
 ) -> DeepSeekV4Model.Config:
     dim = 4096
     n_layers = 43
@@ -733,12 +886,52 @@ def _deepseek_v4_flash(
             eps=hc_eps,
             param_init=_HC_INIT,
         ),
+        n_mtp_layers=n_mtp_layers,
+        mtp_layers=(
+            _build_mtp_layers(
+                n_layers=n_mtp_layers,
+                layer_offset=n_layers,
+                dim=dim,
+                n_heads=n_heads,
+                head_dim=head_dim,
+                rope_head_dim=rope_head_dim,
+                q_lora_rank=q_lora_rank,
+                o_lora_rank=o_lora_rank,
+                n_groups=n_groups,
+                compress_ratios=compress_ratios[n_layers : n_layers + n_mtp_layers],
+                window_size=window_size,
+                norm_eps=norm_eps,
+                index_n_heads=index_n_heads,
+                index_head_dim=index_head_dim,
+                index_topk=index_topk,
+                moe_inter_dim=moe_inter_dim,
+                num_experts=num_experts,
+                num_shared_experts=num_shared_experts,
+                top_k=top_k,
+                vocab_size=vocab_size,
+                n_hash_layers=n_hash_layers,
+                route_norm=route_norm,
+                route_scale=route_scale,
+                load_balance_coeff=load_balance_coeff,
+                moe_comm_backend=moe_comm_backend,
+                non_blocking_capacity_factor=non_blocking_capacity_factor,
+                rope=rope,
+                rope_compress=rope_compress,
+                hc_mult=hc_mult,
+                sinkhorn_iters=sinkhorn_iters,
+                hc_eps=hc_eps,
+                dense_layers=dense_layers,
+            )
+            if n_mtp_layers > 0
+            else None
+        ),
     )
 
 
 def _deepseek_v4_pro(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    n_mtp_layers: int = 0,
 ) -> DeepSeekV4Model.Config:
     dim = 7168
     n_layers = 61
@@ -848,6 +1041,45 @@ def _deepseek_v4_pro(
             eps=hc_eps,
             param_init=_HC_INIT,
         ),
+        n_mtp_layers=n_mtp_layers,
+        mtp_layers=(
+            _build_mtp_layers(
+                n_layers=n_mtp_layers,
+                layer_offset=n_layers,
+                dim=dim,
+                n_heads=n_heads,
+                head_dim=head_dim,
+                rope_head_dim=rope_head_dim,
+                q_lora_rank=q_lora_rank,
+                o_lora_rank=o_lora_rank,
+                n_groups=n_groups,
+                compress_ratios=compress_ratios[n_layers : n_layers + n_mtp_layers],
+                window_size=window_size,
+                norm_eps=norm_eps,
+                index_n_heads=index_n_heads,
+                index_head_dim=index_head_dim,
+                index_topk=index_topk,
+                moe_inter_dim=moe_inter_dim,
+                num_experts=num_experts,
+                num_shared_experts=num_shared_experts,
+                top_k=top_k,
+                vocab_size=vocab_size,
+                n_hash_layers=n_hash_layers,
+                route_norm=route_norm,
+                route_scale=route_scale,
+                load_balance_coeff=load_balance_coeff,
+                moe_comm_backend=moe_comm_backend,
+                non_blocking_capacity_factor=non_blocking_capacity_factor,
+                rope=rope,
+                rope_compress=rope_compress,
+                hc_mult=hc_mult,
+                sinkhorn_iters=sinkhorn_iters,
+                hc_eps=hc_eps,
+                dense_layers=dense_layers,
+            )
+            if n_mtp_layers > 0
+            else None
+        ),
     )
 
 
@@ -862,6 +1094,7 @@ def model_registry(
     flavor: str,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
+    n_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     if flavor not in deepseek_v4_configs:
@@ -872,6 +1105,7 @@ def model_registry(
     config = deepseek_v4_configs[flavor](
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        n_mtp_layers=n_mtp_layers,
     )
     if converters is not None:
         validate_converter_order(converters)
