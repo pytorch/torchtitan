@@ -63,11 +63,12 @@ def parallelize_qwen3_5(
             "and multimodal CP needs vision scatter before CP sharding."
         )
 
-    if parallelism.spmd_backend == "spmd_types":
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
-    elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        # pyrefly: ignore [not-callable]
-        model.parallelize(parallel_dims)
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
