@@ -219,7 +219,7 @@ def parallelize_encoders(
     assert isinstance(hf_module, nn.Module)
     if parallel_dims.spmd_backend == "spmd_types":
         annotate_dp_cp_params_as_r(hf_module, parallel_dims)
-    # pyrefly: ignore [missing-attribute]
+    # pyrefly: ignore [missing-attribute, not-iterable]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
     fully_shard(hf_module, **fsdp_config)

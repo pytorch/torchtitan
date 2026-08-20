@@ -1025,8 +1025,8 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
             loss_fn=loss_fn,
             stage_index=1,
         )
-        x = torch.randn(2, 8, 16, requires_grad=True)
-        labels = torch.randint(0, 33, (2, 8))
+        x = torch.randn(16, 16, requires_grad=True)
+        labels = torch.randint(0, 33, (16,))
         global_valid_tokens = torch.tensor(float(labels.numel()))
 
         _build_test_stage_graphs(

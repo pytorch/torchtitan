@@ -57,7 +57,7 @@ The set of `--section.option` CLI flags will not grow. New features express thei
 
 Everything already on the command line keeps working, for backward compatibility rather than because it is the recommended path. The eventual goal is to remove the flags entirely and keep only `--module` and `--config`, or even remove tyro completely.
 
-Frozen means the CLI, not the config dataclasses. New fields still go in the config tree: on the component they belong to, on the model, or -- for the few options with no other home, such as `training.local_batch_size` -- in [configs.py](configs.py), which is not closed, after discussing with the maintainers.
+Frozen means the CLI, not the config dataclasses. New fields still go in the config tree: on the component they belong to, on the model, or -- for the few options with no other home, such as `training.num_tokens_per_microbatch_per_dp_rank` -- in [configs.py](configs.py), which is not closed, after discussing with the maintainers.
 
 A field on a component config, or in `configs.py`, needs `tyro.conf.Suppress`: it is a CLI option unless you annotate it, and that annotation is what keeps the CLI from growing while a configuration can still set the field. A field in the model config needs nothing, since `model_spec` is annotated already and takes the whole tree under it off the command line.
 

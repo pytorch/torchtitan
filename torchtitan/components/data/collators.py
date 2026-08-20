@@ -33,9 +33,13 @@ class Collator(Configurable, ABC):
     def __call__(self, rows: Sequence[Any]) -> TrainerBatch:
         ...
 
+    def num_rows_per_batch(self) -> int:
+        """Return the number of dataset rows consumed by one trainer batch."""
+        return 1
+
 
 class TextCollator(Collator):
-    """Pads next-token-aligned text rows into trainer batches."""
+    """Concatenates text rows and pads only the final token-batch tail."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
@@ -43,30 +47,31 @@ class TextCollator(Collator):
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         del config
-        self._seq_len = context.seq_len
+        self._num_tokens_per_batch = context.num_tokens_per_batch
 
     def __call__(self, rows: Sequence[TextSequence]) -> TrainerBatch:
-        if any(len(row.input_ids) > self._seq_len for row in rows):
-            raise ValueError("unpacked text exceeds seq_len")
+        num_tokens = sum(len(row.input_ids) for row in rows)
+        if num_tokens > self._num_tokens_per_batch:
+            raise ValueError("text rows exceed the configured token batch")
 
-        input_ids = torch.zeros(
-            len(rows),
-            self._seq_len,
-            dtype=torch.long,
-        )
-        labels = torch.full_like(input_ids, IGNORE_INDEX)
-        positions = torch.zeros_like(input_ids)
-
-        for row_index, row in enumerate(rows):
-            length = len(row.input_ids)
-            input_ids[row_index, :length] = torch.as_tensor(row.input_ids)
-            labels[row_index, :length] = torch.as_tensor(row.labels)
-            row_positions = (
-                torch.arange(length)
+        input_ids = torch.cat([torch.as_tensor(row.input_ids) for row in rows])
+        labels = torch.cat([torch.as_tensor(row.labels) for row in rows])
+        positions = torch.cat(
+            [
+                torch.arange(len(row.input_ids))
                 if row.positions is None
                 else torch.as_tensor(row.positions)
+                for row in rows
+            ]
+        )
+
+        pad_len = self._num_tokens_per_batch - num_tokens
+        if pad_len:
+            input_ids = torch.nn.functional.pad(input_ids, (0, pad_len))
+            labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
+            positions = torch.cat(
+                [positions, torch.arange(pad_len, dtype=positions.dtype)]
             )
-            positions[row_index, :length] = row_positions
 
         return {
             "input": input_ids,

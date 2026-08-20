@@ -18,7 +18,6 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
-    local_head_split,
     VarlenAttention,
     VarlenMetadata,
 )
@@ -117,49 +116,49 @@ class Qwen35Attention(BaseAttention):
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
+        num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_BLN2H = local_head_split(self.wq(x_BLD), self.head_dim * 2)
-        xq_BLNH, gate_BLNH = xq_gate_BLN2H.chunk(2, dim=-1)
-        xk_BLNH = local_head_split(self.wk(x_BLD), self.head_dim)
-        xv_BLNH = local_head_split(self.wv(x_BLD), self.head_dim)
+        xq_gate_TN2H = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_TNH, gate_TNH = xq_gate_TN2H.chunk(2, dim=-1)
+        xk_TNH = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
+        xv_TNH = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
 
         # QK norm (before RoPE)
-        xq_BLNH = self.q_norm(xq_BLNH)
-        xk_BLNH = self.k_norm(xk_BLNH)
+        xq_TNH = self.q_norm(xq_TNH)
+        xk_TNH = self.k_norm(xk_TNH)
 
         # Partial RoPE: only first rotary_dim elements get positional encoding
         assert self.rotary_dim <= self.head_dim
-        xq_BLNR, xq_BLNP = (
-            xq_BLNH[..., : self.rotary_dim],
-            xq_BLNH[..., self.rotary_dim :],
+        xq_TNR, xq_TNP = (
+            xq_TNH[..., : self.rotary_dim],
+            xq_TNH[..., self.rotary_dim :],
         )
-        xk_BLNR, xk_BLNP = (
-            xk_BLNH[..., : self.rotary_dim],
-            xk_BLNH[..., self.rotary_dim :],
+        xk_TNR, xk_TNP = (
+            xk_TNH[..., : self.rotary_dim],
+            xk_TNH[..., self.rotary_dim :],
         )
-        xq_BLNR, xk_BLNR = self.rope(xq_BLNR, xk_BLNR, positions)
-        xq_BLNH = torch.cat([xq_BLNR, xq_BLNP], dim=-1)
-        xk_BLNH = torch.cat([xk_BLNR, xk_BLNP], dim=-1)
+        xq_TNR, xk_TNR = self.rope(xq_TNR, xk_TNR, positions)
+        xq_TNH = torch.cat([xq_TNR, xq_TNP], dim=-1)
+        xk_TNH = torch.cat([xk_TNR, xk_TNP], dim=-1)
 
-        out_BLNH = self.inner_attention(
-            xq_BLNH,
-            xk_BLNH,
-            xv_BLNH,
+        out_TNH = self.inner_attention(
+            xq_TNH,
+            xk_TNH,
+            xv_TNH,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
 
         # Output gating
-        out_BLNH = out_BLNH * torch.sigmoid(gate_BLNH)
-        out_BLD = out_BLNH.view(B, L, -1)
-        return self.wo(out_BLD)
+        out_TNH = out_TNH * torch.sigmoid(gate_TNH)
+        out_TD = out_TNH.view(num_tokens, -1)
+        return self.wo(out_TD)
 
 
 class Qwen35TransformerBlock(Module):
@@ -203,27 +202,26 @@ class Qwen35TransformerBlock(Module):
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         layer_mask = (
             attention_masks[self.attn_mask_key] if attention_masks is not None else None
         )
-
-        h_BLD = self.attention_norm(x_BLD)
+        h_TD = self.attention_norm(x_TD)
         if self.full_attn:
-            h_BLD = self.attn(h_BLD, layer_mask, positions)
+            h_TD = self.attn(h_TD, layer_mask, positions)
         else:
-            h_BLD = self.attn(h_BLD, layer_mask)
-        x_BLD = x_BLD + h_BLD
+            h_TD = self.attn(h_TD, layer_mask)
+        x_TD = x_TD + h_TD
 
-        h_BLD = self.ffn_norm(x_BLD)
+        h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            x_BLD = x_BLD + self.moe(h_BLD)
+            x_TD = x_TD + self.moe(h_TD)
         else:
-            x_BLD = x_BLD + self.feed_forward(h_BLD)
-        return x_BLD
+            x_TD = x_TD + self.feed_forward(h_TD)
+        return x_TD
 
 
 class Qwen35Model(Decoder):
@@ -242,11 +240,11 @@ class Qwen35Model(Decoder):
       text batches use the plain 1D positions
     - MoE variant: routed experts + shared expert with sigmoid gate
 
-    MRoPE positions (``mrope_positions``, shape ``(batch, seq, 3)``) are built by
+    MRoPE positions (``mrope_positions``, shape ``(num_tokens, 3)``) are built by
     the dataloader and forwarded to every pipeline stage, so RoPE stays consistent
     across stages even though the raw vision inputs (``pixel_values``/``grid_thw``)
     only reach the first stage. Text batches carry no ``mrope_positions`` and use
-    the 2D ``positions`` instead.
+    the 1D ``positions`` instead.
 
     Forward pass flow::
 
@@ -256,7 +254,7 @@ class Qwen35Model(Decoder):
           │    ├─ tok_embeddings(tokens)              → text embeddings
           │    ├─ _get_vision_embeds(pixel_values)     → vision embeddings
           │    │    └─ vision_encoder(pixel_values)     → merge patches
-          │    ├─ _get_vision_positions             → locate vision regions
+          │    ├─ get_vision_positions              → locate vision regions
           │    └─ _scatter_vision_embeds                → scatter into text sequence
           │
           └─ transformer layers (hybrid), each given (mrope_positions or positions)
@@ -336,72 +334,47 @@ class Qwen35Model(Decoder):
         self,
         positions: torch.Tensor,
     ) -> Qwen35AttentionMaskDict:
-        """Build the per-consumer mask dict for the hybrid stack.
-
-        A ``BlockMask`` isolates documents in the quadratic layers. The value
-        is ``None`` if the config has no quadratic layer. GatedDeltaNet uses
-        document offsets under the ``"deltanet"`` key. Each block selects its
-        value by ``attn_mask_key``. The trainer builds this dictionary for
-        each pipeline microbatch.
-        """
         attn_config = self.config.first_attention
 
-        # Host offsets are a GatedDeltaNet-only need: the FLA varlen kernels
-        # take cu_seqlens as a CPU tensor to size their launches, whereas
-        # quadratic attention (torch.nn.attention.varlen) consumes the device
-        # tensor directly. They are stored as Python ints so SelectiveAC
-        # checkpoint metadata stays tensor-free.
+        # Multimodal padding uses position 0 for every padded token. A real
+        # document start is position 0 followed by position 1; keep index 0 as
+        # the first start. This avoids routing a single padded sample through
+        # the varlen kernel while retaining boundaries between packed samples.
+        followed_by_one = torch.cat(
+            [
+                positions[1:] == 1,
+                torch.zeros(1, dtype=torch.bool, device=positions.device),
+            ]
+        )
+        first_token = torch.arange(positions.shape[0], device=positions.device) == 0
+        sequence_starts = ((positions == 0) & followed_by_one) | first_token
+        sequence_positions = torch.where(sequence_starts, 0, 1)
         deltanet_metadata = create_varlen_metadata_for_document(
-            positions,
+            sequence_positions,
             include_host_offsets=True,
         )
+        if (
+            deltanet_metadata.cu_seq_q_host is not None
+            and len(deltanet_metadata.cu_seq_q_host) == 2
+            and not (
+                attn_config is not None
+                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
+            )
+        ):
+            deltanet_metadata = None
+
         if attn_config is None:
             quadratic_attention = None
         elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
             # Under varlen both consumers read the same document offsets.
             quadratic_attention = deltanet_metadata
         else:
-            quadratic_masks = super().get_attention_masks(positions)
-            assert isinstance(quadratic_masks, BlockMask)
-            quadratic_attention = quadratic_masks
+            quadratic_attention = super().get_attention_masks(positions)
+        # pyrefly: ignore [bad-return]
         return {
-            "quadratic_attention": quadratic_attention,
+            "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
             "deltanet": deltanet_metadata,
         }
-
-    def _get_vision_positions(
-        self,
-        tokens: torch.Tensor,
-        num_tokens_per_item: torch.Tensor,
-        vision_token_id: int,
-    ) -> list[tuple[int, int, int, int]]:
-        """Compute (item_idx, sample_idx, vision_start, n_tokens) for each vision item.
-
-        Finds where each contiguous run of vision placeholder tokens starts
-        in the text sequence.
-
-        Args:
-            tokens: Token IDs (batch, seq_len)
-            num_tokens_per_item: (num_items,) actual tokens per vision item
-            vision_token_id: Placeholder token ID
-
-        Returns:
-            List of (item_idx, sample_idx, vision_start, n_tokens) tuples
-        """
-        vision_mask = tokens == vision_token_id
-        flat_mask = vision_mask.view(-1)
-        prev_mask = torch.cat(
-            [torch.zeros(1, dtype=torch.bool, device=flat_mask.device), flat_mask[:-1]]
-        )
-        region_starts = torch.where(flat_mask & ~prev_mask)[0]
-        seq_len = tokens.shape[1]
-
-        positions = []
-        for i in range(num_tokens_per_item.shape[0]):
-            start = int(region_starts[i].item())
-            n_tokens = int(num_tokens_per_item[i].item())
-            positions.append((i, start // seq_len, start % seq_len, n_tokens))
-        return positions
 
     def _get_vision_embeds(
         self,
@@ -409,14 +382,14 @@ class Qwen35Model(Decoder):
         *,
         grid_thw: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run vision encoder and return padded embeddings with token counts.
+        """Run the vision encoder and return packed embeddings with token counts.
 
         Args:
-            pixel_values: Padded patches (num_items, max_num_patch, patch_dim)
+            pixel_values: Packed patches ``(total_num_patches, patch_dim)``.
             grid_thw: Grid dimensions (num_items, 3) for [t, h, w]
 
         Returns:
-            vision_embeds: (num_items, max_tokens, dim) padded vision embeddings
+            vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
             num_tokens_per_item: (num_items,) actual token count per item
         """
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
@@ -440,7 +413,7 @@ class Qwen35Model(Decoder):
         """Embed tokens, run vision encoder, scatter vision into text.
 
         Args:
-            tokens: Input token IDs (batch_size, seq_len)
+            tokens: Input token IDs ``(num_tokens,)``.
             pixel_values: Image patches or None
             pixel_values_videos: Video patches or None
             grid_thw: Grid dimensions for images or None
@@ -448,7 +421,7 @@ class Qwen35Model(Decoder):
             special_tokens: Special token definitions
 
         Returns:
-            (batch, seq_len, dim) embeddings with vision tokens scattered in
+            ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
         """
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
@@ -524,10 +497,12 @@ class Qwen35Model(Decoder):
             else:
                 x = tokens
 
-        if spmd.is_type_checking():
-            # The scatter restores a token-aligned tensor, so text-model DP
-            # resumes as global batch sharding after the multimodal region.
-            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            spmd.assert_type(
+                x,
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                spmd.PartitionSpec(("dp", "cp"), None),
+            )
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions

@@ -54,9 +54,10 @@ def parallelize_qwen3(
     the model must fit on GPU or CPU memory.
     """
     assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.num_tokens_per_microbatch_per_dp_rank % parallel_dims.seq_len_divisor
+        == 0
     ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
+        Token count {training.num_tokens_per_microbatch_per_dp_rank} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 

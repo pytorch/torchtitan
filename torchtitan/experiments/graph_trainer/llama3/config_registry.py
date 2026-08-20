@@ -60,6 +60,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     ``build_decoder_config_for_backend``.
     """
     base = llama3_debugmodel()
+    base.parallelism.context_parallel_load_balancer = "headtail"
     base.model_spec = model_registry("debugmodel", attn_backend="sdpa")
     config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)

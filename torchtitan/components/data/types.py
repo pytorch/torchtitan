@@ -18,8 +18,8 @@ class DatasetBuildContext:
     """Runtime values shared while building the data pipeline."""
 
     tokenizer: BaseTokenizer
-    seq_len: int
-    local_batch_size: int
+    max_context_length: int
+    num_tokens_per_batch: int
     read_options: grain.ReadOptions
 
 

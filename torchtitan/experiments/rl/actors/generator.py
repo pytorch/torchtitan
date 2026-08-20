@@ -911,7 +911,7 @@ class VLLMGenerator(Actor, Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
+        engine_kwargs["max_model_len"] = model_spec.model.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens

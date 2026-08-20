@@ -111,8 +111,8 @@ def _trace_dsv3_moe_block_stage(
         runtime_config = Trainer.Config(
             model_spec=model_spec,
             training=TrainingConfig(
-                local_batch_size=batch_size,
-                seq_len=seq_len,
+                num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
+                max_context_length=seq_len,
                 steps=1,
             ),
             parallelism=ParallelismConfig(expert_parallel_degree=2),
@@ -146,15 +146,15 @@ def _trace_dsv3_moe_block_stage(
                 mode="fully_shard",
             )
 
+        num_tokens = batch_size * seq_len
         x = torch.randn(
-            batch_size,
-            seq_len,
+            num_tokens,
             model_config.dim,
             device="cuda",
             dtype=torch.bfloat16,
             requires_grad=include_input_grad,
         )
-        positions = torch.arange(seq_len, device="cuda").repeat(batch_size, 1)
+        positions = torch.arange(seq_len, device="cuda").repeat(batch_size)
         attention_masks = model.get_attention_masks(positions)
         output_grad = torch.randn_like(x)
 

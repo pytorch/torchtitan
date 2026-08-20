@@ -78,6 +78,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
   --training.disable_cuda_graphs \
   --compile.mode aot_fx_trace \
   --parallelism.pipeline_parallel_degree 2 \
+  --parallelism.num_pp_microbatches 8 \
   --parallelism.pipeline_parallel_schedule Interleaved1F1B \
   --parallelism.data_parallel_shard_degree 4 \
   --parallelism.expert_parallel_degree 2

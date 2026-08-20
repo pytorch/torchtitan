@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 from torchtitan.components.data import GrainDataLoader
@@ -41,7 +42,11 @@ class TestFluxDataLoader(unittest.TestCase):
             },
         ]
 
-        model_inputs, labels = self._collator.build(context=None)(rows)
+        context = SimpleNamespace(
+            num_tokens_per_batch=2,
+            max_context_length=1,
+        )
+        model_inputs, labels = self._collator.build(context=context)(rows)
 
         self.assertNotIn("image", model_inputs)
         self.assertEqual(model_inputs["prompt"], ["first", "second"])
@@ -49,8 +54,8 @@ class TestFluxDataLoader(unittest.TestCase):
             torch.equal(labels, torch.stack([row["image"] for row in rows]))
         )
 
-    def test_recipe_sequence_length_matches_dataset_geometry(self):
-        for recipe, expected_seq_len in (
+    def test_recipe_context_length_matches_dataset_geometry(self):
+        for recipe, expected_max_context_length in (
             (flux_debugmodel, 512),
             (flux_dev, 768),
             (flux_schnell, 512),
@@ -61,7 +66,10 @@ class TestFluxDataLoader(unittest.TestCase):
 
                 self.assertIsInstance(processor, FluxSampleProcessor.Config)
                 self.assertEqual(processor.img_size, 256)
-                self.assertEqual(config.training.seq_len, expected_seq_len)
+                self.assertEqual(
+                    config.training.max_context_length,
+                    expected_max_context_length,
+                )
 
     def test_validation_timestep_preserves_sample(self):
         from torchtitan.models.flux.flux_datasets import _add_validation_timestep
@@ -97,8 +105,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--training.local_batch_size",
-                        str(batch_size),
+                        "--training.num_tokens_per_microbatch_per_dp_rank",
+                        "512",
                         "--tokenizer.test_mode",
                         "--tokenizer.t5_tokenizer_path",
                         "tests/assets/tokenizer",
@@ -124,9 +132,11 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    local_batch_size=batch_size,
+                    num_tokens_per_batch=(
+                        batch_size * config.training.max_context_length
+                    ),
                     tokenizer=tokenizer,
-                    seq_len=config.training.seq_len,
+                    max_context_length=config.training.max_context_length,
                 )
 
                 it = iter(dl)
@@ -153,9 +163,11 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl_resumed = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    local_batch_size=batch_size,
+                    num_tokens_per_batch=(
+                        batch_size * config.training.max_context_length
+                    ),
                     tokenizer=tokenizer,
-                    seq_len=config.training.seq_len,
+                    max_context_length=config.training.max_context_length,
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)

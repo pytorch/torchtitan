@@ -110,21 +110,18 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         """
         # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
         # requests K=1, but we can't assert that: vLLM's kernel warmup probes
-        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Map the
-        # N positions to one sequence (B=1, S=N) and reuse the trainer's
-        # compute_logprobs (one token per position) once per column.
+        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Reuse
+        # the trainer's compute_logprobs once per column.
         #
         # NOTE: each element of token_ids is scored independently, after the
         # whole generated sequence is marterialized. We iterate column-by-column
         # purely because torchtitan's compute_logprobs takes one token id per
         # position; it is not a cross-column/cross-position dependency.
-        logits = logits.unsqueeze(0)  # [1, N, V]  (B=1, S=N)
         token_ids = token_ids.to(torch.int64)
         per_column = [
-            compute_logprobs(logits, token_ids[:, k].unsqueeze(0))  # [1, N]
-            for k in range(token_ids.shape[1])
+            compute_logprobs(logits, token_ids[:, k]) for k in range(token_ids.shape[1])
         ]
-        return torch.stack(per_column, dim=-1).squeeze(0)  # [N, K]
+        return torch.stack(per_column, dim=-1)  # [N, K]
 
     vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
     logger.info(
