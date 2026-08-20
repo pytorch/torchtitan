@@ -114,17 +114,20 @@ jobs:
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
+        # Skipped on ROCm 7.14: exploding gradients in Qwen3 MoE TP+EP training
+        # (https://github.com/pytorch/pytorch/issues/194004). Remove skip when
+        # pytorch has ROCm 7.15.
         # MoE loss comparison: verify Qwen3 MoE FSDP+TP+EP deterministic losses match reference
-        MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_rocm_mi350x.txt"
-
-        echo "Checking Qwen3 MoE FSDP+TP+EP loss parity against reference"
-        python3 scripts/loss_compare.py . . \
-          --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
-          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
-          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
-          --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
-          --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
-        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+        # MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_rocm_mi350x.txt"
+        #
+        # echo "Checking Qwen3 MoE FSDP+TP+EP loss parity against reference"
+        # python3 scripts/loss_compare.py . . \
+        #   --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
+        #   --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+        #   --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+        #   --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
+        #   --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
+        # rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
