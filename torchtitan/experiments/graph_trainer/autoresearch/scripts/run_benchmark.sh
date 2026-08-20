@@ -5,7 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 #
-# Autoresearch benchmark: Llama3 8B FSDP=4 TP=2 bs=1 on 8xH100.
+# Autoresearch benchmark: Llama3 8B FSDP=4 TP=2 with 8192 tokens per DP rank on 8xH100.
 # Output goes to ./run.log with wall time appended.
 # Extra arguments are forwarded to run_train.sh.
 
@@ -17,7 +17,8 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --training.local_batch_size 1 \
+    --dataloader.dataset c4_test \
+    --training.num_tokens_per_microbatch_per_dp_rank 8192 \
     --metrics.no-enable_tensorboard \
     --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \

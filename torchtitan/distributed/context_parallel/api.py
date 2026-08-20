@@ -50,8 +50,8 @@ def prepare_context_parallel_input(
     upstream in ``post_dataloading_process``.
 
     Args:
-        inputs: Input tensor of shape [batch_size, seq_len]
-        labels: Label tensor of shape [batch_size, seq_len]
+        inputs: Input tensor of shape [num_tokens]
+        labels: Label tensor of shape [num_tokens]
         extra_kwargs: Dictionary containing 'positions' (required) and
             optionally 'attention_masks' to be sharded.
         cp_mesh: Device mesh for context parallel dimension
@@ -90,7 +90,7 @@ def cp_shard(
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
-    input_seq_dim: int = 1,
+    input_seq_dim: int = 0,
     ptrr_mask_key: str | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
@@ -111,11 +111,9 @@ def cp_shard(
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
             - None: Disable load balancing
             Defaults to "headtail".
-        input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
-            which covers most use cases where tensors have shape
-            [batch_size, seq_len]. Can be changed by passing a
-            different value if your tensors use a different sequence
-            dimension layout.
+        input_seq_dim: Sequence dimension index for sharding. Defaults to 0
+            for folded text tensors with shape [num_tokens]. Callers with a
+            different layout must pass the sequence dimension explicitly.
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and
             ``attention_masks`` is a dict[str, BlockMask], selects which mask in
             the dict the PTRRLoadBalancer is built from. The resulting balancer

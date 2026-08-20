@@ -51,8 +51,8 @@ class HFTransformerTrainer(Trainer):
 
         A flex ``BlockMask`` can only be sharded by the "ptrr" balancer (or with
         balancing disabled via None); the
-        default "headtail" cannot shard it. Raise rather than silently
-        overriding a user-set value.
+        "headtail" cannot shard it. Raise rather than silently overriding a
+        user-set value.
         """
         if not self.parallel_dims.cp_enabled:
             return

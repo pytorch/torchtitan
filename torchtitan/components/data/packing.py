@@ -7,6 +7,7 @@
 """Stateful packing recipes for tokenized documents."""
 
 from dataclasses import dataclass
+from functools import partial
 
 import grain.python as grain
 import numpy as np
@@ -32,7 +33,12 @@ class ConcatThenSplitPackingConfig:
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
         )
-        dataset = dataset.map(_text_sequence_to_packing_input)
+        dataset = dataset.map(
+            partial(
+                _text_sequence_to_packing_input,
+                max_context_length=context.max_context_length,
+            )
+        )
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
         # TODO(data-overflow-policy): Concat-then-split chunks long documents, while
@@ -40,11 +46,12 @@ class ConcatThenSplitPackingConfig:
         dataset = grain.experimental.ConcatThenSplitIterDataset(
             dataset,
             length_struct={
-                "input_ids": context.seq_len,
-                "labels": context.seq_len,
-                "positions": context.seq_len,
+                "input_ids": context.num_tokens_per_batch,
+                "labels": context.num_tokens_per_batch,
+                "positions": context.num_tokens_per_batch,
             },
         )
+        dataset = dataset.filter(_packing_output_is_full)
         return dataset.map(_packing_output_to_text_sequence)
 
 
@@ -71,9 +78,14 @@ class FirstFitPackingConfig:
             dataset_iteration_policy=dataset_iteration_policy,
         )
         dataset = dataset.filter(
-            lambda sample: len(sample.input_ids) <= context.seq_len
+            lambda sample: len(sample.input_ids) <= context.max_context_length
         )
-        dataset = dataset.map(_text_sequence_to_packing_input)
+        dataset = dataset.map(
+            partial(
+                _text_sequence_to_packing_input,
+                max_context_length=context.max_context_length,
+            )
+        )
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=context.read_options)
         # TODO(data-global-pack-plan): Consider packing before DP sharding so
@@ -81,9 +93,9 @@ class FirstFitPackingConfig:
         dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
             length_struct={
-                "input_ids": context.seq_len,
-                "labels": context.seq_len,
-                "positions": context.seq_len,
+                "input_ids": context.num_tokens_per_batch,
+                "labels": context.num_tokens_per_batch,
+                "positions": context.num_tokens_per_batch,
             },
             padding_struct={
                 "input_ids": 0,
@@ -98,8 +110,15 @@ class FirstFitPackingConfig:
         return dataset.map(_packing_output_to_text_sequence)
 
 
+def _packing_output_is_full(packing_output: dict[str, np.ndarray]) -> bool:
+    """Return whether concat-then-split filled the entire token batch."""
+    return bool(np.all(np.asarray(packing_output["input_ids_segment_ids"]) != 0))
+
+
 def _text_sequence_to_packing_input(
     text_sequence: TextSequence,
+    *,
+    max_context_length: int,
 ) -> dict[str, np.ndarray]:
     """Convert a `TextSequence` to the array dictionary expected by text packing.
 
@@ -107,7 +126,9 @@ def _text_sequence_to_packing_input(
     """
     positions = text_sequence.positions
     if positions is None:
-        positions = np.arange(len(text_sequence.input_ids), dtype=np.int64)
+        positions = (
+            np.arange(len(text_sequence.input_ids), dtype=np.int64) % max_context_length
+        )
     return {
         "input_ids": np.asarray(text_sequence.input_ids),
         "labels": np.asarray(text_sequence.labels),

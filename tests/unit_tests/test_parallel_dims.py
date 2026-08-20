@@ -32,8 +32,10 @@ from torchtitan.distributed.spmd_types import (
     spmd_validate_redistributions,
 )
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     dense_activation_placement,
     dense_sequence_parallel_placement,
+    token_id_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
@@ -259,6 +261,20 @@ class TestSpmdLayout(DTensorTestBase):
             },
         )
 
+    def test_decoder_layout_partition_spec_ranks(self):
+        self.assertEqual(
+            token_id_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP),),
+        )
+        self.assertEqual(
+            dense_activation_placement(tp=spmd.R, cp=spmd.S(0)).partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP), None),
+        )
+        self.assertEqual(
+            attention_activation_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP), MeshAxisName.TP, None),
+        )
+
     def test_unfold_dp_axes(self):
         """Logical DP expands only when resolving concrete mesh axes."""
         self.assertEqual(
@@ -420,7 +436,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
         x = torch.ones(2, 2, device=self.device_type)
         src = dense_sequence_parallel_placement()
-        dst = dense_activation_placement(tp=spmd.I)
+        dst = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
 
         comm_mode = CommDebugMode()
         with comm_mode:
@@ -432,7 +448,7 @@ class TestSpmdLayout(DTensorTestBase):
             )
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
-        self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
+        self.assertTrue(torch.equal(result, torch.ones(8, 2, device=self.device_type)))
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
@@ -918,7 +934,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             p.data = p.data.to(torch.bfloat16)
 
         tokens = torch.randint(
-            0, model_config.vocab_size, (2, 32), device=self.device_type
+            0, model_config.vocab_size, (64,), device=self.device_type
         )
         for iter_idx in range(10):
             optim.zero_grad(set_to_none=(iter_idx % 2 == 0))

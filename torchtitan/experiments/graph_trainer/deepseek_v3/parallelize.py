@@ -45,13 +45,14 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    # TODO: TP currently cannot handle uneven seq_len because we set
+    # TODO: TP currently cannot handle uneven token counts because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.num_tokens_per_microbatch_per_dp_rank % parallel_dims.seq_len_divisor
+        == 0
     ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
+        Token count {training.num_tokens_per_microbatch_per_dp_rank} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 

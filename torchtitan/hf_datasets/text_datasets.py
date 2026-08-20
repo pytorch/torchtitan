@@ -75,7 +75,7 @@ class ChatProcessor(SampleProcessor):
             )
         self._tokenizer = context.tokenizer
         self._eos_id = context.tokenizer.eos_id
-        self._seq_len = context.seq_len
+        self._max_context_length = context.max_context_length
         self._messages_fn = config.messages_fn
         self._logged_first_sample = False
 
@@ -123,9 +123,10 @@ class ChatProcessor(SampleProcessor):
         # TODO(data-sft-overflow): Consider truncating oversized examples instead.
         # Causal loss remains valid for the retained response prefix.
         # Drop oversized examples rather than truncating.
-        if len(full_tokens) > self._seq_len:
+        if len(full_tokens) > self._max_context_length:
             logger.debug(
-                f"Dropping sample: token count exceeds seq_len={self._seq_len}"
+                "Dropping sample: token count exceeds "
+                f"max_context_length={self._max_context_length}"
             )
             return None
 

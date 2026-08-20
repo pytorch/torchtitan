@@ -147,7 +147,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         "num_attention_heads": n_heads,  # TP divisibility + FA3 num_heads_q
         "num_key_value_heads": n_kv_heads,  # DCP divisibility + FA3 num_heads_kv
         "head_dim": head_dim,  # FA3 scheduler headdim
-        "max_position_embeddings": attn.rope.max_seq_len,  # caps max_model_len
+        "max_position_embeddings": attn.rope.max_context_length,  # caps max_model_len
         # Presence required
         "model_type": "torchtitan",  # any non-empty string
         "num_hidden_layers": len(

@@ -20,8 +20,8 @@ from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 
 def _reference_ce(pred, labels):
     return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(),
-        labels.flatten(0, 1),
+        pred.float(),
+        labels,
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
@@ -43,16 +43,16 @@ class TestCrossEntropyDTensor(DTensorTestBase):
         torch.manual_seed(0)
         mesh = init_device_mesh(self.device_type, (8,), mesh_dim_names=("tp",))
 
-        B, S, V = 4, 16, 64
+        T, V = 64, 64
         gen = torch.Generator(device=self.device_type).manual_seed(42)
-        global_pred = torch.randn(B, S, V, device=self.device_type, generator=gen)
+        global_pred = torch.randn(T, V, device=self.device_type, generator=gen)
         global_labels = torch.randint(
-            0, V, (B, S), device=self.device_type, dtype=torch.long, generator=gen
+            0, V, (T,), device=self.device_type, dtype=torch.long, generator=gen
         )
 
         ref_loss = _reference_ce(global_pred, global_labels)
 
-        pred_dt = distribute_tensor(global_pred.clone(), mesh, (Shard(2),))
+        pred_dt = distribute_tensor(global_pred.clone(), mesh, (Shard(1),))
         pred_dt = pred_dt.detach().requires_grad_(True)
         labels = global_labels.clone()
 
