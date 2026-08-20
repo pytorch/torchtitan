@@ -26,11 +26,8 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
-)
-from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
-    validate_config,
 )
 
 
@@ -51,9 +48,6 @@ def parallelize_qwen3_5(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.spmd_backend == "full_dtensor":
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -66,7 +60,6 @@ def parallelize_qwen3_5(
         )
 
     if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
     elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         # pyrefly: ignore [not-callable]

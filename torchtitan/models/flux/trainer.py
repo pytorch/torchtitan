@@ -47,7 +47,7 @@ class FluxTrainer(Trainer):
         # transformations such as prompt dropout use Grain's separate RNG.
         distinct_seed_mesh_dims = (
             ["cp", "dp_shard", "dp_replicate"]
-            if config.parallelism.spmd_backend in ("full_dtensor", "spmd_types")
+            if config.parallelism.spmd_backend == "spmd_types"
             else ["fsdp", "dp_replicate"]
         )
         dist_utils.set_determinism(
