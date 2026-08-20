@@ -23,7 +23,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from torchtitan.components.checkpoint import (
+from torchtitan.components.checkpointer import (
     AsyncMode,
     CheckpointManager,
     DATALOADER,

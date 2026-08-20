@@ -13,7 +13,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 
 import dataclasses
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import (
