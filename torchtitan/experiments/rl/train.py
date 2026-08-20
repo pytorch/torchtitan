@@ -32,10 +32,7 @@ from dataclasses import dataclass
 # imports transitively importing torch.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-# TODO: Remove `_src` after monarch cuts a new release. This is already a public
-# API in monarch nightly. https://github.com/meta-pytorch/monarch/pull/4327
-from monarch._src.actor.host_mesh import default_bootstrap_cmd
-from monarch.actor import HostMesh, ProcMesh, this_host
+from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.controller import Controller
@@ -279,15 +276,6 @@ def spawn_proc_mesh(
 
 
 async def main():
-    # Monarch is making breaking changes to its message dispatching mechanism.
-    # The recommended way to maintain the current behavior, which is what we want,
-    # is to use @concurrent_endpoint. But that decorator is not available in
-    # monarch's stable release yet. So we pin this env var for now, until the
-    # new release is cut. More details can be found in:
-    # https://github.com/meta-pytorch/monarch/pull/4243
-    # https://github.com/meta-pytorch/monarch/pull/4211
-    os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
-
     config = ConfigManager().parse_args()
     assert isinstance(config, Controller.Config)
     sl.init_structured_logger(

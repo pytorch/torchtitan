@@ -9,14 +9,14 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from threading import local
 from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Partial, Placement, Replicate, Shard
+from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.utils import get_spmd_backend
 
@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 __all__ = [
     "annotate_input_spmd_types",
     "current_spmd_mesh",
+    "dtensor_to_plain_tensor_state_dict",
+    "maybe_set_sparse_mesh",
+    "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -39,12 +42,53 @@ __all__ = [
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
-    "maybe_set_sparse_mesh",
-    "spmd_layout_to_dtensor_placements",
 ]
 
 
 _MESH_TLS = local()
+
+
+def plain_tensor_to_dtensor_state_dict(
+    state_dict: dict[str, Any],
+    *,
+    state_dict_layouts: Mapping[str, "SpmdLayout"],
+    parallel_dims: "ParallelDims",
+) -> dict[str, Any]:
+    """Represent plain local state tensors as DTensors for state transfer."""
+    from torchtitan.distributed.parallel_dims import unfold_dp_axes
+    from torchtitan.protocols.sharding import resolve_placements
+
+    dtensor_state_dict = dict(state_dict)
+    with torch.no_grad():
+        for name, target in state_dict.items():
+            if not isinstance(target, torch.Tensor) or isinstance(target, DTensor):
+                continue
+
+            layout = state_dict_layouts.get(name)
+            if layout is None:
+                raise KeyError(f"{name} is missing SPMD layout metadata")
+
+            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(layout.axes()))
+            if mesh is None:
+                continue
+
+            dtensor_state_dict[name] = DTensor.from_local(
+                target,
+                mesh,
+                resolve_placements(layout, mesh),
+                run_check=False,
+            )
+    return dtensor_state_dict
+
+
+def dtensor_to_plain_tensor_state_dict(
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace DTensor state-dict entries with their plain local tensors."""
+    return {
+        name: value.to_local() if isinstance(value, DTensor) else value
+        for name, value in state_dict.items()
+    }
 
 
 def set_spmd_meshes(
@@ -134,30 +178,6 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
         yield
 
 
-def spmd_layout_to_dtensor_placements(
-    layout: "SpmdLayout",
-) -> dict["MeshAxisName", Placement]:
-    """Convert an SPMD layout to DTensor placements keyed by mesh axis name."""
-    from torchtitan.distributed.parallel_dims import MeshAxisName
-
-    result: dict[MeshAxisName, Placement] = {}
-    for axis_name, axis_type in layout.per_axis_spmd_types().items():
-        if axis_type == spmd.R or axis_type == spmd.I:
-            dtensor_placement: Placement = Replicate()
-        elif axis_type == spmd.P:
-            dtensor_placement = Partial()
-        else:
-            assert isinstance(axis_type, spmd.Shard)
-            dtensor_placement = Shard(axis_type.dim)
-
-        if axis_name == MeshAxisName.DP:
-            result[MeshAxisName.DP_REPLICATE] = dtensor_placement
-            result[MeshAxisName.DP_SHARD] = dtensor_placement
-        else:
-            result[axis_name] = dtensor_placement
-    return result
-
-
 def annotate_input_spmd_types(
     parallel_dims: "ParallelDims",
     inputs: torch.Tensor,
@@ -168,8 +188,6 @@ def annotate_input_spmd_types(
 
     Hardcodes the standard decoder convention: inputs and positions are
     ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
-    Analogous to ``full_dtensor.parallelize_inputs()`` but for the
-    ``spmd_types`` path.
     """
     from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -208,7 +226,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
     or we should write collective-based (not placement-based) redistributions
-    after full_dtensor backend is removed.
+    once the partial_dtensor backend is removed.
     """
 
     def _normalize_partition_spec(
@@ -258,6 +276,16 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
                 f"axes ({sorted(axis.value for axis in changed_axes)}). "
                 "spmd_redistribute_per_axis only supports one single-axis "
                 "redistribution."
+            )
+        if changed_axes and (
+            src_types[changed_axes[0]] is spmd.V or dst_types[changed_axes[0]] is spmd.V
+        ):
+            axis = changed_axes[0]
+            raise ValueError(
+                f"{name}: SpmdLayout-based redistribution changes mesh axis "
+                f"{axis.value!r} with spmd.V as the source or destination type. "
+                "Config-based redistribution requires non-V types; write an "
+                "explicit collective when the value semantics are unclear."
             )
 
         # 2) If neither has PartitionSpec, comparing per_axis_spmd_types() is sufficient.

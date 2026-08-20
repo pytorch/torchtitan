@@ -11,10 +11,6 @@ from dataclasses import dataclass
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
-from torchtitan.distributed.minimal_async_ep.api import (
-    maybe_update_minimal_async_ep_config,
-)
-
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -24,6 +20,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
+    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
@@ -31,6 +28,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -104,6 +102,32 @@ class Decoder(BaseModel):
             )
 
         @property
+        def first_full_attention_backend(self) -> Module.Config | None:
+            """Backend config of the first full-attention layer, else None."""
+            attention = self.first_attention
+            return attention.inner_attention if attention is not None else None
+
+        @property
+        def first_feed_forward(self) -> FeedForward.Config | None:
+            """First dense feed-forward config, else None."""
+            return next(
+                (
+                    layer.feed_forward
+                    for layer in self.layers
+                    if layer.feed_forward is not None
+                ),
+                None,
+            )
+
+        @property
+        def first_moe(self) -> MoE.Config | None:
+            """First mixture-of-experts config, else None."""
+            return next(
+                (layer.moe for layer in self.layers if layer.moe is not None),
+                None,
+            )
+
+        @property
         def max_seq_len(self) -> int:
             # The first full-attention layer's RoPE defines the context length.
             rope_cfg = getattr(self.first_attention, "rope", None)
@@ -127,6 +151,7 @@ class Decoder(BaseModel):
             field; in that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
+            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -144,16 +169,17 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            if parallelism.pipeline_parallel_degree > 1 and any(
-                layer.attention is not None
-                and isinstance(layer.attention.inner_attention, VarlenAttention.Config)
-                for layer in self.layers
-            ):
-                raise ValueError(
-                    "Pipeline Parallel is not compatible with VarlenAttention. "
-                    "Use a FlexAttention backend (attn_backend='flex' or "
-                    "'flex_flash') for pipelined models."
-                )
+            if parallelism.context_parallel_degree > 1:
+                # ShardingConfig-based CP requires the spmd_types backend.
+                validate_cp_backend(parallelism)
+                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
+                    self.traverse(VarlenAttention.Config)
+                ):
+                    raise NotImplementedError(
+                        "Context Parallel is not supported with "
+                        "ScaledDotProductAttention or VarlenAttention. "
+                        "Use FlexAttention or disable CP."
+                    )
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
@@ -171,31 +197,7 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
-            for layer_cfg in self.layers:
-                if layer_cfg.moe is not None:
-                    from torchtitan.models.common.token_dispatcher import (
-                        DeepEPTokenDispatcher,
-                        HybridEPTokenDispatcher,
-                    )
-
-                    token_dispatcher_cfg = layer_cfg.moe.routed_experts.token_dispatcher
-                    if (
-                        isinstance(
-                            token_dispatcher_cfg,
-                            (
-                                DeepEPTokenDispatcher.Config,
-                                HybridEPTokenDispatcher.Config,
-                            ),
-                        )
-                        and parallelism.expert_parallel_degree == 1
-                    ):
-                        raise ValueError(
-                            f"{type(token_dispatcher_cfg).__qualname__} "
-                            "requires expert parallelism "
-                            "(expert_parallel_degree > 1)."
-                        )
-
-            maybe_update_minimal_async_ep_config(self, config)
+            update_ep_token_dispatcher_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
             # training.seq_len sync. Generated sequence length is not known

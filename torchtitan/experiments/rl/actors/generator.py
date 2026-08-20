@@ -19,10 +19,20 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
-from torch.distributed.tensor import DTensor
-from torchtitan.components.checkpoint import CheckpointManager
+from monarch.actor import (
+    Actor,
+    Channel,
+    concurrent_endpoint,
+    current_rank,
+    Port,
+    PortReceiver,
+)
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
+from torchtitan.distributed.spmd_types import (
+    dtensor_to_plain_tensor_state_dict,
+    plain_tensor_to_dtensor_state_dict,
+)
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -32,25 +42,21 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
+    TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import (
-    FlexAttention,
-    FusedQKVLinear,
-    VarlenAttention,
-)
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig, ParallelConfig
-from vllm.config.compilation import CompilationMode
+from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -174,34 +180,33 @@ class VLLMCudagraphConfig:
 
     ``mode`` selects which vLLM cudagraph mode to capture; see that field and
     ``get_vllm_compilation_config`` for the per-mode trade-offs. The default,
-    ``FULL_DECODE_ONLY``, is the only mode that is both cheap (no inductor
-    compile) and correct with our varlen/FA3 attention backend.
+    ``FULL``, graphs the whole forward (prefill included).
     """
 
     enable: bool = True
     """Whether to enable CUDA graph capture."""
 
-    mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL_DECODE_ONLY"
+    mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL"
     """Which vLLM cudagraph mode to capture (when ``enable``):
 
-    - ``"FULL_DECODE_ONLY"`` (default): graph pure-decode batches; prefill / mixed
-      batches run eager. Cheap (no inductor compile) and correct with our
-      varlen/FA3 attention backend (#3668).
+    - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
+      batches run eager. Cheap (no inductor compile).
     - ``"FULL_AND_PIECEWISE"``: FULL graph for pure single-token decode (whole
       forward incl. attention -- safe because decode has a fixed query_len==1
       layout) AND breakable PIECEWISE for prefill / mixed batches (attention runs
       eager at a stream-capture break). Best coverage: the common decode path
       gets a full graph while only mixed batches pay the eager-break cost.
       Requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1``.
-    - ``"FULL"``: graph the whole forward, prefill included, attention captured
-      too. Only valid with the flex attention backend, which survives FULL
-      capture of mixed prefill+decode batches
+    - ``"FULL"`` (default): graph the whole forward, prefill included, attention
+      captured too.
     """
 
     capture_sizes: list[int] | None = None
     """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
-    exact sizes. When set, exactly these sizes are captured (deduped and sorted)."""
+    exact sizes. When set, these sizes are deduped and sorted. When expert
+    sequence parallelism is enabled, capture sizes that are not multiples of
+    its degree are removed."""
 
     # TODO: Validate CUDA graph capture with MoE / Expert Parallelism.
     # MoE routing produces dynamic shapes that may conflict with full
@@ -213,10 +218,14 @@ class VLLMCudagraphConfig:
     # https://github.com/pytorch/torchtitan/issues/3175
 
     def get_vllm_compilation_config(
-        self, *, max_num_seqs: int, max_num_batched_tokens: int | None = None
-    ) -> CompilationConfig | None:
-        """Build a vLLM ``CompilationConfig`` for ``mode``, or return ``None``
-        when CUDA graphs are disabled.
+        self,
+        *,
+        max_num_seqs: int,
+        expert_sequence_parallel_size: int,
+        enable_sequence_parallel: bool,
+        max_num_batched_tokens: int | None = None,
+    ) -> CompilationConfig:
+        """Build a vLLM ``CompilationConfig`` for the generator.
 
         When ``capture_sizes`` is set, those exact sizes are captured. Otherwise
         sizes are auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and
@@ -228,15 +237,35 @@ class VLLMCudagraphConfig:
         ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it
         -- otherwise prefill chunks larger than the cap fall back to eager.
 
+        ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
+        internally sequence-sharded MoE path. A value greater than one removes
+        capture sizes that are not multiples of this count, preventing CUDA graph
+        padding from producing a token count that cannot be evenly TP-sharded.
+
+        ``enable_sequence_parallel`` is forwarded to vLLM's sequence parallelism
+        pass. vLLM filters dense-SP CUDA graph sizes using its own TP size.
+
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
         cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
         also forces ``mode=NONE`` when that env is set) (#3709).
         """
         if not self.enable:
-            return None
+            return CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.NONE,
+                mode=CompilationMode.NONE,
+                pass_config=PassConfig(
+                    enable_sp=enable_sequence_parallel,
+                    sp_min_token_num=1 if enable_sequence_parallel else None,
+                ),
+            )
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
+        if expert_sequence_parallel_size <= 0:
+            raise ValueError(
+                "expert_sequence_parallel_size must be positive, got "
+                f"{expert_sequence_parallel_size}"
+            )
         if max_num_batched_tokens is not None:
             _max_cudagraph_capture_size = max_num_batched_tokens
         else:
@@ -262,10 +291,34 @@ class VLLMCudagraphConfig:
                 sizes.append(cap)
             sizes = sorted(sizes)
 
+        if expert_sequence_parallel_size > 1:
+            removed_sizes = [
+                size for size in sizes if size % expert_sequence_parallel_size != 0
+            ]
+            if removed_sizes:
+                logger.warning(
+                    "CUDA graph capture sizes %s are removed because they are not "
+                    "multiples of expert_sequence_parallel_size %d",
+                    removed_sizes,
+                    expert_sequence_parallel_size,
+                )
+            sizes = [
+                size for size in sizes if size % expert_sequence_parallel_size == 0
+            ]
+            if not sizes:
+                raise ValueError(
+                    "No CUDA graph capture sizes are divisible by "
+                    f"expert_sequence_parallel_size {expert_sequence_parallel_size}"
+                )
+
         return CompilationConfig(
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
             cudagraph_capture_sizes=sizes,
+            pass_config=PassConfig(
+                enable_sp=enable_sequence_parallel,
+                sp_min_token_num=1 if enable_sequence_parallel else None,
+            ),
         )
 
 
@@ -644,7 +697,7 @@ class VLLMGenerator(Actor, Configurable):
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
-    on the controller side, by blocking new requests until the engine is drained.
+    in the inter-generator router, by blocking new requests until the engine is drained.
 
     Args:
         config: Generator-specific configuration.
@@ -795,9 +848,9 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
-            inner_attn,
+            attention_backend,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
@@ -839,6 +892,7 @@ class VLLMGenerator(Actor, Configurable):
             # explicit EP degree: when this boolean is set, it converts all
             # DP * TP ranks into the expert-parallel group for MoE layers.
             enable_expert_parallel=enable_ep,
+            worker_cls=TORCHTITAN_WORKER_CLS,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
@@ -847,7 +901,7 @@ class VLLMGenerator(Actor, Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attn, FlexAttention.Config)
+                    if isinstance(attention_backend, FlexAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),
@@ -864,9 +918,12 @@ class VLLMGenerator(Actor, Configurable):
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
+        expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
         vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            expert_sequence_parallel_size=expert_sequence_parallel_size,
+            enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -937,12 +994,12 @@ class VLLMGenerator(Actor, Configurable):
         """
         return self._engine.model_executor.driver_worker.get_model()
 
-    @endpoint
+    @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
-    @endpoint
+    @concurrent_endpoint
     async def start_engine_loop(self) -> None:
         """Start the background engine loop on every rank (one-time, idempotent)."""
         if self._engine_loop_task is None:
@@ -957,7 +1014,7 @@ class VLLMGenerator(Actor, Configurable):
                 f"before {endpoint_name}"
             )
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("generate")
     async def generate(
         self,
@@ -1189,7 +1246,7 @@ class VLLMGenerator(Actor, Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
@@ -1273,88 +1330,11 @@ class VLLMGenerator(Actor, Configurable):
         state-dict path, then put the local tensors back before load_state_dict.
         """
 
-        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
-            layouts: dict[str, SpmdLayout] = {}
-
-            for module_fqn, module in model.named_modules():
-                sharding_config = getattr(module, "_sharding_config", None)
-                if sharding_config is not None:
-                    for state_name, layout in sharding_config.state_shardings.items():
-                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
-                        layouts[fqn] = layout
-
-                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
-                    # but its state dict exposes split w1.weight/w3.weight
-                    # (_split_w13_on_save). Mirror w13's layout onto the split
-                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
-                    # w1/w3, which is what the DTensor path gets implicitly.
-                    w13_layout = sharding_config.state_shardings.get("w13")
-                    if w13_layout is not None:
-                        for proj_name in ("w1", "w3"):
-                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
-
-                if isinstance(module, FusedQKVLinear):
-                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
-                    # the sharding layout lives on the fused wqkv parameter.
-                    # TODO: This assumes fused and split QKV layouts stay
-                    # equivalent. The load hook all-gathers anyway, so replace
-                    # this with a less fragile fused-QKV state-dict path.
-                    wqkv_sharding_config = getattr(
-                        module.wqkv, "_sharding_config", None
-                    )
-                    if wqkv_sharding_config is None:
-                        continue
-                    for (
-                        state_name,
-                        layout,
-                    ) in wqkv_sharding_config.state_shardings.items():
-                        for proj_name in ("wq", "wk", "wv"):
-                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
-
-            return layouts
-
-        layouts = _fqn_to_spmd_layout(model.model)
-
-        dtensor_model_sd = dict(model_sd)
-        with torch.no_grad():
-            for name, target in model_sd.items():
-                if not isinstance(target, torch.Tensor):
-                    continue
-
-                layout = layouts.get(name)
-                if layout is None:
-                    if name.endswith(
-                        (
-                            ".vllm_attn._k_scale",
-                            ".vllm_attn._prob_scale",
-                            ".vllm_attn._q_scale",
-                            ".vllm_attn._v_scale",
-                        )
-                    ):
-                        # vLLM attention scale buffers are backend-owned plain
-                        # replicated state with no TorchTitan ShardingConfig.
-                        continue
-                    raise KeyError(f"{name} is missing SPMD layout metadata")
-
-                mesh = model.parallel_dims.resolve_mesh(layout.axes())
-                if mesh is None:
-                    active_axes = [
-                        axis
-                        for axis in layout.axes()
-                        if model.parallel_dims.get_optional_mesh(axis) is not None
-                    ]
-                    if active_axes:
-                        raise RuntimeError(
-                            f"{name} has active SPMD layout axes but no resolved mesh"
-                        )
-                    continue
-
-                dtensor_model_sd[name] = DTensor.from_local(
-                    target,
-                    mesh,
-                    resolve_placements(layout, mesh),
-                    run_check=False,
-                )
+        dtensor_model_sd = plain_tensor_to_dtensor_state_dict(
+            model_sd,
+            state_dict_layouts=model.get_state_dict_layouts(),
+            parallel_dims=model.parallel_dims,
+        )
 
         await ts.get_state_dict(
             "model_state_dict",
@@ -1363,12 +1343,9 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=False,
         )
 
-        with torch.no_grad():
-            for name, value in dtensor_model_sd.items():
-                if isinstance(value, DTensor):
-                    model_sd[name] = value.to_local()
+        model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 
-    @endpoint
+    @concurrent_endpoint
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.
 

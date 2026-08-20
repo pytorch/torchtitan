@@ -22,6 +22,7 @@ __all__ = [
 ]
 
 
+# pyrefly: ignore [not-callable]
 @spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
     """Async bounds check: verify all position values <= max_valid_pos.
@@ -55,7 +56,7 @@ def _yarn_inv_freq(
     convention: ``low <- beta_fast`` (extrapolation boundary), ``high <-
     beta_slow`` (interpolation boundary). ``truncate`` floors/ceils the cutoffs
     (DeepSeek style); ``truncate=False`` keeps fractional cutoffs (gpt-oss
-    style). The range is always clamped to ``[0, dim/2 - 1]``. The YaRN
+    style). The range is always clamped to ``[0, dim - 1]``. The YaRN
     attention "mscale" is intentionally NOT applied here -- the rope stays a
     pure rotation and the model folds mscale into its softmax scale.
     """
@@ -72,9 +73,8 @@ def _yarn_inv_freq(
         low = math.floor(low)
         high = math.ceil(high)
     low, high = max(low, 0), min(high, dim - 1)
-    assert (
-        0 < low < high < dim - 1
-    ), f"Invalid YaRN params: 0 < {low} < {high} < {dim - 1}"
+    if low == high:
+        high += 0.001
 
     ramp = ((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low)).clamp(
         0, 1
@@ -216,7 +216,7 @@ class ComplexRoPE(RoPE):
                 wavelen > low_freq_wavelen
             )
             freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
-        elif cfg.scaling == "yarn" and end > cfg.original_seq_len:
+        elif cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
             # YaRN (DeepSeek V3 style)
             freqs = _yarn_inv_freq(
                 dim,
@@ -400,8 +400,8 @@ def _maybe_wrap_positions(
 ) -> torch.Tensor | None:
     """Wrap positions as a DTensor deriving mesh and placements from x (xq/xk).
 
-    TODO: In a full DTensor rewrite, positions should be made a DTensor
-    in/right after dataloading, together with inputs and labels.
+    TODO: positions should be wrapped in/right after dataloading, together
+    with inputs and labels, so this helper can go away.
 
     When TP uses use_local_output=False (DeepSeek V3, Qwen3, GPT-OSS),
     x is a DTensor but positions is a plain tensor. The downstream

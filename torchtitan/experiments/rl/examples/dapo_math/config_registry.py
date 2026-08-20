@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
@@ -62,9 +61,9 @@ def _qwen3_4b_dapo_math_config(
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
             num_training_steps=150,
-            num_groups_per_train_step=8,
-            group_size=16,
-            max_offpolicy_steps=4,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=16,
+            target_offpolicy_steps=4,
             validation=ValidationConfig(
                 num_samples=num_validation_samples,
             ),

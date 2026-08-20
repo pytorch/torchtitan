@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import dataclasses
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import (
     CompileConfig,
     OverrideConfig,
@@ -108,8 +107,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            # cudagraph on: decode-only graphs (FULL_DECODE_ONLY) are safe at this
-            # config's large batch; plain full graphs corrupted here before. See #3668.
             cudagraph=VLLMCudagraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
@@ -222,9 +219,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # varlen attention -> FULL_AND_PIECEWISE (decode captured FULL, prefill
-            # piecewise).
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             # Generator-only: DeepEP cudagraph EXPAND dispatch on top of the perf overrides.
@@ -239,23 +234,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             ),
         ),
     )
-    # Two inference knobs to set per workload (no golden default; here EP=4):
-    #  * max_num_batched_tokens: vLLM's per-step token budget (default None -> vLLM's own
-    #    default of 2048). Decide it from your input/rollout sequence length.
-    #  * num_max_tokens_per_rank: per-rank EXPAND-dispatch capacity, REQUIRED by the
-    #    deepep_override. For a dropless model (highest memory) set it to
-    #    max_num_batched_tokens // ep; lower it gradually to save memory (trading off
-    #    dropped tokens).
+    # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
+    # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048  # TODO: TBD
-    num_max_tokens_per_rank = (
-        config.generator.max_num_batched_tokens
-        // config.generator.parallelism.expert_parallel_degree
-    )
-    for block in config.model_spec.model.layers:
-        moe = getattr(block, "moe", None)
-        if moe is None:
-            continue
-        moe.routed_experts.token_dispatcher.num_max_tokens_per_rank = (
-            num_max_tokens_per_rank
-        )
     return config

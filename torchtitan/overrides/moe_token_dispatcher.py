@@ -27,11 +27,8 @@ keeps the shared spec's default. Activate per-actor via the ``module.function`` 
 to the static, host-sync-free EXPAND layout a CUDA graph can capture (the compact,
 host-synced, backward-able path is the default). ``deepep.dispatch_tokens`` also gates the
 expand path to ``not torch.is_grad_enabled()``, so it only takes effect for the no-grad
-inference forward. The per-rank EXPAND capacity ``num_max_tokens_per_rank`` is
-inference-only and REQUIRED for this path (the recipe sets it on the ``model_spec``
-dispatchers; ``DeepEPTokenDispatcher.wire_meshes`` raises if it is still None when the
-expand buffer is built). Set it to the largest per-rank token count for droplessness
-(= max_num_batched_tokens / sp), or lower to save memory. ``cudagraphable`` is required.
+inference forward. The runtime configuration derives the required per-rank buffer capacity
+from the scheduler and CUDA graph limits before applying this override.
 
 ``hybridep_override`` (``HybridEPTokenDispatcher.Config``): ``capacity_factor`` sets
 ``non_blocking_capacity_factor`` (``None`` = blocking, dropless; a float in (0, 1] = the
@@ -61,10 +58,7 @@ def deepep_override(
     cudagraphable: bool,
 ) -> DeepEPTokenDispatcher.Config:
     # cudagraphable=True flips the DeepEP dispatchers to the static, cudagraph-able EXPAND
-    # layout (False keeps the compact host-synced default). The expand path also needs
-    # num_max_tokens_per_rank set on the dispatcher (the per-rank capacity); that is
-    # validated where the buffer is built (DeepEPTokenDispatcher.wire_meshes), not here,
-    # since the value is set on the dispatcher by the inference recipe rather than to us.
+    # layout (False keeps the compact host-synced default).
     return dataclasses.replace(cfg, cudagraphable=cudagraphable)
 
 

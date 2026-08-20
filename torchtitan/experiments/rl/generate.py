@@ -30,12 +30,13 @@ from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.examples.alphabet_sort import config_registry
 from torchtitan.experiments.rl.models.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
+    TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.tools.utils import has_cuda_capability
@@ -108,8 +109,12 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    inner_attn = model_spec.model.layers[0].attention.inner_attention
-    if not isinstance(inner_attn, (VarlenAttention.Config, FlexAttention.Config)):
+    attention_backend = model_spec.model.first_full_attention_backend
+    if attention_backend is None:
+        raise ValueError("No full-attention layer found in the model spec.")
+    if not isinstance(
+        attention_backend, (VarlenAttention.Config, FlexAttention.Config)
+    ):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
@@ -142,6 +147,7 @@ def generate() -> None:
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
+        worker_cls=TORCHTITAN_WORKER_CLS,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.
         distributed_executor_backend=("external_launcher"),
@@ -151,7 +157,7 @@ def generate() -> None:
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(inner_attn, FlexAttention.Config)
+                if isinstance(attention_backend, FlexAttention.Config)
                 else AttentionBackendEnum.CUSTOM
             ),
         ),
@@ -163,9 +169,12 @@ def generate() -> None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
+    expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
+        expert_sequence_parallel_size=expert_sequence_parallel_size,
+        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

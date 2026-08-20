@@ -18,10 +18,68 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
+
+
+_DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
+_SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
+
+
+def resolve_fsdp_mesh(
+    parallel_dims: ParallelDims,
+) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
+    """Select the dense storage mesh and DataParallelMeshDims.
+
+    ``dp_shard`` is always included (force-kept-alive in the dense storage mesh
+    even at size 1) so FSDP can pick the DP submesh out of the multi-axis
+    storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
+    """
+    assert (
+        parallel_dims.spmd_backend == "spmd_types"
+    ), "resolve_fsdp_mesh is only meaningful under spmd_types"
+    storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
+    assert storage_mesh is not None
+
+    if storage_mesh.size() == 1:
+        # ``assert_type`` filters out inactive size-1 axes, so params get no
+        # annotations under a size-1 full mesh. That leaves ``fully_shard()``
+        # with no SPMD annotations to translate to DTensor params, so do not
+        # pass a DataParallelMeshDims object to FSDP.
+        return storage_mesh, None
+
+    shard_axes = ["dp_shard"]
+    if parallel_dims.cp_enabled:
+        shard_axes.append("cp")
+    shard: str | tuple[str, ...] = (
+        tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]
+    )
+    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+
+    return storage_mesh, DataParallelMeshDims(shard=shard, replicate=replicate)
+
+
+def resolve_sparse_fsdp_mesh(
+    parallel_dims: ParallelDims,
+) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
+    """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
+
+    Returns ``(None, None)`` when EP is disabled; otherwise the sparse
+    storage mesh + sparse DP axes. The FSDP axis is ``efsdp`` and
+    ``dp_replicate`` is shared with the dense path.
+    """
+    assert (
+        parallel_dims.spmd_backend == "spmd_types"
+    ), "resolve_sparse_fsdp_mesh is only meaningful under spmd_types"
+    if not parallel_dims.ep_enabled:
+        return None, None
+    sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_STORAGE_AXES)
+    assert sparse_mesh is not None
+    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+    return sparse_mesh, DataParallelMeshDims(shard="efsdp", replicate=replicate)
 
 
 def disable_fsdp_gradient_division(model: nn.Module) -> None:
@@ -78,6 +136,35 @@ def get_fsdp_reshard_after_forward_policy(
             )
 
 
+def apply_fsdp_to_vision_encoder(
+    vision_encoder: nn.Module,
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    reshard_after_forward_policy: str = "default",
+    pp_enabled: bool = False,
+    *,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
+) -> None:
+    """FSDP a VLM vision encoder as a single unit.
+
+    One all-gather for all vision params is more efficient than per-layer sharding
+    (the vision encoder is small relative to the decoder). Call before
+    ``apply_fsdp_to_decoder`` so the encoder is already sharded.
+    """
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        reshard_after_forward_policy, pp_enabled=pp_enabled
+    )
+    fully_shard(
+        vision_encoder,
+        mesh=dp_mesh,
+        mp_policy=mp_policy,
+        reshard_after_forward=reshard_after_forward,
+        dp_mesh_dims=dp_mesh_dims,
+    )
+
+
 def apply_fsdp_to_decoder(
     model: "Decoder",
     dp_mesh: DeviceMesh,
@@ -120,16 +207,16 @@ def apply_fsdp_to_decoder(
             in which case the MoE-specific sharding and prefetching are no-ops.
         edp_mesh (DeviceMesh | None, optional): The FSDP mesh for routed experts
             when EP > 1. Required (non-None) iff ``ep_degree > 1``.
-        dp_mesh_dims: Under full_dtensor, ``fully_shard`` must flatten
+        dp_mesh_dims: Under spmd_types, ``fully_shard`` must flatten
             ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
-            needs to know which axes of the multi-D SPMD mesh are
+            needs to know which axes of the multi-dimensional SPMD mesh are
             data-parallel. We pass this explicitly via ``dp_mesh_dims``
             rather than letting FSDP infer it from mesh axis names: the
             naming contract between ``fully_shard`` and torchtitan is not
             strong enough to infer safely, and an explicit declaration
             avoids silent miscategorization when new mesh axes appear.
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
-            used by routed experts. ``None`` outside full_dtensor.
+            used by routed experts. ``None`` under partial_dtensor.
         enable_symm_mem (bool): Whether to enable symmetric-memory FSDP
             communication.
     """
@@ -239,9 +326,9 @@ def apply_fsdp_to_decoder(
 
                 assert edp_mesh is not None
 
-                # Delegate to FSDP2's mesh-info builder. Under full_dtensor
-                # (mesh_dims set) it extracts and FLATTENS the DP submesh from
-                # the full SPMD mesh.
+                # Delegate to FSDP2's mesh-info builder. When mesh_dims is set
+                # it extracts and FLATTENS the DP submesh from the full SPMD
+                # mesh.
                 edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
                 dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
                 # _get_mesh_info is typed to the DataParallelMeshInfo base; with

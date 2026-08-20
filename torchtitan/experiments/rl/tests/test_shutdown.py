@@ -28,7 +28,12 @@ class _FakeController:
         self.setup_generator_meshes = None
         self.instances.append(self)
 
-    async def setup_async(self, *, trainer_mesh=None, generator_meshes=None):
+    async def setup_async(
+        self,
+        *,
+        trainer_mesh=None,
+        generator_meshes=None,
+    ):
         self.events.append("setup")
         self.setup_trainer_mesh = trainer_mesh
         self.setup_generator_meshes = generator_meshes
@@ -89,6 +94,72 @@ class _FakeConfigManager:
         return self.config
 
 
+def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
+    default_loop = AsyncLoopConfig(
+        num_prompts_per_train_step=3,
+        target_offpolicy_steps=2,
+    )
+    assert default_loop.window_fraction == 0.3
+    assert default_loop.window_size == 2
+    assert default_loop.max_offpolicy_steps == 3
+
+    strict_loop = AsyncLoopConfig(
+        num_prompts_per_train_step=3,
+        target_offpolicy_steps=2,
+        window_fraction=None,
+    )
+    assert strict_loop.window_size == 1
+    assert strict_loop.max_offpolicy_steps == 2
+
+    async_loop = AsyncLoopConfig(
+        num_prompts_per_train_step=3,
+        target_offpolicy_steps=2,
+        window_fraction=4 / 9,
+    )
+    assert async_loop.max_active_rollout_groups == 9
+    assert async_loop.window_size == 4
+    assert async_loop.max_offpolicy_steps == 3
+
+    assert (
+        AsyncLoopConfig(
+            num_prompts_per_train_step=3,
+            target_offpolicy_steps=2,
+            window_fraction=1 / 9,
+        ).window_size
+        == 1
+    )
+    assert (
+        AsyncLoopConfig(
+            num_prompts_per_train_step=3,
+            target_offpolicy_steps=2,
+            window_fraction=1.0,
+        ).window_size
+        == 9
+    )
+    assert (
+        AsyncLoopConfig(
+            num_prompts_per_train_step=8,
+            target_offpolicy_steps=3,
+            window_fraction=1.0,
+        ).window_size
+        == 32
+    )
+
+
+def test_async_loop_config_handles_window_fraction_bounds() -> None:
+    with pytest.raises(ValueError, match="window_fraction"):
+        AsyncLoopConfig(window_fraction=0)
+    with pytest.raises(ValueError, match="window_fraction"):
+        AsyncLoopConfig(window_fraction=1.1)
+    with pytest.warns(UserWarning, match="forcing window_size=1"):
+        async_loop = AsyncLoopConfig(
+            num_prompts_per_train_step=8,
+            target_offpolicy_steps=0,
+            window_fraction=0.01,
+        )
+    assert async_loop.window_size == 1
+
+
 def _make_stub_rl_trainer():
     """Create an Controller with a minimal stub config (no VLLMGenerator validation)."""
     from torchtitan.experiments.rl.observability import metrics as m
@@ -131,9 +202,10 @@ def stub_mesh_provisioning(monkeypatch):
     monkeypatch.setattr(train, "_compute_generator_world_size", lambda p: 1)
 
     def _spawn_proc_mesh(*args, num_generators=1, **kwargs):
-        return "trainer_mesh", [
-            f"generator_mesh_{idx}" for idx in range(num_generators)
-        ]
+        return (
+            "trainer_mesh",
+            [f"generator_mesh_{idx}" for idx in range(num_generators)],
+        )
 
     monkeypatch.setattr(train, "spawn_proc_mesh", _spawn_proc_mesh)
 
@@ -229,6 +301,21 @@ class _StubEndpoint:
             raise RuntimeError(f"{self._name} failed")
 
 
+class _RouterCloseEndpoint:
+    def __init__(self, router):
+        self._router = router
+
+    async def call_one(self):
+        return await self._router._fanout("close", return_exceptions=True)
+
+
+class _StubRouterHandle:
+    """Stands in for the router's actor-mesh handle, whose endpoints take adverbs."""
+
+    def __init__(self, router):
+        self.close_generators = _RouterCloseEndpoint(router)
+
+
 class _StubActor:
     def __init__(self, name, events, raises=False):
         self.close = _StubEndpoint(name, events, raises)
@@ -255,9 +342,11 @@ class _StubMesh:
 
 
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = InterGeneratorRouter(
-        InterGeneratorRouter.Config(),
-        generators=generators,
+    rl_trainer.generator_router = _StubRouterHandle(
+        InterGeneratorRouter(
+            InterGeneratorRouter.Config(),
+            generators=generators,
+        )
     )
 
 

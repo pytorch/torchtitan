@@ -7,11 +7,9 @@
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     annotate_moe_ep_regions,
-    apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -22,7 +20,6 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
-from torchtitan.tools.logging import logger
 
 
 def annotate_deepseekv3(model: GraphTrainerDeepSeekV3Model) -> None:
@@ -58,55 +55,16 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention(model, parallel_dims)
-
     annotate_deepseekv3(model)
-
-    # Read comm_backend from the model's token dispatcher config
-    # (set by moe_comm_backend in model_registry / config factories).
-    from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
-
-    moe_config = next((l.moe for l in model.config.layers if l.moe is not None), None)
-    is_hybridep = moe_config is not None and isinstance(
-        moe_config.routed_experts.token_dispatcher,
-        HybridEPTokenDispatcher.Config,
-    )
-    if is_hybridep:
-        from torchtitan.distributed.deepep import hybridep  # noqa: F401
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)
-
-    if parallel_dims.tp_enabled:
-        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that
     # MixedPrecisionPolicy's param_dtype cast still applies in single-GPU runs.
     model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
     maybe_apply_ep_overlap_eager_chunking(model, compile_config)
-
-    # TODO: HybridEP applies to other sparse models (e.g. Qwen3). Refactor
-    # the common HybridEP buffer init into a shared utility.
-    if is_hybridep and parallel_dims.ep_enabled:
-        from torchtitan.distributed.deepep.hybridep import get_buffer
-
-        ep_group = parallel_dims.get_mesh("ep").get_group()
-        moe_config = next(l.moe for l in model.config.layers if l.moe is not None)
-        num_local_experts = moe_config.num_experts // parallel_dims.ep
-        hidden_dim = model.config.dim
-        num_tokens = training.local_batch_size * training.seq_len
-        get_buffer(
-            group=ep_group,
-            hidden_dim=hidden_dim,
-            num_tokens=num_tokens,
-            num_local_experts=num_local_experts,
-        )
-        logger.info(
-            f"Pre-initialized HybridEP buffer (hidden_dim={hidden_dim}, "
-            f"num_tokens={num_tokens}, num_local_experts={num_local_experts})"
-        )
 
     # Apply compilation based on mode
     model = apply_compile(

@@ -17,7 +17,7 @@ import torch.utils._pytree as pytree
 from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.common_fsdp import FSDPTest
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -121,8 +121,8 @@ def _trace_dsv3_moe_block_stage(
         )
         model_config.update_from_config(config=runtime_config)
         moe_layer_config = model_config.layers[1]
-        if moe_layer_config.moe is None or not moe_layer_config.moe.seq_dim_tp_sharded:
-            raise AssertionError("DeepSeek V3 MoE layer must be configured with EP")
+        if moe_layer_config.moe is None:
+            raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")
 
         with torch.device("meta"):
             model = model_config.build()
@@ -425,6 +425,7 @@ class _GraphPPDsv3FSDPTest(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            spmd_backend="partial_dtensor",
         )
 
 
