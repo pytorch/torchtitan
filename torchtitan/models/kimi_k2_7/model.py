@@ -8,7 +8,7 @@
 https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b0638a0/python/sglang/srt/models/kimi_k25.py
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
@@ -23,6 +23,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
+from .qk_clip import QKClipConfig
 from .sharding import (
     annotate_multimodal_input_spmd_types,
     set_kimi_k2_5_sharding_config,
@@ -47,6 +48,7 @@ class KimiK25Model(DeepSeekV3Model):
     @dataclass(kw_only=True, slots=True)
     class Config(DeepSeekV3Model.Config):
         vision_encoder: KimiK25VisionEncoder.Config | None = None
+        qk_clip: QKClipConfig = field(default_factory=QKClipConfig)
 
         def update_from_config(
             self,
@@ -78,6 +80,7 @@ class KimiK25Model(DeepSeekV3Model):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.qk_clip_config = config.qk_clip
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
