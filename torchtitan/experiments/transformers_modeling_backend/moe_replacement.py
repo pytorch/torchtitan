@@ -32,6 +32,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
@@ -109,9 +110,8 @@ def build_and_swap_native_moe(
             expert_param_layout=expert_layout,
         )
 
-        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but leaves the
-        # SigmoidGatedFeedForward gate to model-specific code. Replicate it (weight
-        # and output), matching qwen3_5's _set_shared_expert_gate_sharding.
+        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but
+        # leaves the SigmoidGatedFeedForward gate to model-specific code.
         shared = moe_config.shared_experts
         if isinstance(shared, SigmoidGatedFeedForward.Config):
             shared.gate.sharding_config = ShardingConfig(
@@ -119,7 +119,8 @@ def build_and_swap_native_moe(
                     "weight": dense_param_placement(tp=spmd.R),
                     "bias": dense_param_placement(tp=spmd.R),
                 },
-                out_dst_shardings=dense_activation_placement(tp=spmd.R),
+                out_src_shardings=dense_activation_placement(tp=spmd.R),
+                out_dst_shardings=dense_sequence_parallel_placement(),
             )
 
         with torch.device("meta"):
