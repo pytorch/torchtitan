@@ -105,8 +105,6 @@ def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
 def run_single_test(
     test_flavor: OverrideDefinitions,
     output_dir: str,
-    module: str | None = None,
-    config: str | None = None,
     # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
     # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
@@ -128,12 +126,11 @@ def run_single_test(
     else:
         gpu_env_prefix = ""
 
-    for override_arg in test_flavor.override_args:
+    for run, override_arg in enumerate(test_flavor.override_args):
         cmd = ""
-        if module is not None:
-            cmd += f"MODULE={module} "
-        if config is not None:
-            cmd += f"CONFIG={config} "
+        if test_flavor.configs:
+            config_fn = test_flavor.configs[run]
+            cmd += f"MODULE={config_fn.__module__} CONFIG={config_fn.__name__} "
         cmd += (
             f"{gpu_env_prefix}NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
             f"./run_train.sh"
@@ -208,8 +205,6 @@ def _filter_tests(
 def run_tests(
     args,
     test_list: list[OverrideDefinitions],
-    module=None,
-    config=None,
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
@@ -243,13 +238,7 @@ def run_tests(
                 f"(ngpu={test_flavor.ngpu})"
             )
             try:
-                run_single_test(
-                    test_flavor,
-                    args.output_dir,
-                    module,
-                    config,
-                    gpu_ids=gpus,
-                )
+                run_single_test(test_flavor, args.output_dir, gpu_ids=gpus)
             finally:
                 pool.release(gpus)
                 logger.info(f"[parallel] {test_flavor.test_name}: released GPUs {gpus}")
@@ -268,7 +257,7 @@ def run_tests(
     else:
         for test_flavor in runnable:
             try:
-                run_single_test(test_flavor, args.output_dir, module, config)
+                run_single_test(test_flavor, args.output_dir)
             except Exception as e:
                 logger.error(str(e))
                 failed_tests.append((test_flavor.test_name, str(e)))
@@ -313,18 +302,6 @@ def main():
         default="features",
         choices=["features", "models", "h100"],
         help="Which test suite to run. If not specified, torchtitan composability tests will be run",
-    )
-    parser.add_argument(
-        "--module",
-        default="llama3",
-        help="Model module to use for training (default: llama3). "
-        "This is passed as MODULE env var to run_train.sh.",
-    )
-    parser.add_argument(
-        "--config",
-        default="llama3_debugmodel",
-        help="Config function to use for training (default: llama3_debugmodel). "
-        "This is passed as CONFIG env var to run_train.sh.",
     )
     parser.add_argument(
         "--test_name",
