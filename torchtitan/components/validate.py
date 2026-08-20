@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, TypeAlias
@@ -13,19 +13,20 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.collators import TrainerBatch
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
 
 ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
@@ -35,6 +36,12 @@ class BaseValidator(Configurable):
     class Config(Configurable.Config):
         freq: int = 10
         """Frequency of validation"""
+
+        def __post_init__(self) -> None:
+            if self.freq <= 0:
+                raise ValueError(
+                    f"validation frequency must be positive, got {self.freq}"
+                )
 
     def __init__(
         self,
@@ -76,20 +83,22 @@ class Validator(BaseValidator):
 
         steps: int = -1
         """
-        Number of steps to take in the validation set, -1 means consuming
-        all the data in the validation dataset.
-        WARNING: When setting to -1 there could be hangs due to mismatch among ranks
+        Number of validation steps. -1 consumes the finite dataset and therefore
+        requires an effective data-parallel degree of one.
         """
 
         dataloader: BaseDataLoader.Config = field(
-            default_factory=lambda: HuggingFaceTextDataLoader.Config(
-                dataset="c4_validation",
-                infinite=False,
+            default_factory=lambda: GrainDataLoader.Config(
+                dataset=ConcatThenSplitPackingConfig(
+                    dataset=DATASETS["c4_validation"],
+                ),
+                repeat=False,
             )
         )
         """DataLoader configuration for validation"""
 
         def __post_init__(self):
+            BaseValidator.Config.__post_init__(self)
             assert (
                 self.steps > 0 or self.steps == -1
             ), "validation steps must be positive or -1"
@@ -119,7 +128,8 @@ class Validator(BaseValidator):
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        self.dl_config = replace(config.dataloader, infinite=config.steps != -1)
+        # A bounded validation run repeats data; steps=-1 consumes one finite pass.
+        self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
@@ -129,12 +139,6 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
-
-        if config.steps == -1:
-            logger.warning(
-                "Setting validation steps to -1 might cause hangs because of "
-                "unequal sample counts across ranks when dataset is exhausted."
-            )
 
     def post_dataloading_process(
         self,
@@ -182,11 +186,9 @@ class Validator(BaseValidator):
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
         if isinstance(model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                model_config.first_attention, "inner_attention", None
-            )
+            attention_backend = model_config.first_full_attention_backend
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
                 model = cast(Decoder, model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
@@ -202,11 +204,6 @@ class Validator(BaseValidator):
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
                 self.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        if self.parallelism.spmd_backend == "full_dtensor":
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
             )
 
         return inputs, labels, extra_kwargs
@@ -225,8 +222,11 @@ class Validator(BaseValidator):
 
         parallel_dims = self.parallel_dims
 
-        accumulated_losses = []
+        accumulated_loss: torch.Tensor | None = None
         device_type = utils.device_type
+        total_global_valid_tokens = torch.zeros(
+            (), dtype=torch.int64, device=device_type
+        )
         num_steps = 0
         num_microbatches = (
             self.local_batch_size // self.parallelism.pipeline_parallel_microbatch_size
@@ -246,7 +246,7 @@ class Validator(BaseValidator):
             ),
         )
 
-        validation_iterator = iter(validation_dataloader)
+        validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
         while True:
             # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
@@ -327,21 +327,36 @@ class Validator(BaseValidator):
                     predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum, _ = self.loss_fn(predictions, labels)
 
-            accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
+            loss_sum = loss_sum.detach()
+            if accumulated_loss is None:
+                accumulated_loss = loss_sum.clone()
+            else:
+                accumulated_loss.add_(loss_sum)
+            total_global_valid_tokens.add_(global_valid_tokens)
             num_steps += 1
 
-        # Compute average loss
-        loss = torch.sum(torch.stack(accumulated_losses))
-        loss /= num_steps
+        assert accumulated_loss is not None
+        num_global_valid_tokens = int(total_global_valid_tokens.item())
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_sum(
-                loss, parallel_dims.get_optional_mesh("loss")
+            global_loss_sum = dist_utils.dist_sum(
+                accumulated_loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
-            global_avg_loss = float(loss.item())
+            global_loss_sum = float(accumulated_loss.item())
+        global_avg_loss = global_loss_sum / num_global_valid_tokens
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 
         # Set model back to train mode
         for model in model_parts:
             model.train()
+
+
+def iterate_and_close_dataloader(
+    dataloader: BaseDataLoader,
+) -> Iterator[TrainerBatch]:
+    """Close a temporary dataloader when its consumer stops iterating."""
+    try:
+        yield from dataloader
+    finally:
+        dataloader.close()

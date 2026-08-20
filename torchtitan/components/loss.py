@@ -15,7 +15,7 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
@@ -36,11 +36,8 @@ def cross_entropy_loss(
     global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
-    if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels)
-
     if isinstance(pred, DTensor):
-        assert get_spmd_backend() == "default"
+        assert get_spmd_backend() == "partial_dtensor"
         if pred.placements == (Shard(pred.ndim - 1),):
             return _LossParallelCrossEntropy.apply(
                 pred.to_local().flatten(0, 1).float(),
@@ -221,65 +218,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None, None
 
 
-def _cross_entropy_via_local_map(
-    pred: DTensor,
-    labels: DTensor,
-) -> torch.Tensor:
-    mesh = pred.device_mesh
-    # Labels don't have a vocab dim.
-    expected_labels_placements = tuple(
-        Replicate() if isinstance(p, Shard) and p.dim == 2 else p
-        for p in pred.placements
-    )
-    if labels.placements != expected_labels_placements:
-        raise ValueError(
-            f"cross_entropy_loss: expected labels placements {expected_labels_placements}, "
-            f"got {labels.placements}"
-        )
-
-    # After local flatten(0, 1), tensor dims are [batch*seq, vocab].
-    # Per-axis placement:
-    #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
-    #   Shard on vocab -> Shard(1)
-    vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
-
-    # Per-axis output placement for sum reduction:
-    #   Shard on non-vocab-dim -> Partial
-    #   Shard on vocab-dim -> Replicate
-    out_placements = [
-        Partial() if isinstance(p, Shard) and p.dim != 2 else Replicate()
-        for p in pred.placements
-    ]
-
-    @local_map(
-        out_placements=out_placements,
-        in_placements=(pred.placements, labels.placements),
-        in_grad_placements=(pred.placements, labels.placements),
-        device_mesh=mesh,
-    )
-    def _local_cross_entropy(
-        pred_local: torch.Tensor, labels_local: torch.Tensor
-    ) -> torch.Tensor:
-        flat_pred = pred_local.flatten(0, 1).float()
-        flat_labels = labels_local.flatten(0, 1)
-        if not vocab_sharded:
-            return torch.nn.functional.cross_entropy(
-                flat_pred,
-                flat_labels,
-                reduction="sum",
-                ignore_index=IGNORE_INDEX,
-            )
-        return _LossParallelCrossEntropy.apply(
-            flat_pred,
-            flat_labels,
-            mesh.get_group("tp"),
-            pred.shape[-1],
-            "sum",
-        )
-
-    return _local_cross_entropy(pred, labels)
-
-
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """MSE loss with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
@@ -327,9 +265,10 @@ class BaseLoss(ABC, Configurable):
         loss = self.fn(pred, labels)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
+            is_type_checking = spmd.is_type_checking()
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
+                if is_type_checking:
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 
@@ -358,9 +297,10 @@ class CrossEntropyLoss(BaseLoss):
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         if global_valid_tokens is not None:
             # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
+            is_type_checking = spmd.is_type_checking()
             with spmd.no_typecheck():
                 loss = loss / global_valid_tokens
-                if get_spmd_backend() == "spmd_types":
+                if is_type_checking:
                     spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
         return loss, {}
 

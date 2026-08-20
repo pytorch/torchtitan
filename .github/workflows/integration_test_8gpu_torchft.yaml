@@ -5,13 +5,13 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/torchft/**'
-      - 'torchtitan/components/checkpoint.py'
+      - 'torchtitan/components/checkpointer/**'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/torchft/**'
-      - 'torchtitan/components/checkpoint.py'
+      - 'torchtitan/components/checkpointer/**'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   schedule:
     # Runs every 6 hours
