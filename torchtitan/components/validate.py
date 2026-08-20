@@ -186,11 +186,9 @@ class Validator(BaseValidator):
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
         if isinstance(model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                model_config.first_attention, "inner_attention", None
-            )
+            attention_backend = model_config.first_full_attention_backend
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
                 model = cast(Decoder, model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(

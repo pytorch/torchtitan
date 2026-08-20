@@ -45,12 +45,13 @@ from torchtitan.models.common.vision_encoder_sharding import (
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
+CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
     from torchtitan.models.common import SigmoidGatedFeedForward
+    from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
-        GatedDeltaNet,
         Qwen35Attention,
         Qwen35AttentionMaskDict,
         Qwen35Model,
@@ -134,18 +135,12 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
+    enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Qwen3.5 sub-configs.
-
-    Uses SP for decoder layers, norm, and lm_head. tok_embeddings output
-    stays Replicate so vision scatter and MRoPE can access the full sequence.
-    The model forward redistributes to Shard(1) before entering the layers.
-    """
-    # SP on norm, lm_head, and layers. Each full-attention layer owns its rope;
-    # its cache buffer is sharded Replicate in _set_full_attention_sharding.
-    set_decoder_sharding_config(config, enable_sp=True)
-    # Override tok_embeddings: output Replicate (not Shard(1)) for vision scatter
+    """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
+    set_decoder_sharding_config(config, enable_sp=enable_sp)
+    # Vision scatter needs the full embedding sequence on every TP rank.
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
@@ -155,23 +150,26 @@ def set_qwen35_sharding_config(
         local_map=LocalMapConfig(in_grad_placements=None),
     )
     _set_vision_encoder_sharding(config.vision_encoder)
-    # The embedding path stays replicated through multimodal vision scatter.
-    # Layer 0 restores SP at the block boundary; later decoder blocks are SP.
-    decoder_input_layout = dense_activation_placement(tp=spmd.R)
-    layer_input_layout = dense_sequence_parallel_placement()
+    # The first layer restores sequence parallelism after replicated vision scatter.
+    first_layer_input_layout = dense_activation_placement(tp=spmd.R)
+    layer_input_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.R)
+    )
     for layer_idx, layer_cfg in enumerate(config.layers):
+        input_layout = (
+            first_layer_input_layout if layer_idx == 0 else layer_input_layout
+        )
         layer_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={
-                "x_BLD": (
-                    decoder_input_layout if layer_idx == 0 else layer_input_layout
-                )
-            },
+            in_src_shardings={"x_BLD": input_layout},
             in_dst_shardings={"x_BLD": layer_input_layout},
             out_src_shardings=layer_input_layout,
         )
         _set_qwen35_layer_sharding(
             layer_cfg,
             attention_input_layout=layer_input_layout,
+            enable_sp=enable_sp,
             enable_ep=enable_ep,
         )
 
@@ -180,65 +178,84 @@ def _set_qwen35_layer_sharding(
     layer_cfg: "Qwen35TransformerBlock.Config",
     *,
     attention_input_layout: SpmdLayout,
+    enable_sp: bool,
     enable_ep: bool,
 ) -> None:
     layer_cfg.attention_norm.sharding_config = _decoder_norm_sharding(
         attention_input_layout
     )
-    layer_cfg.ffn_norm.sharding_config = norm_config(enable_sp=True)
+    layer_cfg.ffn_norm.sharding_config = norm_config(enable_sp=enable_sp)
 
     if layer_cfg.attention is not None:
         _set_full_attention_sharding(
             layer_cfg.attention,
             attention_input_layout=attention_input_layout,
+            enable_sp=enable_sp,
         )
     else:
         assert layer_cfg.delta_net is not None
         _set_deltanet_sharding(
             layer_cfg.delta_net,
             attention_input_layout=attention_input_layout,
+            enable_sp=enable_sp,
         )
 
     if layer_cfg.feed_forward is not None:
+        attn_x_layout = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I)
+        )
         set_dense_ffn_sharding(
             layer_cfg.feed_forward,
-            attn_x_layout=dense_sequence_parallel_placement(),
-            enable_sp=True,
+            attn_x_layout=attn_x_layout,
+            enable_sp=enable_sp,
         )
 
     if layer_cfg.moe is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
-            enable_sp=True,
+            enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
-        # pyrefly: ignore [missing-attribute]
-        _set_shared_expert_gate_sharding(layer_cfg.moe.shared_experts)
+        _set_shared_expert_gate_sharding(
+            # pyrefly: ignore [missing-attribute]
+            layer_cfg.moe.shared_experts,
+            enable_sp=enable_sp,
+        )
 
 
 def _set_shared_expert_gate_sharding(
     shared_experts: "SigmoidGatedFeedForward.Config | None",
+    *,
+    enable_sp: bool,
 ) -> None:
     """Shard Qwen3.5's shared-expert sigmoid gate.
 
     The common MoE sharding handles the shared FFN (w1/w2/w3) and the
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
-    add the gate: its weight and local output are Replicate, then the output is
-    sliced into the sequence-sharded layout produced by the shared FFN before
-    the pointwise multiply. ``getattr`` keeps this a no-op when the MoE has no
-    shared expert (``None``); Qwen3.5's shared expert always carries the gate.
+    add the gate: its weight and local output are Replicate. With SP, the output
+    is sliced into the sequence-sharded layout produced by the shared FFN. With
+    SP disabled, it remains Replicate and scales the shared FFN's Partial output.
+    ``getattr`` keeps this a no-op when the MoE has no shared expert (``None``);
+    Qwen3.5's shared expert always carries the gate.
     """
     gate = getattr(shared_experts, "gate", None)
     if gate is None:
         return
+    gate_output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.R)
+    )
     gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
             "bias": dense_param_placement(tp=spmd.R),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.R),
-        out_dst_shardings=dense_sequence_parallel_placement(),
+        out_dst_shardings=gate_output_layout,
     )
 
 
@@ -282,6 +299,7 @@ def _set_full_attention_sharding(
     attention_cfg: "Qwen35Attention.Config",
     *,
     attention_input_layout: SpmdLayout,
+    enable_sp: bool,
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
     attention_cfg.sharding_config = ShardingConfig(
@@ -296,7 +314,9 @@ def _set_full_attention_sharding(
     attention_cfg.wq.sharding_config = colwise_config()
     attention_cfg.wk.sharding_config = colwise_config()
     attention_cfg.wv.sharding_config = colwise_config()
-    attention_cfg.wo.sharding_config = rowwise_config(output_sp=True)
+    # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
+    # to Replicate.
+    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
     attention_cfg.q_norm.sharding_config = _qk_norm_sharding()
     attention_cfg.k_norm.sharding_config = _qk_norm_sharding()
@@ -308,19 +328,14 @@ def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
     attention_input_layout: SpmdLayout,
+    enable_sp: bool,
 ) -> None:
-    """Sharding for GatedDeltaNet: head-sharded TP on projections.
+    """Configure head-sharded TP for GatedDeltaNet.
 
-    Input is allgathered (Shard(1)→Replicate) so that the recurrence
-    sees the full sequence. Projections are ColwiseParallel (head-sharded
-    output). The FLA kernel runs on local tensors via local_map.
-    out_proj is RowwiseParallel (reduce-scatter back to Shard(1)).
-
-    A_log and dt_bias are per-head parameters, Shard(0) on TP.
-    Conv1d weights are Shard(0) (out-channels); the DTensor->local conversion
-    for the depthwise conv is handled in the model's ``_causal_conv``.
+    Input projections are ColwiseParallel (head-sharded output) and out_proj is
+    RowwiseParallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
+    recurrence runs on rank-local heads via a single local_map boundary.
     """
-    # ColwiseParallel on all input projections
     for name in (
         "in_proj_q",
         "in_proj_k",
@@ -331,51 +346,85 @@ def _set_deltanet_sharding(
     ):
         getattr(deltanet_cfg, name).sharding_config = colwise_config()
 
-    # Depthwise Conv1d weights: Shard(0) on out-channels (head-sharded).
+    # Depthwise conv weights: Shard(0) on out-channels (head-sharded).
     deltanet_cfg.conv_q.sharding_config = _conv_weight_sharding()
     deltanet_cfg.conv_k.sharding_config = _conv_weight_sharding()
     deltanet_cfg.conv_v.sharding_config = _conv_weight_sharding()
 
-    # RowwiseParallel on output projection (reduce-scatter to SP)
-    deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=True)
+    # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
+    # to Replicate.
+    deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    # Training folds (B, L) to (1, B * L), so tensor DP shards dim 1. Inference
-    # already supplies folded tokens and uses separate vLLM DP workers. CP is
-    # omitted because Qwen3.5 rejects CP, whose sequence sharding would collide
-    # with tensor DP on dim 1.
-    deltanet_activation_layout = SpmdLayout({DP: spmd.S(1), TP: spmd.S(2)})
-
-    # RMSNormGated: per-head norm, weight Replicate, activations Shard(2)
-    deltanet_cfg.norm.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={
-            "x": deltanet_activation_layout,
-            "gate": deltanet_activation_layout,
-        },
-        out_src_shardings=deltanet_activation_layout,
+    # Head-sharded TP placements reused by the norm, inner GDN, and module state.
+    # The inner boundary receives separate Q/K/V tensors and convolution weights;
+    # only the vLLM implementation packs them for its paged convolution cache.
+    activation_placement = dense_activation_placement(tp=spmd.S(2))
+    parameter_placement = dense_param_placement(tp=spmd.S(0))
+    replicated_placement = dense_param_placement(tp=spmd.R)
+    cu_seqlens_placement = SpmdLayout(
+        {
+            DP: spmd.V,
+            CP: spmd.R,
+            TP: spmd.R,
+        }
     )
 
-    # GatedDeltaKernel: local_map converts DTensor q/k/v/g/beta to local.
-    deltanet_cfg.kernel.sharding_config = ShardingConfig(
+    deltanet_cfg.norm.sharding_config = ShardingConfig(
+        state_shardings={"weight": replicated_placement},
         in_src_shardings={
-            "xq_BLNK": deltanet_activation_layout,
-            "xk_BLNK": deltanet_activation_layout,
-            "xv_BLNV": deltanet_activation_layout,
-            "g_BLN": deltanet_activation_layout,
-            "beta_BLN": deltanet_activation_layout,
+            "x": activation_placement,
+            "gate": activation_placement,
         },
-        out_src_shardings=deltanet_activation_layout,
+        out_src_shardings=activation_placement,
+    )
+
+    # The inner GDN is the DTensor-to-local boundary for the head-parallel
+    # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
+    # and intentionally remains outside local_map's positional placements.
+    deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "query_BLC": activation_placement,
+            "key_BLC": activation_placement,
+            "value_BLC": activation_placement,
+            "a_BLN": activation_placement,
+            "b_BLN": activation_placement,
+            "conv_q_weight_C1W": parameter_placement,
+            "conv_k_weight_C1W": parameter_placement,
+            "conv_v_weight_C1W": parameter_placement,
+            "A_log_N": parameter_placement,
+            "dt_bias_N": parameter_placement,
+            "cu_seqlens": cu_seqlens_placement,
+        },
+        out_src_shardings=activation_placement,
         local_map=LocalMapConfig(
-            in_grad_placements=(deltanet_activation_layout,) * 5,
+            # cu_seqlens varies across DP ranks and is replicated across TP.
+            # It has no gradient, but local_map still requires its placement.
+            in_grad_placements=(
+                activation_placement,
+                activation_placement,
+                activation_placement,
+                activation_placement,
+                activation_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                cu_seqlens_placement,
+            ),
         ),
     )
 
     deltanet_cfg.sharding_config = ShardingConfig(
         state_shardings={
-            "A_log": dense_param_placement(tp=spmd.S(0)),
-            "dt_bias": dense_param_placement(tp=spmd.S(0)),
+            "A_log": parameter_placement,
+            "dt_bias": parameter_placement,
         },
         in_src_shardings={"x_BLD": attention_input_layout},
         in_dst_shardings={"x_BLD": dense_activation_placement(tp=spmd.R)},
-        out_src_shardings=dense_sequence_parallel_placement(),
+        out_src_shardings=(
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.R)
+        ),
     )
