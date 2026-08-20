@@ -400,8 +400,8 @@ def _maybe_wrap_positions(
 ) -> torch.Tensor | None:
     """Wrap positions as a DTensor deriving mesh and placements from x (xq/xk).
 
-    TODO: In a full DTensor rewrite, positions should be made a DTensor
-    in/right after dataloading, together with inputs and labels.
+    TODO: positions should be wrapped in/right after dataloading, together
+    with inputs and labels, so this helper can go away.
 
     When TP uses use_local_output=False (DeepSeek V3, Qwen3, GPT-OSS),
     x is a DTensor but positions is a plain tensor. The downstream

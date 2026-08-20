@@ -37,7 +37,7 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     MemoryBudgetAC,
@@ -729,11 +729,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # tests) still receives positions for RoPE but no masks — it relies on
         # is_causal instead.
         if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                self.model_config.first_attention, "inner_attention", None
-            )
+            attention_backend = self.model_config.first_full_attention_backend
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
                 model = cast(Decoder, self.model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
@@ -755,11 +753,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # unique tokens this rank processes (not the full pre-split sequence).
         self.ntokens_seen += labels.numel()
 
-        if self.config.parallelism.spmd_backend == "full_dtensor":
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
-            )
-        elif self.config.parallelism.spmd_backend == "spmd_types":
+        if self.config.parallelism.spmd_backend == "spmd_types":
             inputs, labels, extra_kwargs = annotate_input_spmd_types(
                 self.parallel_dims,
                 inputs,

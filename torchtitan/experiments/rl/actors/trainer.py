@@ -261,8 +261,9 @@ class PolicyTrainer(Actor, Configurable):
 
         from torchtitan.models.common.attention import VarlenAttention
 
+        attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
-            model_spec.model.layers[0].attention.inner_attention,
+            attention_backend,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 

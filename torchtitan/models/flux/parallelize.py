@@ -32,8 +32,8 @@ from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
+    resolve_fsdp_mesh,
 )
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.models.flux.sharding import annotate_dp_cp_params_as_r
