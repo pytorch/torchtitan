@@ -305,22 +305,26 @@ def set_deepseek_v4_sharding_config(
         replicated_activation = dense_activation_placement(tp=spmd.R)
         for mtp_cfg in config.mtp_layers:
             set_deepseek_v4_layer_sharding(
-                mtp_cfg.block, enable_sp=enable_sp, enable_ep=enable_ep
+                mtp_cfg, enable_sp=enable_sp, enable_ep=enable_ep
             )
             mtp_cfg.e_proj.sharding_config = _replicate_weight
             mtp_cfg.h_proj.sharding_config = _replicate_weight
             mtp_cfg.enorm.sharding_config = _replicate_weight
             mtp_cfg.hnorm.sharding_config = _replicate_weight
-            mtp_cfg.norm.sharding_config = _replicate_weight
-            mtp_cfg.sharding_config = ShardingConfig(
+            mtp_cfg.mtp_norm.sharding_config = _replicate_weight
+            mtp_cfg.hc_head.sharding_config = ShardingConfig(
                 state_shardings={
-                    "hc_head_fn": _dense_param_rep,
-                    "hc_head_base": _dense_param_rep,
-                    "hc_head_scale": _dense_param_rep,
+                    "hc_fn": _dense_param_rep,
+                    "hc_base": _dense_param_rep,
+                    "hc_scale": _dense_param_rep,
                 },
+            )
+            mtp_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
-                    "x": replicated_activation,
-                    "input_ids": dense_activation_placement(tp=spmd.R),
+                    "mtp_input_embed": replicated_activation,
+                    "prev_hc_hidden": replicated_activation,
+                    "mtp_input_ids": dense_activation_placement(tp=spmd.R),
+                    "mtp_input_valid_mask": dense_activation_placement(tp=spmd.R),
                 },
                 out_src_shardings=replicated_activation,
             )

@@ -19,6 +19,7 @@ from torchtitan.trainer import Trainer
 from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
+from .mtp import MTPLoss
 
 
 def deepseek_v4_debugmodel() -> Trainer.Config:
@@ -65,10 +66,8 @@ def deepseek_v4_debugmodel() -> Trainer.Config:
 def deepseek_v4_mtp_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel", n_mtp_layers=1)
     return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
+        loss=MTPLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_spec),
         ),
         profiler=Profiler.Config(
             enable_profiling=False,

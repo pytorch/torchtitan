@@ -53,6 +53,15 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.hc_ffn_base": "layers.{}.hc_ffn_pre.hc_base",
             "layers.{}.hc_ffn_fn": "layers.{}.hc_ffn_pre.hc_fn",
             "layers.{}.hc_ffn_scale": "layers.{}.hc_ffn_pre.hc_scale",
+            # MTP
+            "layers.{}.enorm.weight": "layers.{}.enorm.weight",
+            "layers.{}.hnorm.weight": "layers.{}.hnorm.weight",
+            "layers.{}.e_proj.weight": "layers.{}.e_proj.weight",
+            "layers.{}.h_proj.weight": "layers.{}.h_proj.weight",
+            "layers.{}.norm.weight": "layers.{}.mtp_norm.weight",
+            "layers.{}.hc_head_base": "layers.{}.hc_head.hc_base",
+            "layers.{}.hc_head_fn": "layers.{}.hc_head.hc_fn",
+            "layers.{}.hc_head_scale": "layers.{}.hc_head.hc_scale",
             "hc_head_base": "hc_head.hc_base",
             "hc_head_fn": "hc_head.hc_fn",
             "hc_head_scale": "hc_head.hc_scale",
@@ -131,6 +140,13 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
     def _can_delegate_titan_key(self, key: str, to_hf_map: dict[str, str]) -> bool:
         if key in to_hf_map or "moe.experts" in key:
             return True
+        if key.startswith("mtp_layers."):
+            abstract_key = self._abstract_key(key, count=1).replace(
+                "mtp_layers.{}.",
+                "layers.{}.",
+                1,
+            )
+            return abstract_key in to_hf_map
         if "layers" in key:
             return self._abstract_key(key, count=1) in to_hf_map
         return False
