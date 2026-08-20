@@ -9,7 +9,8 @@
 #   N = num heads, K = key/value head dimension (KDA uses K == V), W = conv width
 
 from dataclasses import dataclass
-from typing import Any, get_args, Literal
+from functools import partial
+from typing import Any, Literal, get_args
 
 import torch
 from torch import nn
@@ -23,17 +24,16 @@ from torchtitan.models.common.nn_modules import Conv1d, RMSNorm
 from torchtitan.protocols.module import Module
 
 try:
-    from attn_gym.linear.kda.fwd.cute import chunk_kda
-    from attn_gym.linear.kda.fwd.recurrent import recurrent_kda
+    from attn_gym.linear.kda import chunk_kda, recurrent_kda
     from attn_gym.linear.kda.fwd.triton.gate_fwd import bounded_gate_cumsum
     from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
-    from attn_gym.linear.kda.short_conv import cute_causal_conv1d_silu
+    from attn_gym.linear.kda.short_conv import causal_conv1d
 except ImportError:
     chunk_kda: Any = None
     recurrent_kda: Any = None
     bounded_gate_cumsum: Any = None
     l2norm: Any = None
-    cute_causal_conv1d_silu: Any = None
+    causal_conv1d: Any = None
 
 
 __all__ = ["KDA", "KDAAttention", "KDABackend", "KDAInnerAttention"]
@@ -47,7 +47,8 @@ class KDAInnerAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         # "chunked": parallel within chunks, for training (default)
-        # "recurrent": token at a time, inference only, no backward
+        # "recurrent": pure-torch token at a time; the reference the chunked
+        # kernel is checked against in tests, far too slow to train with
         backend: KDABackend = "chunked"
 
         def __post_init__(self):
@@ -82,7 +83,11 @@ class KDAInnerAttention(Module):
         ``g_BLNK`` is the per-channel log2 decay: chunk-local cumulative for
         ``"chunked"``, per token for ``"recurrent"``.
         """
-        core = chunk_kda if self.backend == "chunked" else recurrent_kda
+        core = (
+            chunk_kda
+            if self.backend == "chunked"
+            else partial(recurrent_kda, impl="reference")
+        )
         output, _ = core(
             q_BLNK,
             k_BLNK,
@@ -139,9 +144,10 @@ class KDAAttention(Module):
         ``raw_gate_BLNK`` and ``raw_beta_BLN`` are the projections before the gate
         map and the sigmoid.
         """
-        conv_output_BLC = cute_causal_conv1d_silu(
+        conv_output_BLC = causal_conv1d(
             mixed_qkv_BLC,
             conv_weight_C1W[:, 0],
+            activation="silu",
             cu_seqlens=cu_seqlens,
         )
         conv_output_BLN3K = conv_output_BLC.unflatten(-1, (-1, 3, self.head_dim))

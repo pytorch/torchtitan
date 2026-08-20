@@ -34,7 +34,6 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.models.common.attention import KDA, KDAAttention
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from vllm.compilation.decorators import support_torch_compile
@@ -45,6 +44,69 @@ from vllm.utils import torch_utils as _torch_utils
 
 
 logger = init_logger(__name__)
+
+
+def _replace_vllm_layer_configs(model_config):
+    """Replace inner-computation configs with vLLM generation variants.
+
+    A hybrid model carries at most one of ``attention`` / ``kda`` per layer, so
+    both fields are looked up independently rather than as an either/or.
+    """
+    new_layers = []
+    for layer_idx, layer_cfg in enumerate(model_config.layers):
+        new_layer_cfg = layer_cfg
+
+        attention_cfg = getattr(layer_cfg, "attention", None)
+        if attention_cfg is not None:
+            num_heads = attention_cfg.n_heads
+            num_kv_heads = attention_cfg.n_kv_heads or num_heads
+            head_dim = (
+                attention_cfg.head_dim
+                if attention_cfg.head_dim is not None
+                else model_config.dim // num_heads
+            )
+            vllm_attention_cfg = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                attention=dataclasses.replace(
+                    attention_cfg,
+                    inner_attention=vllm_attention_cfg,
+                ),
+            )
+
+        kda_cfg = getattr(layer_cfg, "kda", None)
+        if kda_cfg is not None:
+            # Import the KDA adapter only for models that have KDA layers so the
+            # others do not acquire attention-gym as an optional dependency.
+            from torchtitan.experiments.rl.models.kda_attention import VLLMKDAWrapper
+
+            vllm_kda_cfg = VLLMKDAWrapper.Config(
+                num_heads=kda_cfg.num_heads,
+                head_dim=kda_cfg.head_dim,
+                conv_kernel_size=kda_cfg.conv_qkv.kernel_size,
+                gate_lower_bound=kda_cfg.attention.gate_lower_bound,
+                # vLLM keys per-layer state and metadata by name, so this has to
+                # be the index in the full layer list, not a count of KDA layers.
+                layer_index=layer_idx,
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                # KDA.Config.attention is typed Module.Config precisely so this
+                # substitution is possible: the dense KDAAttention holds no
+                # parameters, so replacing it moves no state.
+                kda=dataclasses.replace(kda_cfg, attention=vllm_kda_cfg),
+            )
+
+        new_layers.append(new_layer_cfg)
+
+    return dataclasses.replace(model_config, layers=new_layers)
+
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
@@ -195,40 +257,7 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Swap each layer's compute core for its vLLM paged equivalent. Read the
-        # head counts per layer rather than from layer 0: a hybrid model
-        # interleaves softmax and linear-attention layers, and a KDA layer
-        # carries none of these fields.
-        model_config = model_spec.model
-        new_layers = []
-        for layer_index, layer_cfg in enumerate(model_config.layers):
-            attn_cfg = layer_cfg.attention
-            if isinstance(attn_cfg, KDA.Config):
-                new_attn = dataclasses.replace(
-                    attn_cfg,
-                    attention=self._paged_kda_config(attn_cfg, layer_index),
-                )
-            else:
-                n_heads = attn_cfg.n_heads
-                n_kv_heads = attn_cfg.n_kv_heads or n_heads
-                new_attn = dataclasses.replace(
-                    attn_cfg,
-                    inner_attention=VLLMAttentionWrapper.Config(
-                        hidden_size=model_config.dim,
-                        num_heads=n_heads,
-                        num_kv_heads=n_kv_heads,
-                        head_dim=(
-                            attn_cfg.head_dim
-                            if attn_cfg.head_dim is not None
-                            else model_config.dim // n_heads
-                        ),
-                        sliding_window_size=getattr(
-                            attn_cfg, "sliding_window_size", None
-                        ),
-                    ),
-                )
-            new_layers.append(dataclasses.replace(layer_cfg, attention=new_attn))
-        self.config = dataclasses.replace(model_config, layers=new_layers)
+        self.config = _replace_vllm_layer_configs(model_spec.model)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Translate the inference parallelism into torchtitan's full
@@ -333,34 +362,6 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
-
-    @staticmethod
-    def _paged_kda_config(kda_cfg: KDA.Config, layer_index: int) -> Module.Config:
-        """Build the paged backend for the ``attention`` slot of a KDA layer.
-
-        ``KDA.Config.attention`` is typed ``Module.Config`` precisely so this
-        substitution is possible: the dense ``KDAAttention`` holds no parameters,
-        so replacing it moves no state. Imported here rather than at module scope
-        because the adapter pulls in attention-gym, an optional dependency that a
-        model without KDA layers must not need installed.
-        """
-        from torchtitan.experiments.rl.models.kda_attention import VLLMKDAWrapper
-
-        dense_cfg = kda_cfg.attention
-        if not isinstance(dense_cfg, KDAAttention.Config):
-            raise TypeError(
-                "expected a KDAAttention.Config in KDA.Config.attention, got "
-                f"{type(dense_cfg).__qualname__}"
-            )
-        return VLLMKDAWrapper.Config(
-            num_heads=kda_cfg.num_heads,
-            head_dim=kda_cfg.head_dim,
-            conv_kernel_size=kda_cfg.conv_qkv.kernel_size,
-            gate_lower_bound=dense_cfg.gate_lower_bound,
-            # vLLM keys per-layer state and metadata by name, so this has to be
-            # the index in the full layer list, not a count of KDA layers.
-            layer_index=layer_index,
-        )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

@@ -7,33 +7,37 @@
 from dataclasses import dataclass
 
 import torch
-
-from attn_gym.linear.kda.fwd.recurrent import (
-    chunk_kda_with_fused_gate,
-    fused_recurrent_kda_packed_decode,
+from attn_gym.linear.kda import (
+    bounded_gate_cumsum,
+    chunk_kda,
+    l2norm,
+    recurrent_kda_decode,
 )
-from torchtitan.protocols.module import Module
+from attn_gym.linear.kda.short_conv import causal_conv1d_decode
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    is_conv_state_dim_first,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
-    causal_conv1d_update,
-)
-from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
-    gather_initial_states,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
+from torchtitan.protocols.module import Module
+
 
 class VLLMKDAWrapper(Module, MambaBase):
-    """Adapter from the KDA layer to vLLM's paged recurrent state."""
+    """Adapter from the KDA layer to vLLM's paged recurrent state.
+
+    vLLM owns allocation, routing, prefix copies, and the ``[slot, H, V, K]`` recurrent
+    cache shape. KDA uses ``K == V``, so Attention Gym can advance the same dense slot
+    storage directly without changing vLLM's cache-manager contract.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -127,21 +131,21 @@ class VLLMKDAWrapper(Module, MambaBase):
 
         live = metadata.num_actual_tokens
         mixed_qkv_TC = mixed_qkv_TC[:live]
-        # attn_gym's decode ops take a leading batch axis of 1.
+        # The KDA kernels take a leading batch axis of 1.
         raw_gate = raw_gate_BLNK.reshape(1, num_tokens, self.local_num_heads, -1)[
             :, :live
         ]
         raw_beta = raw_beta_BLN.reshape(1, num_tokens, -1)[:, :live]
 
         conv_state, recurrent_state = self.kv_cache
-        if not is_conv_state_dim_first():
-            conv_state = conv_state.transpose(-1, -2)
         # vLLM's conv kernels take (channels, width); Conv1d stores (C, 1, W).
         conv_weight = conv_weight_C1W.reshape(
             conv_weight_C1W.size(0), conv_weight_C1W.size(-1)
         )
 
         if metadata.num_prefills > 0:
+            if not is_conv_state_dim_first():
+                conv_state = conv_state.transpose(-1, -2)
             result = self._kda_prefill(
                 mixed_qkv_TC,
                 raw_gate,
@@ -154,6 +158,10 @@ class VLLMKDAWrapper(Module, MambaBase):
                 recurrent_state,
             )
         else:
+            if is_conv_state_dim_first():
+                raise ValueError(
+                    "attention-gym decode requires VLLM_SSM_CONV_STATE_LAYOUT=SD"
+                )
             result = self._kda_decode(
                 mixed_qkv_TC,
                 raw_gate,
@@ -191,7 +199,7 @@ class VLLMKDAWrapper(Module, MambaBase):
         conv_weight,
         recurrent_state,
     ) -> torch.Tensor:
-        """Chunked prefill: dense conv, then the chunked core with per-sequence state."""
+        """Chunked prefill directly over the paged recurrent-state pool."""
         convolved_TC = causal_conv1d_fn(
             mixed_qkv_TC.transpose(0, 1),
             conv_weight,
@@ -203,39 +211,36 @@ class VLLMKDAWrapper(Module, MambaBase):
             query_start_loc=metadata.non_spec_query_start_loc,
             metadata=metadata,
         ).transpose(0, 1)
-        # reshape copies: the head-major views are strided, and the chunked core
-        # wants a leading batch axis of 1.
         query, key, value = (
-            tensor.reshape(1, -1, self.local_num_heads, self.head_dim)
+            tensor.reshape(1, -1, self.local_num_heads, self.head_dim).contiguous()
             for tensor in convolved_TC.unflatten(-1, (-1, 3, self.head_dim)).unbind(-2)
         )
 
-        # The chunked core's dense state is [num_sequences, H, K, V]; the paged
-        # cache is value-major, so transpose across the boundary both ways.
-        # chunk_kda calls .float().contiguous() on initial_state itself, so the
-        # transposed view is handed over as is.
-        gathered = gather_initial_states(
-            recurrent_state,
-            metadata.non_spec_state_indices_tensor,
-            metadata.has_initial_state,
-        )
-        core_out, final_state = chunk_kda_with_fused_gate(
-            q=query,
-            k=key,
-            v=value,
-            raw_g=raw_gate,
-            raw_beta=raw_beta,
-            A_log=A_log,
-            g_bias=dt_bias,
+        slots = metadata.non_spec_state_indices_tensor
+        has_initial_state = metadata.has_initial_state
+        query_start_loc = metadata.non_spec_query_start_loc
+        assert slots is not None
+        assert has_initial_state is not None
+        assert query_start_loc is not None
+        cumulative_gate = bounded_gate_cumsum(
+            raw_gate.to(torch.bfloat16).contiguous(),
+            A_log.float(),
+            dt_bias.float(),
+            chunk_size=64,
             lower_bound=self.gate_lower_bound,
-            initial_state=gathered.transpose(-1, -2),
-            output_final_state=True,
-            use_qk_l2norm_in_kernel=True,
-            cu_seqlens=metadata.non_spec_query_start_loc,
+            cu_seqlens=query_start_loc,
         )
-        recurrent_state[metadata.non_spec_state_indices_tensor] = final_state.transpose(
-            -1, -2
-        ).to(recurrent_state.dtype)
+        core_out, _ = chunk_kda(
+            l2norm(query),
+            l2norm(key),
+            value,
+            cumulative_gate,
+            raw_beta.float().sigmoid(),
+            recurrent_state,
+            cu_seqlens=query_start_loc,
+            state_indices=slots,
+            has_initial_state=has_initial_state,
+        )
         return core_out
 
     def _kda_decode(
@@ -250,30 +255,23 @@ class VLLMKDAWrapper(Module, MambaBase):
         conv_weight,
         recurrent_state,
     ) -> torch.Tensor:
-        """Single-token decode: one conv update and one packed recurrent step."""
+        """Single-token decode: one conv update and one fused paged recurrent step."""
+        assert metadata.non_spec_state_indices_tensor is not None
         slots = metadata.non_spec_state_indices_tensor[: mixed_qkv_TC.size(0)]
-        conv_out = torch.empty_like(mixed_qkv_TC)
-        convolved = causal_conv1d_update(
+        convolved = causal_conv1d_decode(
             mixed_qkv_TC,
-            conv_state,
             conv_weight,
-            None,
+            conv_state,
             activation="silu",
-            conv_state_indices=slots,
-            validate_data=True,
-            out=conv_out,
+            state_indices=slots,
         )
-        core_out, _ = fused_recurrent_kda_packed_decode(
-            convolved.unflatten(-1, (-1, 3, self.head_dim))
-            .transpose(-2, -3)
-            .flatten(-3),
+        return recurrent_kda_decode(
+            convolved,
             raw_gate,
             raw_beta,
             A_log,
             dt_bias,
-            self.gate_lower_bound,
             recurrent_state,
             slots,
-            head_dim=self.head_dim,
+            lower_bound=self.gate_lower_bound,
         )
-        return core_out
