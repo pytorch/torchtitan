@@ -80,10 +80,7 @@ def _compute_learned_pos_embeds(
 
     for (h, w), indices in hw_to_indices.items():
         if isinstance(pos_grid, DTensor):
-            pos_hw = local_map(
-                F.interpolate,
-                out_placements=(pos_grid.placements,),
-            )(
+            pos_hw = local_map(F.interpolate, out_placements=(pos_grid.placements,),)(
                 pos_grid,
                 size=[h, w],  # pyrefly: ignore [unexpected-keyword]
                 mode="bilinear",  # pyrefly: ignore [unexpected-keyword]
@@ -118,9 +115,7 @@ def _compute_learned_pos_embeds(
             else:
                 pos_embeds[i] = pos_hw_block
 
-    packed_pos_embeds = torch.cat(
-        [pos_embeds[i] for i in range(len(grids))], dim=0
-    )
+    packed_pos_embeds = torch.cat([pos_embeds[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_pos_embeds = spmd.mutate_type(
             packed_pos_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
@@ -449,11 +444,14 @@ class Qwen35VisionEncoder(Module):
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = x + learned_pos
 
-        attention_mask = create_block_diagonal_mask(
-            segment_lengths,
-            total_tokens,
-            x.device,
-        )
+        # BlockMask creation and use in FlexAttention are blackboxed from
+        # typechecking.
+        with spmd.no_typecheck():
+            attention_mask = create_block_diagonal_mask(
+                segment_lengths,
+                total_tokens,
+                x.device,
+            )
 
         for layer in self.layers.values():
             x = layer(

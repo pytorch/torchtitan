@@ -46,7 +46,7 @@ TP = MeshAxisName.TP
 if TYPE_CHECKING:
     from torchtitan.models.kimi_k2_7.model import KimiK25Model
 
-_REPLICATE_ACT = dense_activation_placement(tp=spmd.R)
+_REPLICATE_ACT = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
 
 def annotate_multimodal_input_spmd_types(
@@ -102,7 +102,7 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": token_id_placement()},
         in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=_REPLICATE_ACT,
         local_map=LocalMapConfig(in_grad_placements=None),
     )

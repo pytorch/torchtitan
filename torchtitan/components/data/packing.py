@@ -127,8 +127,7 @@ def _text_sequence_to_packing_input(
     positions = text_sequence.positions
     if positions is None:
         positions = (
-            np.arange(len(text_sequence.input_ids), dtype=np.int64)
-            % max_context_length
+            np.arange(len(text_sequence.input_ids), dtype=np.int64) % max_context_length
         )
     return {
         "input_ids": np.asarray(text_sequence.input_ids),

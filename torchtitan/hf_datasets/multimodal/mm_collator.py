@@ -95,12 +95,9 @@ class MultiModalCollator(Collator):
                 (0, pad_len),
                 value=self.tokenizer.pad_id,
             )
-            labels = torch.nn.functional.pad(
-                labels, (0, pad_len), value=IGNORE_INDEX
-            )
+            labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
             padding_positions = (
-                torch.arange(pad_len, dtype=positions.dtype)
-                % self._max_context_length
+                torch.arange(pad_len, dtype=positions.dtype) % self._max_context_length
             )
             positions = torch.cat([positions, padding_positions])
 
@@ -160,7 +157,9 @@ class MultiModalCollator(Collator):
         )
 
         if positions is not None:
-            resets = positions[:, 1:] < positions[:, :-1]  # (batch, seq_len-1)
+            # Every document starts at 0. A decrease check misses 0 -> 0
+            # boundaries after padding or a single-token document.
+            resets = positions[:, 1:] == 0  # (batch, seq_len-1)
         # First token of each consecutive vision region (image or video).
         vision_mask = (tokens == image_token_id) | (tokens == video_token_id)
         prev_vision = torch.cat(

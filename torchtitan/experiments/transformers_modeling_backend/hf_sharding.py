@@ -143,7 +143,7 @@ def set_hf_sharding_configs(
         lm_head_input = (
             dense_sequence_parallel_placement()
             if enable_sp
-            else dense_activation_placement(tp=spmd.R)
+            else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         )
         model.lm_head._sharding_config = ShardingConfig(
             state_shardings={
@@ -154,14 +154,14 @@ def set_hf_sharding_configs(
                 "input": lm_head_input,
             },
             in_dst_shardings={
-                "input": dense_activation_placement(tp=spmd.R),
+                "input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             },
             # Vocab-shard the lm_head output S(-1) unconditionally, mirroring
             # core's set_decoder_sharding_config. The S(-1) TP placement is a
             # no-op when TP is absent from the runtime mesh, so no flag is
             # needed: core cross_entropy_loss detects the vocab-sharded pred
             # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
-            out_dst_shardings=dense_activation_placement(tp=spmd.S(-1)),
+            out_dst_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
         )
 
     # Rotary embedding — distribute buffers (inv_freq) and wrap inputs

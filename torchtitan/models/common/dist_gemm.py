@@ -119,7 +119,7 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
         what binds ``Config.build()`` to this module rather than the stock one, so
         it cannot be deleted as empty."""
 
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tp_group = _tp_group_from_context()

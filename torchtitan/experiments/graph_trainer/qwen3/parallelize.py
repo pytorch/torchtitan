@@ -10,7 +10,6 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     annotate_moe_ep_regions,
-    apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -54,8 +53,13 @@ def parallelize_qwen3(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention(model, parallel_dims)
+    assert (
+        training.num_tokens_per_microbatch_per_dp_rank % parallel_dims.seq_len_divisor
+        == 0
+    ), f"""
+        Token count {training.num_tokens_per_microbatch_per_dp_rank} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
+        """
 
     annotate_qwen3(model)
 

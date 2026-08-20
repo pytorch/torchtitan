@@ -397,8 +397,7 @@ class MMSamplePackingConfig:
             dataset_iteration_policy=dataset_iteration_policy,
         )
         dataset = dataset.filter(
-            lambda sample: len(sample["input_ids"])
-            <= context.max_context_length
+            lambda sample: len(sample["input_ids"]) <= context.max_context_length
         )
         dataset = dataset.map(_mm_sample_to_packing_input)
         if isinstance(dataset, grain.MapDataset):

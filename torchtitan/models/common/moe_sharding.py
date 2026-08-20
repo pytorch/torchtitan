@@ -101,7 +101,7 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
         input_layout = (
             dense_sequence_parallel_placement()
             if enable_sp
-            else dense_activation_placement(tp=spmd.I)
+            else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
         return ShardingConfig(
             state_shardings=state,
@@ -113,10 +113,14 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
     else:
         return ShardingConfig(
             state_shardings=state,
-            in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-            out_src_shardings=dense_activation_placement(tp=spmd.R),
-            out_dst_shardings=dense_activation_placement(tp=spmd.R),
+            in_src_shardings={
+                "input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+            },
+            in_dst_shardings={
+                "input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+            },
+            out_src_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+            out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         )
 
 
@@ -131,10 +135,10 @@ def _shared_expert_colwise_config() -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R)},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(1)),
-        out_dst_shardings=dense_activation_placement(tp=spmd.S(1)),
+        in_src_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+        out_src_shardings=dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0)),
+        out_dst_shardings=dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0)),
     )
 
 
@@ -152,8 +156,10 @@ def _shared_expert_rowwise_config(*, output_layout: SpmdLayout) -> ShardingConfi
             # to match the rowwise matmul output placement.
             "bias": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.S(1))},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        in_src_shardings={
+            "input": dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
+        },
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=output_layout,
     )
 
@@ -171,13 +177,15 @@ def _shared_experts_sharding_configs(
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp
-        else dense_activation_placement(tp=spmd.I if enable_ep else spmd.R)
+        else dense_activation_placement(
+            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
+        )
     )
-    desired_input_layout = dense_activation_placement(tp=spmd.R)
+    desired_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     desired_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.P)
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
     return (
         ShardingConfig(
@@ -201,7 +209,7 @@ def _routed_experts_sharding_configs(
         pre_experts_input_layout = (
             dense_sequence_parallel_placement()
             if enable_sp
-            else dense_activation_placement(tp=spmd.I)
+            else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
         state_shardings: dict[str, SpmdLayout] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
@@ -209,25 +217,25 @@ def _routed_experts_sharding_configs(
         experts_input_layout = dense_sequence_parallel_placement()
         experts_input_grad_layout = dense_sequence_parallel_placement()
     else:
-        pre_experts_input_layout = dense_activation_placement(tp=spmd.R)
+        pre_experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         state_shardings = {
             name: expert_param_placement_dense(tp_placement=placement)
             for name, placement in expert_param_layout.items()
         }
-        experts_input_layout = dense_activation_placement(tp=spmd.R)
-        experts_input_grad_layout = dense_activation_placement(tp=spmd.P)
+        experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        experts_input_grad_layout = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
 
     tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
     experts_output_layout = (
         dense_sequence_parallel_placement()
         if enable_ep
-        else dense_activation_placement(tp=spmd.P)
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
     desired_experts_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.P)
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
 
     return (
@@ -273,15 +281,15 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     sp_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     desired_input_layout = (
-        sp_layout if enable_ep else dense_activation_placement(tp=spmd.R)
+        sp_layout if enable_ep else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
     output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.P)
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
     return ShardingConfig(
         state_shardings={

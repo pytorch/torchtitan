@@ -59,9 +59,7 @@ class TestPackedVision(unittest.TestCase):
         inputs_T, labels_T, positions_T = collator.collate_text(batch)
 
         torch.testing.assert_close(inputs_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
-        torch.testing.assert_close(
-            labels_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
-        )
+        torch.testing.assert_close(labels_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 4, 0, 1, 2]))
 
     def test_collator_resets_long_padding_positions(self) -> None:

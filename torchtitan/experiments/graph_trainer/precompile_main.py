@@ -230,6 +230,7 @@ def _precompile_aot_fx_trace(
             torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
             % config.training.max_context_length
         )
+        extra_kwargs["positions"] = positions
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(

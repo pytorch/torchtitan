@@ -50,9 +50,7 @@ from torchtitan.protocols.module import Module, ModuleDict
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
     """Annotate a tensor created inside the vision forward."""
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        return spmd.mutate_type(
-            tensor, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
-        )
+        return spmd.mutate_type(tensor, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
     return tensor
 
 
@@ -506,16 +504,19 @@ class MuseGlimmerVisionEncoder(Module):
         global_slens = _annotate_vision_activation_type(
             torch.tensor(all_global_slens, device=device, dtype=torch.int32)
         )
-        global_mask = create_block_diagonal_mask(
-            global_slens,
-            total_tokens,
-            device,
-        )
-        sp_mask: BlockMask | None = (
-            create_block_diagonal_mask(sp_slens_cat, total_tokens, device)
-            if sp_slens_cat is not None
-            else None
-        )
+        # BlockMask creation and use in FlexAttention are blackboxed from
+        # typechecking.
+        with spmd.no_typecheck():
+            global_mask = create_block_diagonal_mask(
+                global_slens,
+                total_tokens,
+                device,
+            )
+            sp_mask: BlockMask | None = (
+                create_block_diagonal_mask(sp_slens_cat, total_tokens, device)
+                if sp_slens_cat is not None
+                else None
+            )
 
         num_layers = len(self.layers)
         for i, block in enumerate(self.layers.values()):

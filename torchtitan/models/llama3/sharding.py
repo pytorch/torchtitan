@@ -60,7 +60,7 @@ def _set_llama3_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)

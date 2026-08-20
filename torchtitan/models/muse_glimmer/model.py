@@ -446,9 +446,9 @@ class MuseGlimmerModel(Decoder):
                         self.vision_projection(vision_features)
                     )
                     downsample_factor = self.vision_encoder.downsample_factor
-                    num_tokens_per_item = (
-                        grid_thw[:, 1] // downsample_factor
-                    ) * (grid_thw[:, 2] // downsample_factor)
+                    num_tokens_per_item = (grid_thw[:, 1] // downsample_factor) * (
+                        grid_thw[:, 2] // downsample_factor
+                    )
                     vision_positions = get_vision_positions(
                         tokens,
                         num_tokens_per_item,

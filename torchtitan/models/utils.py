@@ -124,7 +124,6 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_i_placements = []
 
         # Find all the device mesh dimensios that shard on dim-i
-        # pyrefly: ignore [bad-argument-type]
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
             if placement.dim == dim:

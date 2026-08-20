@@ -59,9 +59,7 @@ def apply_compile(
     # side-effects in backward, but torch.compile has no easy way to reapply
     # python mutations in the backward. Setting this flag accepts this eager
     # and compile divergence by skipping reapplication of side effects.
-    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = (
-        True  # pyrefly: ignore [bad-assignment]
-    )
+    torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
 
     backend = _maybe_regional_inductor_backend(model, compile_config.backend)
 

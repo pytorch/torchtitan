@@ -68,7 +68,7 @@ def _get_lora_cls(parent_cls: type) -> type:
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+    parent_config_cls = parent_cls.Config
 
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
@@ -187,7 +187,7 @@ class LoRAConverter(ModelConfigConverter):
         """Create a LoRALinear.Config from a base Linear.Config."""
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
-        return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
+        return lora_cls.Config(
             **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
             rank=self.rank,
             alpha=self.alpha,

@@ -453,11 +453,14 @@ class KimiK25VisionEncoder(Module):
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = self.patch_embed(pixel_values) + learned_pos
 
-        attention_mask = create_block_diagonal_mask(
-            segment_lengths,
-            total_tokens,
-            x.device,
-        )
+        # BlockMask creation and use in FlexAttention are blackboxed from
+        # typechecking.
+        with spmd.no_typecheck():
+            attention_mask = create_block_diagonal_mask(
+                segment_lengths,
+                total_tokens,
+                x.device,
+            )
 
         for block in self.layers.values():
             x = block(

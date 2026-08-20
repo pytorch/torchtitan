@@ -4,118 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
-import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.experimental._attention import (
     _context_parallel_shard,
-    _enable_context_parallel_dispatcher,
     _HeadTailLoadBalancer,
     _PTRRLoadBalancer,
 )
-from torch.distributed.tensor.experimental._context_parallel._attention import (
-    flex_cp_allgather,
-)
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    FlexAttention,
-    ScaledDotProductAttention,
-    VarlenAttention,
-)
-from torchtitan.tools.logging import logger
+from torchtitan.models.common.attention import AttentionMasksType
+
+if TYPE_CHECKING:
+    from torchtitan.config import ParallelismConfig
 
 
-def apply_cp_to_forward(
-    attention_modules: Sequence[nn.Module],
-    cp_mesh: DeviceMesh,
-    *,
-    attention_seq_dim: int = 0,
-) -> None:
-    """Wrap inner attention ``forward`` with CP logic.
-
-    Must be called **before** ``Module.parallelize()`` so the CP wrapper
-    is captured inside parallelize's ``local_map`` wrapping.
-
-    The attention type is inferred via isinstance on the first module.
-
-    TODO: This is a temporary workaround that manually allgathers K/V
-    (FlexAttention) or wraps inputs as CP-sharded DTensors (SDPA).
-    Once all models adopt config-based sharding with full DTensor,
-    CP redistribution should be expressed declaratively via
-    ShardingConfig and this function should be removed.
-
-    Args:
-        attention_modules: Sequence of inner attention modules to apply CP to.
-        cp_mesh: Device mesh for context parallel dimension.
-        attention_seq_dim: Sequence dimension of the tensors passed to the
-            attention module. Defaults to 0. Can be changed if the attention
-            tensors use a different sequence dimension layout.
-    """
-    first = attention_modules[0]
-    if isinstance(first, FlexAttention):
-        for mod in attention_modules:
-            original_forward = mod.forward
-
-            def _make_cp_forward(orig_fn, mesh):
-                pg_name = dist._get_process_group_name(mesh.get_group())
-
-                def cp_forward(q, k, v, **kwargs):
-                    if kwargs.get("score_mod") is not None:
-                        raise NotImplementedError(
-                            "FlexAttention score_mod is not supported with "
-                            "Context Parallel yet. It must be sharded before "
-                            "use with CP."
-                        )
-                    k = k.contiguous()
-                    v = v.contiguous()
-                    global_k, global_v = flex_cp_allgather(
-                        k, v, attention_seq_dim, pg_name
-                    )
-                    return orig_fn(q, global_k, global_v, **kwargs)
-
-                return cp_forward
-
-            mod.forward = _make_cp_forward(original_forward, cp_mesh)
-
-    elif isinstance(first, ScaledDotProductAttention):
-        _enable_context_parallel_dispatcher()
-
-        for mod in attention_modules:
-            original_forward = mod.forward
-
-            def _make_cp_forward(orig_fn, mesh):
-                placement = [Shard(attention_seq_dim)]
-
-                def cp_forward(q, k, v, **kwargs):
-                    if not isinstance(q, DTensor):
-                        q = DTensor.from_local(q, mesh, placement, run_check=False)
-                    if not isinstance(k, DTensor):
-                        k = DTensor.from_local(k, mesh, placement, run_check=False)
-                    if not isinstance(v, DTensor):
-                        v = DTensor.from_local(v, mesh, placement, run_check=False)
-                    output = orig_fn(q, k, v, **kwargs)
-                    return output.to_local() if isinstance(output, DTensor) else output
-
-                return cp_forward
-
-            mod.forward = _make_cp_forward(original_forward, cp_mesh)
-
-    elif isinstance(first, VarlenAttention):
-        raise NotImplementedError("Variable-length attention CP is not yet supported")
-    else:
-        raise NotImplementedError(
-            f"Context Parallel forward wrapping is not supported for "
-            f"{type(first).__name__}"
+def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
+    """Validate CP backend compatibility for ShardingConfig-based models."""
+    if (
+        parallelism.context_parallel_degree > 1
+        and parallelism.spmd_backend != "spmd_types"
+    ):
+        raise ValueError(
+            "Context Parallel requires parallelism.spmd_backend='spmd_types', "
+            f"got '{parallelism.spmd_backend}'."
         )
-
-    logger.info("Applied Context Parallel (forward wrapping) to the model")
 
 
 def prepare_context_parallel_input(
@@ -135,8 +50,8 @@ def prepare_context_parallel_input(
     upstream in ``post_dataloading_process``.
 
     Args:
-        inputs: Input tensor of shape ``[num_tokens]``.
-        labels: Label tensor of shape ``[num_tokens]``.
+        inputs: Input tensor of shape [batch_size, seq_len]
+        labels: Label tensor of shape [batch_size, seq_len]
         extra_kwargs: Dictionary containing 'positions' (required) and
             optionally 'attention_masks' to be sharded.
         cp_mesh: Device mesh for context parallel dimension
@@ -175,7 +90,7 @@ def cp_shard(
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
     load_balancer_type: str | None = "headtail",
-    input_seq_dim: int = 0,
+    input_seq_dim: int = 1,
     ptrr_mask_key: str | None = None,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
@@ -196,15 +111,17 @@ def cp_shard(
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
             - None: Disable load balancing
             Defaults to "headtail".
-        input_seq_dim: Token dimension index for sharding. Defaults to 0 for
-            tensors whose leading dimension is ``num_tokens``. Can be changed
-            by passing a different value if your tensors use a different
-            sequence dimension layout.
+        input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
+            which covers most use cases where tensors have shape
+            [batch_size, seq_len]. Can be changed by passing a
+            different value if your tensors use a different sequence
+            dimension layout.
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and
             ``attention_masks`` is a dict[str, BlockMask], selects which mask in
             the dict the PTRRLoadBalancer is built from. The resulting balancer
             is used to shard every mask in the dict as well as the inputs.
             Required (must be a valid key) in that case; ignored otherwise.
+
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
             - sharded_inputs: Tuple of input tensors sharded along the

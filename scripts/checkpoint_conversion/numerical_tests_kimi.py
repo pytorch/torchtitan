@@ -39,7 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 
-from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
     resize_to_patch_budget,
@@ -86,7 +86,6 @@ def run_hf(hf_model_path, image_size, dtype, device):
         .reshape(image_size, image_size, 3)
         .to(torch.uint8)
     )
-    # pyrefly: ignore [not-callable]
     batch = proc(
         text=[_PROMPT], images=[Image.fromarray(raw_image.numpy())], return_tensors="pt"
     )
@@ -255,7 +254,7 @@ def compare(ref_logits, tt_logits) -> bool:
         f"  KL={kl:.4e}  cos={cos:.6f}  max_diff={max_diff:.4e}  "
         f"top1={'Y' if top1 else 'N'}  top5={ov5:.0%}"
     )
-    passed = abs(kl) < 1e-3  # pyrefly: ignore [bad-argument-type]
+    passed = abs(kl) < 1e-3
     print(
         "RESULT: PASS (KL < 1e-3 -- fp noise)."
         if passed

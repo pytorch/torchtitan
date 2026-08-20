@@ -165,7 +165,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertFalse(checkpoint.enable)
 
     def test_legacy_import_path(self):
-        from torchtitan.components.checkpoint import (
+        from torchtitan.components.checkpointer import (
             CheckpointManager as LegacyCheckpointManager,
             ModelWrapper as LegacyModelWrapper,
         )

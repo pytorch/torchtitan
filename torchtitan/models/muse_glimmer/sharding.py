@@ -144,7 +144,7 @@ def _set_multimodal_sharding(
     back to ``Shard(0)``, restoring SP activations for every later layer. Mirrors
     qwen3_5's multimodal sharding overrides.
     """
-    replicate = dense_activation_placement(tp=spmd.R)
+    replicate = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     # The vision encoder + adapter emit TP-invariant activations (the common
     # vision_encoder_sharding helpers flow {DP: V, TP: I}). The LLM-side injection
     # modules only promote the TP axis I->R so the features become TP-Replicate for
@@ -168,7 +168,7 @@ def _set_multimodal_sharding(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": token_id_placement()},
         in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=replicate,
         local_map=LocalMapConfig(in_grad_placements=None),
     )
@@ -230,7 +230,7 @@ def _set_muse_glimmer_layer_sharding(
     sp_activation = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     # All four norms operate on the sequence-parallel activation.
     layer_cfg.attention_norm.sharding_config = ShardingConfig(

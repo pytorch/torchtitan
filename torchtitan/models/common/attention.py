@@ -362,6 +362,8 @@ class FlexAttention(Module):
         return out_transform(out_TNH, lse_TN)
 
 
+# TODO: Verify whether SDPA support can be removed without losing performance
+# after folding: https://github.com/pytorch/torchtitan/pull/4218#pullrequestreview-4977638012
 class ScaledDotProductAttention(Module):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
@@ -759,7 +761,7 @@ class FusedQKVLinear(BaseQKVLinear):
         )
         * 3
     )
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
@@ -796,7 +798,8 @@ class FusedQKVLinear(BaseQKVLinear):
             # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
             # cat() inconsistent grad types in PP's backward metadata inference.
             # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards tokens). TODO: remove it after spmd_types/full_dtensor
+            # head axis, CP shards tokens). TODO: remove once the partial_dtensor
+            # backend is gone.
             _split = local_map(
                 _split,
                 out_placements=(qkv.placements,) * 3,

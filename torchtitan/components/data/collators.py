@@ -68,9 +68,7 @@ class TextCollator(Collator):
         pad_len = self._num_tokens_per_batch - num_tokens
         if pad_len:
             input_ids = torch.nn.functional.pad(input_ids, (0, pad_len))
-            labels = torch.nn.functional.pad(
-                labels, (0, pad_len), value=IGNORE_INDEX
-            )
+            labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
             positions = torch.cat(
                 [positions, torch.arange(pad_len, dtype=positions.dtype)]
             )

@@ -20,7 +20,7 @@ from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -36,6 +36,12 @@ class BaseValidator(Configurable):
     class Config(Configurable.Config):
         freq: int = 10
         """Frequency of validation"""
+
+        def __post_init__(self) -> None:
+            if self.freq <= 0:
+                raise ValueError(
+                    f"validation frequency must be positive, got {self.freq}"
+                )
 
     def __init__(
         self,
@@ -92,6 +98,7 @@ class Validator(BaseValidator):
         """DataLoader configuration for validation"""
 
         def __post_init__(self):
+            BaseValidator.Config.__post_init__(self)
             assert (
                 self.steps > 0 or self.steps == -1
             ), "validation steps must be positive or -1"
@@ -179,11 +186,9 @@ class Validator(BaseValidator):
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
         if isinstance(model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                model_config.first_attention, "inner_attention", None
-            )
+            attention_backend = model_config.first_full_attention_backend
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
                 model = cast(Decoder, model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
@@ -199,11 +204,6 @@ class Validator(BaseValidator):
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
                 self.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        if self.parallelism.spmd_backend == "full_dtensor":
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
             )
 
         return inputs, labels, extra_kwargs

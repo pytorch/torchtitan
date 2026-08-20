@@ -20,7 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
     apply_overrides,
     CompileConfig,
@@ -32,7 +32,6 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
@@ -44,6 +43,72 @@ from vllm.utils import torch_utils as _torch_utils
 
 
 logger = init_logger(__name__)
+
+
+def _replace_vllm_layer_configs(model_config):
+    """Replace inner-computation configs with vLLM generation variants."""
+    # These modules inspect the breakable-cudagraph environment at import time.
+    # Defer imports until vLLM constructs the model, after the generator has set
+    # that environment. Import the GDN adapter only for hybrid models so other
+    # models do not acquire FLA as an optional dependency.
+    from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
+
+    new_layers = []
+    for layer_idx, layer_cfg in enumerate(model_config.layers):
+        new_layer_cfg = layer_cfg
+
+        attention_cfg = getattr(layer_cfg, "attention", None)
+        if attention_cfg is not None:
+            num_heads = attention_cfg.n_heads
+            num_kv_heads = attention_cfg.n_kv_heads or num_heads
+            head_dim = (
+                attention_cfg.head_dim
+                if attention_cfg.head_dim is not None
+                else model_config.dim // num_heads
+            )
+            vllm_attention_cfg = VLLMAttentionWrapper.Config(
+                hidden_size=model_config.dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                attention=dataclasses.replace(
+                    attention_cfg,
+                    inner_attention=vllm_attention_cfg,
+                ),
+            )
+
+        delta_net_cfg = getattr(layer_cfg, "delta_net", None)
+        if delta_net_cfg is not None:
+            from torchtitan.experiments.rl.models.gdn import VLLMInnerGatedDeltaNet
+
+            vllm_inner_gdn_cfg = VLLMInnerGatedDeltaNet.Config(
+                layer_idx=layer_idx,
+                num_k_heads=(
+                    delta_net_cfg.in_proj_q.out_features // delta_net_cfg.key_head_dim
+                ),
+                num_v_heads=(
+                    delta_net_cfg.in_proj_v.out_features // delta_net_cfg.value_head_dim
+                ),
+                head_k_dim=delta_net_cfg.key_head_dim,
+                head_v_dim=delta_net_cfg.value_head_dim,
+                conv_kernel_size=delta_net_cfg.conv_kernel_size,
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                delta_net=dataclasses.replace(
+                    delta_net_cfg,
+                    inner_gated_delta_net=vllm_inner_gdn_cfg,
+                ),
+            )
+
+        new_layers.append(new_layer_cfg)
+
+    return dataclasses.replace(model_config, layers=new_layers)
+
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
@@ -194,36 +259,7 @@ class VLLMModelWrapper(Module):
         self.state_dict_adapter = model_spec.state_dict_adapter
         self.parallelize_fn = model_spec.parallelize_fn
 
-        # Replace inner_attention with VLLMAttentionWrapper in config
-        model_config = model_spec.model
-        attn_config = model_config.layers[0].attention
-        n_heads = attn_config.n_heads
-        n_kv_heads = attn_config.n_kv_heads or n_heads
-        head_dim = (
-            attn_config.head_dim
-            if attn_config.head_dim is not None
-            else model_config.dim // n_heads
-        )
-        new_layers = []
-        for layer_cfg in model_config.layers:
-            vllm_backend = VLLMAttentionWrapper.Config(
-                hidden_size=model_config.dim,
-                num_heads=n_heads,
-                num_kv_heads=n_kv_heads,
-                head_dim=head_dim,
-                sliding_window_size=getattr(
-                    layer_cfg.attention, "sliding_window_size", None
-                ),
-            )
-            new_layers.append(
-                dataclasses.replace(
-                    layer_cfg,
-                    attention=dataclasses.replace(
-                        layer_cfg.attention, inner_attention=vllm_backend
-                    ),
-                )
-            )
-        self.config = dataclasses.replace(model_config, layers=new_layers)
+        self.config = _replace_vllm_layer_configs(model_spec.model)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Translate the inference parallelism into torchtitan's full
@@ -251,8 +287,8 @@ class VLLMModelWrapper(Module):
 
         # Fill sharding configs on the config BEFORE build so every sub-module
         # is constructed with its ShardingConfig attached (required by the
-        # declarative model.parallelize() API). Need to be called after Attention
-        # module replacement.
+        # declarative model.parallelize() API). This also gives the replacement
+        # attention and GDN configs their rank-local compute boundaries.
         # Provides the generic config shape (has .parallelism) so
         # update_from_config can extract parallelism uniformly.
         @dataclass(kw_only=True, slots=True)

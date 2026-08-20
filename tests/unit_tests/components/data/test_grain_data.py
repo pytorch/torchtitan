@@ -109,9 +109,7 @@ class PairCollator(Collator):
 
     def __init__(self, config: Config, *, context: DatasetBuildContext):
         del config
-        self._num_rows = (
-            context.num_tokens_per_batch // context.max_context_length
-        )
+        self._num_rows = context.num_tokens_per_batch // context.max_context_length
 
     def num_rows_per_batch(self) -> int:
         return self._num_rows
@@ -1757,9 +1755,7 @@ def test_first_fit_oversized_row_does_not_discard_buffered_row():
     )
 
     assert sequence.input_ids.tolist() == [1, 2, 3, 4, 5, 10, 11] + [0] * 11
-    assert sequence.labels.tolist() == [2, 3, 4, 5, 6, 11, 12] + [
-        IGNORE_INDEX
-    ] * 11
+    assert sequence.labels.tolist() == [2, 3, 4, 5, 6, 11, 12] + [IGNORE_INDEX] * 11
 
 
 def test_loader_passes_read_options_to_map_conversion(monkeypatch):

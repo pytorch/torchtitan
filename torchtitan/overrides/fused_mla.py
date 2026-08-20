@@ -618,13 +618,13 @@ class _FusedMLAQ(torch.autograd.Function):
         positions: torch.Tensor,
         q_nope_dim: int,
     ) -> torch.Tensor:
-        q_type = {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)}
-        positions_type = {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R}
-        spmd.assert_type(q, q_type)
+        q_type = (spmd.V, spmd.PartitionSpec(None, ("dp", "cp"), "tp", None))
+        positions_type = (spmd.V, spmd.PartitionSpec(None, ("dp", "cp")))
+        spmd.assert_type(q, *q_type)
         spmd.assert_type(rope_cache_real, spmd.R)
-        spmd.assert_type(positions, positions_type)
+        spmd.assert_type(positions, *positions_type)
         output = _FusedMLAQ.apply(q, rope_cache_real, positions, q_nope_dim)
-        spmd.assert_type(output, q_type)
+        spmd.assert_type(output, *q_type)
         return output
 
     @staticmethod
@@ -677,16 +677,13 @@ class _FusedMLAKV(torch.autograd.Function):
         positions: torch.Tensor,
         q_nope_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        kv_type = {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)}
-        replicated_head_type = {
-            "dp": spmd.S(0),
-            "cp": spmd.S(1),
-            "tp": spmd.R,
-        }
-        spmd.assert_type(kv, kv_type)
-        spmd.assert_type(k_pe, replicated_head_type)
+        kv_partition = spmd.PartitionSpec(None, ("dp", "cp"), "tp", None)
+        k_pe_partition = spmd.PartitionSpec(None, ("dp", "cp"), None)
+        positions_partition = spmd.PartitionSpec(None, ("dp", "cp"))
+        spmd.assert_type(kv, spmd.V, kv_partition)
+        spmd.assert_type(k_pe, spmd.V, k_pe_partition)
         spmd.assert_type(rope_cache_real, spmd.R)
-        spmd.assert_type(positions, replicated_head_type)
+        spmd.assert_type(positions, spmd.V, positions_partition)
         k, v = _FusedMLAKV.apply(
             kv,
             k_pe,
@@ -694,8 +691,8 @@ class _FusedMLAKV(torch.autograd.Function):
             positions,
             q_nope_dim,
         )
-        spmd.assert_type(k, kv_type)
-        spmd.assert_type(v, kv_type)
+        spmd.assert_type(k, spmd.V, kv_partition)
+        spmd.assert_type(v, spmd.V, kv_partition)
         return k, v
 
     @staticmethod
@@ -872,9 +869,7 @@ class FusedMLAAttention(Attention):
 
         kv = self.wkv_b(self.kv_norm(kv_latent))
         with spmd.local():
-            kv = kv.view(
-                num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim
-            )
+            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             k, v = fused_mla_kv(
                 kv.unsqueeze(0),
                 k_pe.unsqueeze(0),

@@ -155,7 +155,7 @@ def build_and_swap_native_moe(
                     "weight": dense_param_placement(tp=spmd.R),
                     "bias": dense_param_placement(tp=spmd.R),
                 },
-                out_dst_shardings=dense_activation_placement(tp=spmd.R),
+                out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             )
 
         with torch.device("meta"):

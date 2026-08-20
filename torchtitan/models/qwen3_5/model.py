@@ -5,27 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
-from fla.modules.conv.triton.ops import CausalConv1dFunction
-from fla.ops.gated_delta_rule import (
-    chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
-)
-from fla.ops.gated_delta_rule.chunk import ChunkGatedDeltaRuleFunction
-from fla.ops.gated_delta_rule.fused_recurrent import FusedRecurrentFunction
 from torch import nn
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -42,55 +30,12 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
+from .gdn import GatedDeltaNet
 from .rope import MRoPE
 from .sharding import annotate_qwen35_input_spmd_types, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
-GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
-
-spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
-spmd.register_local_autograd_function(FusedRecurrentFunction)
-spmd.register_local_autograd_function(CausalConv1dFunction)
-
-@spmd.local_map(
-    in_types=(
-        {"dp": spmd.S(0), "tp": spmd.S(1)},
-        {"dp": spmd.R, "tp": spmd.S(0)},
-        {"dp": spmd.V, "tp": spmd.R},
-        {"dp": spmd.V, "tp": spmd.R},
-    ),
-    out_types={"dp": spmd.S(0), "tp": spmd.S(1)},
-)
-def _causal_conv1d_varlen(
-    x_TD: torch.Tensor,
-    weight: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    cu_seqlens_cpu: torch.Tensor | None,
-) -> torch.Tensor:
-    """FLA depthwise causal conv with per-document resets (CUDA-only).
-
-    A pure-torch per-document reference lives in
-    ``tests/unit_tests/test_qwen3_5_deltanet.py``.
-    """
-    if cu_seqlens_cpu is None:
-        raise ValueError(
-            "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor. "
-            "Build VarlenMetadata with include_host_offsets=True."
-        )
-
-    from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
-
-    out_BTD, _ = _fla_causal_conv1d(
-        x=x_TD.unsqueeze(0),
-        weight=weight.squeeze(1),
-        bias=None,
-        activation="silu",
-        backend="triton",
-        cu_seqlens=cu_seqlens,
-        cu_seqlens_cpu=cu_seqlens_cpu,
-    )
-    return out_BTD.squeeze(0)
 
 
 class OffsetRMSNorm(Module):
@@ -116,329 +61,6 @@ class OffsetRMSNorm(Module):
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return ((1.0 + self.weight.float()) * x).to(input_dtype)
-
-
-class RMSNormGated(Module):
-    """Gated RMSNorm: ``silu(gate) * weight * norm(x)``.
-
-    Takes ``(x, gate)`` separately. Weight is ones-initialized.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-6
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        x = (self.weight.float() * x).to(input_dtype)
-        x = x * F.silu(gate.float())
-        return x.to(input_dtype)
-
-
-class GatedDeltaKernel(Module):
-    """Stateless dispatch to the configured FLA gated delta kernel.
-
-    Provides a module boundary for the sharding code to wrap forward with
-    DTensor→local conversion — same pattern as FlexAttention. Handles Q/K
-    head expansion for grouped linear attention internally so that
-    repeat_interleave runs on local tensors under TP. A pure-torch reference
-    implementation lives in ``tests/unit_tests/test_qwen3_5_deltanet.py``;
-    it is far too slow for training use.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        # "fla_chunked": parallel within chunks for training (default)
-        # "fla_fused_recurrent": for inference only in rl, no backward
-        backend: GatedDeltaBackend = "fla_chunked"
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.backend = config.backend
-
-    def forward(
-        self,
-        xq_TNK: torch.Tensor,
-        xk_TNK: torch.Tensor,
-        xv_TNV: torch.Tensor,
-        g_TN: torch.Tensor,
-        beta_TN: torch.Tensor,
-        *,
-        cu_seqlens: torch.Tensor | None = None,
-        cu_seqlens_cpu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # Expand Q/K heads to match V when n_value_heads > n_key_heads
-        if xq_TNK.shape[1] != xv_TNV.shape[1]:
-            assert xv_TNV.shape[1] % xq_TNK.shape[1] == 0
-            repeat = xv_TNV.shape[1] // xq_TNK.shape[1]
-            xq_TNK = xq_TNK.repeat_interleave(repeat, dim=1)
-            xk_TNK = xk_TNK.repeat_interleave(repeat, dim=1)
-
-        xq_BTNK = xq_TNK.unsqueeze(0)
-        xk_BTNK = xk_TNK.unsqueeze(0)
-        xv_BTNV = xv_TNV.unsqueeze(0)
-        g_BTN = g_TN.unsqueeze(0)
-        beta_BTN = beta_TN.unsqueeze(0)
-
-        if self.backend == "fla_chunked":
-            if cu_seqlens is not None and cu_seqlens_cpu is None:
-                raise ValueError(
-                    "Qwen3.5 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
-                )
-            result = _fla_chunk_gated_delta_rule(
-                xq_BTNK,
-                xk_BTNK,
-                xv_BTNV,
-                g_BTN,
-                beta_BTN,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=cu_seqlens_cpu,
-            )
-        elif self.backend == "fla_fused_recurrent":
-            result = _fla_fused_recurrent_gated_delta_rule(
-                xq_BTNK,
-                xk_BTNK,
-                xv_BTNV,
-                g_BTN,
-                beta=beta_BTN,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=cu_seqlens,
-            )
-        else:
-            raise ValueError(
-                f"Unknown fla_backend '{self.backend}'. "
-                "Valid: 'fla_chunked', 'fla_fused_recurrent'."
-            )
-
-        # FLA kernels return (output, final_state); we only need output
-        return result[0].squeeze(0)
-
-
-class GatedDeltaNet(Module):
-    """Gated DeltaNet linear attention.
-
-    Uses recurrent state + gated delta rule instead of softmax attention.
-    No RoPE, different head structure from standard attention. When varlen
-    Document offsets are read from the model's attention-mask dictionary, so
-    convolution and recurrent state reset at packed-document boundaries for
-    both full-attention backends.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        key_head_dim: int
-        value_head_dim: int
-        conv_kernel_size: int = 4
-
-        # Sub-module configs
-        in_proj_q: Linear.Config
-        in_proj_k: Linear.Config
-        in_proj_v: Linear.Config
-        in_proj_z: Linear.Config
-        in_proj_a: Linear.Config
-        in_proj_b: Linear.Config
-        conv_q: Conv1d.Config
-        conv_k: Conv1d.Config
-        conv_v: Conv1d.Config
-        kernel: GatedDeltaKernel.Config
-        norm: RMSNormGated.Config
-        out_proj: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.key_head_dim = config.key_head_dim
-        self.value_head_dim = config.value_head_dim
-        self.conv_kernel_size = config.conv_kernel_size
-
-        value_dim = config.in_proj_v.out_features
-
-        self.in_proj_q = config.in_proj_q.build()
-        self.in_proj_k = config.in_proj_k.build()
-        self.in_proj_v = config.in_proj_v.build()
-        self.in_proj_z = config.in_proj_z.build()
-        self.in_proj_a = config.in_proj_a.build()
-        self.in_proj_b = config.in_proj_b.build()
-
-        self.conv_q = config.conv_q.build()
-        self.conv_k = config.conv_k.build()
-        self.conv_v = config.conv_v.build()
-
-        n_value_heads = value_dim // config.value_head_dim
-        self.A_log = nn.Parameter(torch.empty(n_value_heads))
-        self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
-
-        self.kernel = config.kernel.build()
-        self.norm = config.norm.build()
-        self.out_proj = config.out_proj.build()
-
-    @staticmethod
-    def _local_map_conv(
-        x: DTensor,
-        conv: Conv1d,
-        conv_fn: Callable[..., torch.Tensor],
-        *extra_args: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run a depthwise, channel-sharded conv on local shards via local_map.
-
-        ``conv_fn`` receives the local (x, weight, *extra_args) tensors. Trailing
-        ``extra_args`` (e.g. ``cu_seqlens``) are plain replicated tensors passed
-        through with a ``None`` placement (unmapped). Input is channel-sharded
-        and the weight is ``Shard(0)``; DTensor-ness and gradient placements are
-        restored explicitly.
-        """
-        x_plc = x.placements
-        w = conv.weight
-        w_plc = w.placements  # pyrefly: ignore [missing-attribute]
-        extra_plc = (None,) * len(extra_args)
-        conv_dt = local_map(
-            conv_fn,
-            out_placements=(x_plc,),
-            in_placements=(x_plc, w_plc, *extra_plc),
-            in_grad_placements=(x_plc, w_plc, *extra_plc),
-            device_mesh=x.device_mesh,
-        )
-        return conv_dt(x, w, *extra_args)  # pyrefly: ignore
-
-    def _causal_conv(
-        self,
-        x_TD: torch.Tensor,
-        conv: Conv1d,
-        cu_seqlens: torch.Tensor | None = None,
-        cu_seqlens_cpu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if cu_seqlens is not None:
-            if isinstance(x_TD, DTensor):
-
-                def _conv_varlen(
-                    x_local_TD: torch.Tensor,
-                    w_local: torch.Tensor,
-                    cu_seqlens_local: torch.Tensor,
-                ) -> torch.Tensor:
-                    return _causal_conv1d_varlen(
-                        x_local_TD,
-                        w_local,
-                        cu_seqlens_local,
-                        cu_seqlens_cpu,
-                    )
-
-                return self._local_map_conv(x_TD, conv, _conv_varlen, cu_seqlens)
-            return _causal_conv1d_varlen(
-                x_TD,
-                conv.weight,
-                cu_seqlens,
-                cu_seqlens_cpu,
-            )
-
-        x_BDT = F.pad(
-            x_TD.transpose(0, 1).unsqueeze(0),
-            [self.conv_kernel_size - 1, 0],
-        )
-        if isinstance(x_BDT, DTensor):
-            # TODO: Remove once the DTensor Conv1d dispatch fix for sharded
-            # groups lands in a released torch.
-            def _conv(x_local_BDT: torch.Tensor, w_local: torch.Tensor) -> torch.Tensor:
-                # groups == local out-channels (depthwise, channel-sharded)
-                return F.conv1d(
-                    x_local_BDT,
-                    w_local,
-                    None,
-                    conv.stride,
-                    conv.padding,
-                    conv.dilation,
-                    w_local.size(0),
-                )
-
-            x_BDT = self._local_map_conv(x_BDT, conv, _conv)
-        else:
-            x_BDT = conv(x_BDT)
-        return F.silu(x_BDT).squeeze(0).transpose(0, 1)
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-    ) -> torch.Tensor:
-        num_tokens = x_TD.shape[0]
-        cu_seqlens = None
-        cu_seqlens_cpu = None
-        if attention_masks is not None:
-            # FLA caches varlen index helpers by tensor identity. A fresh
-            # tensor keeps forward and activation-checkpoint recompute on the
-            # same path.
-            with spmd.local():
-                cu_seqlens = attention_masks.cu_seq_q.clone()
-            cu_seqlens_host = attention_masks.cu_seq_q_host
-            if cu_seqlens_host is None:
-                raise ValueError(
-                    "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
-                    "metadata. Build VarlenMetadata with include_host_offsets=True."
-                )
-            # Keep host metadata as Python values in VarlenMetadata so
-            # SelectiveAC does not treat integer CPU tensors as checkpoint
-            # inputs; build the FLA API tensor at the DeltaNet boundary.
-            cu_seqlens_cpu = torch.tensor(
-                cu_seqlens_host,
-                dtype=cu_seqlens.dtype,
-                device="cpu",
-            )
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                spmd.mutate_type(cu_seqlens_cpu, "dp", src=spmd.R, dst=spmd.V)
-
-        # Shapes:
-        #   xq_TNK, xk_TNK: (T, n_key_heads, key_head_dim)
-        #   xv_TNV, xz_TNV: (T, n_value_heads, value_head_dim)
-        #   xa_TN, xb_TN: (T, n_value_heads)
-        xq_TNK = self._causal_conv(
-            self.in_proj_q(x_TD),
-            self.conv_q,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(num_tokens, -1, self.key_head_dim)
-        xk_TNK = self._causal_conv(
-            self.in_proj_k(x_TD),
-            self.conv_k,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(num_tokens, -1, self.key_head_dim)
-        xv_TNV = self._causal_conv(
-            self.in_proj_v(x_TD),
-            self.conv_v,
-            cu_seqlens,
-            cu_seqlens_cpu,
-        ).view(num_tokens, -1, self.value_head_dim)
-        xz_TNV = self.in_proj_z(x_TD).view(num_tokens, -1, self.value_head_dim)
-        xa_TN = self.in_proj_a(x_TD)
-        xb_TN = self.in_proj_b(x_TD)
-
-        # Gating signals have shape (T, n_value_heads).
-        g_TN = -torch.exp(self.A_log.float()) * F.softplus(xa_TN.float() + self.dt_bias)
-        beta_TN = torch.sigmoid(xb_TN)
-
-        out_TNV = self.kernel(
-            xq_TNK,
-            xk_TNK,
-            xv_TNV,
-            g_TN,
-            beta_TN,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
-        )
-
-        out_TNV = self.norm(out_TNV, xz_TNV)
-
-        out_TD = out_TNV.reshape(num_tokens, -1)
-        return self.out_proj(out_TD)
 
 
 class Qwen35Attention(BaseAttention):
@@ -679,6 +301,7 @@ class Qwen35Model(Decoder):
 
             set_qwen35_sharding_config(
                 self,
+                enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
@@ -783,7 +406,7 @@ class Qwen35Model(Decoder):
         pixel_values_videos: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run vision encoder, scatter vision into text.
 
@@ -798,18 +421,19 @@ class Qwen35Model(Decoder):
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
         """
-        image_token_id = special_tokens["image_id"]
-        video_token_id = special_tokens["video_id"]
-
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
 
         if pixel_values is not None and grid_thw is not None:
+            if special_tokens is None:
+                raise ValueError("special_tokens is required for image inputs")
             vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values, grid_thw=grid_thw
             )
-            image_positions = get_vision_positions(tokens, num_tokens, image_token_id)
+            image_positions = get_vision_positions(
+                tokens, num_tokens, special_tokens["image_id"]
+            )
             if image_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
@@ -818,10 +442,14 @@ class Qwen35Model(Decoder):
                 )
 
         if pixel_values_videos is not None and grid_thw_videos is not None:
+            if special_tokens is None:
+                raise ValueError("special_tokens is required for video inputs")
             vision_embeds, num_tokens = self._get_vision_embeds(
                 pixel_values_videos, grid_thw=grid_thw_videos
             )
-            video_positions = get_vision_positions(tokens, num_tokens, video_token_id)
+            video_positions = get_vision_positions(
+                tokens, num_tokens, special_tokens["video_id"]
+            )
             if video_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
@@ -868,7 +496,11 @@ class Qwen35Model(Decoder):
                 x = tokens
 
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+            spmd.assert_type(
+                x,
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                spmd.PartitionSpec(("dp", "cp"), None),
+            )
 
         # 3D MRoPE positions for multimodal batches, else 2D text positions.
         rope_positions = mrope_positions if mrope_positions is not None else positions

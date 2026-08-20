@@ -47,7 +47,7 @@ class FluxTrainer(Trainer):
         # transformations such as prompt dropout use Grain's separate RNG.
         distinct_seed_mesh_dims = (
             ["cp", "dp_shard", "dp_replicate"]
-            if config.parallelism.spmd_backend in ("full_dtensor", "spmd_types")
+            if config.parallelism.spmd_backend == "spmd_types"
             else ["fsdp", "dp_replicate"]
         )
         dist_utils.set_determinism(
@@ -297,7 +297,6 @@ class FluxTrainer(Trainer):
         if self.gradient_accumulation_steps > 1:
             raise ValueError("FLUX doesn't support gradient accumulation for now.")
 
-        # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
         loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
