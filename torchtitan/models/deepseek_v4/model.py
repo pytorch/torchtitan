@@ -8,8 +8,11 @@ import dataclasses as dc
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.protocols.module import Module
 
 from .mhc import HcHead, HcPost, HcPre
 
@@ -80,6 +83,75 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         return x
 
 
+class MTPBlock(Module):
+    """Auxiliary multi-token prediction block for DeepSeek V4."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        block: DeepSeekV4TransformerBlock.Config
+        dim: int
+        hc_mult: int = 4
+        norm_eps: float = 1e-6
+        eps: float = 1e-6
+        e_proj: Linear.Config
+        h_proj: Linear.Config
+        enorm: RMSNorm.Config
+        hnorm: RMSNorm.Config
+        norm: RMSNorm.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        cfg = config
+        self.block = cfg.block.build()
+        self.e_proj = cfg.e_proj.build()
+        self.h_proj = cfg.h_proj.build()
+        self.enorm = cfg.enorm.build()
+        self.hnorm = cfg.hnorm.build()
+        self.norm = cfg.norm.build()
+        self.hc_mult = cfg.hc_mult
+        self.dim = cfg.dim
+        self.norm_eps = cfg.norm_eps
+        self.eps = cfg.eps
+        hc_dim = self.hc_mult * self.dim
+        self.hc_head_fn = torch.nn.Parameter(
+            torch.empty(self.hc_mult, hc_dim, dtype=torch.float32)
+        )
+        self.hc_head_base = torch.nn.Parameter(
+            torch.empty(self.hc_mult, dtype=torch.float32)
+        )
+        self.hc_head_scale = torch.nn.Parameter(torch.empty(1, dtype=torch.float32))
+        self.embed: Linear | None = None
+        self.head: Linear | None = None
+
+    def _merge_hc(self, x: torch.Tensor) -> torch.Tensor:
+        shape, dtype = x.size(), x.dtype
+        x = x.flatten(2).float()
+        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x, self.hc_head_fn.float()) * rsqrt
+        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.eps
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+        return y.to(dtype)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.embed is None or self.head is None:
+            raise ValueError("MTPBlock requires embed and head references")
+
+        e = self.embed(input_ids)
+        e = self.enorm(e)
+        x = self.hnorm(x)
+        x = self.e_proj(e).unsqueeze(2) + self.h_proj(x)
+        x = self.block(x, input_ids, attention_masks, positions)
+        x = self._merge_hc(x)
+        x = self.norm(x)
+        return self.head(x.float())
+
+
 class DeepSeekV4Model(Decoder):
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
 
@@ -88,10 +160,12 @@ class DeepSeekV4Model(Decoder):
         dim: int
         vocab_size: int
         hc_mult: int = 4
+        n_mtp_layers: int = 0
         compress_ratios: tuple[int, ...] = (1, 1, 4, 4)
         n_layers: int = 4
         norm_eps: float = 1e-6
         hc_head: HcHead.Config
+        mtp_layers: list[MTPBlock.Config] | None = None
 
         def update_from_config(self, *, config, **kwargs):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -156,7 +230,7 @@ class DeepSeekV4Model(Decoder):
                 for n, p in model.named_parameters()
                 if p.requires_grad and "tok_embeddings" not in n and "lm_head" not in n
             )
-            n_layers = self.n_layers
+            n_layers = self.n_layers + self.n_mtp_layers
             head_dim = self.layers[0].attention.head_dim
             n_heads = self.layers[0].attention.n_heads
             flops_per_token = (
@@ -169,10 +243,19 @@ class DeepSeekV4Model(Decoder):
         cfg = config
 
         self.hc_mult = cfg.hc_mult
+        self.n_mtp_layers = cfg.n_mtp_layers
         self.compress_ratios = list(cfg.compress_ratios)[: cfg.n_layers]
         self.n_main_layers = cfg.n_layers
 
         self.hc_head = cfg.hc_head.build()
+        self.mtp_layers = torch.nn.ModuleList()
+        if cfg.mtp_layers is not None:
+            self.mtp_layers = torch.nn.ModuleList(
+                mtp_layer.build() for mtp_layer in cfg.mtp_layers
+            )
+            for mtp_layer in self.mtp_layers:
+                mtp_layer.embed = self.tok_embeddings
+                mtp_layer.head = self.lm_head
 
     def get_attention_masks(self, positions):
         return None
@@ -210,3 +293,17 @@ class DeepSeekV4Model(Decoder):
             return h
         output = self.lm_head(h.float()) if self.lm_head is not None else h
         return output
+
+    def mtp_forward(
+        self,
+        h: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> list[torch.Tensor]:
+        """Run all auxiliary MTP blocks and return their logits."""
+        return [
+            mtp_block(h, input_ids, attention_masks, positions)
+            for mtp_block in self.mtp_layers
+        ]
+

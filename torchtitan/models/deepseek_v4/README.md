@@ -7,6 +7,7 @@ training configs are exposed from `torchtitan.models.deepseek_v4.config_registry
 The currently registered configs are:
 
 - `deepseek_v4_debugmodel`
+- `deepseek_v4_mtp_debugmodel`
 - `deepseek_v4_flash`
 - `deepseek_v4_pro`
 
@@ -45,6 +46,7 @@ To exercise the `spmd_types` backend, add:
 ## Status
 
 The debug model has been smoke-tested with 4 GPUs using FSDP2, TP2, EP2, and the
-`spmd_types` backend. Checkpoint compatibility and larger-scale convergence
+`spmd_types` backend. The optional MTP path is available through
+`deepseek_v4_mtp_debugmodel`. Checkpoint compatibility and larger-scale convergence
 validation should be verified before using the larger configs for production
 training.
