@@ -851,9 +851,9 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
-            inner_attn,
+            attention_backend,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
@@ -904,7 +904,7 @@ class VLLMGenerator(Actor, Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attn, FlexAttention.Config)
+                    if isinstance(attention_backend, FlexAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),
