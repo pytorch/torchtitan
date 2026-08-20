@@ -974,8 +974,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
             # Keep the check and optimizer kernels ordered on the device without
-            # synchronizing the host on every step. A failed CUDA assertion
-            # invalidates the process before later kernels can update parameters.
+            # synchronizing the host on every step. The RuntimeError is catchable
+            # on CPU, while a failed CUDA assertion invalidates the process.
             torch._assert_async(
                 step_is_finite,
                 "Loss or gradient norm is not finite on at least one rank at "
