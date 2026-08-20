@@ -133,6 +133,13 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             dp_degree, dp_rank = 1, 0
         self.dp_degree, self.dp_rank = dp_degree, dp_rank
 
+        # Resolve the global batch size early so model configs (e.g. aux-loss
+        # denominators) see it during update_from_config below.
+        if config.training.global_batch_size < 0:
+            config.training.global_batch_size = (
+                config.training.local_batch_size * dp_degree
+            )
+
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq, debug=config.training.gc_debug
@@ -181,10 +188,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * dp_degree
         assert global_batch_size > 0
         assert (
             global_batch_size % (config.training.local_batch_size * dp_degree) == 0
