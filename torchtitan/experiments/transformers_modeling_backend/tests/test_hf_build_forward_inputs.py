@@ -29,7 +29,6 @@ def _run(m: HFTransformerModel):
         m.preprocess_inputs(
             batch,
             parallel_dims=pd,
-            device=torch.device("cpu"),
             parallelism=ParallelismConfig(),
         ),
         B,

@@ -58,7 +58,6 @@ class BaseModel(Module):
         input_dict: dict[str, torch.Tensor],
         *,
         parallel_dims: ParallelDims,
-        device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Prepare the forward inputs from a dataloader batch.

@@ -155,7 +155,6 @@ class Validator(BaseValidator):
         ).preprocess_inputs(
             {**input_dict, "labels": labels},
             parallel_dims=self.parallel_dims,
-            device=input_dict["input"].device,
             parallelism=self.parallelism,
         )
         return inputs, labels, extra_kwargs

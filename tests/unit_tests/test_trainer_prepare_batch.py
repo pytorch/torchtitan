@@ -21,7 +21,6 @@ def test_prepare_batch_accumulates_tokens_and_returns_triple():
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
         parallel_dims="PD",
-        device="cpu",
         config=SimpleNamespace(parallelism="PARA"),
         ntokens_seen=100,
     )
@@ -30,4 +29,4 @@ def test_prepare_batch_accumulates_tokens_and_returns_triple():
     assert extra == {"positions": 1}
     assert labels.numel() == 7
     assert fake.ntokens_seen == 107  # labels.numel() (7) folded in
-    assert captured == {"parallel_dims": "PD", "device": "cpu", "parallelism": "PARA"}
+    assert captured == {"parallel_dims": "PD", "parallelism": "PARA"}

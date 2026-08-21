@@ -338,7 +338,6 @@ class Decoder(BaseModel):
         input_dict: dict[str, torch.Tensor],
         *,
         parallel_dims: ParallelDims,
-        device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""

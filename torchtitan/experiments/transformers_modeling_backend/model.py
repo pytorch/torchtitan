@@ -1047,7 +1047,6 @@ class HFTransformerModel(BaseModel):
         input_dict: dict[str, torch.Tensor],
         *,
         parallel_dims: ParallelDims,
-        device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""

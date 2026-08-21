@@ -348,7 +348,6 @@ class Qwen35Model(Decoder):
         input_dict: dict[str, torch.Tensor],
         *,
         parallel_dims: ParallelDims,
-        device: torch.device,
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""

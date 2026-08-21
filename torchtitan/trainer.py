@@ -703,7 +703,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ).preprocess_inputs(
             {**input_dict, "labels": labels},
             parallel_dims=self.parallel_dims,
-            device=self.device,
             parallelism=self.config.parallelism,
         )
         self.ntokens_seen += labels.numel()
