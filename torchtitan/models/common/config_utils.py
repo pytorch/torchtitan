@@ -37,6 +37,7 @@ from torchtitan.models.common.moe import (
     GroupedExperts,
     MoE,
     RoutedExperts,
+    SeqwiseLoadBalanceLoss,
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -315,14 +316,24 @@ def make_moe_config(
     routed_experts: RoutedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    aux_loss = (
+        SeqwiseLoadBalanceLoss.Config(
+            coeff=aux_loss_coeff,
+            top_k=router.top_k,
+        )
+        if aux_loss_coeff is not None
+        else None
+    )
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
         router=router,
         routed_experts=routed_experts,
         shared_experts=shared_experts,
+        aux_loss=aux_loss,
     )
 
 

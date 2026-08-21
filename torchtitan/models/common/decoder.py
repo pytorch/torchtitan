@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
+from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -223,6 +224,18 @@ class Decoder(BaseModel):
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
                         )
+
+                # Per-step normalization denominator, set before build.
+                for _fqn, aux_loss_cfg, _parent, _attr in self.traverse(
+                    LoggedAuxLoss.Config
+                ):
+                    # pyrefly: ignore [missing-attribute]
+                    aux_loss_cfg.per_step_denominator = {
+                        "token": config.training.global_batch_size
+                        * config.training.seq_len,
+                        "sequence": config.training.global_batch_size,
+                        "batch": 1,  # O(1) global-batch statistic
+                    }[aux_loss_cfg.aggregation_level]
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

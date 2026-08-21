@@ -358,6 +358,52 @@ class TestSpmdLayout(DTensorTestBase):
                         )
                     )
 
+    def test_accepts_multi_axis_pure_reduction(self):
+        """Multi-axis Partial -> Invariant moves are expressible: sequential
+        all-reduces over distinct axes are order-independent and semantics
+        preserving."""
+        spmd_validate_redistributions(
+            ShardingConfig(
+                out_src_shardings=SpmdLayout(
+                    {
+                        MeshAxisName.DP: spmd.S(0),
+                        MeshAxisName.CP: spmd.P,
+                        MeshAxisName.TP: spmd.P,
+                    }
+                ),
+                out_dst_shardings=SpmdLayout(
+                    {
+                        MeshAxisName.DP: spmd.S(0),
+                        MeshAxisName.CP: spmd.I,
+                        MeshAxisName.TP: spmd.I,
+                    }
+                ),
+            )
+        )
+
+    def test_rejects_multi_axis_mixed_reduction(self):
+        """Multi-axis moves mixing a pure reduction with a shard change (or a
+        PartitionSpec) remain unsupported."""
+        with self.assertRaises(ValueError):
+            spmd_validate_redistributions(
+                ShardingConfig(
+                    out_src_shardings=SpmdLayout(
+                        {
+                            MeshAxisName.DP: spmd.S(0),
+                            MeshAxisName.CP: spmd.P,
+                            MeshAxisName.TP: spmd.P,
+                        }
+                    ),
+                    out_dst_shardings=SpmdLayout(
+                        {
+                            MeshAxisName.DP: spmd.R,
+                            MeshAxisName.CP: spmd.I,
+                            MeshAxisName.TP: spmd.I,
+                        }
+                    ),
+                )
+            )
+
     @with_comms
     def test_partition_spec_order_controls_state_shard(self):
         """Test spmd_distribute_tensor follows PartitionSpec order.
