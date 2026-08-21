@@ -38,7 +38,7 @@ pip install av torchvision
 | FSDP / HSDP | Decoder sharded per-layer. Without PP, the vision encoder is a separate FSDP unit; with PP, it belongs to the first-stage root FSDP unit |
 | Tensor Parallelism (TP) | Model support exists, but DistMuon recipes currently reject TP-produced `_StridedShard` layouts ([#3353](https://github.com/pytorch/torchtitan/issues/3353)) |
 | Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts. DistMuon preserves the EP-axis `Shard(0)` storage placement while redistributing the EFSDP-axis storage placement from `Shard(1)` to compute `Shard(0)` ordered after EP when `efsdp_size * ep_size > num_experts` ([#4122](https://github.com/pytorch/torchtitan/pull/4122)) |
-| Pipeline Parallel (PP) | Vision encoder folded into the first stage; 1F1B and Interleaved1F1B schedules |
+| Pipeline Parallel (PP) | Vision encoder folded into the first stage; 1F1B and Interleaved1F1B schedules. DistMuon additionally requires every stage to own at least one transformer layer: a stage holding only `norm` and `lm_head` has no Muon matrices, so its param group is empty and the optimizer build fails with `matched no parameters`. This needs the stage count to approach the layer count (61 for Kimi K2), so it does not arise at realistic depths |
 
 ## Numerical Checks
 
