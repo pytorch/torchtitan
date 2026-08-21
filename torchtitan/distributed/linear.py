@@ -44,7 +44,6 @@ def ensure_symm_mem_ops():
     return symm_mem
 
 
-@spmd.register_autograd_function
 class AllGatherLinear(torch.autograd.Function):
     """All-gather the sequence shard, then apply a column-parallel linear.
 
@@ -80,32 +79,32 @@ class AllGatherLinear(torch.autograd.Function):
     """
 
     @staticmethod
-    def typecheck_forward(
+    def spmd_typecheck(
+        result: torch.Tensor,
+        *,
         x_shard_m: torch.Tensor,
         w_shard_n: torch.Tensor,
         bias_shard_n: torch.Tensor | None,
-        group: dist.ProcessGroup,
         group_name: str,
-    ) -> torch.Tensor:
+    ) -> None:
         """SPMD type: x S(0)@TP, w S(0)@TP -> y S(1)@TP.
 
         The gather consumes the row shard, so the result is full on rows; the
         weight's output-feature shard survives the GEMM. Non-TP axes pass through
         from x.
         """
-        spmd.assert_type(x_shard_m, {group: spmd.S(0)})
+        spmd.assert_type(x_shard_m, {group_name: spmd.S(0)})
         # S(0), not S(1), even though this is the column-parallel direction: torch
         # stores the weight as [N, K] while the mental model of the GEMM is [K, N],
         # so sharding the output features N is dim 0 of what is actually stored.
-        spmd.assert_type(w_shard_n, {group: spmd.S(0)})
+        spmd.assert_type(w_shard_n, {group_name: spmd.S(0)})
         if bias_shard_n is not None:
-            spmd.assert_type(bias_shard_n, {group: spmd.S(0)})
-        result = AllGatherLinear.apply(
-            x_shard_m, w_shard_n, bias_shard_n, group, group_name
+            spmd.assert_type(bias_shard_n, {group_name: spmd.S(0)})
+        spmd.assert_local_type_like(
+            result,
+            x_shard_m,
+            {group_name: spmd.S(1)},  # pyrefly: ignore [bad-argument-type]
         )
-        output_type = {**spmd.get_local_type(x_shard_m), group: spmd.S(1)}
-        spmd.assert_type(result, output_type)
-        return result
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
@@ -183,7 +182,6 @@ class AllGatherLinear(torch.autograd.Function):
         return grad_x_shard_m, grad_w_shard_n, grad_bias, None, None
 
 
-@spmd.register_autograd_function
 class AllGatherLinearMulti(torch.autograd.Function):
     """One all-gather feeding a pair of column-parallel linears on the same input.
 
@@ -282,29 +280,28 @@ class AllGatherLinearMulti(torch.autograd.Function):
         )
 
     @staticmethod
-    def typecheck_forward(
+    def spmd_typecheck(
+        results: tuple[torch.Tensor, torch.Tensor],
+        *,
         x_shard_m: torch.Tensor,
         wa_shard_n: torch.Tensor,
         wb_shard_n: torch.Tensor,
-        group: dist.ProcessGroup,
         group_name: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> None:
         """SPMD type: x S(0)@TP, both w S(0)@TP -> both y S(1)@TP."""
-        spmd.assert_type(x_shard_m, {group: spmd.S(0)})
+        spmd.assert_type(x_shard_m, {group_name: spmd.S(0)})
         # S(0) for the column-parallel direction; see AllGatherLinear for why the
         # stored [N, K] layout inverts the dim you would expect.
-        spmd.assert_type(wa_shard_n, {group: spmd.S(0)})
-        spmd.assert_type(wb_shard_n, {group: spmd.S(0)})
-        results = AllGatherLinearMulti.apply(
-            x_shard_m, wa_shard_n, wb_shard_n, group, group_name
-        )
-        output_type = {**spmd.get_local_type(x_shard_m), group: spmd.S(1)}
+        spmd.assert_type(wa_shard_n, {group_name: spmd.S(0)})
+        spmd.assert_type(wb_shard_n, {group_name: spmd.S(0)})
         for result in results:
-            spmd.assert_type(result, output_type)
-        return results
+            spmd.assert_local_type_like(
+                result,
+                x_shard_m,
+                {group_name: spmd.S(1)},  # pyrefly: ignore [bad-argument-type]
+            )
 
 
-@spmd.register_autograd_function
 class LinearReduceScatter(torch.autograd.Function):
     """Apply a row-parallel linear, then reduce-scatter over the sequence.
 
@@ -329,32 +326,32 @@ class LinearReduceScatter(torch.autograd.Function):
     """
 
     @staticmethod
-    def typecheck_forward(
+    def spmd_typecheck(
+        result: torch.Tensor,
+        *,
         x_shard_k: torch.Tensor,
         w_shard_k: torch.Tensor,
         bias: torch.Tensor | None,
-        group: dist.ProcessGroup,
         group_name: str,
-    ) -> torch.Tensor:
+    ) -> None:
         """SPMD type: x S(1)@TP, w S(1)@TP, bias R@TP -> y S(0)@TP.
 
         The local matmul is a partial sum over the sharded K; the reduce-scatter
         completes it and shards rows instead. Non-TP axes pass through from x.
         """
-        spmd.assert_type(x_shard_k, {group: spmd.S(1)})
+        spmd.assert_type(x_shard_k, {group_name: spmd.S(1)})
         # S(1), the mirror of AllGatherLinear's S(0): torch stores the weight as
         # [N, K] while the mental model of the GEMM is [K, N], so sharding the
         # input features K -- the row-parallel direction -- is dim 1 of what is
         # actually stored.
-        spmd.assert_type(w_shard_k, {group: spmd.S(1)})
+        spmd.assert_type(w_shard_k, {group_name: spmd.S(1)})
         if bias is not None:
-            spmd.assert_type(bias, {group: spmd.R})
-        result = LinearReduceScatter.apply(
-            x_shard_k, w_shard_k, bias, group, group_name
+            spmd.assert_type(bias, {group_name: spmd.R})
+        spmd.assert_local_type_like(
+            result,
+            x_shard_k,
+            {group_name: spmd.S(0)},  # pyrefly: ignore [bad-argument-type]
         )
-        output_type = {**spmd.get_local_type(x_shard_k), group: spmd.S(0)}
-        spmd.assert_type(result, output_type)
-        return result
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
