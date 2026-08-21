@@ -79,22 +79,21 @@ def vision_colwise_config(
 
 def vision_scaled_bias_rowwise_config() -> ShardingConfig:
     """Scaled-bias rowwise vision linear returning a TP-invariant activation."""
+    input_layout = SpmdLayout({DP: spmd.V, TP: spmd.S(1)})
     return ShardingConfig(
         state_shardings={
             "weight": SpmdLayout({DP: spmd.R, TP: spmd.S(1)}),
             "bias": SpmdLayout({DP: spmd.R, TP: spmd.R}),
         },
         in_src_shardings={
-            "input": SpmdLayout({DP: spmd.V, TP: spmd.S(2)}),
+            "input": input_layout,
         },
         in_dst_shardings={
-            "input": SpmdLayout({DP: spmd.V, TP: spmd.S(2)}),
+            "input": input_layout,
         },
         out_src_shardings=SpmdLayout({DP: spmd.V, TP: spmd.P}),
         out_dst_shardings=SpmdLayout({DP: spmd.V, TP: spmd.I}),
-        local_map=LocalMapConfig(
-            in_grad_placements=(SpmdLayout({DP: spmd.V, TP: spmd.S(2)}),)
-        ),
+        local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
     )
 
 

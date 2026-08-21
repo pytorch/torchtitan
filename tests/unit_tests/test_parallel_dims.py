@@ -32,8 +32,10 @@ from torchtitan.distributed.spmd_types import (
     spmd_validate_redistributions,
 )
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     dense_activation_placement,
     dense_sequence_parallel_placement,
+    token_id_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
@@ -259,6 +261,20 @@ class TestSpmdLayout(DTensorTestBase):
             },
         )
 
+    def test_decoder_layout_partition_spec_ranks(self):
+        self.assertEqual(
+            token_id_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP),),
+        )
+        self.assertEqual(
+            dense_activation_placement(tp=spmd.R, cp=spmd.S(0)).partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP), None),
+        )
+        self.assertEqual(
+            attention_activation_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP), MeshAxisName.TP, None),
+        )
+
     def test_unfold_dp_axes(self):
         """Logical DP expands only when resolving concrete mesh axes."""
         self.assertEqual(
@@ -420,7 +436,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
         x = torch.ones(2, 2, device=self.device_type)
         src = dense_sequence_parallel_placement()
-        dst = dense_activation_placement(tp=spmd.I)
+        dst = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
 
         comm_mode = CommDebugMode()
         with comm_mode:
@@ -432,7 +448,7 @@ class TestSpmdLayout(DTensorTestBase):
             )
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
-        self.assertTrue(torch.equal(result, torch.ones(2, 8, device=self.device_type)))
+        self.assertTrue(torch.equal(result, torch.ones(8, 2, device=self.device_type)))
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):
@@ -506,6 +522,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
 
         # Test mesh building
@@ -573,6 +590,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
         parallel_dims.build_mesh()
 
@@ -611,71 +629,45 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertTrue(parallel_dims.dp_shard_enabled)
 
 
-class TestSpmdMeshesLegacy(DTensorTestBase):
-    """spmd_meshes() under non-full_dtensor."""
+class TestDenseStorageAxes(DTensorTestBase):
+    """Which dense storage axes each backend exposes."""
 
     @property
     def world_size(self):
         return 8
 
+    def _build(self, spmd_backend: str) -> ParallelDims:
+        pd = ParallelDims(
+            dp_replicate=2,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=8,
+            spmd_backend=spmd_backend,
+        )
+        pd.build_mesh()
+        return pd
+
     @with_comms
-    def test_legacy_spmd_meshes(self):
+    def test_partial_dtensor_flattens_dp_shard_into_fsdp(self):
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
-            pd = ParallelDims(
-                dp_replicate=2,
-                dp_shard=2,
-                cp=1,
-                tp=2,
-                pp=1,
-                ep=1,
-                world_size=8,
-                spmd_backend="default",
-            )
-            pd.build_mesh()
-
-            # Legacy mode pre-flattens dp_shard+cp into 'fsdp'; dp_shard
-            # never appears as a single-axis mesh, so must not appear in any
-            # SPMD mesh either.
-            meshes = pd.spmd_meshes()
-            flat = {axis for m in meshes for axis in (m.mesh_dim_names or ())}
-            self.assertNotIn("dp_shard", flat)
-            # Dense mesh names ``fsdp`` (the storage axis) instead of
-            # ``dp_shard`` / ``cp`` under legacy.
-            dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
-            self.assertEqual(set(dense.mesh_dim_names), {"dp_replicate", "fsdp", "tp"})
-
-
-class TestSpmdMeshesFullDTensor(DTensorTestBase):
-    """spmd_meshes() under full_dtensor."""
-
-    @property
-    def world_size(self):
-        return 8
+            axes = self._build("partial_dtensor").get_all_one_dimensional_meshes()
+            self.assertIn("fsdp", axes)
+            self.assertNotIn("dp_shard", axes)
 
     @with_comms
-    def test_full_dtensor_spmd_meshes(self):
+    def test_spmd_types_keeps_dp_shard_separate(self):
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
-            pd = ParallelDims(
-                dp_replicate=2,
-                dp_shard=2,
-                cp=1,
-                tp=2,
-                pp=1,
-                ep=1,
-                world_size=8,
-                spmd_backend="full_dtensor",
-            )
-            pd.build_mesh()
-
-            # Dense mesh keeps dp_shard separate (no 'fsdp' flatten), in
-            # canonical outer-to-inner order; cp filtered out (disabled).
-            meshes = pd.spmd_meshes()
-            dense = next(m for m in meshes if "tp" in (m.mesh_dim_names or ()))
-            self.assertEqual(dense.mesh_dim_names, ("dp_replicate", "dp_shard", "tp"))
+            axes = self._build("spmd_types").get_all_one_dimensional_meshes()
+            self.assertNotIn("fsdp", axes)
+            self.assertIn("dp", axes)
+            self.assertIn("dp_shard", axes)
 
 
 class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
@@ -699,6 +691,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                spmd_backend="partial_dtensor",
             )
             pd.build_mesh()
 
@@ -769,6 +762,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                spmd_backend="partial_dtensor",
             )
 
             # Test mesh building
@@ -940,7 +934,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             p.data = p.data.to(torch.bfloat16)
 
         tokens = torch.randint(
-            0, model_config.vocab_size, (2, 32), device=self.device_type
+            0, model_config.vocab_size, (64,), device=self.device_type
         )
         for iter_idx in range(10):
             optim.zero_grad(set_to_none=(iter_idx % 2 == 0))

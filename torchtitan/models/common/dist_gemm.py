@@ -14,8 +14,8 @@ move the TP collective into the GEMM, over the autograd Functions in
 FFN's ``w2``; nothing about the primitives is attention-specific, and MoE
 projections could use the same pair.
 
-What lives here is the wiring -- the reshaping around each collective, and the
-fallbacks -- while ``torchtitan/distributed/linear.py`` holds the collective+GEMM math itself.
+What lives here is the wiring around each collective and the fallbacks, while
+``torchtitan/distributed/linear.py`` holds the collective+GEMM math itself.
 
 Selected by passing ``tp_gemm_backend="dist_gemm"`` to ``make_gqa_config`` or
 ``make_ffn_config`` (see ``config_utils.py``), which also drops the boundary
@@ -127,34 +127,21 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
             _warn_once_unfused()
             return super().forward(x)
 
-        bsz, _, dim = x.shape
-        # The all-gather concatenates whole per-rank blocks, so the rows it
-        # produces are ordered (rank, batch, seq_local). Flattening [B, S/W, D]
-        # directly would therefore be reinterpreted as (batch, seq) and mix
-        # batches together for bsz > 1. Put the sequence outermost first so the
-        # gathered rows really are (seq, batch) row-major.
-        x_seq_major = x.transpose(0, 1).reshape(-1, dim).contiguous()
-        qkv_flat = AllGatherLinear.apply(
-            x_seq_major,
+        qkv = AllGatherLinear.apply(
+            x,
             self.wqkv.weight,
             self.wqkv.bias,
             tp_group,
             tp_group.group_name,
         )
 
-        full_seqlen = qkv_flat.shape[0] // bsz
-        qkv = qkv_flat.view(
-            full_seqlen,
-            bsz,
-            -1,
-            self.r_dim,
-            self.head_dim,
-        ).transpose(0, 1)
+        num_tokens = qkv.shape[0]
+        qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
         xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
         return (
-            xq.reshape(bsz, full_seqlen, -1, self.head_dim).contiguous(),
-            xk.reshape(bsz, full_seqlen, -1, self.head_dim).contiguous(),
-            xv.reshape(bsz, full_seqlen, -1, self.head_dim).contiguous(),
+            xq.reshape(num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(num_tokens, -1, self.head_dim).contiguous(),
         )
 
 
@@ -179,21 +166,13 @@ class RowParallelLinear(Linear):
             _warn_once_unfused()
             return super().forward(input)
 
-        bsz, seqlen, k_local = input.shape
-        world_size = tp_group.size()
-        # Reduce-scatter splits the flattened rows, so put the sequence outermost
-        # first or the split would cut across batches instead of the sequence.
-        # Feeding 2D with scatter_dim=0 is also what lets the operator take its
-        # fused schedules, which it declines for a 3D input.
-        x_seq_major = input.transpose(0, 1).reshape(-1, k_local).contiguous()
-        y_flat = LinearReduceScatter.apply(
-            x_seq_major,
+        return LinearReduceScatter.apply(
+            input,
             self.weight,
             self.bias,
             tp_group,
             tp_group.group_name,
         )
-        return y_flat.view(seqlen // world_size, bsz, -1).transpose(0, 1).contiguous()
 
 
 class AllGatherFusedFeedForward(FeedForward):
@@ -234,12 +213,8 @@ class AllGatherFusedFeedForward(FeedForward):
             _warn_once_unfused()
             return super().forward(x)
 
-        bsz, _, dim = x.shape
-        # Sequence outermost before flattening, so the gathered rows really are
-        # (seq, batch) row-major. See AllGatherFusedQKVLinear for why.
-        x_seq_major = x.transpose(0, 1).reshape(-1, dim).contiguous()
         h1, h3 = AllGatherLinearMulti.apply(
-            x_seq_major,
+            x,
             self.w1.weight,
             self.w3.weight,
             tp_group,
@@ -247,16 +222,13 @@ class AllGatherFusedFeedForward(FeedForward):
         )
         # Elementwise on feature-sharded activations: no collective.
         h = F.silu(h1) * h3
-        y_flat = LinearReduceScatter.apply(
+        return LinearReduceScatter.apply(
             h,
             self.w2.weight,
             self.w2.bias,
             tp_group,
             tp_group.group_name,
         )
-        # y_flat is [S_local * B, dim], sequence-major. Shape comes from y_flat
-        # rather than from x: the collectives change the row count.
-        return y_flat.view(-1, bsz, y_flat.shape[-1]).transpose(0, 1).contiguous()
 
 
 __all__ = [

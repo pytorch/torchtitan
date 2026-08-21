@@ -84,14 +84,14 @@ def build_minimal_trainer(
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-                spmd_backend="default",
+                spmd_backend="partial_dtensor",
             ),
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
         trainer.config = SimpleNamespace(
-            parallelism=SimpleNamespace(spmd_backend="default"),
+            parallelism=SimpleNamespace(spmd_backend="partial_dtensor"),
         )
 
     return trainer
