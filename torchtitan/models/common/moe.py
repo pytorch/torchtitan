@@ -91,21 +91,41 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(
-                A=x_RD.bfloat16(),
-                B_t=w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
-            )
+        gate_RF = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            B_t=w1_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
-        h_RF = h_RF * self._grouped_mm(
+        up_RF = self._grouped_mm(
             A=x_RD.bfloat16(),
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
+        h_RF = self.gate_up_combine(gate_RF, up_RF)
         return self._grouped_mm(
             A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
+
+    def gate_up_combine(
+        self, gate_RF: torch.Tensor, up_RF: torch.Tensor
+    ) -> torch.Tensor:
+        """Combine the gate and up projections. Override for a different GLU variant.
+
+        Default is SwiGLU, which is what this class has always computed, so existing
+        models are unaffected.
+
+        A hook rather than an activation parameter, because the variants that exist are
+        not single-argument activations: gpt_oss clamps BOTH branches at a configured
+        limit, and Kimi K3's SiTU-GLU is ``beta * tanh(g / beta) * sigmoid(g)`` with a
+        second clip on the linear branch, computed in fp32 because the product of two
+        saturating nonlinearities is sensitive to bf16 rounding near the caps. Neither
+        fits ``activation(gate) * up``, and both carry hyperparameters the subclass owns.
+
+        What this removes is the real duplication: a subclass changing this one step
+        previously had to copy the whole forward, grouped-mm calls and SPMD type mutation
+        included, to reach it.
+        """
+        return F.silu(gate_RF) * up_RF
 
     def _grouped_mm(
         self, *, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
@@ -400,10 +420,24 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x_BLD: torch.Tensor,
+        *,
+        router_input_BLD: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Args:
-            x_BLD: Input ``(B, L, D)``.
+            x_BLD: Input ``(B, L, D)`` -- what the experts consume.
+            router_input_BLD: Keyword-only. Optional ``(B, L, D_r)`` routed-on
+                tensor. When None (the default) the router reads ``x_BLD``,
+                which is the conventional MoE. Latent-expert designs route on
+                the full-width token while dispatching a projected, narrower
+                tensor to the experts, so they need the two to differ; only
+                the leading ``(B, L)`` must match. Keyword-only so it stays out
+                of ``_cache_pos_arg_names``: a positional parameter would extend
+                the list that ``LocalMapConfig.in_grad_placements`` is ordered
+                by.
 
         Returns:
             Output ``(B, L, D)``.
@@ -419,11 +453,10 @@ class MoE(Module):
         """
         # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
         # scores_BLE shape (B, L, E)
-        (
-            topk_scores_BLK,
-            topk_expert_ids_BLK,
-            scores_BLE,
-        ) = self.router(x_BLD, self.expert_bias_E)
+        (topk_scores_BLK, topk_expert_ids_BLK, scores_BLE,) = self.router(
+            x_BLD if router_input_BLD is None else router_input_BLD,
+            self.expert_bias_E,
+        )
 
         # Build a one-hot routing map (B, L, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on

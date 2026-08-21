@@ -289,8 +289,15 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
             "expert_bias_E": dense_param_placement(tp=spmd.R),
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
-        in_src_shardings={"x_BLD": sp_layout},
-        in_dst_shardings={"x_BLD": desired_input_layout},
+        # router_input_BLD is optional and skipped when None, but it must be named:
+        # an unnamed input reaches the router unredistributed, so a latent-expert
+        # model passing a Replicate activation would silently route on it while the
+        # gate declares SP.
+        in_src_shardings={"x_BLD": sp_layout, "router_input_BLD": sp_layout},
+        in_dst_shardings={
+            "x_BLD": desired_input_layout,
+            "router_input_BLD": desired_input_layout,
+        },
         out_src_shardings=output_layout,
         out_dst_shardings=sp_layout,
     )
