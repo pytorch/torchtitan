@@ -272,7 +272,7 @@ def llama3_debugmodel_mxfp8_fused_swiglu() -> Trainer.Config:
     # every GEMM itself; attention and lm_head stay BF16.
     config.compile = CompileConfig(enable=True, components=["model"])
     config.override.imports.append(
-        "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_swiglu"
+        "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_swiglu"
     )
     return config
 

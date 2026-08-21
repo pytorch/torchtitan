@@ -30,9 +30,9 @@ from torchtitan.models.llama3 import model_registry as llama3_model_registry
 from torchtitan.overrides.fused_swiglu import FusedSwiGLU
 
 try:
-    from torchtitan.overrides.mxfp8_fused_mlp import (
+    from torchtitan.overrides.mxfp8_fused_swiglu import (
         mxfp8_fused_swiglu,
-        MXFP8FusedGroupedMLP,
+        MXFP8FusedGroupedExperts,
         MXFP8FusedSwiGLU,
     )
 except ImportError as e:  # torchao (or a transitive dep) not installed
@@ -40,9 +40,9 @@ except ImportError as e:  # torchao (or a transitive dep) not installed
         f"torchao is required for the MXFP8 SwiGLU overrides: {e}"
     ) from e
 
-_DENSE_OVERRIDE = "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_swiglu"
+_DENSE_OVERRIDE = "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_swiglu"
 _GROUPED_OVERRIDE = (
-    "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_grouped_experts"
+    "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_grouped_experts"
 )
 
 
@@ -51,7 +51,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         # The factories gate on SM100 at config-application time; hardware is
         # irrelevant to the config-tree transforms under test.
         patcher = mock.patch(
-            "torchtitan.overrides.mxfp8_fused_mlp.has_cuda_capability",
+            "torchtitan.overrides.mxfp8_fused_swiglu.has_cuda_capability",
             lambda *args: True,
         )
         patcher.start()
@@ -84,7 +84,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         return model_config
 
     def _grouped_experts_config(self, model_config):
-        nodes = list(model_config.traverse(MXFP8FusedGroupedMLP.Config))
+        nodes = list(model_config.traverse(MXFP8FusedGroupedExperts.Config))
         self.assertTrue(nodes)
         return nodes[0][1]
 
@@ -100,9 +100,9 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         self.assertTrue(all(pad == 128 for pad in pads))
         with torch.device("meta"):
             model = model_config.build()
-        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedGroupedMLP)]
+        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedGroupedExperts)]
         self.assertTrue(fused)
-        self.assertTrue(all(type(m) is MXFP8FusedGroupedMLP for m in fused))
+        self.assertTrue(all(type(m) is MXFP8FusedGroupedExperts for m in fused))
         self.assertTrue(all(m.fuse_activation for m in fused))
 
     def test_grouped_forward_routes_through_the_hook(self):
@@ -117,7 +117,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         x = torch.randn(2, cfg.dim)
         sentinel = torch.zeros(2, cfg.dim, dtype=torch.bfloat16)
         with mock.patch(
-            "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_swiglu_grouped_mlp_w13",
+            "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_swiglu_grouped_mlp_w13",
             return_value=sentinel,
         ) as composite:
             out = module(x, num_tokens)
@@ -140,7 +140,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         # numerical implementation (the seam a future fully fused
         # grouped GEMM + SwiGLU + dual MXFP8 quantization backend uses)
         # while inheriting all of forward's plumbing.
-        class _ProbeGroupedMLP(MXFP8FusedGroupedMLP):
+        class _ProbeGroupedMLP(MXFP8FusedGroupedExperts):
             def _run_grouped_mlp(self, x, w13, w2_t, offsets):
                 return torch.zeros(
                     x.shape[0], w2_t.shape[-1], dtype=x.dtype, device=x.device

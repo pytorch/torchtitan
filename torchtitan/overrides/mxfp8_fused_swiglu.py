@@ -38,11 +38,11 @@ Two self-contained overrides wire the composites into a model:
   :class:`MXFP8FusedSwiGLU`, a :class:`FusedSwiGLU` whose forward runs the
   dense composite.
 * ``mxfp8_fused_grouped_experts`` (``RoutedExperts``) builds
-  :class:`MXFP8FusedGroupedMLP` and swaps the token dispatcher for the
+  :class:`MXFP8FusedGroupedExperts` and swaps the token dispatcher for the
   padded variant the grouped composite requires (``pad_multiple=128``).
 
 Activate by naming the factories, e.g. ``--override.imports
-torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_swiglu``; both accept a
+torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_swiglu``; both accept a
 ``fuse_activation`` kwarg via ``(target, kwargs)`` imports entries. The
 composites quantize every GEMM themselves, so these overrides must not be
 combined with the MXFP8 linear / grouped-experts converters on the same
@@ -94,7 +94,7 @@ from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.utils import has_cuda_capability
 
 __all__ = [
-    "MXFP8FusedGroupedMLP",
+    "MXFP8FusedGroupedExperts",
     "MXFP8FusedSwiGLU",
     "mxfp8_fused_grouped_experts",
     "mxfp8_fused_swiglu",
@@ -578,7 +578,7 @@ class MXFP8FusedSwiGLU(FusedSwiGLU):
         return output
 
 
-class MXFP8FusedGroupedMLP(FusedGroupedExperts):
+class MXFP8FusedGroupedExperts(FusedGroupedExperts):
     """:class:`FusedGroupedExperts` whose forward runs the composite MXFP8
     SwiGLU grouped MLP.
 
@@ -589,9 +589,8 @@ class MXFP8FusedGroupedMLP(FusedGroupedExperts):
 
     ``forward`` owns the plumbing -- DTensor localization, BF16 conversion,
     expert-offset construction, output-dtype restoration -- and delegates
-    the complete numerical grouped-MLP forward/autograd to
-    :meth:`_run_grouped_mlp`, the one implementation hook a future optimized
-    backend subclass may override.
+    the numerical grouped-MLP forward/autograd to :meth:`_run_grouped_mlp`,
+    the backend seam.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -611,16 +610,10 @@ class MXFP8FusedGroupedMLP(FusedGroupedExperts):
         w2_t: torch.Tensor,
         offsets: torch.Tensor,
     ) -> torch.Tensor:
-        """Complete numerical grouped-MLP implementation, autograd included.
+        """Numerical/autograd backend seam.
 
-        Receives the localized plain-tensor operands ``forward`` prepared:
-        BF16 ``x (M, D)``, ``w13 (E, F, 2, D)``, transposed down weight
-        ``w2_t (E, F, D_out)``, and int32 exclusive per-expert end
-        ``offsets (E,)``; returns BF16 ``(M, D_out)``. A future optimized
-        subclass may override this hook alone with a fully fused backend
-        (grouped GEMM + SwiGLU + dual MXFP8 quantization -> grouped GEMM);
-        a backend needing a different native ``w13`` layout would also
-        override the initialization/checkpoint hooks it inherits.
+        Future implementations may also require backend-specific parameter
+        layout, checkpoint hooks, dispatcher padding, and factory validation.
         """
         return mxfp8_swiglu_grouped_mlp_w13(
             x,
@@ -752,7 +745,7 @@ def mxfp8_fused_grouped_experts(
     param_init = _fuse_w13_grouped_experts_param_init(inner.param_init)
     fused = derive(
         inner,
-        MXFP8FusedGroupedMLP.Config,
+        MXFP8FusedGroupedExperts.Config,
         param_init=param_init,
         fuse_activation=fuse_activation,
     )
