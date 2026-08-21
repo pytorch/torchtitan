@@ -7,7 +7,7 @@ import copy
 import dataclasses
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import torch
 import torch.nn as nn
@@ -476,6 +476,63 @@ def _generate_llm_fqn_per_model_part(
     return module_names_per_stage
 
 
+def _named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
+    """Every parameter and buffer under ``module``, paired with its FQN.
+
+    Passes ``remove_duplicate=False`` so a tied tensor is reported under each
+    name it is reachable from, rather than only the first one encountered.
+    """
+    yield from module.named_parameters(remove_duplicate=False)
+    yield from module.named_buffers(remove_duplicate=False)
+
+
+def _validate_split_preserves_fqns(
+    fqns_before: dict[int, set[str]],
+    model_chunk: nn.Module,
+    module_names: list[str],
+) -> None:
+    """Check that a stage spells its retained FQNs the way the whole model does.
+
+    Splitting may drop a name but must never rename one, because downstream
+    components key global state by whole-model FQN and neither notices a
+    rename. The checkpointer flattens the per-stage state dicts into a single
+    dict and lets the last writer win for a colliding key, so a stage's tensors
+    vanish. DistMuon resolves a parameter's compute layout and communication
+    bucket by name, so it binds the entry belonging to some other parameter and
+    training continues with a plausible loss.
+
+    Renaming comes from containers that address children by position:
+    ``nn.ModuleList`` renumbers survivors from zero, so any stage that does not
+    begin at index 0 renames every layer it keeps. Comparing FQNs as sets would
+    miss exactly that case -- the renumbered names are names the whole model
+    also has, just for other layers -- so identity decides, keyed on the
+    pre-split snapshot in ``fqns_before``.
+
+    Args:
+        fqns_before: Maps each pre-split tensor to every FQN it was reachable
+            under, as built by ``_split_module`` before it prunes.
+        model_chunk: The pruned stage module.
+        module_names: The stage's requested modules, for the error message.
+    """
+    renamed = sorted(
+        (min(fqns_before[id(tensor)]), name)
+        for name, tensor in _named_state(model_chunk)
+        if name not in fqns_before[id(tensor)]
+    )
+    if not renamed:
+        return
+    moves = ", ".join(f"{before} -> {after}" for before, after in renamed)
+    raise ValueError(
+        f"Pipeline splitting renamed parameters for the stage holding "
+        f"{module_names}: {moves}. Splitting must preserve fully qualified "
+        "names so that checkpointing and FQN-keyed optimizers stay bound to "
+        "the parameters they were configured for. Containers indexed by "
+        "position (nn.ModuleList) renumber their children once a split drops "
+        "earlier entries -- use a keyed container (ModuleDict) for any module "
+        "pipeline parallelism splits."
+    )
+
+
 def _split_module(
     whole_model: nn.Module,
     module_names: list[str],
@@ -490,11 +547,22 @@ def _split_module(
     Returns:
         The split module
 
+    Raises:
+        ValueError: If splitting renamed a retained parameter or buffer instead
+            of dropping it. See ``_validate_split_preserves_fqns``.
+
     Example usage:
         module_names = ["tok_embeddings", "layers.0", "layers.1", "norm", "output"]
         split_module(whole_model, module_names)
     """
     model = copy.deepcopy(whole_model)
+    # Snapshot names before pruning can rename anything. Holding the pairs in a
+    # local keeps every pre-split tensor alive, so the ids stay unique for the
+    # lifetime of the check even after pruning drops a tensor's last reference.
+    state_before = list(_named_state(model))
+    fqns_before: dict[int, set[str]] = {}
+    for name, tensor in state_before:
+        fqns_before.setdefault(id(tensor), set()).add(name)
     # Create a set of modules to keep for faster lookup
     modules_to_keep = set(module_names)
     for module_name, module_value in model.named_children():
@@ -535,6 +603,7 @@ def _split_module(
         elif module_name not in modules_to_keep:
             # Replace with None
             setattr(model, module_name, None)
+    _validate_split_preserves_fqns(fqns_before, model, module_names)
     return model
 
 
