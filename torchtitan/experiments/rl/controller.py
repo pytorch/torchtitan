@@ -1007,10 +1007,6 @@ class Controller(Configurable):
                     rollout_group=rollout_group
                 )
 
-            training_sample_group = await asyncio.to_thread(
-                batcher.prepare_training_sample_group,
-                training_sample_group=training_sample_group,
-            )
             if not training_sample_group.training_samples:
                 await group_buffer.release_active_groups(1, reason="untrainable_group")
 
