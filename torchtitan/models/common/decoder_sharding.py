@@ -103,7 +103,7 @@ def dense_sequence_parallel_placement() -> SpmdLayout:
             CP: spmd.V,
             TP: spmd.V,
         },
-        partition_spec=((DP, CP, TP), None),
+        partition_spec=spmd.PartitionSpec((DP, CP, TP), None),
     )
 
 

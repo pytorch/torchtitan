@@ -443,8 +443,8 @@ class TestSpmdLayout(DTensorTestBase):
             result = spmd_redistribute_per_axis(
                 x,
                 mesh,
-                src.per_axis_spmd_types(),
-                dst.per_axis_spmd_types(),
+                src,
+                dst,
             )
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
