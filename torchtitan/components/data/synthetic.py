@@ -102,11 +102,17 @@ class ParametricLengthSpec:
         if self.kind == "uniform":
             raw = rng.integers(self.min_len, self.max_len + 1, size=size)
         elif self.kind == "normal":
-            raw = rng.normal(self.mean, self.std, size=size)
+            mean, std = self.mean, self.std
+            assert mean is not None and std is not None
+            raw = rng.normal(mean, std, size=size)
         elif self.kind == "lognormal":
-            raw = rng.lognormal(self.mean, self.std, size=size)
+            mean, std = self.mean, self.std
+            assert mean is not None and std is not None
+            raw = rng.lognormal(mean, std, size=size)
         else:  # zipf
-            raw = rng.zipf(self.alpha, size=size)
+            alpha = self.alpha
+            assert alpha is not None
+            raw = rng.zipf(alpha, size=size)
         lengths = np.rint(np.asarray(raw, dtype=np.float64)).astype(np.int64)
         return np.clip(lengths, self.min_len, self.max_len)
 

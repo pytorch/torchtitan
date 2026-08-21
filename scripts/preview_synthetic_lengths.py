@@ -75,7 +75,7 @@ def summarize(lengths: np.ndarray) -> dict[str, float]:
 def histogram(lengths: np.ndarray, bins: int = 20, width: int = 50) -> str:
     counts, edges = np.histogram(lengths, bins=bins)
     peak = counts.max() or 1
-    lines = []
+    lines: list[str] = []
     for count, lo, hi in zip(counts, edges[:-1], edges[1:]):
         bar = "#" * int(width * count / peak)
         lines.append(f"[{int(lo):>7}, {int(hi):>7}) {count:>8} {bar}")
