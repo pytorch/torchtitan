@@ -14,7 +14,7 @@ import torchstore as ts
 from monarch.actor import Actor, concurrent_endpoint, current_rank
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, compute_logprobs
+from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
     apply_overrides,
@@ -34,7 +34,6 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
-from torchtitan.experiments.rl.losses.dapo import compute_logprob_comparison_metrics
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
@@ -504,18 +503,28 @@ class PolicyTrainer(Actor, Configurable):
         attention_masks = model.get_attention_masks(positions)
 
         with torch.no_grad(), self.train_context():
-            logits = model(
+            pred = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-            policy_logprobs = compute_logprobs(logits, labels)
+            # Reuse the configured loss path so ChunkedLossWrapper applies the
+            # model's lm_head in bounded-memory chunks. Its no-grad path emits
+            # the same log-prob metrics without running backward.
+            _, loss_metrics = self.loss_fn(
+                pred,
+                labels,
+                num_global_valid_tokens,
+                generator_logprobs=generator_logprobs,
+                advantages=torch.zeros_like(generator_logprobs),
+                loss_mask=loss_mask,
+            )
 
-        metrics = compute_logprob_comparison_metrics(
-            policy_logprobs=policy_logprobs,
-            reference_logprobs=generator_logprobs,
-            loss_mask=loss_mask,
-            global_valid_tokens=num_global_valid_tokens,
-            prefix="comparison/correctness/post_update",
-        )
+        pre_update_prefix = "comparison/correctness/pre_update/"
+        post_update_prefix = "comparison/correctness/post_update/"
+        metrics = {
+            key.replace(pre_update_prefix, post_update_prefix, 1): value
+            for key, value in loss_metrics.items()
+            if key.startswith(pre_update_prefix)
+        }
         sum_reduced_metrics = {
             key: value for key, value in metrics.items() if not key.endswith("/max")
         }
