@@ -5,6 +5,97 @@ CODA fusion pass. Full tlparse dumps stay under `outputs/` because they are
 generated artifacts; the grounded samples and exact artifact paths are listed
 here.
 
+## Standalone 12-pattern tuning suite
+
+The standalone suite is implemented in
+`benchmarks/coda_fusion_microbench.py`. Every case has an explicit plain
+PyTorch eager function and an explicit FlexGEMM function at a real shape from
+the DSV3-671B joint graph. The primary baseline is the same eager function
+compiled with Inductor. Source eager is also reported to keep the epilogue
+implementation visible and independently measurable.
+
+The primary timing contract uses fixed-pointer CUDA graph replay, 25 warmups,
+10 alternating candidate-order rounds, and 200 replays per round. F2-Q and
+F2-KV used 100 replays per round because of their larger live input sets.
+Compilation and tuning are outside the timed region. Every generated source is
+checked for the expected number of `flex_gemm_epilogue` calls, and the selected
+QuACK configurations are extracted from the generated code. All outputs pass
+elementwise tolerance checks plus max-absolute, mean-absolute, and relative-L2
+reporting.
+
+Environment: one NVIDIA GB300 (SM 10.3), PyTorch
+`2.14.0.dev20260811+cu130` at `50e2fa0ee83b`, CUTLASS DSL `4.6.2`. Results are
+milliseconds; speedup is compiled eager divided by FlexGEMM.
+
+| Pattern | Source eager | Compiled eager | FlexGEMM | Speedup | Selected config(s) |
+| --- | ---: | ---: | ---: | ---: | --- |
+| B1 | 13.443 | 13.636 | 14.226 | 0.959x | `256x256 c2x1 dynamic` |
+| B2 | 6.140 | 5.743 | 5.797 | 0.991x | `128x256 c2x1 dynamic`; `256x256 c2x2 dynamic` |
+| B4 | 7.205 | 6.799 | 0.587 | 11.582x | `256x256 c2x2 dynamic` |
+| B5 | 4.408 | 4.522 | 4.841 | 0.934x | `256x256 c2x1 dynamic` |
+| B6 | 1.713 | 1.748 | 1.772 | 0.987x | `256x256 c2x1 dynamic` |
+| B7 | 2.302 | 2.086 | 2.058 | 1.013x | `256x256 c2x1 dynamic` |
+| F2-KV | 3.052 | 3.048 | 3.135 | 0.972x | `256x192 c2x1 dynamic`; `256x256 c2x1 dynamic` |
+| F2-Q | 5.946 | 6.078 | 6.062 | 1.003x | `256x512 c2x1 static`; `256x256 c2x1 dynamic` |
+| F3-A | 14.190 | 14.385 | 14.932 | 0.963x | `256x512 c2x1 static` |
+| F3-B | 3.042 | 2.558 | 2.720 | 0.940x | `256x512 c2x1 static` |
+| F4 | 3.725 | 3.730 | 3.598 | 1.037x | two `256x256 c2x1 dynamic` |
+| F6 | 5.454 | 5.404 | 0.573 | 9.428x | `256x256 c2x1 dynamic` |
+
+Every FlexGEMM uses `tuned=True`. The F4 SiLU FlexGEMM and F6 sigmoid
+FlexGEMM also use `fast_math=True`; the non-SiLU F4 FlexGEMM does not. B4's
+BF16 result has `max_abs=4.883e-4` and `relative_l2=1.707e-3` versus source
+eager. F6's two FP32 results have `max_abs=1.392e-5` and relative L2 below
+`5e-6`. The large B4 and F6 speedups therefore satisfy the pattern-specific
+tolerances but are not bitwise-equivalence claims.
+
+### Automatic tuning behavior
+
+FlexGEMM can tune without an explicit configuration:
+
+```python
+kernel_options={"backend": "QUACK", "tuned": True}
+```
+
+With this form, the lowering obtains all device-compatible QuACK candidates,
+filters them for the epilogue and local-reduction geometry, passes the resulting
+template choices to Inductor's `autotune_select_algorithm()`, and caches the
+winner. An explicit partial `config` constrains that candidate set while still
+using the tuned path.
+
+The results above use `benchmarks/coda_fusion_autotune.py`, which supplies one
+fully constrained configuration to each fresh child process and performs the
+search outside Inductor. This is a reliability workaround, not a FlexGEMM API
+requirement. On this build, unconstrained in-process tuning can execute an SM100
+candidate that raises `cudaErrorNoKernelImageForDevice` on SM103 or hangs in
+the kernel. Inductor subprocess tuning cannot currently transport the resulting
+TVM-FFI exception. Process isolation lets the suite time out or reject one bad
+candidate without losing the entire search.
+
+The tuner searches 12 measured-priority configurations on every pattern,
+remeasures per-GPU finalists sequentially on GPU 0, and performs a final full
+timing run in another fresh process. Multi-FlexGEMM patterns use coordinate
+descent. A full 74-configuration non-TMA, non-transposed SM100 search was also
+run for B4 and F6. It retained the priority winners shown above, so the broader
+space did not improve either decisive win.
+
+Artifacts:
+
+```text
+outputs/coda_fusion_microbench/20260811_tournament_autotune
+outputs/coda_fusion_microbench/20260811_full_autotune
+```
+
+Representative commands:
+
+```bash
+python -m torchtitan.experiments.graph_trainer.benchmarks.coda_fusion_autotune \
+  --case f4_shared_expert_swiglu --search priority --devices 0,1,2,3
+
+python -m torchtitan.experiments.graph_trainer.benchmarks.coda_fusion_autotune \
+  --case f6_router_sigmoid_bias --search full --devices 0,1,2,3
+```
+
 ## B1 LM-head input-gradient cast
 
 Pattern name: `b1_lm_head_input_grad_cast`
