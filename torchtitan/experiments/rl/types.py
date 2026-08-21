@@ -124,12 +124,12 @@ class TrainingMicrobatch:
     N-1), matching the pre-training dataloader convention.
     """
 
-    token_ids: torch.Tensor  # [B, L]
-    labels: torch.Tensor  # [B, L]
-    positions: torch.Tensor  # [B, L]
-    generator_logprobs: torch.Tensor  # [B, L]
-    loss_mask: torch.Tensor  # [B, L]
-    advantages: torch.Tensor  # [B, L]
+    token_ids: torch.Tensor  # [T]
+    labels: torch.Tensor  # [T]
+    positions: torch.Tensor  # [T]
+    generator_logprobs: torch.Tensor  # [T]
+    loss_mask: torch.Tensor  # [T]
+    advantages: torch.Tensor  # [T]
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +140,9 @@ class TrainingBatch:
         # 5 training samples, effective length 5 each; seq_len=10, local_batch_size=2, dp_degree=1
         # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
         # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
-        #    microbatches = [[TrainingMicrobatch(token_ids=[2, 10])],
-        #                    [TrainingMicrobatch(token_ids=[2, 10])]]   # mb1 = 1 real row + 1 pad row
+        #    microbatches = [[TrainingMicrobatch(token_ids=[20])],
+        #                    [TrainingMicrobatch(token_ids=[20])]]
+        # The second microbatch contains one real row and one pad row.
         # num_global_valid_tokens = response tokens with finite generator logprobs
     """
 

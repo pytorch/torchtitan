@@ -28,6 +28,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    token_id_placement,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -45,7 +46,7 @@ TP = MeshAxisName.TP
 if TYPE_CHECKING:
     from torchtitan.models.kimi_k2_7.model import KimiK25Model
 
-_REPLICATE_ACT = dense_activation_placement(tp=spmd.R)
+_REPLICATE_ACT = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
 
 def annotate_multimodal_input_spmd_types(
@@ -88,12 +89,20 @@ def set_kimi_k2_5_sharding_config(
 
 
 def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> None:
-    """Keep the full embedding through vision scatter, then resume SP at layer 0."""
+    """Keep ``tok_embeddings`` ``Replicate`` and resume SP at layer 0's output.
+
+    The vision scatter writes features at arbitrary sequence positions, so it
+    needs the full (``Replicate``) embedding -- a ``Shard(0)`` one cannot be
+    indexed by sequence position locally. Layer 0 then takes a ``Replicate``
+    input and its rowwise ``wo`` reduce-scatters back to ``Shard(0)``, so the
+    residual is sequence-parallel from layer 0's output and layers ``1..N-1``
+    are unchanged full SP.
+    """
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": _REPLICATE_ACT},
-        in_dst_shardings={"input": _REPLICATE_ACT},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        in_src_shardings={"input": token_id_placement()},
+        in_dst_shardings={"input": token_id_placement()},
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=_REPLICATE_ACT,
         local_map=LocalMapConfig(in_grad_placements=None),
     )

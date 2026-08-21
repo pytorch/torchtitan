@@ -139,7 +139,7 @@ def _build_muse_glimmer_attention(
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
-    max_seq_len: int,
+    max_context_length: int,
     window_pattern: list[int],
     attn_backend: str,
 ) -> Attention.Config:
@@ -181,11 +181,11 @@ def _build_muse_glimmer_attention(
         use_rope=_layer_use_rope(layer_id, n_layers),
         inner_attention=inner_attention,
         # Every layer (incl. NoPE) carries a rope config so the base Decoder's
-        # max_seq_len discovery/resize works uniformly; NoPE layers simply never
-        # apply it (guarded by use_rope in Attention.forward).
+        # max_context_length discovery/resize works uniformly; NoPE layers
+        # simply never apply it (guarded by use_rope in Attention.forward).
         rope=ComplexRoPE.Config(
             dim=head_dim,
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             theta=_ROPE_THETA,
         ),
         scale_query_by=_SCALE_QUERY_NUMERATOR / math.sqrt(head_dim),
@@ -205,7 +205,7 @@ def _build_muse_glimmer_layers(
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
-    max_seq_len: int,
+    max_context_length: int,
     window_pattern: list[int],
     attn_backend: str,
 ) -> list[MuseGlimmerTransformerBlock.Config]:
@@ -225,7 +225,7 @@ def _build_muse_glimmer_layers(
                     n_heads=n_heads,
                     n_kv_heads=n_kv_heads,
                     head_dim=head_dim,
-                    max_seq_len=max_seq_len,
+                    max_context_length=max_context_length,
                     window_pattern=window_pattern,
                     attn_backend=attn_backend,
                 ),
@@ -360,7 +360,7 @@ def _muse_glimmer_config(
     n_kv_heads: int,
     head_dim: int,
     vocab_size: int,
-    max_seq_len: int,
+    max_context_length: int,
     window_pattern: list[int],
     output_multiplier: float,
     attn_backend: str,
@@ -415,7 +415,7 @@ def _muse_glimmer_config(
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
             head_dim=head_dim,
-            max_seq_len=max_seq_len,
+            max_context_length=max_context_length,
             window_pattern=window_pattern,
             attn_backend=attn_backend,
         ),
@@ -434,7 +434,7 @@ def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
         n_kv_heads=2,
         head_dim=64,
         vocab_size=2048,
-        max_seq_len=4096,
+        max_context_length=4096,
         window_pattern=[128, 128, 128, 0],
         output_multiplier=1.0,
         attn_backend=attn_backend,
@@ -459,7 +459,7 @@ def _muse_glimmer_30b(
         n_kv_heads=2,
         head_dim=128,
         vocab_size=202048,
-        max_seq_len=16384,
+        max_context_length=16384,
         window_pattern=[2048, 2048, 2048, 0],
         output_multiplier=0.19611613513,
         attn_backend=attn_backend,
@@ -499,7 +499,7 @@ def _muse_glimmer_debugmodel_mm(attn_backend: str) -> MuseGlimmerModel.Config:
         n_kv_heads=2,
         head_dim=64,
         vocab_size=2048,
-        max_seq_len=4096,
+        max_context_length=4096,
         window_pattern=[128, 128, 128, 0],
         output_multiplier=1.0,
         attn_backend=attn_backend,

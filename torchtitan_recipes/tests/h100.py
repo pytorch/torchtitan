@@ -44,7 +44,9 @@ def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.compile.enable_async_tensor_parallel = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 

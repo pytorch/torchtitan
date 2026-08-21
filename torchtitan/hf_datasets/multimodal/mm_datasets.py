@@ -299,7 +299,7 @@ class MultiModalProcessor(SampleProcessor):
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._config = config
         self._tokenizer = context.tokenizer
-        self._seq_len = context.seq_len
+        self._max_context_length = context.max_context_length
 
     def __call__(
         self,
@@ -325,10 +325,13 @@ class MultiModalProcessor(SampleProcessor):
             video_min_frames=self._config.video_min_frames,
             video_max_frames=self._config.video_max_frames,
         )
-        if processed is not None and processed["input_ids"].shape[0] > self._seq_len:
+        if (
+            processed is not None
+            and processed["input_ids"].shape[0] > self._max_context_length
+        ):
             logger.warning(
                 f"Sample length {processed['input_ids'].shape[0]} > training "
-                f"seq_len={self._seq_len}. Skip"
+                f"max_context_length={self._max_context_length}. Skip"
             )
             return None
         return processed
@@ -394,7 +397,7 @@ class MMSamplePackingConfig:
             dataset_iteration_policy=dataset_iteration_policy,
         )
         dataset = dataset.filter(
-            lambda sample: len(sample["input_ids"]) <= context.seq_len
+            lambda sample: len(sample["input_ids"]) <= context.max_context_length
         )
         dataset = dataset.map(_mm_sample_to_packing_input)
         if isinstance(dataset, grain.MapDataset):
@@ -404,9 +407,9 @@ class MMSamplePackingConfig:
         dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
             length_struct={
-                "input_ids": context.seq_len,
-                "labels": context.seq_len,
-                "positions": context.seq_len,
+                "input_ids": context.num_tokens_per_batch,
+                "labels": context.num_tokens_per_batch,
+                "positions": context.num_tokens_per_batch,
             },
             padding_struct={
                 # pyrefly: ignore [missing-attribute]

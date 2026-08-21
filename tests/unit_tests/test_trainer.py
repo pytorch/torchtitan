@@ -116,7 +116,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 get_optional_mesh=lambda name: None,
             ),
             gradient_accumulation_steps=3,
-            num_pipeline_parallel_microbatches=1,
+            num_pp_microbatches=1,
             device=torch.device("cpu"),
             forward_backward_step=forward_backward_step,
             model_parts=[],

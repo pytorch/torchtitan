@@ -111,8 +111,8 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * 512,
+            max_context_length=512,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -155,8 +155,8 @@ def moonlight_16b_a3b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -201,8 +201,8 @@ def kimi_vl_a3b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=1 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -245,8 +245,8 @@ def kimi_k2_5() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),

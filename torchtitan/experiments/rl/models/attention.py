@@ -254,9 +254,7 @@ class VLLMAttentionWrapper(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
-    but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.
-
-    Receives ``(bs, seq, heads, dim)`` layout from GQAttention.
+    and expects ``(num_tokens, num_heads, head_dim)`` inputs.
 
     Used as ``inner_attention`` in GQAttention via Config-based construction.
     """
@@ -335,9 +333,9 @@ class VLLMAttentionWrapper(Module):
 
     def forward(
         self,
-        q_BLNH: torch.Tensor,
-        k_BLNH: torch.Tensor,
-        v_BLNH: torch.Tensor,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
         *,
         attention_masks: AttentionMasksType | None = None,
         **kwargs,
@@ -345,13 +343,12 @@ class VLLMAttentionWrapper(Module):
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
-            q_BLNH: ``(batch, seq_len, num_heads, head_dim)``
-            k_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
-            v_BLNH: ``(batch, seq_len, num_kv_heads, head_dim)``
+            q_TNH: ``(num_tokens, num_heads, head_dim)``
+            k_TNH: ``(num_tokens, num_kv_heads, head_dim)``
+            v_TNH: ``(num_tokens, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, seq_len, num_heads * head_dim)`` -- ready for
-            ``output.view(bs, seqlen, -1)`` in GQAttention.forward
+            ``(num_tokens, num_heads, head_dim)``.
         """
         if attention_masks is not None:
             raise ValueError(
@@ -359,22 +356,11 @@ class VLLMAttentionWrapper(Module):
                 "manages causal masking and the KV-cache internally."
             )
 
-        batch_size, seq_len, _, head_dim = q_BLNH.shape
-
-        # vllm attention expects (bs*seqlen, n_heads, head_dim) == (T, N, H)
-        # (bs, seq, heads, dim) is contiguous, so reshape is zero-copy
-        q_TNH = q_BLNH.reshape(batch_size * seq_len, -1, head_dim)
-        k_TNH = k_BLNH.reshape(batch_size * seq_len, -1, head_dim)
-        v_TNH = v_BLNH.reshape(batch_size * seq_len, -1, head_dim)
-
         out_TD = self.vllm_attn(q_TNH, k_TNH, v_TNH)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
         # shape under torch.compile.  Narrow to trim this padding.
-        out_TD = out_TD.narrow(0, 0, batch_size * seq_len)
-
-        # Reshape back to the (B, L, N, H) format expected by GQAttention.forward()
-        out_BLNH = out_TD.view(batch_size, seq_len, -1, head_dim)
-
-        return out_BLNH
+        num_tokens, _, head_dim = q_TNH.shape
+        out_TD = out_TD.narrow(0, 0, num_tokens)
+        return out_TD.view(num_tokens, -1, head_dim)

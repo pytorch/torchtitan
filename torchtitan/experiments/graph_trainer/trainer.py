@@ -27,6 +27,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
     TracedResult,
 )
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    validate_memory_policy_config,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
@@ -107,6 +110,8 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config):
         super().__init__(config)
+
+        validate_memory_policy_config(self.config.compile)
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
