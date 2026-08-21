@@ -517,17 +517,16 @@ class _KimiTrainerConfig(Trainer.Config):
             parallelism=self.parallelism,
         )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
-        # TODO(#4102): Build DistMuon from PP stage-local parameter groups.
-        if (
-            self.parallelism.tensor_parallel_degree > 1
-            or self.parallelism.pipeline_parallel_degree > 1
-        ):
+        if self.parallelism.tensor_parallel_degree > 1:
             # Fail during config parsing, before TP/FSDP creates _StridedShard
-            # storage or PP constructs optimizers from stage-local parameters.
+            # storage.
             raise ValueError(
                 "Kimi DistMuon currently requires "
-                "tensor_parallel_degree=1 and pipeline_parallel_degree=1: "
-                "tensor parallelism can produce unsupported _StridedShard "
-                "parameter layouts, and pipeline parallelism gives each stage "
-                "only a subset of the optimizer's parameter-group patterns."
+                "tensor_parallel_degree=1: tensor parallelism can produce "
+                "unsupported _StridedShard parameter layouts."
             )
+        # No PP gate: DistMuon is PP-safe. The one precondition -- every stage
+        # must own at least one transformer layer, or its Muon pattern claims
+        # nothing and OptimizersContainer rejects the empty param group -- needs
+        # the stage count to approach the layer count. See README, Supported
+        # Parallelisms.
