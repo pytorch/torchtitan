@@ -84,3 +84,12 @@ def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
     config.compile.enable = True
     config.compile.components = ["model", "loss"]
     return config
+
+
+def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
+
+    config = qwen3_moe_deepep()
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 4
+    return config
