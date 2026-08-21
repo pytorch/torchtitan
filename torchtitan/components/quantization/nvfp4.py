@@ -119,9 +119,7 @@ try:
                 instance = Linear.Config.build(self, **kwargs)
                 if instance._sharding_config is not None:
                     sc = instance._sharding_config
-                    weight_tp = (
-                        sc.state_shardings["weight"].per_axis_spmd_types().get(TP)
-                    )
+                    weight_tp = sc.state_shardings["weight"].local_type.get(TP)
                     rowwise = isinstance(weight_tp, spmd.Shard) and weight_tp.dim == 1
                     if rowwise:
                         in_layout = dense_activation_placement(
