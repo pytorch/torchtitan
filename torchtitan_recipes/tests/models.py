@@ -186,14 +186,23 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     return config
 
 
-def kimi_k2_5_debugmodel_muon_fsdp4_ep2() -> Trainer.Config:
-    """DistMuon rejects tensor parallel: it produces _StridedShard storage."""
+def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
+    """One four-GPU smoke path covering PP=2, FSDP=2, and EP=2.
+
+    Each PP stage consumes its local subset of the global DistMuon
+    compute-sharding map. DistMuon rejects tensor parallel: it produces
+    _StridedShard storage.
+    """
     from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
 
     config = kimi_k2_5_debugmodel()
-    _use_spmd_types(config, typechecking=True)
-    config.parallelism.data_parallel_shard_degree = 4
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
+    # Four microbatches match the four virtual pipeline stages.
+    config.training.local_batch_size = 4
     config.training.steps = 1
     config.training.disable_cuda_graphs = True
     return config

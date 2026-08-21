@@ -366,6 +366,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ):
             model = model_config.build()
 
+        # Validate optimizer param groups against the whole model here: this is
+        # the last point where every rank holds the complete parameter set, so
+        # the verdict is identical everywhere without a collective. Once PP
+        # splits the model, a stage can no longer tell a dead pattern from one
+        # owned by another stage.
+        config.optimizer.validate_against_model(model)
+
         # Verify all submodules satisfy the Module protocol
         # TODO: move this to module validate().
         # This is current put here to verify module build and
@@ -546,7 +553,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build optimizer after applying parallelisms to the model
-        self.optimizers = config.optimizer.build(model_parts=self.model_parts)
+        self.optimizers = config.optimizer.build(
+            model_parts=self.model_parts,
+            model_is_partial=parallel_dims.pp_enabled,
+        )
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
