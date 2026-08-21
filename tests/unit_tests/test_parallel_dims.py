@@ -621,12 +621,26 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             cp=1,
             tp=1,
             pp=1,
-            ep=3,
+            ep=2,
             world_size=4,  # 2 * 2 * 1 * 1 * 1 = 4
         )
         self.assertTrue(parallel_dims.ep_enabled)
         self.assertTrue(parallel_dims.dp_replicate_enabled)
         self.assertTrue(parallel_dims.dp_shard_enabled)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expert_parallel_degree \(3\) must divide dp_shard \* cp \* tp \(2\)",
+        ):
+            ParallelDims(
+                dp_replicate=2,
+                dp_shard=2,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=3,
+                world_size=4,
+            )
 
 
 class TestDenseStorageAxes(DTensorTestBase):
