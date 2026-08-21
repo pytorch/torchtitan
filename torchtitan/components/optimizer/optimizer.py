@@ -198,10 +198,25 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     claimed.add(name)
 
             if not params:
-                raise ValueError(
-                    f"Optimizer param_groups pattern '{pg.pattern}' "
-                    f"matched no parameters"
+                # An empty match means one of two different things, and only one is an
+                # error. If the model has trainable parameters and none matched, the
+                # pattern is wrong -- keep raising, that is what this check is for. If
+                # the model has NO trainable parameters at all, the pattern is fine and
+                # this model part simply has nothing to optimize: a pipeline stage that
+                # owns only frozen weights. LoRA plus PP produces exactly that, e.g. a
+                # DEP vision stage holding an unadapted tower and frozen embeddings.
+                if any(p.requires_grad for p in model.parameters()):
+                    raise ValueError(
+                        f"Optimizer param_groups pattern '{pg.pattern}' "
+                        f"matched no parameters"
+                    )
+                logger.warning(
+                    "Optimizer param_groups pattern '%s' matched no parameters and "
+                    "this model part has none that require grad; it gets no optimizer. "
+                    "Expected for a pipeline stage that owns only frozen weights.",
+                    pg.pattern,
                 )
+                continue
 
             groups[pg.optimizer_name].append(
                 {
@@ -327,7 +342,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
         # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
-        Optimizer.__init__(self, all_params, {})
+        #
+        # torch rejects an empty params LIST but accepts an empty param GROUP, and the
+        # difference matters here: a pipeline stage owning only frozen weights has nothing
+        # to optimize, and it still has to end up a properly initialized Optimizer so the
+        # hooks and param_groups exist. LoRA plus PP produces such a stage.
+        Optimizer.__init__(self, all_params or [{"params": []}], {})
 
     def _register_bf16_optimizer_state_hook(self) -> None:
         """Register a step pre-hook to create Adam optimizer states in bfloat16.

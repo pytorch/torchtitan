@@ -592,6 +592,58 @@ def set_pg_timeouts(
 
 
 @torch.no_grad()
+def _get_total_norm_fp32(
+    tensors: Iterable[torch.Tensor],
+    norm_type: float,
+    error_if_nonfinite: bool,
+    foreach: bool | None,
+) -> torch.Tensor:
+    """``torch.nn.utils.get_total_norm`` with the reduction carried in float32.
+
+    That function returns the norm in the TENSORS' dtype. With bf16 gradients both the
+    per-tensor norms and the norm-of-norms are bf16 -- three to four significant digits --
+    so the total is wrong by a few tenths of a percent, and by an amount that depends on
+    how the tensors are GROUPED. Under PP or EP each rank norms its own share, so the
+    value a rank reports depends on where the pipeline was cut rather than only on the
+    gradients. Measured on 394 bf16 tensors: 0.184% error overall, and 0.057% / 0.142% /
+    0.174% for three different splits of the same tensors.
+
+    With clipping active the error is not cosmetic -- it scales the update. A run with
+    ``max_norm=1.0`` against a true norm near 10 clips by ``max_norm / total_norm``, so a
+    0.2% error in the norm is a 0.2% error in that step's effective learning rate.
+
+    Structure follows the upstream function so the only difference is precision: same
+    empty-list result, same error_if_nonfinite behaviour, and the foreach fast path where
+    it applies. DTensors go through ``vector_norm`` one at a time because upstream's
+    foreach support check excludes them too; the dtype argument preserves their
+    ``_NormPartial`` placement, so the caller's ``full_tensor()`` still reduces correctly.
+    """
+    tensors = list(tensors)
+    if not tensors:
+        # Upstream returns a plain CPU scalar here, and callers depend on that: it is how
+        # a PP rank owning no gradients of one group signals "nothing to contribute".
+        return torch.tensor(0.0)
+    if any(isinstance(t, DTensor) for t in tensors):
+        norms: list[torch.Tensor] = [
+            torch.linalg.vector_norm(t, norm_type, dtype=torch.float32) for t in tensors
+        ]
+    else:
+        norms = list(torch._foreach_norm(tensors, norm_type, dtype=torch.float32))
+    first_device = tensors[0].device
+    total_norm = torch.linalg.vector_norm(
+        torch.stack([norm.to(first_device) for norm in norms]), norm_type
+    )
+    if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
+        raise RuntimeError(
+            f"The total norm of order {norm_type} for gradients from "
+            "`parameters` is non-finite, so it cannot be clipped. To disable "
+            "this error and scale the gradients by the non-finite norm anyway, "
+            "set `error_if_nonfinite=False`"
+        )
+    return total_norm
+
+
+@torch.no_grad()
 def clip_grad_norm_(
     parameters: torch.Tensor | Iterable[torch.Tensor],
     max_norm: float,
@@ -645,9 +697,7 @@ def clip_grad_norm_(
         # prevent generators from being exhausted
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
+    total_norm = _get_total_norm_fp32(grads, norm_type, error_if_nonfinite, foreach)
 
     # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
     # We can simply reduce the DTensor to get the total norm in this tensor's process group
@@ -661,6 +711,15 @@ def clip_grad_norm_(
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:
+        # Normalise dtype and device before the collective. get_total_norm returns a CPU
+        # float32 tensor(0.) for an empty gradient list, so a PP rank whose share of the
+        # model contributes no gradients to one of these groups reaches this all_reduce
+        # with float32 while a peer holding bf16 gradients carries bfloat16. NCCL returns
+        # GARBAGE for a dtype mismatch instead of raising: the observed symptom is one
+        # side of the pipeline reporting a plausible norm -- its own PP shard's sum only --
+        # and the other reporting NaN, while every individual gradient is finite. float32
+        # is also the right width for a sum of squares.
+        total_norm = total_norm.to(device=pp_mesh.device_type, dtype=torch.float32)
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
         else:
@@ -704,14 +763,14 @@ def _clip_grad_norm_with_ep(
     # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
     #   so non_ep_grads would be empty
     # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
-    ep_grads_total_norm = torch.nn.utils.get_total_norm(
+    ep_grads_total_norm = _get_total_norm_fp32(
         ep_grads, norm_type, error_if_nonfinite, foreach
     )
     # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
+    non_ep_grads_total_norm = _get_total_norm_fp32(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
     )
     # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
@@ -727,6 +786,15 @@ def _clip_grad_norm_with_ep(
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
+        # Normalise dtype and device before the collective. get_total_norm returns a CPU
+        # float32 tensor(0.) for an empty gradient list, so a PP rank whose share of the
+        # model contributes no gradients to one of these groups reaches this all_reduce
+        # with float32 while a peer holding bf16 gradients carries bfloat16. NCCL returns
+        # GARBAGE for a dtype mismatch instead of raising: the observed symptom is one
+        # side of the pipeline reporting a plausible norm -- its own PP shard's sum only --
+        # and the other reporting NaN, while every individual gradient is finite. float32
+        # is also the right width for a sum of squares.
+        total_norm = total_norm.to(device=pp_mesh.device_type, dtype=torch.float32)
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
         else:

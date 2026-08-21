@@ -196,9 +196,11 @@ class LRSchedulersContainer(Stateful, Configurable):
     schedulers: list[LRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
-        assert (
-            len(optimizers) > 0
-        ), "Must have at least one optimizer to create LRScheduler"
+        # No assert on len(optimizers) > 0. A pipeline stage that owns only frozen
+        # weights gets no optimizer (see OptimizersContainer._build_param_groups), and it
+        # has no learning rate to schedule either. The comprehension below then yields
+        # zero schedulers, and step() / get_last_lr() iterate, so an empty container is
+        # well defined. LoRA plus PP is what produces such a stage.
 
         self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
 
@@ -224,6 +226,12 @@ class LRSchedulersContainer(Stateful, Configurable):
             scheduler.step()
 
     def state_dict(self) -> dict[str, Any]:
+        # A container with no schedulers has no last_epoch to report, and returning an
+        # empty dict is the honest answer rather than a zero that a later load would
+        # apply as real progress. DCP is fine with a rank contributing no keys.
+        if not self.schedulers:
+            return {}
+
         # Only last_epoch is needed — each scheduler recomputes its lr from
         # its own optimizer's base_lrs on load. Per-scheduler state (base_lrs,
         # _last_lr) is not saved because it's reconstructed from the optimizer
@@ -231,6 +239,11 @@ class LRSchedulersContainer(Stateful, Configurable):
         return {"last_epoch": self.schedulers[0].last_epoch}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        # Nothing to restore on a stage that schedules nothing. Returning before reading
+        # the key matters: a frozen-only stage's own state_dict() never wrote one.
+        if not self.schedulers:
+            return
+
         # Only restore last_epoch. Each scheduler recomputes _last_lr from its
         # own optimizer's base_lrs and the shared lambda. This is correct for
         # mixed optimizers (different base_lrs) and resharding (different number
