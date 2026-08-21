@@ -79,9 +79,11 @@ class GrainDataLoader(BaseDataLoader):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        seq_len: int,
-        local_batch_size: int,
+        max_context_length: int,
+        num_tokens_per_batch: int,
+        **kwargs: Any,
     ) -> None:
+        del kwargs
         # Validate the run policy.
         # TODO(data-finite-dp): Support finite distributed datasets with a global
         # remainder policy. Simple map datasets can truncate or pad before DP
@@ -100,8 +102,8 @@ class GrainDataLoader(BaseDataLoader):
         read_options = config.read_options
         context = DatasetBuildContext(
             tokenizer=tokenizer,
-            seq_len=seq_len,
-            local_batch_size=local_batch_size,
+            max_context_length=max_context_length,
+            num_tokens_per_batch=num_tokens_per_batch,
             read_options=read_options,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
@@ -130,7 +132,7 @@ class GrainDataLoader(BaseDataLoader):
 
         # Batch and collate samples.
         dataset = dataset.batch(
-            local_batch_size,
+            collator.num_rows_per_batch(),
             drop_remainder=config.repeat,
             batch_fn=collator,
         )

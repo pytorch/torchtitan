@@ -35,7 +35,13 @@ _TOKENIZER = _TOKENIZER_CONFIG.build(tokenizer_path=_TOKENIZER_PATH)
 class TestMMDatasetCheckpointing(unittest.TestCase):
     """Test save/load for multimodal dataset, mirroring test_dataset_checkpointing.py."""
 
-    def _build_dataloader(self, batch_size, seq_len, world_size, rank):
+    def _build_dataloader(
+        self,
+        num_tokens_per_batch,
+        max_context_length,
+        world_size,
+        rank,
+    ):
         dataset = MM_DATASETS["cc12m-test"]
         assert dataset.processor is not None
         dataset = replace(
@@ -57,14 +63,14 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_TOKENIZER,
-            seq_len=seq_len,
-            local_batch_size=batch_size,
+            max_context_length=max_context_length,
+            num_tokens_per_batch=num_tokens_per_batch,
         )
 
     def test_cc12m_resumption(self):
         dl = self._build_dataloader(
-            batch_size=1,
-            seq_len=512,
+            num_tokens_per_batch=512,
+            max_context_length=512,
             world_size=1,
             rank=0,
         )
@@ -73,8 +79,8 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         state = dl.state_dict()
 
         dl_resumed = self._build_dataloader(
-            batch_size=1,
-            seq_len=512,
+            num_tokens_per_batch=512,
+            max_context_length=512,
             world_size=1,
             rank=0,
         )

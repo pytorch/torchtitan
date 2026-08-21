@@ -140,7 +140,8 @@ target's field set at the time it was written:
 # Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
-return TritonRoPE.Config(dim=cfg.dim, max_seq_len=cfg.max_seq_len,
+return TritonRoPE.Config(
+    dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
 # Robust: every RoPE.Config field (including ones added later, inherited by the

@@ -27,7 +27,11 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.multimodal import multimodal_context
+from torchtitan.models.common.multimodal import (
+    get_vision_positions,
+    multimodal_context,
+    scatter_vision_embeds,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.module import Module
@@ -73,7 +77,7 @@ class Attention(GQAttention):
     class Config(GQAttention.Config):
         # Muse Glimmer-specific per-layer iRoPE flag: the shared GQAttention always
         # applies RoPE, so Muse Glimmer carries its own flag and guards the call in
-        # forward (NoPE layers still build a rope module so max_seq_len
+        # forward (NoPE layers still build a rope module so max_context_length
         # discovery/resize in the base Decoder works uniformly).
         use_rope: bool = True
         scale_query_by: float
@@ -100,16 +104,12 @@ class Attention(GQAttention):
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Param name must stay ``x_BLD`` to match the base GQAttention.forward and
-        # the sharding-config key set by set_gqa_attention_sharding: the per-arg
-        # input redistribution (SP Shard(1) -> Replicate) is looked up by the
-        # forward's actual parameter name, so renaming this drops the gather.
-        bs, seqlen, _ = x_BLD.shape
-        xq, xk, xv = self.qkv_linear(x_BLD)
+        num_tokens = x_TD.shape[0]
+        xq, xk, xv = self.qkv_linear(x_TD)
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).
@@ -138,10 +138,10 @@ class Attention(GQAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        output = output.view(bs, seqlen, -1)
+        output = output.view(num_tokens, -1)
 
         if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_BLD))
+            output = output * torch.sigmoid(self.o_gate(x_TD))
 
         return self.wo(output)
 
@@ -348,7 +348,7 @@ class MuseGlimmerModel(Decoder):
             else None
         )
         # Owned vision stack (None unless a multimodal flavor configured it). When
-        # present, ``forward`` runs encoder->adapter on padded pixel_values.
+        # present, ``forward`` runs encoder->adapter on packed pixel_values.
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
@@ -359,92 +359,18 @@ class MuseGlimmerModel(Decoder):
     def _get_vision_features(
         self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
     ) -> torch.Tensor:
-        """Encode padded ``pixel_values`` and adapter-project into features.
+        """Encode packed ``pixel_values`` and adapter-project into features.
 
         Mirrors qwen3_5's ``_get_vision_embeds``: runs the owned encoder +
-        adapter and returns ``[1, n_vision_tokens, adapter_dim]`` -- the shape
-        ``_inject_vision`` expects. ``pixel_values`` is the padded
-        ``[N, P, patch_dim]`` tensor (one row per image, zero-padded to the
-        batch's max patch count) and ``grid_thw`` the ``[N, 3]`` per-image grid;
-        the encoder unpads each row and casts inputs to its parameter dtype.
+        adapter and returns ``[T, adapter_dim]``. ``pixel_values`` contains all
+        visual patches packed into one sequence, and ``grid_thw`` describes each
+        visual item's contiguous segment.
         """
         assert self.vision_encoder is not None and self.vision_adapter is not None
         feats = self.vision_adapter(
             self.vision_encoder(pixel_values, grid_thw=grid_thw)
         )
-        return feats.unsqueeze(0)
-
-    def _vision_spans(self, vision_mask: torch.Tensor) -> list[tuple[int, int, int]]:
-        """Find contiguous vision spans as ``(sample_idx, start, n_tokens)``.
-
-        Scans ``vision_mask`` (``[batch, seq_len]``) and returns the contiguous
-        runs of True entries in row-major order -- the same order in which the
-        flat ``vision_features`` tokens are laid out.
-        """
-        # Compute start/end transitions for the whole batch on-device, then do a
-        # single .tolist() sync. Doing .tolist() per-row (per sample) would force
-        # a device->host sync for every batch element on the vision path.
-        zero_col = torch.zeros(
-            vision_mask.shape[0], 1, dtype=torch.bool, device=vision_mask.device
-        )
-        prev = torch.cat([zero_col, vision_mask[:, :-1]], dim=1)
-        nxt = torch.cat([vision_mask[:, 1:], zero_col], dim=1)
-        # nonzero returns indices in row-major (sample-then-column) order, matching
-        # the flat vision_features token layout; start/end rows align pairwise.
-        start_idx = (vision_mask & ~prev).nonzero(as_tuple=False)
-        end_cols = (vision_mask & ~nxt).nonzero(as_tuple=False)[:, 1]
-        spans = torch.stack(
-            [start_idx[:, 0], start_idx[:, 1], end_cols - start_idx[:, 1] + 1],
-            dim=1,
-        )
-        return [(s, start, n) for s, start, n in spans.tolist()]
-
-    def _inject_vision(
-        self,
-        h: torch.Tensor,
-        vision_features: torch.Tensor,
-        vision_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Project + scaleless-norm vision features and scatter them into the
-        token-embedding stream at ``vision_mask`` positions.
-
-        ``vision_features`` is ``[1, n_vision_tokens, adapter_dim]`` and
-        ``vision_mask`` is ``[batch, seq_len]`` with exactly ``n_vision_tokens``
-        True entries.
-
-        Boolean-mask assignment (``h[vision_mask] = vision_features``) has no
-        DTensor sharding rule, so the features are scattered by explicit
-        integer/slice assignment instead.
-        """
-        if self.vision_projection is None or self.perception_emb_norm is None:
-            raise ValueError(
-                "vision_features were provided but the model has no "
-                "vision_projection/perception_emb_norm configured."
-            )
-        v = self.vision_projection(vision_features)
-        v = self.perception_emb_norm(v)
-        v = v.squeeze(0).to(h.dtype)
-        # Scatter via integer/slice assignment rather than boolean-mask
-        # index_put: the latter has no DTensor sharding rule, the former does.
-        # Under TP both ``h`` and ``v`` are Replicate (the embedding output is
-        # overridden to Replicate so the full sequence is local), so the slice
-        # assignment writes straight through DTensor -- no unwrap/clone/rewrap.
-        # The plain path (single-GPU / FSDP) writes directly. ``v`` is consumed
-        # in row-major order to match the boolean-mask semantics it replaces.
-        v_offset = 0
-        spans = self._vision_spans(vision_mask)
-        total_span = sum(n_tokens for _, _, n_tokens in spans)
-        if total_span != v.shape[0]:
-            raise ValueError(
-                f"vision_mask selects {total_span} positions but "
-                f"vision_features has {v.shape[0]} tokens; counts must match."
-            )
-        for sample_idx, start, n_tokens in spans:
-            h[sample_idx, start : start + n_tokens, :] = v[
-                v_offset : v_offset + n_tokens, :
-            ]
-            v_offset += n_tokens
-        return h
+        return feats
 
     def forward(
         self,
@@ -473,7 +399,7 @@ class MuseGlimmerModel(Decoder):
 
             if self.tok_embeddings is not None:
                 h = self.tok_embeddings(tokens)
-                # The model owns the encoder: when padded pixel_values are passed,
+                # The model owns the encoder: when packed pixel_values are passed,
                 # run encoder->adapter here to produce the features for injection.
                 # The placeholder mask is derived from tokens + special_tokens.
                 # TODO: Video is not implemented in the training forward. The
@@ -507,21 +433,38 @@ class MuseGlimmerModel(Decoder):
                             "pixel_values were provided but special_tokens with an "
                             "'image_id' entry was not provided."
                         )
-                    vision_mask = tokens == special_tokens["image_id"]
                     vision_features = self._get_vision_features(pixel_values, grid_thw)
-                    h = self._inject_vision(h, vision_features, vision_mask)
+                    if (
+                        self.vision_projection is None
+                        or self.perception_emb_norm is None
+                    ):
+                        raise ValueError(
+                            "pixel_values were provided but the model has no "
+                            "vision_projection/perception_emb_norm configured."
+                        )
+                    vision_embeds = self.perception_emb_norm(
+                        self.vision_projection(vision_features)
+                    )
+                    downsample_factor = self.vision_encoder.downsample_factor
+                    num_tokens_per_item = (grid_thw[:, 1] // downsample_factor) * (
+                        grid_thw[:, 2] // downsample_factor
+                    )
+                    vision_positions = get_vision_positions(
+                        tokens,
+                        num_tokens_per_item,
+                        special_tokens["image_id"],
+                    )
+                    h = scatter_vision_embeds(
+                        h,
+                        vision_embeds=vision_embeds,
+                        vision_positions=vision_positions,
+                    )
             else:
                 h = tokens
 
         if get_spmd_backend() == "spmd_types":
             # The scatter restores a token-aligned tensor, so text-model DP
-            # resumes as global batch sharding after the multimodal region.
-
-            # NOTE: Under PP + TP + SP, this is not a truly correct typeing.
-            # In a later PP stage, h arrives as TP sharded activation,
-            # so annotating it as R on TP is wrong. However,
-            # PP + spmd typechecking is not supported currently and
-            # the asserted type here is not used anywhere.
+            # resumes sharding the leading token dimension.
             spmd.assert_type(h, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
@@ -556,8 +499,7 @@ class MuseGlimmerModel(Decoder):
         # Language models always use block-causal (per-document) masking: the
         # dataloaders emit per-document positions, and the efficient packed-doc
         # mask ANDed with the causal mask yields same-document causal attention.
-        seq_len = positions.shape[1]
-        B = positions.shape[0]
+        seq_len = positions.shape[0]
         base_mods = [
             get_causal_mask_mod(),
             get_efficient_causal_mask_mod_for_packed_document(positions),
@@ -571,7 +513,7 @@ class MuseGlimmerModel(Decoder):
         def _build_mask(mask_mods: list) -> BlockMask:
             return create_attention_mask(
                 and_masks(*mask_mods),
-                B,
+                1,
                 None,
                 seq_len,
                 seq_len,

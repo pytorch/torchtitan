@@ -348,10 +348,10 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
 GRAPH_PP_DSV3_PP_OPTIONS = (
     "--training.disable_cuda_graphs"
     " --parallelism.pipeline_parallel_degree=2"
+    " --parallelism.num_pp_microbatches=8"
     " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
-    " --training.local_batch_size=8"
-    " --training.global_batch_size=32"
+    " --training.num_tokens_per_microbatch_per_dp_rank=2048"
     # Eager PP cannot be the baseline for ZBVZeroBubble or DualPipeV here:
     # FlexAttention needs torch.compile, and torch.compile is incompatible with
     # those eager PP schedules. Compare GraphPP schedules against eager

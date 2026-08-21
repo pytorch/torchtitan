@@ -47,8 +47,8 @@ def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(

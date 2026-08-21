@@ -58,8 +58,7 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "Fused MLA requires CUDA")
 class TestFusedMLANumerics(unittest.TestCase):
-    batch = 2
-    seq_len = 16
+    num_tokens = 32
     n_heads = 128
     q_nope_dim = 128
     rope_dim = 64
@@ -73,7 +72,7 @@ class TestFusedMLANumerics(unittest.TestCase):
         cuda = torch.device("cuda")
         self.rope = ComplexRoPE.Config(
             dim=self.rope_dim,
-            max_seq_len=128,
+            max_context_length=128,
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -81,17 +80,7 @@ class TestFusedMLANumerics(unittest.TestCase):
             original_seq_len=4096,
         ).build()
         self.rope = self.rope.to(cuda)
-        self.positions = torch.stack(
-            [
-                torch.arange(self.seq_len, device=cuda),
-                torch.arange(
-                    self.seq_len - 1,
-                    -1,
-                    -1,
-                    device=cuda,
-                ),
-            ]
-        )
+        self.positions = torch.arange(self.num_tokens, device=cuda)
 
     def tearDown(self):
         FlexAttention.inductor_configs.clear()
@@ -133,8 +122,8 @@ class TestFusedMLANumerics(unittest.TestCase):
     def _check_q_forward_backward_and_storage(self, dtype: torch.dtype) -> None:
         torch.manual_seed(42)
         q_source = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.n_heads,
             self.q_nope_dim + self.rope_dim,
             device=self.positions.device,
@@ -155,7 +144,7 @@ class TestFusedMLANumerics(unittest.TestCase):
             [self.q_nope_dim, self.rope_dim],
             dim=-1,
         )
-        cache = self.rope._reshape_cache(q_pos, self.positions)
+        cache = self.rope.cache[self.positions].unsqueeze(0).unsqueeze(2)
         q_pos, _ = self.rope.apply_rotary_emb(
             q_pos,
             q_pos[:, :, :1],
@@ -190,8 +179,8 @@ class TestFusedMLANumerics(unittest.TestCase):
     @parametrize("dtype", [torch.bfloat16, torch.float32])
     def test_q_sum_backward_matches_eager(self, dtype: torch.dtype):
         q_source = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.n_heads,
             self.q_nope_dim + self.rope_dim,
             device=self.positions.device,
@@ -211,7 +200,7 @@ class TestFusedMLANumerics(unittest.TestCase):
             [self.q_nope_dim, self.rope_dim],
             dim=-1,
         )
-        cache = self.rope._reshape_cache(q_pos, self.positions)
+        cache = self.rope.cache[self.positions].unsqueeze(0).unsqueeze(2)
         q_pos, _ = self.rope.apply_rotary_emb(
             q_pos,
             q_pos[:, :, :1],
@@ -227,50 +216,14 @@ class TestFusedMLANumerics(unittest.TestCase):
         self.assert_dtype_close(fused_grad, reference_grad, dtype)
 
     @parametrize("dtype", [torch.bfloat16, torch.float32])
-    def test_singleton_positions_broadcast_matches_eager(self, dtype: torch.dtype):
-        self._check_singleton_positions_broadcast(dtype)
-
-    def _check_singleton_positions_broadcast(self, dtype: torch.dtype) -> None:
-        torch.manual_seed(42)
-        q = torch.randn(
-            self.batch,
-            self.seq_len,
-            self.n_heads,
-            self.q_nope_dim + self.rope_dim,
-            device=self.positions.device,
-            dtype=dtype,
-        )
-        singleton_positions = self.positions[:1]
-        q_nope, q_pos = torch.split(
-            q,
-            [self.q_nope_dim, self.rope_dim],
-            dim=-1,
-        )
-        cache = self.rope._reshape_cache(q_pos, singleton_positions)
-        q_pos, _ = self.rope.apply_rotary_emb(
-            q_pos,
-            q_pos[:, :, :1],
-            cache,
-        )
-        reference_q = torch.cat([q_nope, q_pos], dim=-1)
-
-        fused_q = fused_mla_q(
-            q.clone(),
-            self.rope.cache,
-            singleton_positions,
-            self.q_nope_dim,
-        )
-        self.assert_dtype_close(fused_q, reference_q, dtype)
-
-    @parametrize("dtype", [torch.bfloat16, torch.float32])
     def test_kv_forward_backward_and_storage_match_eager(self, dtype: torch.dtype):
         self._check_kv_forward_backward_and_storage(dtype)
 
     def _check_kv_forward_backward_and_storage(self, dtype: torch.dtype) -> None:
         torch.manual_seed(42)
         kv = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.n_heads,
             self.q_nope_dim + self.value_dim,
             device=self.positions.device,
@@ -278,8 +231,8 @@ class TestFusedMLANumerics(unittest.TestCase):
             requires_grad=True,
         )
         k_pos = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.rope_dim,
             device=self.positions.device,
             dtype=dtype,
@@ -301,7 +254,7 @@ class TestFusedMLANumerics(unittest.TestCase):
             dim=-1,
         )
         k_pos_view = reference_k_pos.unsqueeze(2)
-        cache = self.rope._reshape_cache(k_pos_view, self.positions)
+        cache = self.rope.cache[self.positions].unsqueeze(0).unsqueeze(2)
         _, rotated_k_pos = self.rope.apply_rotary_emb(
             k_pos_view,
             k_pos_view,
@@ -356,24 +309,24 @@ class TestFusedMLANumerics(unittest.TestCase):
     def test_make_fx_keeps_forward_and_backward_custom_ops(self):
         """GraphTrainer fake tracing sees stable fused MLA operator nodes."""
         q = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.n_heads,
             self.q_nope_dim + self.rope_dim,
             device=self.positions.device,
             requires_grad=True,
         )
         kv = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.n_heads,
             self.q_nope_dim + self.value_dim,
             device=self.positions.device,
             requires_grad=True,
         )
         k_pos = torch.randn(
-            self.batch,
-            self.seq_len,
+            1,
+            self.num_tokens,
             self.rope_dim,
             device=self.positions.device,
             requires_grad=True,
@@ -470,27 +423,24 @@ class TestFusedMLANumerics(unittest.TestCase):
                     parameter.normal_(mean=0.0, std=0.02)
         fused.load_state_dict(stock.state_dict(), strict=True)
 
-        batch = 2
-        seq_len = 16
         hidden_dim = cast(Attention.Config, stock_config).dim
         x = torch.randn(
-            batch,
-            seq_len,
+            self.num_tokens,
             hidden_dim,
             device=self.positions.device,
             dtype=dtype,
         )
         stock_x = x.detach().clone().requires_grad_()
         fused_x = x.detach().clone().requires_grad_()
-        positions = self.positions[:, :seq_len]
+        positions = self.positions
         attention_mask = create_block_mask(
             lambda batch_idx, head_idx, query_idx, key_value_idx: (
                 query_idx >= key_value_idx
             ),
             B=None,
             H=None,
-            Q_LEN=seq_len,
-            KV_LEN=seq_len,
+            Q_LEN=self.num_tokens,
+            KV_LEN=self.num_tokens,
             device=self.positions.device,
         )
 

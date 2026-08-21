@@ -93,8 +93,8 @@ class TestRegionalInductorCodegen(unittest.TestCase):
 
         torch._dynamo.reset()
         attn = FlexAttention(FlexAttention.Config())
-        bs, seq, heads, dim = 2, 256, 4, 64
-        shape = (bs, seq, heads, dim)
+        seq, heads, dim = 256, 4, 64
+        shape = (seq, heads, dim)
         q, k, v = (
             torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
             for _ in range(3)

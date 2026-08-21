@@ -111,7 +111,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 wqkv_param_init={},
                 wo_param_init={},
                 inner_attention=FlexAttention.Config(),
-                rope=ComplexRoPE.Config(dim=DIM // N_HEADS, max_seq_len=128),
+                rope=ComplexRoPE.Config(dim=DIM // N_HEADS, max_context_length=128),
                 fuse_qkv=False,
                 tp_gemm_backend="dist_gemm",
             )
@@ -245,7 +245,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
 
     Proves the fused path actually runs (a silent fallback would still match, so
     the weights are sharded per rank -- the stock module could not consume them)
-    and that the sequence-major flatten/unflatten round-trips.
+    and that the flat token layout is preserved through both collectives.
     """
 
     @property
@@ -259,7 +259,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
 
         R = self.world_size
         dev = self.device_type
-        dim, hidden, bsz, seq = 64, 128, 2, 8 * R
+        dim, hidden, num_tokens = 64, 128, 16 * R
         init = {"weight": torch.nn.init.zeros_}
 
         torch.manual_seed(0)
@@ -288,7 +288,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
                     torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                     w.copy_(torch.randn_like(w) * 0.1)
 
-        x = torch.randn(bsz, seq, dim, device=dev)
+        x = torch.randn(num_tokens, dim, device=dev)
         ref = stock(x)
 
         # shard the fused module's weights: w1/w3 colwise, w2 rowwise
@@ -307,12 +307,12 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
         with use_spmd_backend("spmd_types"):
             with set_current_spmd_mesh(mesh):
-                x_shard = x.chunk(R, 1)[self.rank].contiguous()
+                x_shard = x.chunk(R, 0)[self.rank].contiguous()
                 out_shard = fused(x_shard)
 
         # fused returns this rank's sequence shard of the full-sequence result
         torch.testing.assert_close(
-            out_shard, ref.chunk(R, 1)[self.rank], atol=2e-3, rtol=2e-3
+            out_shard, ref.chunk(R, 0)[self.rank], atol=2e-3, rtol=2e-3
         )
 
 

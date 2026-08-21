@@ -67,11 +67,11 @@ class DAPOLoss(BaseLoss):
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
-            logits: [B, L, V] current-policy output.
-            labels: [B, L] pre-shifted target token ids.
-            generator_logprobs: [B, L] logprobs from the sampling policy.
-            loss_mask: [B, L] bool mask; True for response tokens.
-            advantages: [B, L] per-token advantages (0.0 for prompt/padding).
+            logits: [T, V] current-policy output.
+            labels: [T] pre-shifted target token ids.
+            generator_logprobs: [T] logprobs from the sampling policy.
+            loss_mask: [T] bool mask; True for response tokens.
+            advantages: [T] per-token advantages (0.0 for prompt/padding).
             global_valid_tokens: total response tokens with finite generator logprobs
                 across all microbatches and DP ranks; the loss denominator.
 

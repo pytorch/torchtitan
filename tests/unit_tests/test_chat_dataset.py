@@ -56,22 +56,22 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
-def _runtime(seq_len):
+def _runtime(max_context_length):
     return DatasetBuildContext(
         tokenizer=_load_tokenizer(),
-        seq_len=seq_len,
-        local_batch_size=1,
+        max_context_length=max_context_length,
+        num_tokens_per_batch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
     )
 
 
-def _build_processor(seq_len=2048, messages_fn=_process_sample):
+def _build_processor(max_context_length=2048, messages_fn=_process_sample):
     return ChatProcessor.Config(messages_fn=messages_fn).build(
-        context=_runtime(seq_len)
+        context=_runtime(max_context_length)
     )
 
 
-def _build_rows(seq_len):
+def _build_rows(max_context_length):
     dataset = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=HuggingFaceRandomAccessSource.Config(
@@ -86,7 +86,7 @@ def _build_rows(seq_len):
         )
     )
     return dataset.build(
-        context=_runtime(seq_len),
+        context=_runtime(max_context_length),
         dataset_iteration_policy=DatasetIterationPolicy(
             seed=42,
             shuffle=False,
@@ -98,7 +98,7 @@ def _build_rows(seq_len):
     )
 
 
-def _build_dataloader(seq_len=128, world_size=1, rank=0):
+def _build_dataloader(max_context_length=128, world_size=1, rank=0):
     config = GrainDataLoader.Config(
         dataset=FirstFitPackingConfig(
             dataset=SingleDatasetConfig(
@@ -123,8 +123,8 @@ def _build_dataloader(seq_len=128, world_size=1, rank=0):
         dp_world_size=world_size,
         dp_rank=rank,
         tokenizer=_load_tokenizer(),
-        seq_len=seq_len,
-        local_batch_size=1,
+        max_context_length=max_context_length,
+        num_tokens_per_batch=max_context_length,
     )
 
 
@@ -137,7 +137,6 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
             np.random.default_rng(0),
         )
         _, label_ids = TextCollator.Config().build(context=_runtime(2048))([sequence])
-        label_ids = label_ids[0]
 
         masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
         unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
@@ -164,7 +163,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             full_tokens.append(tokenizer.eos_id)
 
         self.assertEqual(
-            inputs["input"][0].tolist()[: len(full_tokens) - 1],
+            inputs["input"].tolist()[: len(full_tokens) - 1],
             full_tokens[:-1],
         )
 
@@ -173,41 +172,41 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         )
         prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
         response_start = len(prompt_tokens) - 1
-        self.assertNotEqual(labels[0, response_start], IGNORE_INDEX)
+        self.assertNotEqual(labels[response_start], IGNORE_INDEX)
         self.assertEqual(
-            labels[0, response_start : len(full_tokens) - 1].tolist(),
+            labels[response_start : len(full_tokens) - 1].tolist(),
             full_tokens[1:][response_start:],
         )
-        self.assertEqual(labels[0, len(full_tokens) - 1], IGNORE_INDEX)
+        self.assertEqual(labels[len(full_tokens) - 1], IGNORE_INDEX)
 
 
 class TestChatDatasetGreedyPacking(unittest.TestCase):
-    """Multiple short samples packed into one sequence with small seq_len."""
+    """Multiple short samples packed with a small maximum context length."""
 
     def test_packing_multiple_samples(self):
-        seq_len = 256
-        sequences = list(_build_rows(seq_len))
+        max_context_length = 256
+        sequences = list(_build_rows(max_context_length))
 
         # With 10 samples of lengths 79-123, they should pack into fewer than 10 batches
         self.assertGreater(len(sequences), 0)
         self.assertLess(len(sequences), 10)
 
-        collator = TextCollator.Config().build(context=_runtime(seq_len))
+        collator = TextCollator.Config().build(context=_runtime(max_context_length))
         for sequence in sequences:
             batch, labels = collator([sequence])
-            self.assertEqual(batch["input"].shape, (1, seq_len))
-            self.assertEqual(labels.shape, (1, seq_len))
+            self.assertEqual(batch["input"].shape, (max_context_length,))
+            self.assertEqual(labels.shape, (max_context_length,))
             self.assertIn("positions", batch)
-            self.assertEqual(batch["positions"].shape, (1, seq_len))
+            self.assertEqual(batch["positions"].shape, (max_context_length,))
 
 
 class TestChatDatasetPerDocumentPositions(unittest.TestCase):
     """Positions reset to 0 at each document boundary in packed mode."""
 
     def test_positions_reset_at_boundaries(self):
-        sequence = next(iter(_build_rows(seq_len=256)))
+        sequence = next(iter(_build_rows(max_context_length=256)))
         batch, _ = TextCollator.Config().build(context=_runtime(256))([sequence])
-        positions = batch["positions"][0]
+        positions = batch["positions"]
 
         self.assertEqual(positions[0].item(), 0)
         resets = (positions[1:] == 0).nonzero(as_tuple=True)[0]
@@ -228,13 +227,13 @@ class TestChatDatasetPerDocumentPositions(unittest.TestCase):
 
 
 class TestChatDatasetDropOnOverflow(unittest.TestCase):
-    """Samples exceeding seq_len are silently dropped."""
+    """Samples exceeding the maximum context length are silently dropped."""
 
-    def test_all_dropped_with_tiny_seq_len(self):
+    def test_all_dropped_with_tiny_max_context_length(self):
         self.assertEqual(
-            len(list(_build_rows(seq_len=32))),
+            len(list(_build_rows(max_context_length=32))),
             0,
-            "All samples should be dropped at seq_len=32",
+            "All samples should be dropped at max_context_length=32",
         )
 
 
@@ -308,7 +307,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
         packed = np.concatenate((input_ids_0, input_ids_1))
         boundary = len(input_ids_0)
         positions = torch.tensor(
-            [list(range(len(input_ids_0))) + list(range(len(input_ids_1)))]
+            list(range(len(input_ids_0))) + list(range(len(input_ids_1)))
         )
 
         mask_mod = get_document_mask_mod(positions)
@@ -338,13 +337,8 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
 
     def test_packed_document_mask_composes_with_causal_mask(self):
         for positions in (
-            torch.tensor([[0, 1, 2, 0, 1, 0, 1, 2]]),
-            torch.tensor(
-                [
-                    [0, 1, 2, 0, 1, 0, 1, 2],
-                    [0, 1, 0, 1, 2, 3, 0, 1],
-                ]
-            ),
+            torch.tensor([0, 1, 2, 0, 1, 0, 1, 2]),
+            torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1]),
         ):
             causal_mask = get_causal_mask_mod()
             document_mask = get_document_mask_mod(positions)
@@ -354,33 +348,26 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             )
             head = torch.tensor(0)
 
-            for batch in range(positions.shape[0]):
-                batch_tensor = torch.tensor(batch)
-                for query_index in range(positions.shape[1]):
-                    query_tensor = torch.tensor(query_index)
-                    for key_value_index in range(positions.shape[1]):
-                        key_value_tensor = torch.tensor(key_value_index)
-                        expected = causal_mask(
+            batch_tensor = torch.tensor(0)
+            for query_index in range(positions.shape[0]):
+                query_tensor = torch.tensor(query_index)
+                for key_value_index in range(positions.shape[0]):
+                    key_value_tensor = torch.tensor(key_value_index)
+                    expected = causal_mask(
+                        batch_tensor, head, query_tensor, key_value_tensor
+                    ) & document_mask(
+                        batch_tensor, head, query_tensor, key_value_tensor
+                    )
+                    self.assertEqual(
+                        packed_mask(
                             batch_tensor, head, query_tensor, key_value_tensor
-                        ) & document_mask(
-                            batch_tensor, head, query_tensor, key_value_tensor
-                        )
-                        self.assertEqual(
-                            packed_mask(
-                                batch_tensor,
-                                head,
-                                query_tensor,
-                                key_value_tensor,
-                            ).item(),
-                            expected.item(),
-                        )
+                        ).item(),
+                        expected.item(),
+                    )
 
     def test_decoder_block_causal_flex_mask_supports_multiple_samples(self):
         positions = torch.tensor(
-            [
-                [0, 1, 2, 0, 1, 0, 1, 2],
-                [0, 1, 0, 1, 2, 3, 0, 1],
-            ],
+            [0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1],
             dtype=torch.int32,
         )
         attn_config = BaseAttention.Config(
@@ -391,7 +378,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
         decoder = Decoder.__new__(Decoder)
         mask = decoder._create_flex_attention_mask_for_document(positions, attn_config)
 
-        self.assertEqual(mask.shape, (positions.shape[0], 1, 8, 8))
+        self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
 
 
 if __name__ == "__main__":
