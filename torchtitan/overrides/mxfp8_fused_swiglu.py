@@ -432,41 +432,14 @@ class _MXFP8SwiGLUGroupedMLP(torch.autograd.Function):
 
 
 def _validate_grouped_inputs(x, w13, w2_t, offs):
-    _require_kernels("mxfp8_swiglu_grouped_mlp_w13")
-    if any(isinstance(t, DTensor) for t in (x, w13, w2_t)):
-        raise ValueError(
-            "mxfp8_swiglu_grouped_mlp_w13 takes plain local tensors, not "
-            "DTensor; pass local shards or exclude this module from the fused "
-            "MXFP8 path."
-        )
-    if not x.is_cuda or x.ndim != 2:
-        raise ValueError(
-            "mxfp8_swiglu_grouped_mlp_w13 requires a 2D CUDA token tensor, got "
-            f"ndim={x.ndim} on device {x.device}"
-        )
-    if (
-        x.dtype != torch.bfloat16
-        or w13.dtype != torch.bfloat16
-        or w2_t.dtype != torch.bfloat16
-    ):
-        raise ValueError(
-            "mxfp8_swiglu_grouped_mlp_w13 requires BF16 inputs and weights, got "
-            f"x={x.dtype}, w13={w13.dtype}, down_weight_t={w2_t.dtype}"
-        )
-    if w13.ndim != 4 or w13.shape[2] != 2 or w2_t.ndim != 3:
-        raise ValueError(
-            "expected w13 of shape (E, F, 2, D) and down_weight_t of shape "
-            f"(E, F, D_out), got w13={tuple(w13.shape)}, "
-            f"down_weight_t={tuple(w2_t.shape)}"
-        )
-    e, f, _, d = w13.shape
+    # The only caller is MXFP8FusedGroupedExperts.forward, which guarantees
+    # plain local BF16 tensors in the module's own (M, D) / (E, F, 2, D) /
+    # (E, F, D_out) shapes; only environment, config dims, and the
+    # routing-dependent token count need checking.
+    _require_kernels("MXFP8FusedGroupedExperts")
+    _, f, _, d = w13.shape
     m = x.shape[0]
     d_out = w2_t.shape[2]
-    if x.shape[1] != d or w2_t.shape[:2] != (e, f) or offs.shape != (e,):
-        raise ValueError(
-            f"shape mismatch: x={tuple(x.shape)}, w13={tuple(w13.shape)}, "
-            f"down_weight_t={tuple(w2_t.shape)}, offs={tuple(offs.shape)}"
-        )
     if f % 128 != 0 or d % 128 != 0 or d_out % 128 != 0:
         raise ValueError(
             "the MXFP8 CuTeDSL kernels require expert dimensions to be "
@@ -504,7 +477,7 @@ def _validate_grouped_inputs(x, w13, w2_t, offs):
     ):
         if cond is False:
             raise ValueError(
-                f"mxfp8_swiglu_grouped_mlp_w13: token count {m} (hidden={f}) "
+                f"MXFP8FusedGroupedExperts: token count {m} (hidden={f}) "
                 f"must be {requirement}; there is no silent fallback."
             )
         if cond is not True:
