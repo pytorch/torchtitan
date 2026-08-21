@@ -405,6 +405,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         assert closure is None, "OptimizersContainer does not support closures"
+        # Optimizers run in sequence. An interleaved pipeline schedule gives a
+        # rank several model parts, and the loop above builds one optimizer per
+        # (part, optimizer name), so a bucketed optimizer like DistMuon drains
+        # one virtual stage's collectives before the next stage's begin. The
+        # total collective count is unchanged -- each bucket still covers the
+        # same parameters -- but overlap across virtual stages is lost.
         for optimizer in self.optimizers:
             optimizer.step()
         return None

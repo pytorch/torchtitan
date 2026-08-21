@@ -298,6 +298,13 @@ class DistMuon(Optimizer):
         super().__init__(params, defaults)
         self._validate_groups()
         self._param_groups_frozen = True
+        # TODO: Anything reserved per instance is reserved once per virtual
+        # pipeline stage. OptimizersContainer builds one optimizer per model
+        # part, so under an interleaved schedule a rank holds several DistMuon
+        # instances at once. The bucket plan built below is small enough not to
+        # matter, but a per-instance scratch pool would scale with the number of
+        # virtual stages instead of the rank's actual peak demand, and should be
+        # shared across the instances on a rank rather than sized per instance.
         _initialize_dist_muon(
             self,
             compute_sharding_by_fqn=compute_sharding_by_fqn,
