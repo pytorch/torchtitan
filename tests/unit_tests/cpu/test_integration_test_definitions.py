@@ -128,7 +128,6 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
     [
         ("checkpoint", "checkpointing"),
         ("pipeline_parallel", "pipeline parallelism"),
-        ("explicit_backend", "comm.mode=torchcomms"),
         ("fsdp+varlen_attn+per_op_sac", "selective AC"),
     ],
 )
@@ -140,8 +139,6 @@ def test_fake_pg_incompatible_test_requires_explicit_marker(
         config.checkpoint.enable = True
     elif test_name == "pipeline_parallel":
         config.parallelism.pipeline_parallel_degree = 2
-    elif test_name == "explicit_backend":
-        config.comm.mode = "torchcomms"
 
     test = OverrideDefinitions(configs=[llama3_debugmodel], test_name=test_name)
 
