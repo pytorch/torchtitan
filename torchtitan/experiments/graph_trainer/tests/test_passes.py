@@ -91,6 +91,8 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
+    _make_node_override_memory_policy,
+    NodePolicyKey,
     tag_sac_policy,
     tag_with_memory_policy_pass,
     validate_memory_policy_config,
@@ -1624,6 +1626,32 @@ class TestApplySACPass(TestCase):
         # Mutating the dup's annotation must not leak into the original.
         dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
         self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
+
+    def test_make_node_override_memory_policy_save_specific_node(self):
+        gm = self._build_gm([torch.ops.aten.add.Tensor] * 3)
+        nodes = self._get_call_function_nodes(gm)
+        for node, fqn in nodes:
+            if fqn is not None:
+                node.meta["custom"] = {_MODULE_FQN: "layers.0.attention_norm"}
+        policy_fn = _make_node_override_memory_policy(
+            base_policy=_make_default_memory_policy(set()),
+            overrides={
+                NodePolicyKey(
+                    target="torch.ops.aten.add.Tensor",
+                    module_fqn="layers.0.attention",
+                    occurrence=2,
+                ): CheckpointPolicy.MUST_SAVE,
+            },
+        )
+        tag_sac_policy(gm, policy_fn=policy_fn())
+        self.assertEqual(
+            [node.meta["recompute"] for node in nodes],
+            [
+                CheckpointPolicy.PREFER_RECOMPUTE,
+                CheckpointPolicy.MUST_SAVE,
+                CheckpointPolicy.PREFER_RECOMPUTE,
+            ],
+        )
 
 
 class TestFullMemoryPolicy(TestCase):
