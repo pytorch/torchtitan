@@ -369,7 +369,7 @@ class KimiK25VisionEncoder(Module):
             )
         )
         self.rotary_pos_emb = config.rotary_pos_emb.build()
-        self._cached_freq_table: torch.Tensor | None = None
+        self.register_buffer("_cached_freq_table", None, persistent=False)
         self.layers = ModuleDict(
             {str(idx): config.block.build() for idx in range(config.num_layers)}
         )

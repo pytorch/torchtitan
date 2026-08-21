@@ -194,6 +194,80 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.training.disable_cuda_graphs
 
+    def test_sdc_replay_requires_determinism(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.disable_cuda_graphs",
+            ]
+        )
+        config.sdc_replay.enabled = True
+
+        with pytest.raises(ValueError, match="debug.deterministic=True"):
+            config._validate_sdc_replay()
+
+        config.debug.deterministic = True
+        config.debug.deterministic_warn_only = True
+        with pytest.raises(ValueError, match="deterministic_warn_only=False"):
+            config._validate_sdc_replay()
+
+    def test_sdc_replay_cli_options(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--debug.deterministic",
+                "--sdc-replay.enabled",
+                "--sdc-replay.num-steps",
+                "3",
+                "--sdc-replay.num-replays",
+                "2",
+            ]
+        )
+
+        assert config.sdc_replay.enabled
+        assert config.sdc_replay.num_steps == 3
+        assert config.sdc_replay.num_replays == 2
+
+    def test_sdc_replay_accepts_execution_modes(self):
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_hybridep,
+            deepseek_v3_debugmodel_minimal_async_ep,
+        )
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
+        from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--debug.deterministic",
+            ]
+        )
+        config.sdc_replay.enabled = True
+        config.parallelism.enable_fsdp_symm_mem = True
+        config.compile.enable_async_tensor_parallel = True
+        configs = {
+            "symm_mem_async_tp": config,
+            "distributed_gemm": llama3_debugmodel_dist_gemm(),
+            "hybrid_ep": deepseek_v3_debugmodel_hybridep(),
+            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(),
+            "deep_ep": qwen3_moe_deepep(),
+        }
+
+        for name, config in configs.items():
+            with self.subTest(config=name):
+                config.debug.deterministic = True
+                config.sdc_replay.enabled = True
+                config._validate_sdc_replay()
+
     def test_cuda_graphs_reject_blocking_hybridep(self):
         from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
         from torchtitan.models.deepseek_v3.config_registry import (

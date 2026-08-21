@@ -348,7 +348,7 @@ class Qwen35VisionEncoder(Module):
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
         self.rotary_pos_emb = config.rotary_pos_emb.build()
-        self._cached_freq_table: torch.Tensor | None = None
+        self.register_buffer("_cached_freq_table", None, persistent=False)
 
         self.layers = ModuleDict(
             {str(idx): config.block.build() for idx in range(config.num_layers)}

@@ -19,7 +19,7 @@ from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import ForwardBackwardStepContext, Trainer
 
 DTYPE = torch.bfloat16
 BATCH_SIZE = 2
@@ -70,10 +70,12 @@ def _measure_step(
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    loss = trainer.forward_backward_step(
-        input_dict={"input": tokens, "positions": positions},
-        labels=labels,
-        global_valid_tokens=global_valid_tokens,
+    loss = trainer.forward_backward_step_fn(
+        ForwardBackwardStepContext(
+            input_dict={"input": tokens, "positions": positions},
+            labels=labels,
+            global_valid_tokens=global_valid_tokens,
+        )
     )
     torch.cuda.synchronize()
 

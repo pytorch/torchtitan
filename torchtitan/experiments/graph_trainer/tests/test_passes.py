@@ -1953,12 +1953,16 @@ class TestBucketingPrefetchOrder(FSDPTest):
             self.BATCH_SIZE * self.SEQ_LEN, dtype=torch.float, device="cuda"
         )
 
-        # One forward_backward_step triggers _make_fx_forward_backward_step
+        # One forward/backward invocation triggers _make_fx_forward_backward_step
         # which traces the model and applies all graph passes.
-        trainer.forward_backward_step(
-            input_dict={"input": inputs, "positions": positions},
-            labels=labels,
-            global_valid_tokens=global_valid_tokens,
+        from torchtitan.trainer import ForwardBackwardStepContext
+
+        trainer.forward_backward_step_fn(
+            ForwardBackwardStepContext(
+                input_dict={"input": inputs, "positions": positions},
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)

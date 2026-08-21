@@ -33,6 +33,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.num_pipeline_parallel_microbatches = 1
         trainer.step = 1
         trainer.ntokens_seen = 0
+        trainer.sdc_attempt_step = 0
 
         parallel_dims = MagicMock()
         parallel_dims.dp_enabled = False
@@ -45,8 +46,9 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.metrics_processor = MagicMock()
         trainer.metrics_processor.should_log.return_value = should_log
 
-        # Shadow the bound method so forward/backward returns a canned loss.
-        trainer.forward_backward_step = MagicMock(return_value=torch.tensor(loss_value))
+        trainer.forward_backward_step_fn = MagicMock(
+            return_value=torch.tensor(loss_value)
+        )
         return trainer
 
     def _data_iterator(self):

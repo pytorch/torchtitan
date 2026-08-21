@@ -42,7 +42,12 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_INPUT_PREPARERS,
 )
 from torchtitan.tools.logging import logger
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import (
+    ForwardBackwardStepContext,
+    ForwardBackwardStepFn,
+    ForwardBackwardStepWrapper,
+    Trainer,
+)
 
 
 def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
@@ -131,22 +136,29 @@ class GraphTrainer(Trainer):
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
-    def forward_backward_step(
+    def make_forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
-        global_valid_tokens: torch.Tensor,
+        step_wrappers: tuple[ForwardBackwardStepWrapper, ...] = (),
+    ) -> ForwardBackwardStepFn:
+        return super().make_forward_backward_step(
+            step_wrappers=(self._graph_forward_backward_step, *step_wrappers)
+        )
+
+    def _graph_forward_backward_step(
+        self,
+        next_step_fn: ForwardBackwardStepFn,
+        context: ForwardBackwardStepContext,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
-            return super().forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
-                global_valid_tokens=global_valid_tokens,
-            )
+            return next_step_fn(context)
 
+        input_dict = context.input_dict
+        labels = context.labels
+        global_valid_tokens = context.global_valid_tokens
         assert isinstance(input_dict, dict)
         assert isinstance(labels, torch.Tensor)
+        assert global_valid_tokens is not None
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 

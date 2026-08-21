@@ -2043,6 +2043,7 @@ class TestTraceContextParallel(FSDPTest):
             graph_trainer_llama3_debugmodel_sdpa,
         )
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+        from torchtitan.trainer import ForwardBackwardStepContext
 
         old_local_rank = os.environ.get("LOCAL_RANK")
         os.environ["LOCAL_RANK"] = str(dist.get_rank() % torch.cuda.device_count())
@@ -2092,12 +2093,14 @@ class TestTraceContextParallel(FSDPTest):
                     .unsqueeze(0)
                     .expand(config.training.local_batch_size, config.training.seq_len)
                 )
-                trainer.forward_backward_step(
-                    input_dict={"input": tokens, "positions": positions},
-                    labels=labels,
-                    global_valid_tokens=torch.tensor(
-                        labels.numel(), device=trainer.device
-                    ),
+                trainer.forward_backward_step_fn(
+                    ForwardBackwardStepContext(
+                        input_dict={"input": tokens, "positions": positions},
+                        labels=labels,
+                        global_valid_tokens=torch.tensor(
+                            labels.numel(), device=trainer.device
+                        ),
+                    )
                 )
                 assert trainer._traced_step is not None
                 code_lines = trainer._traced_step.gm.graph.python_code(

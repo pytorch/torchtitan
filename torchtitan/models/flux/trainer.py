@@ -25,7 +25,12 @@ from torchtitan.models.flux.utils import (
     pack_latents,
     preprocess_data,
 )
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import (
+    ForwardBackwardStepContext,
+    ForwardBackwardStepFn,
+    ForwardBackwardStepWrapper,
+    Trainer,
+)
 
 
 class FluxTrainer(Trainer):
@@ -146,27 +151,33 @@ class FluxTrainer(Trainer):
             )
             yield input_dict, labels
 
-    def forward_backward_step(
+    def make_forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
-        global_valid_tokens: torch.Tensor | None = None,
+        step_wrappers: tuple[ForwardBackwardStepWrapper, ...] = (),
+    ) -> ForwardBackwardStepFn:
+        return super().make_forward_backward_step(
+            step_wrappers=(self._flux_forward_backward_step, *step_wrappers)
+        )
+
+    def _flux_forward_backward_step(
+        self,
+        _next_step_fn: ForwardBackwardStepFn,
+        context: ForwardBackwardStepContext,
     ) -> torch.Tensor:
         """
         Perform a single forward and backward pass through the model.
 
         Args:
-            input_dict: Dictionary containing input data including prompts and other metadata
-            labels: Target tensor containing the ground truth image data
-            global_valid_tokens: Optional tensor tracking the total number of
-                valid tokens across all processes.
-                This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
+            context: Input data and labels for this forward/backward invocation.
 
         Returns:
             torch.Tensor: The computed loss value for this training step
         """
 
+        input_dict = context.input_dict
+        labels = context.labels
+        global_valid_tokens = context.global_valid_tokens
         assert (
             global_valid_tokens is None
         ), "FLUX model don't need to rescale loss by number of global valid tokens"
@@ -280,10 +291,17 @@ class FluxTrainer(Trainer):
 
         return loss
 
+    def _get_sdc_replay_modules(self) -> Iterable[torch.nn.Module]:
+        modules = [*self.model_parts, self.t5_encoder, self.clip_encoder]
+        if self.autoencoder is not None:
+            modules.append(self.autoencoder)
+        return modules
+
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
+        self._sdc_replay_unit_index = 0
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
 
@@ -297,7 +315,9 @@ class FluxTrainer(Trainer):
         # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
+        loss = self.forward_backward_step_fn(
+            ForwardBackwardStepContext(input_dict=input_dict, labels=labels)
+        )
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -308,6 +328,7 @@ class FluxTrainer(Trainer):
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
+        self.sdc_attempt_step += 1
         self.lr_schedulers.step()
 
         # log metrics

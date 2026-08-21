@@ -13,7 +13,13 @@ import pytest
 import torch
 
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
-from torchtitan.trainer import Trainer
+from torchtitan.distributed.sdc_replay import SDCReplay, SDCReplayMismatch
+from torchtitan.trainer import (
+    ForwardBackwardStepBuilder,
+    ForwardBackwardStepContext,
+    ForwardBackwardStepFn,
+    Trainer,
+)
 
 
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
@@ -82,11 +88,81 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
 
 
+def test_forward_backward_step_builder_installs_cuda_graph_body():
+    body_fn = MagicMock()
+    wrapped_body_fn = MagicMock(return_value=torch.tensor(1.0))
+    postprocess_fn = MagicMock(
+        return_value=(torch.ones(1), torch.ones(1), {"position": torch.ones(1)})
+    )
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(),
+    )
+
+    trace_decorator = MagicMock(side_effect=lambda step_fn: step_fn)
+    with (
+        patch(
+            "torchtitan.trainer.wrap_with_cuda_graph",
+            return_value=wrapped_body_fn,
+        ) as wrap,
+        patch(
+            "torchtitan.trainer.sl.log_trace_span",
+            return_value=trace_decorator,
+        ) as trace_span,
+    ):
+        step_fn = (
+            ForwardBackwardStepBuilder(
+                pp_enabled=False,
+                postprocess_fn=postprocess_fn,
+                pipeline_step_fn=MagicMock(),
+                body_fn=body_fn,
+            )
+            .with_cuda_graphs()
+            .build()
+        )
+
+    wrap.assert_called_once_with(body_fn)
+    trace_span.assert_called_once_with("fwd_bwd")
+    trace_decorator.assert_called_once()
+    torch.testing.assert_close(
+        step_fn(
+            ForwardBackwardStepContext(
+                input_dict={"input": torch.ones(1)},
+                labels=torch.ones(1),
+                global_valid_tokens=torch.ones(1),
+            )
+        ),
+        torch.tensor(1.0),
+    )
+    wrapped_body_fn.assert_called_once()
+
+
+def test_make_forward_backward_step_skips_disabled_sdc():
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(disable_cuda_graphs=True),
+                sdc_replay=SDCReplay.Config(enabled=False),
+            ),
+            parallel_dims=SimpleNamespace(pp_enabled=False),
+            post_dataloading_process=MagicMock(),
+            pp_forward_backward_step=MagicMock(),
+            _forward_backward_body=MagicMock(),
+        ),
+    )
+
+    with patch.object(ForwardBackwardStepBuilder, "with_sdc") as with_sdc:
+        Trainer.make_forward_backward_step(trainer)
+
+    with_sdc.assert_not_called()
+
+
 def test_trainer_accumulates_reused_cuda_graph_losses():
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
 
-    def forward_backward_step(**kwargs):
+    def forward_backward_step(context):
         graph_loss.fill_(next(loss_values))
         return graph_loss
 
@@ -118,12 +194,13 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             gradient_accumulation_steps=3,
             num_pipeline_parallel_microbatches=1,
             device=torch.device("cpu"),
-            forward_backward_step=forward_backward_step,
+            forward_backward_step_fn=forward_backward_step,
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             step=1,
             ntokens_seen=3,
+            sdc_attempt_step=0,
         ),
     )
     data_iterator = iter(
@@ -158,6 +235,141 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         )
 
     metrics_processor.log.assert_not_called()
+    assert trainer.sdc_attempt_step == 2
+
+
+def test_forward_backward_step_fn_replays_only_first_gradient_accumulation_unit():
+    replay = SimpleNamespace(
+        should_run=MagicMock(return_value=True),
+        run=MagicMock(side_effect=lambda execute, **kwargs: execute()),
+    )
+    implementation = MagicMock(return_value=torch.tensor(1.0))
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            _sdc_replay_unit_index=0,
+            sdc_attempt_step=0,
+            step=1,
+            _get_sdc_replay=lambda: replay,
+        ),
+    )
+
+    context = ForwardBackwardStepContext(
+        input_dict={"input": torch.ones(1)},
+        labels=torch.ones(1),
+        global_valid_tokens=torch.ones(1),
+    )
+
+    def implementation_wrapper(
+        _next_step_fn, context: ForwardBackwardStepContext
+    ) -> torch.Tensor:
+        return implementation(context)
+
+    forward_backward_step_fn = (
+        ForwardBackwardStepBuilder(
+            pp_enabled=False,
+            postprocess_fn=MagicMock(),
+            pipeline_step_fn=MagicMock(),
+            body_fn=MagicMock(),
+        )
+        .with_step_wrapper(implementation_wrapper)
+        .with_sdc(replay_state=trainer)
+        .build()
+    )
+    forward_backward_step_fn(context)
+    forward_backward_step_fn(context)
+
+    replay.run.assert_called_once()
+    assert implementation.call_count == 2
+
+
+def test_forward_backward_step_builder_applies_step_wrapper():
+    trainer = cast(Trainer, SimpleNamespace())
+
+    def wrapper(
+        _next_step_fn: ForwardBackwardStepFn, context: ForwardBackwardStepContext
+    ) -> torch.Tensor:
+        assert context.labels is labels
+        return torch.tensor(2.0)
+
+    labels = torch.ones(1)
+    forward_backward_step_fn = (
+        ForwardBackwardStepBuilder(
+            pp_enabled=False,
+            postprocess_fn=MagicMock(),
+            pipeline_step_fn=MagicMock(),
+            body_fn=MagicMock(),
+        )
+        .with_step_wrapper(wrapper)
+        .build()
+    )
+
+    torch.testing.assert_close(
+        forward_backward_step_fn(
+            ForwardBackwardStepContext(
+                input_dict={"input": torch.ones(1)},
+                labels=labels,
+            )
+        ),
+        torch.tensor(2.0),
+    )
+
+
+def test_replay_failure_happens_before_optimizer():
+    mismatch = SDCReplayMismatch(
+        step=1,
+        attempt=1,
+        replay=1,
+        rank=0,
+        signature_mismatch="loss",
+    )
+    optimizers = MagicMock()
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(disable_cuda_graphs=True, max_norm=1.0)
+            ),
+            optimizers=optimizers,
+            lr_schedulers=SimpleNamespace(get_metrics=lambda: {}, step=MagicMock()),
+            parallel_dims=SimpleNamespace(
+                dp_enabled=False,
+                pp_enabled=False,
+                dp_cp_enabled=False,
+                ep_enabled=False,
+                get_optional_mesh=lambda name: None,
+            ),
+            gradient_accumulation_steps=1,
+            num_pipeline_parallel_microbatches=1,
+            device=torch.device("cpu"),
+            forward_backward_step_fn=MagicMock(side_effect=mismatch),
+            model_parts=[],
+            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
+            metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
+            step=1,
+            ntokens_seen=0,
+            sdc_attempt_step=0,
+        ),
+    )
+
+    with pytest.raises(SDCReplayMismatch):
+        Trainer.train_step(
+            trainer,
+            iter([({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))]),
+        )
+
+    optimizers.step.assert_not_called()
+    assert trainer.sdc_attempt_step == 0
+
+
+def test_loading_checkpoint_rearms_attempt_local_replay():
+    trainer = cast(Trainer, SimpleNamespace(sdc_attempt_step=8))
+
+    Trainer.load_state_dict(trainer, {"step": 12, "ntokens_seen": 34})
+
+    assert trainer.step == 12
+    assert trainer.ntokens_seen == 34
+    assert trainer.sdc_attempt_step == 0
 
 
 @pytest.mark.parametrize(
