@@ -199,6 +199,14 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            ep = parallelism.expert_parallel_degree
+            moe = self.first_moe
+            if moe is not None and moe.num_experts % ep != 0:
+                raise ValueError(
+                    f"num_experts ({moe.num_experts}) must be divisible by "
+                    f"expert_parallel_degree ({ep})."
+                )
+
             update_ep_token_dispatcher_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip

@@ -185,6 +185,13 @@ class ParallelDims:
             f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
         )
 
+        sparse_region = dp_shard * cp * tp
+        if sparse_region % ep != 0:
+            raise ValueError(
+                f"expert_parallel_degree ({ep}) must divide "
+                f"dp_shard * cp * tp ({sparse_region})"
+            )
+
     def _mesh_exist(self, name: str, degree: int) -> bool:
         if name == "fsdp":
             # Always keep fsdp mesh with real backend so fully_shard()
