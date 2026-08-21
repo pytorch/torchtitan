@@ -175,6 +175,18 @@ def resize_to_patch_budget(
         ``(resize_h, resize_w, pad_h, pad_w)`` -- resize to the first two, then
         pad right/bottom by the last two.
     """
+    factor = patch_size * merge_size
+    min_patches = merge_size**2
+    if max_patches < min_patches:
+        raise ValueError(
+            f"max_patches must be at least {min_patches} when merge_size={merge_size}"
+        )
+    if max_patches_per_side < merge_size:
+        raise ValueError(
+            "max_patches_per_side must be at least merge_size, "
+            f"got {max_patches_per_side} and {merge_size}"
+        )
+
     num_patches_h = max(1.0, height // patch_size)
     num_patches_w = max(1.0, width // patch_size)
     num_patches = num_patches_h * num_patches_w
@@ -190,7 +202,27 @@ def resize_to_patch_budget(
     h = min(h, max_patches_per_side * patch_size)
     w = min(w, max_patches_per_side * patch_size)
 
-    factor = patch_size * merge_size
+    # Padding to ``factor`` can push an otherwise valid resize back over the
+    # patch budget. Reduce the shared (aspect-preserving) scale to the next
+    # patch-grid boundary until the padded image satisfies both limits.
+    while True:
+        patches_h = math.ceil(h / factor) * merge_size
+        patches_w = math.ceil(w / factor) * merge_size
+        over_h = patches_h > max_patches_per_side
+        over_w = patches_w > max_patches_per_side
+        over_total = patches_h * patches_w > max_patches
+        if not (over_h or over_w or over_total):
+            break
+
+        next_scales = []
+        if over_h or (over_total and not (over_h or over_w)):
+            next_scales.append((patches_h - merge_size) * patch_size / height)
+        if over_w or (over_total and not (over_h or over_w)):
+            next_scales.append((patches_w - merge_size) * patch_size / width)
+        scale = min(scale, max(next_scales))
+        h = max(1, int(height * scale))
+        w = max(1, int(width * scale))
+
     pad_h = (factor - h % factor) % factor
     pad_w = (factor - w % factor) % factor
     return h, w, pad_h, pad_w

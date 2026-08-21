@@ -79,6 +79,13 @@ class TestResizeToPatchBudget(unittest.TestCase):
         self.assertEqual(fh % (self.PS * self.MERGE), 0)
         self.assertLessEqual((fh // self.PS) * (fw // self.PS), self.LIMIT)
 
+    def test_padding_does_not_exceed_patch_limit(self):
+        # The initial 901x901 resize needs padding to 924x924. Without
+        # accounting for that padding it would contain 66*66=4356 patches.
+        fh, fw = self._final(1000, 1000)
+        self.assertEqual((fh, fw), (896, 896))
+        self.assertLessEqual((fh // self.PS) * (fw // self.PS), self.LIMIT)
+
     def test_small_image_not_upscaled(self):
         # below the cap -> only padded, never scaled up.
         rh, rw, ph, pw = resize_to_patch_budget(
@@ -108,6 +115,29 @@ class TestResizeToPatchBudget(unittest.TestCase):
             max_patches_per_side=self.SIDE,
         )
         self.assertEqual((rh, rw, ph, pw), (height, width, 0, 0))
+
+    def test_rejects_impossible_patch_budgets(self):
+        with self.assertRaisesRegex(ValueError, "max_patches must be at least 4"):
+            resize_to_patch_budget(
+                100,
+                100,
+                patch_size=self.PS,
+                merge_size=self.MERGE,
+                max_patches=-1,
+                max_patches_per_side=self.SIDE,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "max_patches_per_side must be at least merge_size"
+        ):
+            resize_to_patch_budget(
+                100,
+                100,
+                patch_size=self.PS,
+                merge_size=self.MERGE,
+                max_patches=self.LIMIT,
+                max_patches_per_side=1,
+            )
 
 
 class TestProcessImagePatchBudget(unittest.TestCase):
