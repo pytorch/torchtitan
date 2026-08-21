@@ -213,6 +213,9 @@ class CheckpointManager(BaseCheckpointManager):
         self.close()
 
     def _close(self):
+        self.maybe_wait_for_staging()
+        self.maybe_wait_for_saving()
+
         if (
             hasattr(self, "purge_thread")
             and self.purge_thread
