@@ -15,12 +15,13 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import get_mesh_pg, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.embedding import get_tp_rank
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -36,9 +37,6 @@ def cross_entropy_loss(
     global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Cross-entropy loss with sum reduction for token-based normalization."""
-    if isinstance(pred, DTensor) and isinstance(labels, DTensor):
-        return _cross_entropy_via_local_map(pred, labels)
-
     if isinstance(pred, DTensor):
         assert get_spmd_backend() == "partial_dtensor"
         if pred.placements == (Shard(pred.ndim - 1),):
@@ -53,8 +51,9 @@ def cross_entropy_loss(
         return _LossParallelCrossEntropy.apply(
             pred.flatten(0, 1).float(),
             labels.flatten(0, 1),
-            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
+            get_mesh_pg("tp"),
             global_vocab_size,
+            "sum",
         )
 
     return torch.nn.functional.cross_entropy(
@@ -65,7 +64,6 @@ def cross_entropy_loss(
     )
 
 
-@spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
     Vocab-parallel cross-entropy on plain (non-DTensor) local tensors.
@@ -83,30 +81,22 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
     """
 
     @staticmethod
-    def typecheck_forward(
+    def spmd_typecheck(
+        result: torch.Tensor,
+        *,
         logits: torch.Tensor,
         labels: torch.Tensor,
         tp_group: dist.ProcessGroup,
-        global_vocab_size: int,
-        reduction: str = "sum",
-    ) -> torch.Tensor:
+    ) -> None:
         """
         SPMD type: logits S(-1)@TP, labels I@TP -> loss I@TP.
         Non-TP axes are passed through from logits to the output.
         """
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(labels, {tp_group: spmd.I})
-        result = _LossParallelCrossEntropy.apply(
-            logits,
-            labels,
-            tp_group,
-            global_vocab_size,
-            reduction,
-        )
         output_type = dict(spmd.get_local_type(logits))
-        output_type[tp_group] = spmd.I
+        output_type[spmd.MeshAxis.of(tp_group)] = spmd.I
         spmd.assert_type(result, output_type)
-        return result
 
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -125,26 +115,25 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         negates to get per-token logprobs without all-gathering the vocab.
         """
         logits_shape = logits.shape
+        logits_dtype = logits.dtype
         logits_2d = logits.flatten(0, -2).float()
         labels_1d = labels.flatten()
 
         # Compute this rank's vocab shard bounds for the local logits.
         tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
+        tp_rank = get_tp_rank(tp_group)
         chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
-        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
-        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
-        local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits_2d.shape[-1] != local_vocab_size:
-            raise ValueError(
-                "_LossParallelCrossEntropy expected local vocab size "
-                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits_2d.shape[-1]}."
-            )
-        if local_vocab_size == 0:
-            raise ValueError(
-                "_LossParallelCrossEntropy does not support empty vocab shards."
-            )
+        vocab_start = torch.sym_min(global_vocab_size, chunk_size * tp_rank)
+        vocab_end = torch.sym_min(global_vocab_size, vocab_start + chunk_size)
+        local_vocab_size = torch.sym_max(0, vocab_end - vocab_start)
+        torch._check(
+            logits_2d.shape[-1] == local_vocab_size,
+            lambda: "_LossParallelCrossEntropy local vocab size mismatch.",
+        )
+        torch._check(
+            local_vocab_size > 0,
+            lambda: "_LossParallelCrossEntropy does not support empty vocab shards.",
+        )
 
         # All-reduce max for numerically stable distributed log-softmax.
         local_max = torch.amax(logits_2d, dim=-1, keepdim=True)
@@ -221,65 +210,6 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None, None
 
 
-def _cross_entropy_via_local_map(
-    pred: DTensor,
-    labels: DTensor,
-) -> torch.Tensor:
-    mesh = pred.device_mesh
-    # Labels don't have a vocab dim.
-    expected_labels_placements = tuple(
-        Replicate() if isinstance(p, Shard) and p.dim == 2 else p
-        for p in pred.placements
-    )
-    if labels.placements != expected_labels_placements:
-        raise ValueError(
-            f"cross_entropy_loss: expected labels placements {expected_labels_placements}, "
-            f"got {labels.placements}"
-        )
-
-    # After local flatten(0, 1), tensor dims are [batch*seq, vocab].
-    # Per-axis placement:
-    #   Shard on batch/seq -> Shard(0) (valid because reduction is sum)
-    #   Shard on vocab -> Shard(1)
-    vocab_sharded = any(isinstance(p, Shard) and p.dim == 2 for p in pred.placements)
-
-    # Per-axis output placement for sum reduction:
-    #   Shard on non-vocab-dim -> Partial
-    #   Shard on vocab-dim -> Replicate
-    out_placements = [
-        Partial() if isinstance(p, Shard) and p.dim != 2 else Replicate()
-        for p in pred.placements
-    ]
-
-    @local_map(
-        out_placements=out_placements,
-        in_placements=(pred.placements, labels.placements),
-        in_grad_placements=(pred.placements, labels.placements),
-        device_mesh=mesh,
-    )
-    def _local_cross_entropy(
-        pred_local: torch.Tensor, labels_local: torch.Tensor
-    ) -> torch.Tensor:
-        flat_pred = pred_local.flatten(0, 1).float()
-        flat_labels = labels_local.flatten(0, 1)
-        if not vocab_sharded:
-            return torch.nn.functional.cross_entropy(
-                flat_pred,
-                flat_labels,
-                reduction="sum",
-                ignore_index=IGNORE_INDEX,
-            )
-        return _LossParallelCrossEntropy.apply(
-            flat_pred,
-            flat_labels,
-            mesh.get_group("tp"),
-            pred.shape[-1],
-            "sum",
-        )
-
-    return _local_cross_entropy(pred, labels)
-
-
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """MSE loss with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
@@ -325,13 +255,14 @@ class BaseLoss(ABC, Configurable):
         """Return the scaled loss and any metrics computed by the loss."""
         del kwargs
         loss = self.fn(pred, labels)
+        if get_spmd_backend() == "spmd_types":  # loss: V->P, annotate global_valid_tokens
+            spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
+            spmd.assert_type(
+                global_valid_tokens,
+                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+            )
         if global_valid_tokens is not None:
-            # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
-            is_type_checking = spmd.is_type_checking()
-            with spmd.no_typecheck():
-                loss = loss / global_valid_tokens
-                if is_type_checking:
-                    spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
+            loss = loss / global_valid_tokens
         return loss, {}
 
 
@@ -357,13 +288,14 @@ class CrossEntropyLoss(BaseLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
+        if get_spmd_backend() == "spmd_types":  # loss: V->P, annotate global_valid_tokens
+            spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
+            spmd.assert_type(
+                global_valid_tokens,
+                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+            )
         if global_valid_tokens is not None:
-            # TODO(pianpwk): Teach spmd_types that P / scalar preserves P.
-            is_type_checking = spmd.is_type_checking()
-            with spmd.no_typecheck():
-                loss = loss / global_valid_tokens
-                if is_type_checking:
-                    spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P, "tp": spmd.I})
+            loss = loss / global_valid_tokens
         return loss, {}
 
 
@@ -385,17 +317,16 @@ def compute_logprobs(
     *,
     return_entropy: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Per-position logprobs from logits and labels, optionally with entropy.
+    """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
 
-    Output shape matches input: ``[batch, seq_len]``. Any DTensor placement
-    handling is centralized here so RL losses that call ``compute_logprobs`` do
-    not need to duplicate the vocab-gather logic.
+    Any DTensor placement handling is centralized here so RL losses that call
+    ``compute_logprobs`` do not need to duplicate the vocab-gather logic.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
-    ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, shape
-    ``[batch, seq_len]``. Both share the single vocab gather + fp32 upcast.
+    ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
+    ``[T]``. Both share the single vocab gather + fp32 upcast.
     Entropy is a metric only, so it is computed under ``no_grad``: it never
-    contributes gradient and must not build an autograd graph over the [B, L, V]
+    contributes gradient and must not build an autograd graph over the logits
     softmax.
 
     Returns ``logprobs`` when ``return_entropy`` is False, else
@@ -415,28 +346,25 @@ def compute_logprobs(
     elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
         # spmd_types returns a plain local vocab shard. Labels are global token
         # ids, so cross_entropy needs full-vocab logits.
-        mesh = current_spmd_mesh()
-        assert mesh is not None
         # dst=I, not R: the vocab all-gather's grad is the replicated upstream
         # grad sliced back to this rank's vocab shard (I's backward), not an
         # all-reduce (R's backward). The latter over-counts by tp_degree and
         # diverges from the DTensor path above, whose redistribute grad slices.
         logits = spmd.redistribute(
             logits,
-            mesh.get_group("tp"),
+            "tp",
             src=spmd.S(-1),
             dst=spmd.I,
         )
 
     # Single bf16->fp32 upcast, reused by both logprobs and (optionally) entropy.
     logits = logits.float()
-    B, L, V = logits.shape
     logprobs = -F.cross_entropy(
-        logits.reshape(B * L, V),
-        labels.reshape(B * L),
+        logits,
+        labels,
         reduction="none",
         ignore_index=IGNORE_INDEX,
-    ).reshape(B, L)
+    )
     if not return_entropy:
         return logprobs
     with torch.no_grad():
@@ -476,7 +404,7 @@ class GradAccumulator:
         reference: torch.Tensor,
         *,
         num_chunks: int,
-        seq_dim: int = 1,
+        seq_dim: int = 0,
         dtype: torch.dtype,
     ):
         from torch.distributed.device_mesh import DeviceMesh
@@ -567,22 +495,22 @@ class GradAccumulator:
 class ChunkedLossWrapper(BaseLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
-    Instead of materializing the full [B, L, V] logits tensor at once, this splits
-    the hidden states into N chunks along the sequence dimension and computes
+    Instead of materializing the full [T, V] logits tensor at once, this splits
+    the hidden states into N chunks along the token dimension and computes
     lm_head + loss on each chunk sequentially. This reduces peak memory
-    from O(B*L*V) to O(B*L/N*V).
+    from O(T*V) to O(T/N*V).
 
     The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
     chunk on logits from that chunk. Additional per-token ``loss_inputs`` are
     chunked along the same sequence dimension and forwarded to the inner loss.
 
     The flow:
-    1. Model forward with _skip_lm_head=True to get hidden states [B, L, D]
+    1. Model forward with _skip_lm_head=True to get hidden states [T, D]
     2. Detach hidden states at the boundary
     3. Split detached hidden states into N chunks along seq dim
     4. Disable FSDP reshard on lm_head to keep weight unsharded across chunks
     5. For each chunk: lm_head(chunk) -> loss_fn(logits, labels, gvt) -> backward()
-    6. Assemble chunk gradients into a full gradient [B, L, D] via GradAccumulator
+    6. Assemble chunk gradients into a full gradient [T, D] via GradAccumulator
     7. Backward through the decoder via hidden_states.backward(accumulated_grad)
 
     FSDP2 composability:
@@ -657,7 +585,7 @@ class ChunkedLossWrapper(BaseLoss):
         requires_grad = hidden_states.requires_grad
 
         # Chunking always operates on the *local* view: when ``t`` is a
-        # Shard(1) DTensor, chunking the global view would distribute whole
+        # Shard(0) DTensor, chunking the global view would distribute whole
         # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
         # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
         # local seq=0 and breaking GradAccumulator's slice writes.
@@ -666,14 +594,14 @@ class ChunkedLossWrapper(BaseLoss):
         # Equal chunk sizes also match GradAccumulator's sequential slice
         # writes, which use one chunk length for each write offset.
         def _chunk_local(t):
-            seq_len = t.shape[1]
+            seq_len = t.shape[0]
             torch._check(
                 seq_len % num_chunks == 0,
                 lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
             )
             chunk_len = seq_len // num_chunks
             return tuple(
-                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=1)
+                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
             )
 
         def _chunk(t):
@@ -710,15 +638,11 @@ class ChunkedLossWrapper(BaseLoss):
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                # TODO(pianpwk): would be nice if mutate_type accepted multiple axes.
-                for axis_name, dst in {
-                    "dp": spmd.P,
-                    "cp": spmd.P,
-                    "tp": spmd.I,
-                }.items():
-                    total_loss = spmd.mutate_type(
-                        total_loss, axis_name, src=spmd.R, dst=dst
-                    )
+                total_loss = spmd.mutate_type(
+                    total_loss,
+                    src=spmd.R,
+                    dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
+                )
             metrics: dict[str, torch.Tensor] = {}
 
             # Disable FSDP reshard on lm_head to keep weight unsharded across

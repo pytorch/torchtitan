@@ -5,341 +5,125 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import dataclasses
-import os
+import torchtitan_recipes.tests.features as recipes
 
 from tests.integration_tests import OverrideDefinitions
 
 
-def _is_pp_only(variant: tuple[str, ...], ngpu: int) -> bool:
-    """True when the variant has PP > 1 and no other SPMD parallelism > 1.
-
-    SPMD backends require at least one SPMD axis > 1; PP-only runs collapse
-    every dense SPMD axis to size 1 and trip DTensor's reshape / flatten
-    rejection of Shard-on-degenerate-axis. Detected by parsing the explicit
-    ``--parallelism.*_degree`` flags and back-computing ``dp_shard`` (default
-    -1, "fill remaining").
-    """
-    degrees = {
-        "pipeline_parallel_degree": 1,
-        "data_parallel_replicate_degree": 1,
-        "data_parallel_shard_degree": -1,
-        "tensor_parallel_degree": 1,
-        "context_parallel_degree": 1,
-        "expert_parallel_degree": 1,
-    }
-    for arg in variant:
-        for key in degrees:
-            if key in arg:
-                try:
-                    degrees[key] = int(arg.split()[-1])
-                except ValueError:
-                    pass
-                break
-    if degrees["data_parallel_shard_degree"] == -1:
-        denom = (
-            degrees["pipeline_parallel_degree"]
-            * degrees["data_parallel_replicate_degree"]
-            * degrees["context_parallel_degree"]
-            * degrees["tensor_parallel_degree"]
-        )
-        degrees["data_parallel_shard_degree"] = max(1, ngpu // denom)
-    return degrees["pipeline_parallel_degree"] > 1 and all(
-        v <= 1 for k, v in degrees.items() if k != "pipeline_parallel_degree"
-    )
-
-
-def _supports_spmd_typechecking(test_name: str, variant: tuple[str, ...]) -> bool:
-    """List of tests/variants to test spmd_types backend, but without typechecking."""
-    unsupported_tests = [
-        # Compile is not compatible with SPMD typechecking yet.
-        "1d_compile",
-        "1d_compile_sac_op",
-        "2d_compile",
-        "2d_asynctp_compile",
-        "3d_compile",
-        "torchcomms_3d_dp+cp+pp+compile",
-        "torchcomms_3d_dp+tp+pp+compile",
-        # PP is not compatible with SPMD typechecking yet.
-        "pp_dp_1f1b",
-        "pp_tp_gpipe",
-        "pp_dp_tp",
-        "validation_tp_cp_pp",
-        "float8_emulate_lora",
-        # non-chunked CE loss isn't happy yet.
-        (
-            "2d_eager",
-            [
-                "--module llama3 --config llama3_debugmodel_ce_loss",
-                "--parallelism.tensor_parallel_degree 2",
-            ],
-        ),
-    ]
-    return (
-        test_name not in unsupported_tests
-        and (test_name, variant) not in unsupported_tests
-    )
-
-
-def _configure_spmd_backend_and_typechecking(
-    t: OverrideDefinitions,
-) -> OverrideDefinitions:
-    """Configure the spmd_types backend and enable typechecking where supported."""
-    new_args = []
-    for variant in t.override_args:
-        prefix: list[str] = []
-        suffix: list[str] = []
-        has_cp = any("context_parallel_degree" in arg for arg in variant)
-        has_compile = any("compile.enable" in arg for arg in variant)
-        has_ac_mode = any("activation-checkpoint:" in arg for arg in variant)
-        if (
-            not _is_pp_only(variant, t.ngpu)
-            and not (has_cp and has_compile)
-            and not has_ac_mode
-            and _supports_spmd_typechecking(t.test_name, variant)
-        ):
-            prefix.append("--debug.spmd_typechecking")
-            suffix.append("activation-checkpoint:none")
-        new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
-    return dataclasses.replace(
-        t,
-        override_args=tuple(new_args),
-    )
-
-
-# Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
-runner_temp = os.getenv("RUNNER_TEMP")
-if runner_temp:
-    checkpoint_path = os.path.join(
-        runner_temp,
-        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
-    )
-else:
-    checkpoint_path = (
-        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
-    )
-
-
 def build_features_test_list() -> list[OverrideDefinitions]:
     """
-    key is the config file name and value is a list of OverrideDefinitions
-    that is used to generate variations of integration tests based on the
-    same root config file.
+    Build the list of integration tests covering the core features of torchtitan.
+
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.features``.
     """
-    integration_tests_flavors = [
+    return [
         OverrideDefinitions(
-            [
-                [
-                    "--profiler.enable_profiling",
-                    "--metrics.enable_tensorboard",
-                ],
-            ],
-            "default",
-            "default",
+            configs=[recipes.llama3_debugmodel_default],
+            test_descr="default",
+            test_name="default",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                ],
-            ],
-            "1D compile",
-            "1d_compile",
+            configs=[recipes.llama3_debugmodel_compile],
+            test_descr="1D compile",
+            test_name="1d_compile",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "activation-checkpoint:selective",
-                ],
-            ],
-            "1D compile with selective op AC",
-            "1d_compile_sac_op",
+            configs=[recipes.llama3_debugmodel_compile_sac_op],
+            test_descr="1D compile with selective op AC",
+            test_name="1d_compile_sac_op",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-                [
-                    "--module llama3 --config llama3_debugmodel_ce_loss",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_tp2,
+                recipes.llama3_debugmodel_ce_loss_tp2,
             ],
-            "2D eager (ChunkedLossWrapper + standard CE loss with TP+loss_parallel)",
-            "2d_eager",
+            test_descr=(
+                "2D eager (ChunkedLossWrapper + standard CE loss with TP+loss_parallel)"
+            ),
+            test_name="2d_eager",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.no-enable-sequence-parallel",
-                ],
-            ],
-            "2D eager (SP disabled)",
-            "2d_eager_no_sp",
+            configs=[recipes.llama3_debugmodel_tp2_no_sp],
+            test_descr="2D eager (SP disabled)",
+            test_name="2d_eager_no_sp",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "2D compile",
-            "2d_compile",
+            configs=[recipes.llama3_debugmodel_tp2_compile],
+            test_descr="2D compile",
+            test_name="2d_compile",
         ),
         # TODO: re-enable this test once the async TP CI issue is fixed
         OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--compile.enable_async_tensor_parallel",
-                ],
-            ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
+            configs=[recipes.llama3_debugmodel_tp2_asynctp_compile_spmd_types],
+            test_descr="2D async TP compile",
+            test_name="2d_asynctp_compile",
             disabled=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                ],
-                [
-                    "--checkpoint.enable",
-                    "--training.steps 20",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_full_checkpoint_save,
+                recipes.llama3_debugmodel_full_checkpoint_load,
             ],
-            "Checkpoint Integration Test - Save Load Full Checkpoint",
-            "full_checkpoint",
+            test_descr="Checkpoint Integration Test - Save Load Full Checkpoint",
+            test_name="full_checkpoint",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.folder hf_checkpoint",
-                    "--checkpoint.last_save_model_only",
-                    "--checkpoint.last_save_in_hf",
-                ],
-                [
-                    "--checkpoint.enable",
-                    f"--checkpoint.initial_load_path {checkpoint_path}",
-                    "--checkpoint.initial_load_model_only",
-                    "--checkpoint.initial_load_in_hf",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_hf_checkpoint_save,
+                recipes.llama3_debugmodel_hf_checkpoint_load,
             ],
-            "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
-            "model_only_hf_checkpoint",
+            test_descr=(
+                "Checkpoint Integration Test - save load model only checkpoint in "
+                "HF definition and format"
+            ),
+            test_name="model_only_hf_checkpoint",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.last_save_model_only",
-                    "--checkpoint.export_dtype bfloat16",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Only bf16",
-            "last_save_model_only_bf16",
+            configs=[recipes.llama3_debugmodel_last_save_model_only_bf16],
+            test_descr="Checkpoint Integration Test - Save Model Only bf16",
+            test_name="last_save_model_only_bf16",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule 1F1B",
-                    "--parallelism.data_parallel_shard_degree 1",
-                ],
-            ],
-            "PP 1D test 1F1B",
-            "pp_1f1b",
+            configs=[recipes.llama3_debugmodel_pp2_1f1b],
+            test_descr="PP 1D test 1F1B",
+            test_name="pp_1f1b",
             ngpu=2,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule 1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule 1F1B",
-                    "--parallelism.pipeline_parallel_layers_per_stage 4",
-                    "--parallelism.data_parallel_shard_degree 2",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_fsdp2_pp2_1f1b,
+                recipes.llama3_debugmodel_fsdp2_pp2_1f1b_layers_per_stage,
             ],
-            "PP+DP 1F1B 2D test",
-            "pp_dp_1f1b",
+            test_descr="PP+DP 1F1B 2D test",
+            test_name="pp_dp_1f1b",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule GPipe",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "PP+TP GPipe 2D test",
-            "pp_tp_gpipe",
+            configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
+            test_descr="PP+TP GPipe 2D test",
+            test_name="pp_tp_gpipe",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--checkpoint.enable",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-                [
-                    "--training.disable_cuda_graphs",
-                    "--training.steps 20",
-                    "--checkpoint.enable",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_fsdp2_tp2_pp2_save,
+                recipes.llama3_debugmodel_fsdp2_tp2_pp2_load,
             ],
-            "PP+DP+TP 3D test with save/load resume ckpt",
-            "pp_dp_tp",
+            test_descr="PP+DP+TP 3D test with save/load resume ckpt",
+            test_name="pp_dp_tp",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--compile.enable",
-                ],
-            ],
-            "PP+DP+TP 3D test with torch.compile",
-            "3d_compile",
+            configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2_compile],
+            test_descr="PP+DP+TP 3D test with torch.compile",
+            test_name="3d_compile",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                ],
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.pipeline_parallel_layers_per_stage 1",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_pp4_interleaved_1f1b,
+                recipes.llama3_debugmodel_pp4_interleaved_1f1b_layers_per_stage,
             ],
-            "PP looped 1F1B test",
-            "pp_looped_1f1b",
+            test_descr="PP looped 1F1B test",
+            test_name="pp_looped_1f1b",
             ngpu=4,
         ),
         # TODO: Disabled with the FlexAttention default (SDPA is no longer a
@@ -355,30 +139,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         # CI does not install; SDPA is no longer a core LM backend. So the
         # upstream stage_backward_input fix is the path here.)
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 4",
-                    "--parallelism.pipeline_parallel_schedule InterleavedZeroBubble",
-                    "activation-checkpoint:full",
-                ],
-            ],
-            "PP looped zero bubble test",
-            "pp_looped_zero_bubble",
+            configs=[recipes.llama3_debugmodel_pp4_zero_bubble],
+            test_descr="PP looped zero bubble test",
+            test_name="pp_looped_zero_bubble",
             ngpu=4,
             disabled=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule ZBVZeroBubble",
-                    "activation-checkpoint:full",
-                ],
-            ],
-            "PP zero bubble test (v shaped)",
-            "pp_zbv",
+            configs=[recipes.llama3_debugmodel_pp2_zbv],
+            test_descr="PP zero bubble test (v shaped)",
+            test_name="pp_zbv",
             ngpu=2,
             disabled=True,
         ),
@@ -387,248 +157,124 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         # so stage_backward_input chokes on the forwarded FlexAttention
         # BlockMask. Re-enable once stage_backward_input skips non-tensor inputs.
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule PipelineScheduleMulti",
-                    "--parallelism.pipeline_parallel_schedule_csv ./tests/assets/custom_schedule.csv",
-                    "activation-checkpoint:full",
-                ],
-            ],
-            "PP with custom pipeline schedule loaded from CSV file",
-            "pp_custom_csv",
+            configs=[recipes.llama3_debugmodel_pp2_custom_csv],
+            test_descr="PP with custom pipeline schedule loaded from CSV file",
+            test_name="pp_custom_csv",
             ngpu=2,
             disabled=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--optimizer.implementation fused_opt_states_bf16",
-                ]
-            ],
-            "BF16 Optimizer States Test",
-            "optimizer_bf16_states",
+            configs=[recipes.llama3_debugmodel_optimizer_bf16_states],
+            test_descr="BF16 Optimizer States Test",
+            test_name="optimizer_bf16_states",
             ngpu=2,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=4",
-                ]
-            ],
-            "DDP",
-            "ddp",
+            configs=[recipes.llama3_debugmodel_ddp4],
+            test_descr="DDP",
+            test_name="ddp",
             ngpu=4,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                ]
-            ],
-            "HSDP",
-            "hsdp",
+            configs=[recipes.llama3_debugmodel_hsdp2x2],
+            test_descr="HSDP",
+            test_name="hsdp",
             ngpu=4,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.context_parallel_degree=4",
-                ]
-            ],
-            "CP",
-            "cp",
+            configs=[recipes.llama3_debugmodel_cp4],
+            test_descr="CP",
+            test_name="cp",
             ngpu=4,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                ]
-            ],
-            "HSDP+TP",
-            "hsdp+tp",
+            configs=[recipes.llama3_debugmodel_hsdp2x2_tp2],
+            test_descr="HSDP+TP",
+            test_name="hsdp+tp",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module torchtitan_recipes.tests "
-                    "--config llama3_debugmodel_fsdp2_cp2",
-                ]
-            ],
-            "FSDP+CP",
-            "fsdp+cp",
+            configs=[recipes.llama3_debugmodel_fsdp2_cp2],
+            test_descr="FSDP+CP",
+            test_name="fsdp+cp",
             ngpu=4,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=1",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (without dp_shard)",
-            "hsdp+cp_without_dp_shard",
+            configs=[recipes.llama3_debugmodel_ddp2_cp2],
+            test_descr="HSDP+CP (without dp_shard)",
+            test_name="hsdp+cp_without_dp_shard",
             ngpu=4,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "HSDP+CP (with dp_shard)",
-            "hsdp+cp_with_dp_shard",
+            configs=[recipes.llama3_debugmodel_hsdp2x2_cp2],
+            test_descr="HSDP+CP (with dp_shard)",
+            test_name="hsdp+cp_with_dp_shard",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree=2",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                ]
-            ],
-            "FSDP+TP+CP",
-            "fsdp+tp+cp",
+            configs=[recipes.llama3_debugmodel_fsdp2_tp2_cp2],
+            test_descr="FSDP+TP+CP",
+            test_name="fsdp+tp+cp",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--parallelism.fsdp_reshard_after_forward always",
-                ],
-            ],
-            "Test always resharding after forward pass",
-            "fsdp_reshard_always",
+            configs=[recipes.llama3_debugmodel_fsdp_reshard_always],
+            test_descr="Test always resharding after forward pass",
+            test_name="fsdp_reshard_always",
             ngpu=2,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--training.steps 10",
-                ],
-                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
-                # excluded during loading to avoid errors caused by mismatched dp_degree.
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--training.steps 20",
-                ],
+            configs=[
+                recipes.llama3_debugmodel_optional_checkpoint_save,
+                recipes.llama3_debugmodel_optional_checkpoint_load_tp2,
             ],
-            "Optional checkpoint",
-            "optional_checkpoint",
+            test_descr="Optional checkpoint",
+            test_name="optional_checkpoint",
         ),
         OverrideDefinitions(
-            [
-                [
-                    # Local batch size = 8, and `ngpu=2`, so default
-                    # global batch size = 8 * 2 = 16.
-                    # To achieve 2 gradient accumulation steps, multiply
-                    # default global batch size by 2. 16 * 2 = 32.
-                    "--training.local_batch_size 8",
-                    "--training.global_batch_size 32",
-                ],
-            ],
-            "Gradient accumulation",
-            "gradient_accumulation",
+            configs=[recipes.llama3_debugmodel_gradient_accumulation],
+            test_descr="Gradient accumulation",
+            test_name="gradient_accumulation",
             ngpu=2,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--validator.enable",
-                    "--validator.dataloader.dataset c4_test",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_degree=2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                ],
-            ],
-            "Validation test with tp, cp, pp",
-            "validation_tp_cp_pp",
+            configs=[recipes.llama3_debugmodel_validation_tp2_cp2_pp2],
+            test_descr="Validation test with tp, cp, pp",
+            test_name="validation_tp_cp_pp",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
-            "override_fused_swiglu",
+            configs=[recipes.llama3_debugmodel_fused_swiglu_tp2],
+            test_descr="Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
+            test_name="override_fused_swiglu",
             ngpu=4,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
-                    "--override.imports torchtitan.overrides.fused_swiglu.fused_swiglu,"
-                    "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                ],
-            ],
-            "Override: fuse grouped experts + FFNs on deepseek_v3 "
-            "(FSDP2 + TP2 dense, EP4 sparse)",
-            "override_fused_grouped_experts",
+            configs=[recipes.deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4],
+            test_descr=(
+                "Override: fuse grouped experts + FFNs on deepseek_v3 "
+                "(FSDP2 + TP2 dense, EP4 sparse)"
+            ),
+            test_name="override_fused_grouped_experts",
             ngpu=4,
         ),
-        # NOTE: below are tests which require config change that cannot be done
-        #       via CLI overrides, so remain llama3 specific
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--module llama3 --config llama3_debugmodel_varlen_attn",
-                    "--parallelism.data_parallel_shard_degree=4",
-                    "activation-checkpoint:selective",
-                ]
-            ],
-            "FSDP+VARLEN_ATTN + per op SAC",
-            "fsdp+varlen_attn+per_op_sac",
+            configs=[recipes.llama3_debugmodel_varlen_attn_fsdp4_sac],
+            test_descr="FSDP+VARLEN_ATTN + per op SAC",
+            test_name="fsdp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--module llama3 --config llama3_debugmodel_float8_emulate_lora",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                ],
-            ],
-            "Float8 emulate + LoRA training test",
-            "float8_emulate_lora",
+            configs=[recipes.llama3_debugmodel_float8_emulate_lora_tp2_pp2],
+            test_descr="Float8 emulate + LoRA training test",
+            test_name="float8_emulate_lora",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--comm.mode torchcomms",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--compile.enable",
-                ],
-            ],
-            "FSDP+CP+PP+compile with torchcomms",
-            "torchcomms_3d_dp+cp+pp+compile",
+            configs=[recipes.llama3_debugmodel_torchcomms_cp2_pp2_compile],
+            test_descr="FSDP+CP+PP+compile with torchcomms",
+            test_name="torchcomms_3d_dp+cp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
             # NotImplementedError: new_group cannot delegate to split_group
@@ -637,18 +283,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             disabled=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--module llama3 --config llama3_debugmodel_ce_loss",
-                    "--comm.mode torchcomms",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--compile.enable",
-                ],
-            ],
-            "FSDP+TP+PP+compile with torchcomms",
-            "torchcomms_3d_dp+tp+pp+compile",
+            configs=[recipes.llama3_debugmodel_torchcomms_tp2_pp2_compile],
+            test_descr="FSDP+TP+PP+compile with torchcomms",
+            test_name="torchcomms_3d_dp+tp+pp+compile",
             ngpu=8,
             skip_rocm_test=True,
             # torchcomms-managed TP PG not registered in c10d;
@@ -656,33 +293,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             disabled=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config sft_debugmodel",
-                ],
-            ],
-            "SFT ChatDataset integration test",
-            "sft",
+            configs=[recipes.llama3_debugmodel_sft],
+            test_descr="SFT ChatDataset integration test",
+            test_name="sft",
             ngpu=2,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--training.disable_cuda_graphs",
-                    "--checkpoint.enable",
-                    "--checkpoint.create_seed_checkpoint",
-                ],
-            ],
-            "Seed checkpoint creation",
-            "seed_checkpoint",
+            configs=[recipes.llama3_debugmodel_seed_checkpoint],
+            test_descr="Seed checkpoint creation",
+            test_name="seed_checkpoint",
             ngpu=1,
             timeout=30,
         ),
-    ]
-
-    return [
-        *[
-            _configure_spmd_backend_and_typechecking(t)
-            for t in integration_tests_flavors
-        ],
     ]

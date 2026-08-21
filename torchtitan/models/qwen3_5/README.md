@@ -64,7 +64,7 @@ pip install av torchvision flash-linear-attention
 | Tensor Parallelism (TP) | With Sequence Parallel; head-sharded TP on GatedDeltaNet projections |
 | Expert Parallelism (EP) | For MoE variants |
 | Pipeline Parallel (PP) | Vision encoder assigned to first stage; 1F1B and Interleaved1F1B schedules |
-| Sample Packing | Configurable via `packing_buffer_size` in dataloader config |
+| Sample Packing | Opt-in via `MMSamplePackingConfig` |
 
 ## Numerical Parity
 

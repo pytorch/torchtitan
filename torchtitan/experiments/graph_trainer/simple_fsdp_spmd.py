@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 
 from spmd_types.checker import typecheck
-from spmd_types.runtime import has_local_type
 from torch.distributed.device_mesh import DeviceMesh
 
+from torchtitan.distributed.spmd_types import get_mesh_pg
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     _register_parametrization,
     is_active_parametrization,
@@ -32,6 +32,7 @@ StorageTimePlacement: TypeAlias = tuple[
 def _shard_param_for_fsdp_storage(
     param: nn.Parameter,
     fsdp_mesh: DeviceMesh,
+    storage_mesh: DeviceMesh,
     shard_axis_name: str,
     shard_dim: int,
 ) -> nn.Parameter:
@@ -50,9 +51,9 @@ def _shard_param_for_fsdp_storage(
         )
 
     # track GSPMD annotation on param, so weight init can read & feed correct shard
-    fsdp_group = fsdp_mesh.get_group(shard_axis_name)
-    fsdp_axis = spmd.MeshAxis.of(fsdp_group)
     with typecheck(local=False):
+        fsdp_group = get_mesh_pg(shard_axis_name, mesh=storage_mesh)
+        fsdp_axis = spmd.MeshAxis.of(fsdp_group)
         param_for_storage = param.detach()
         spmd.mutate_type(
             param_for_storage,
@@ -75,6 +76,7 @@ def _shard_param_for_fsdp_storage(
 def _get_non_dp_storage_time_placements(
     param: nn.Parameter,
     non_dp_mesh: DeviceMesh | None,
+    storage_mesh: DeviceMesh,
 ) -> tuple[StorageTimePlacement, ...]:
     """
     Return list of non-DP mesh axes requiring I->R convert in FWD,
@@ -82,7 +84,7 @@ def _get_non_dp_storage_time_placements(
     """
     if non_dp_mesh is None:
         return ()
-    if not has_local_type(param):
+    if not spmd.has_local_type(param):
         raise ValueError(
             "Parameters must have SPMD layouts before applying SimpleFSDP "
             "with a non_dp_mesh."
@@ -90,10 +92,14 @@ def _get_non_dp_storage_time_placements(
 
     assert non_dp_mesh.mesh_dim_names is not None
     return tuple(
-        (non_dp_mesh, axis_name, spmd.I)
+        (storage_mesh, axis_name, spmd.I)
         for axis, axis_name in enumerate(non_dp_mesh.mesh_dim_names)
         if non_dp_mesh.size(axis) > 1
-        and spmd.get_axis_local_type(param, non_dp_mesh.get_group(axis_name)) is spmd.R
+        and spmd.get_axis_local_type(
+            param,
+            get_mesh_pg(axis_name, mesh=non_dp_mesh),
+        )
+        is spmd.R
     )
 
 
@@ -121,7 +127,7 @@ class ReplicateComputation(Module):
         ]:
             result = spmd.redistribute(
                 result,
-                mesh.get_group(axis_name),
+                get_mesh_pg(axis_name, mesh=mesh),
                 src=storage_type,
                 dst=spmd.R,
                 op_dtype=self.param_dtype,
@@ -137,6 +143,8 @@ def data_parallel(
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
     non_dp_mesh: DeviceMesh | None = None,
+    *,
+    storage_mesh: DeviceMesh,
 ) -> nn.Module:
     """Apply local-tensor SPMD data parallelism to ``model``."""
     if fsdp_mesh.mesh_dim_names is None:
@@ -165,7 +173,7 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode!r}.")
 
     fsdp_storage_time_placements = tuple(
-        (fsdp_mesh, axis_name, storage_type)
+        (storage_mesh, axis_name, storage_type)
         for axis_name, storage_type in zip(
             fsdp_axis_names,
             fsdp_storage_types,
@@ -185,8 +193,17 @@ def data_parallel(
         for param_name, param in params.items():
             if param is None:
                 continue
+            storage_axes = [
+                fsdp_mesh.get_group(axis_name) for axis_name in fsdp_axis_names
+            ]
+            if non_dp_mesh is not None:
+                storage_axes.extend(
+                    non_dp_mesh.get_group(axis_name)
+                    for axis_name in non_dp_mesh.mesh_dim_names
+                )
+            spmd.reinterpret_mesh(param, storage_axes, inplace=True)
             non_dp_storage_time_placements = _get_non_dp_storage_time_placements(
-                param, non_dp_mesh
+                param, non_dp_mesh, storage_mesh
             )
             storage_time_placements_by_param[param_name] = (
                 fsdp_storage_time_placements + non_dp_storage_time_placements
@@ -197,6 +214,7 @@ def data_parallel(
                     _shard_param_for_fsdp_storage(
                         param,
                         fsdp_mesh,
+                        storage_mesh,
                         storage_shard_axis_name,
                         shard_dim,
                     ),

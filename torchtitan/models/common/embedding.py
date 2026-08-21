@@ -15,10 +15,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.protocols.module import Module
 
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
+
+
+def get_tp_rank(tp_group: dist.ProcessGroup) -> int | torch.SymInt:
+    """Return the TP rank, using a runtime symbol only during CooR tracing.
+
+    ``DeviceMesh._sym_get_coordinate`` returns the concrete coordinate in eager
+    execution and emits a runtime coordinate op only under compile-on-one-rank
+    fake tracing.
+    """
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        return dist.get_rank(tp_group)
+
+    mesh_axis_names = mesh.mesh_dim_names
+    assert mesh_axis_names is not None, "DeviceMesh must have named axes"
+    if "tp" not in mesh_axis_names:
+        raise ValueError(
+            f"TP rank requires a 'tp' mesh axis, but got {mesh_axis_names}."
+        )
+    return mesh._sym_get_coordinate(mesh_axis_names.index("tp"))
 
 
 class Embedding(nn.Embedding, Module):
@@ -37,8 +58,8 @@ class Embedding(nn.Embedding, Module):
         self.tp_group: dist.ProcessGroup | None = None
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
-        # TODO(pianpwk): delete and rely on `current_spmd_mesh().get_group("tp")`
-        # once full_dtensor & legacy backends are removed.
+        # TODO(pianpwk): delete and rely on `get_mesh_pg("tp")`
+        # once the partial_dtensor backend is removed.
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if tp_mesh is not None:
             self.tp_group = tp_mesh.get_group("tp")
@@ -49,7 +70,8 @@ class Embedding(nn.Embedding, Module):
         weight = (
             self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         )
-        if self.tp_group is None:
+        tp_group = self.tp_group
+        if tp_group is None:
             return F.embedding(
                 input,
                 weight,
@@ -60,11 +82,11 @@ class Embedding(nn.Embedding, Module):
                 self.sparse,
             )
 
-        tp_pg = self.tp_group
-        tp_size = dist.get_world_size(tp_pg)
+        tp_rank = get_tp_rank(tp_group)
+        tp_size = dist.get_world_size(tp_group)
         weight = weight.to_local() if isinstance(weight, DTensor) else weight
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
-        offset = dist.get_rank(tp_pg) * chunk_size
+        offset = tp_rank * chunk_size
         mask = (input >= offset) & (input < offset + weight.shape[0])
         local_input = (input - offset).clamp(0, weight.shape[0] - 1)
         out = F.embedding(

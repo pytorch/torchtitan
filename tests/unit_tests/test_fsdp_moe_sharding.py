@@ -50,7 +50,11 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
             # attention backend is irrelevant; use the default flex backend
             attn_backend="flex",
             moe_comm_backend="standard",
-            rope=CosSinRoPE.Config(dim=head_dim, max_seq_len=4096, theta=1000000.0),
+            rope=CosSinRoPE.Config(
+                dim=head_dim,
+                max_context_length=4096,
+                theta=1000000.0,
+            ),
         ),
     )
     return Qwen3Model(config)

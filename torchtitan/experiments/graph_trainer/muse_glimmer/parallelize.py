@@ -32,15 +32,9 @@ def parallelize_muse_glimmer(
             "Context parallelism is not supported for GraphTrainer MuseGlimmer."
         )
 
-    assert training.seq_len % parallel_dims.seq_len_divisor == 0, (
-        f"Sequence length {training.seq_len} must be divisible by the product "
-        f"of TP degree ({parallel_dims.tp}) and 2 * CP degree "
-        f"({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}."
-    )
-
     annotate_module_fqns(model)
 
-    if parallel_dims.tp_enabled:
+    if parallelism.spmd_backend == "spmd_types" or parallel_dims.tp_enabled:
         model.parallelize(parallel_dims)
 
     parallelized_model = apply_simple_fsdp(

@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Literal
 
 import torch
-from spmd_types.runtime import get_local_type, get_partition_spec, has_local_type
+from spmd_types import get_local_type, get_partition_spec, has_local_type, SpmdType
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import (
@@ -185,8 +185,7 @@ def _fused_qkv_param_init(
                         fused = spmd_distribute_tensor(
                             fused,
                             mesh,
-                            get_local_type(t),
-                            partition_spec=get_partition_spec(t),
+                            SpmdType(dict(get_local_type(t)), get_partition_spec(t)),
                         )
                 t.copy_(fused)
 

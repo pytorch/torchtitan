@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 import torch
 import torch.utils._pytree as pytree
+from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     SubclassLayout,
@@ -28,6 +29,22 @@ from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
+
+
+def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
+    """Return the SPMD meshes that must be DeviceMesh graph inputs."""
+    candidates = [
+        parallel_dims.spmd_dense_mesh(),
+        parallel_dims.spmd_dense_storage_mesh(),
+        parallel_dims.spmd_sparse_mesh(),
+        parallel_dims.spmd_sparse_storage_mesh(),
+        parallel_dims.get_optional_mesh("pp"),
+    ]
+    meshes: list[DeviceMesh] = []
+    for mesh in candidates:
+        if mesh is not None and all(mesh is not other for other in meshes):
+            meshes.append(mesh)
+    return meshes
 
 
 def compute_config_fingerprint(
@@ -54,6 +71,11 @@ def compute_config_fingerprint(
     h.update(f"compile:mode:{compile_config.mode}\n".encode())
     h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
+    h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
+    h.update(
+        "compile:full_recompute_save_ops:"
+        f"{compile_config.full_recompute_save_ops}\n".encode()
+    )
     h.update(
         f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
     )
@@ -81,19 +103,20 @@ def compute_config_fingerprint(
 
 
 def _register_coor_ops() -> None:
-    """Register CooR custom ops required for deserialization.
+    """Register CooR custom ops required for tracing and deserialization.
 
     CooR-compiled artifacts reference custom ops (e.g.
     device_mesh._runtime_compute_coordinate_on_dim) that are lazily
     registered. The ops module uses @torch.library.custom_op with
     DeviceMesh, which requires DeviceMesh to be registered as an
-    opaque type first. Must be called before deserializing any
+    opaque type first. Must be called before tracing or deserializing a
     CooR-compiled artifact.
     """
     from torch.distributed.device_mesh import _register_distributed_opaque_types
 
     _register_distributed_opaque_types()
     from torch.distributed._ops import device_mesh as _dm_ops  # noqa: F401
+    from torch.distributed.tensor import _collective_utils  # noqa: F401
 
 
 def _validate_config_fingerprint(

@@ -92,6 +92,8 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _make_default_memory_policy,
     _make_full_memory_policy,
     tag_sac_policy,
+    tag_with_memory_policy_pass,
+    validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
@@ -1696,6 +1698,93 @@ class TestFullMemoryPolicy(TestCase):
         node = self._get_call_function_nodes(gm)[0]
         self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_RECOMPUTE)
 
+    def test_selected_module_ops_saved(self):
+        policy_fn = _make_full_memory_policy(
+            "layers.*.moe.router.gate :: aten.mm.default | "
+            "layers.*.attention.inner_attention :: higher_order.flex_attention"
+        )
+        cases = (
+            (
+                torch.ops.aten.mm.default,
+                "layers.3.moe.router.gate",
+                CheckpointPolicy.MUST_SAVE,
+            ),
+            (
+                torch.ops.aten.mm.default,
+                "layers.3.attention.wkv_a",
+                CheckpointPolicy.MUST_RECOMPUTE,
+            ),
+            (
+                torch.ops.aten._to_copy.default,
+                "layers.3.moe.router.gate",
+                CheckpointPolicy.MUST_RECOMPUTE,
+            ),
+            (
+                torch.ops.higher_order.flex_attention,
+                "layers.3.attention.inner_attention",
+                CheckpointPolicy.MUST_SAVE,
+            ),
+        )
+
+        for target, fqn, expected in cases:
+            with self.subTest(target=target, fqn=fqn):
+                gm = self._build_gm([target], layer_fqns=[fqn])
+                node = self._get_call_function_nodes(gm)[0]
+                self.assertEqual(policy_fn(node), expected)
+
+    def test_selected_module_op_can_target_one_layer(self):
+        policy_fn = _make_full_memory_policy(
+            "layers.7.attention.wo :: torch.ops.aten.mm.default"
+        )
+        for layer_id, expected in (
+            (7, CheckpointPolicy.MUST_SAVE),
+            (8, CheckpointPolicy.MUST_RECOMPUTE),
+        ):
+            gm = self._build_gm(
+                [torch.ops.aten.mm.default],
+                layer_fqns=[f"layers.{layer_id}.attention.wo"],
+            )
+            node = self._get_call_function_nodes(gm)[0]
+            self.assertEqual(policy_fn(node), expected)
+
+    def test_full_policy_uses_configured_save_ops(self):
+        gm = self._build_gm(
+            [torch.ops.aten.mm.default],
+            layer_fqns=["layers.3.moe.router.gate"],
+        )
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                memory_policy="full",
+                full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+            )
+        )
+
+        tag_with_memory_policy_pass(gm, config=config)
+
+        node = self._get_call_function_nodes(gm)[0]
+        self.assertEqual(node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_save_ops_rejected_for_other_memory_policies(self):
+        compile_config = GraphTrainerCompileConfig(
+            memory_policy="default",
+            full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires.*memory_policy full"):
+            validate_memory_policy_config(compile_config)
+
+    def test_invalid_save_op_selectors_rejected(self):
+        invalid_values = (
+            "layers.*.moe.router.gate",
+            ":: aten.mm.default",
+            "layers.*.moe.router.gate ::",
+            "layers.*.moe.router.gate :: aten.not_an_op.default",
+            "layers.*.moe.router.gate :: aten.mm",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _make_full_memory_policy(value)
+
     def test_layer_boundary_forced_to_must_save(self):
         """Nodes at layer boundaries should still be forced to MUST_SAVE."""
         gm = self._build_gm(
@@ -1846,23 +1935,15 @@ class TestBucketingPrefetchOrder(FSDPTest):
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
         )
 
-        inputs = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
+        num_tokens = self.BATCH_SIZE * self.SEQ_LEN
+        inputs = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
+        labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
+        # The dataloader supplies per-document positions, which the trainer
+        # requires to build the block-causal FlexAttention mask.
+        positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
+            self.BATCH_SIZE
         )
-        labels = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
-        )
-        # The dataloader always supplies per-document positions, which the
-        # trainer requires to build the (block_causal) FlexAttention mask. A
-        # single document (sequential positions) is fine here.
-        positions = (
-            torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32)
-            .unsqueeze(0)
-            .expand(self.BATCH_SIZE, self.SEQ_LEN)
-        )
-        global_valid_tokens = torch.tensor(
-            self.BATCH_SIZE * self.SEQ_LEN, dtype=torch.float, device="cuda"
-        )
+        global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
 
         # One forward_backward_step triggers _make_fx_forward_backward_step
         # which traces the model and applies all graph passes.
@@ -2181,7 +2262,7 @@ class TestChunkPasses(TestCase):
         graph.output(relu)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        dim = {"batch": 0, "seq": 1}[mode]
+        dim = 0
         fake_mode, sym_extent = self._symbolic_batch_fake_mode(input_shape[dim])
         x_shape = list(input_shape)
         x_shape[dim] = sym_extent
@@ -2950,16 +3031,16 @@ class TestChunkPasses(TestCase):
             )
 
     def test_chunk_seq_preserves_split_view_stride_scalar_live_in(self):
-        fake_mode, sym_seq = self._symbolic_batch_fake_mode(4)
+        fake_mode, sym_tokens = self._symbolic_batch_fake_mode(4)
         with fake_mode:
-            x_val = torch.empty(2, sym_seq, 256)
+            x_val = torch.empty(sym_tokens, 256)
 
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         stride0 = graph.call_function(torch.ops.aten.sym_stride.int, args=(x, 0))
         view = graph.call_function(
             torch.ops.aten.as_strided.default,
-            args=(x, [2, sym_seq, 256], [stride0, 256, 1]),
+            args=(x, [sym_tokens, 256], [stride0, 1]),
         )
         graph.output(view)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -2973,20 +3054,18 @@ class TestChunkPasses(TestCase):
         self._chunk_seq(gm, module_patterns=["layers.*.moe"])
 
     def test_chunk_seq_keeps_parent_shape_template_full(self):
-        fake_mode, sym_seq = self._symbolic_batch_fake_mode(4)
+        fake_mode, sym_tokens = self._symbolic_batch_fake_mode(4)
         with fake_mode:
-            x_val = torch.empty(8, sym_seq, 256)
-            moe_val = torch.empty(8, sym_seq, 256)
-            template_flat_val = torch.empty(8 * sym_seq, 256)
-            template_val = torch.empty(8, sym_seq, 256)
+            x_val = torch.empty(sym_tokens, 256)
+            moe_val = torch.empty(sym_tokens, 256)
+            template_val = torch.empty(sym_tokens, 256)
 
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
-        seq = graph.call_function(torch.ops.aten.sym_size.int, args=(x, 1))
-        flat = graph.call_function(operator.mul, args=(8, seq))
+        num_tokens = graph.call_function(torch.ops.aten.sym_size.int, args=(x, 0))
         body_zeros = graph.call_function(
             torch.ops.aten.zeros.default,
-            args=([flat, 256],),
+            args=([num_tokens, 256],),
             kwargs={
                 "dtype": torch.bfloat16,
                 "device": torch.device("cpu"),
@@ -2994,12 +3073,12 @@ class TestChunkPasses(TestCase):
             },
         )
         body_view = graph.call_function(
-            torch.ops.aten.view.default, args=(body_zeros, [8, seq, 256])
+            torch.ops.aten.view.default, args=(body_zeros, [num_tokens, 256])
         )
         moe_out = graph.call_function(torch.ops.aten.add.Tensor, args=(x, body_view))
         template_flat = graph.call_function(
             torch.ops.aten.empty_strided.default,
-            args=([flat, 256], [256, 1]),
+            args=([num_tokens, 256], [256, 1]),
             kwargs={
                 "dtype": torch.bfloat16,
                 "device": torch.device("cpu"),
@@ -3007,12 +3086,12 @@ class TestChunkPasses(TestCase):
             },
         )
         template = graph.call_function(
-            torch.ops.aten.view.default, args=(template_flat, [8, seq, 256])
+            torch.ops.aten.view.default, args=(template_flat, [num_tokens, 256])
         )
         stride0 = graph.call_function(torch.ops.aten.sym_stride.int, args=(template, 0))
         parent_empty = graph.call_function(
             torch.ops.aten.empty_strided.default,
-            args=([8, seq, 256], [stride0, 256, 1]),
+            args=([num_tokens, 256], [stride0, 1]),
             kwargs={
                 "dtype": torch.bfloat16,
                 "device": torch.device("cpu"),
@@ -3023,12 +3102,11 @@ class TestChunkPasses(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         x.meta["val"] = x_val
-        seq.meta["val"] = sym_seq
-        flat.meta["val"] = 8 * sym_seq
-        body_zeros.meta["val"] = template_flat_val
+        num_tokens.meta["val"] = sym_tokens
+        body_zeros.meta["val"] = template_val
         body_view.meta["val"] = template_val
         moe_out.meta["val"] = moe_val
-        template_flat.meta["val"] = template_flat_val
+        template_flat.meta["val"] = template_val
         template.meta["val"] = template_val
         stride0.meta["val"] = template_val.stride(0)
         parent_empty.meta["val"] = template_val
@@ -3040,17 +3118,15 @@ class TestChunkPasses(TestCase):
 
         self.assertIs(stride0.args[0], template)
         self.assertIs(parent_empty.args[1][0], stride0)
-        self.assertIs(flat.args[0], 8)
-        self.assertIs(flat.args[1], seq)
         self.assertNotEqual(stride0.meta.get("chunked_region_role"), "body")
         self.assertNotEqual(template.meta.get("chunked_region_role"), "body")
 
-    def test_chunk_seq_matches_eager_symbolic_flatten_view_contract(self):
+    def test_chunk_seq_matches_eager_symbolic_view_contract(self):
         class FlatMoe(torch.nn.Module):
             def forward(self, x):
-                batch, seq, dim = x.shape
+                num_tokens, dim = x.shape
                 flat = x.view(-1, dim)
-                return (flat + 1).view(batch, seq, dim)
+                return (flat + 1).view(num_tokens, dim)
 
         class ChunkModel(torch.nn.Module):
             def __init__(self):
@@ -3078,7 +3154,7 @@ class TestChunkPasses(TestCase):
                     ),
                 )
 
-            x = torch.randn(2, 4, 8)
+            x = torch.randn(8, 8)
             mark_chunk_dynamic_dims(x, mode="seq")
             traced = minimal_fx_tracer(lambda inp: model(inp), module=model)(x)
             if strategy == "eager":
@@ -3097,50 +3173,32 @@ class TestChunkPasses(TestCase):
         eager_model, eager = trace_model("eager")
         graph_model, graph = trace_model("graph")
 
-        eager_clones = self._nodes_by_target(eager.gm, torch.ops.aten.clone.default)
-        graph_clones = [
-            node
-            for node in self._nodes_by_target(graph.gm, torch.ops.aten.clone.default)
-            if node.meta.get("chunked_region_role") == "chunk_input"
-        ]
-        self.assertEqual(len(eager_clones), 2)
-        self.assertEqual(len(graph_clones), 2)
-        self.assertEqual({node.meta.get("chunk_id") for node in graph_clones}, {0, 1})
-        self.assertEqual(
-            [tuple(node.meta["val"].shape) for node in graph_clones],
-            [tuple(node.meta["val"].shape) for node in eager_clones],
-        )
-        self.assertEqual(
-            [node.meta["val"].stride() for node in graph_clones],
-            [node.meta["val"].stride() for node in eager_clones],
-        )
-
         graph_body_targets = {
-            node.meta.get("chunk_id"): [
+            chunk_id: [
                 body.target
                 for body in graph.gm.graph.nodes
                 if body.meta.get("chunked_region_role") == "body"
-                and body.meta.get("chunk_id") == node.meta.get("chunk_id")
+                and body.meta.get("chunk_id") == chunk_id
             ]
-            for node in graph_clones
+            for chunk_id in (0, 1)
         }
         for targets in graph_body_targets.values():
             self.assertIn(torch.ops.aten.view.default, targets)
             self.assertIn(torch.ops.aten.add.Tensor, targets)
 
-        x_input = torch.randn(2, 4, 8)
+        x_input = torch.randn(8, 8)
         self.assertEqual(
             run_traced(graph, module=graph_model)(x_input),
             run_traced(eager, module=eager_model)(x_input),
         )
 
     def test_chunk_seq_rewrites_dependent_symbolic_scalar_live_in(self):
-        fake_mode, sym_seq = self._symbolic_batch_fake_mode(4)
+        fake_mode, sym_tokens = self._symbolic_batch_fake_mode(4)
         with fake_mode:
-            x_val = torch.empty(8, sym_seq, 256)
+            x_val = torch.empty(sym_tokens, 256)
             out_val = torch.empty_strided(
-                (8, sym_seq, 256),
-                (256 * torch.sym_max(1, sym_seq), 256, 1),
+                (sym_tokens, 256),
+                (256, 1),
             )
 
         graph = torch.fx.Graph()
@@ -3148,7 +3206,7 @@ class TestChunkPasses(TestCase):
         stride0 = graph.call_function(torch.ops.aten.sym_stride.int, args=(x, 0))
         empty = graph.call_function(
             torch.ops.aten.empty_strided.default,
-            args=([8, sym_seq, 256], [stride0, 256, 1]),
+            args=([sym_tokens, 256], [stride0, 1]),
             kwargs={
                 "dtype": torch.float32,
                 "device": torch.device("cpu"),
@@ -3170,9 +3228,9 @@ class TestChunkPasses(TestCase):
         self._chunk_seq(gm, module_patterns=["layers.*.moe"])
         concretize_ep_chunk_symbolic_shapes_pass(gm)
 
-        out = gm(torch.empty(8, 4, 256))
-        self.assertEqual(out.shape, (8, 4, 256))
-        self.assertEqual(out.stride(), (1024, 256, 1))
+        out = gm(torch.empty(8, 256))
+        self.assertEqual(out.shape, (8, 256))
+        self.assertEqual(out.stride(), (256, 1))
 
     def test_chunk_batch_rewrites_mixed_symbolic_scalar_live_in(self):
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -3564,60 +3622,60 @@ class TestChunkPasses(TestCase):
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
-        x = torch.randn(4, 4)
-        labels = torch.ones(4, 4)
-        positions = torch.arange(4).repeat(4, 1)
+        x = torch.randn(8, 4)
+        labels = torch.ones(8)
+        positions = torch.arange(4).repeat(2)
         prepare_ep_overlap_trace_inputs(
             config.compile,
-            (x, labels, torch.tensor(16), {}, {"positions": positions}),
+            (x, labels, torch.tensor(8), {}, {"positions": positions}),
             {},
         )
         self.assertIn(0, x._dynamo_unbacked_indices)
         self.assertIn(0, labels._dynamo_unbacked_indices)
         self.assertIn(0, positions._dynamo_unbacked_indices)
-        self.assertEqual(x._dynamo_unbacked_bounds[0], (2, 4))
+        self.assertEqual(x._dynamo_unbacked_bounds[0], (4, 8))
 
     def test_prepare_ep_overlap_trace_inputs_marks_seq_dims(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
         config.compile.ep_overlap.chunk_dim = "seq"
         config.compile.ep_overlap.module_fqn = "layers.*.moe"
-        x = torch.randn(4, 4)
-        positions = torch.arange(4).repeat(4, 1)
+        x = torch.randn(8, 4)
+        positions = torch.arange(4).repeat(2)
         prepare_ep_overlap_trace_inputs(
             config.compile,
-            (x, torch.ones(4, 4), torch.tensor(16), {}, {"positions": positions}),
+            (x, torch.ones(8), torch.tensor(8), {}, {"positions": positions}),
             {},
         )
-        self.assertIn(1, x._dynamo_unbacked_indices)
-        self.assertIn(1, positions._dynamo_unbacked_indices)
-        self.assertEqual(x._dynamo_unbacked_bounds[1], (2, 4))
+        self.assertIn(0, x._dynamo_unbacked_indices)
+        self.assertIn(0, positions._dynamo_unbacked_indices)
+        self.assertEqual(x._dynamo_unbacked_bounds[0], (4, 8))
 
     def test_prepare_ep_overlap_trace_inputs_bounds_seq_dim_to_original_half(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
         config.compile.ep_overlap.chunk_dim = "seq"
         config.compile.ep_overlap.module_fqn = "layers.*.moe"
-        x = torch.randn(2, 32, 4)
-        labels = torch.ones(2, 32, dtype=torch.long)
+        x = torch.randn(64, 4)
+        labels = torch.ones(64, dtype=torch.long)
         prepare_ep_overlap_trace_inputs(
             config.compile,
             (x, labels, torch.tensor(64), {}, {}),
             {},
         )
 
-        self.assertEqual(x._dynamo_unbacked_bounds[1], (16, 32))
-        self.assertEqual(labels._dynamo_unbacked_bounds[1], (16, 32))
+        self.assertEqual(x._dynamo_unbacked_bounds[0], (32, 64))
+        self.assertEqual(labels._dynamo_unbacked_bounds[0], (32, 64))
 
     def test_seq_chunk_marker_traces_chunked_loss_backward(self):
         from torchtitan.components.loss import ChunkedLossWrapper
 
         torch.manual_seed(42)
-        batch, seq_len, dim, vocab_size = 2, 32, 4, 8
+        num_tokens, dim, vocab_size = 64, 4, 8
         lm_head = torch.nn.Linear(dim, vocab_size, bias=False)
         loss_fn = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=8))
         loss_fn.lm_head = lm_head
 
-        hidden_states = torch.randn(batch, seq_len, dim, requires_grad=True)
-        labels = torch.randint(0, vocab_size, (batch, seq_len))
+        hidden_states = torch.randn(num_tokens, dim, requires_grad=True)
+        labels = torch.randint(0, vocab_size, (num_tokens,))
         mark_chunk_dynamic_dims(hidden_states, mode="seq")
         mark_chunk_dynamic_dims(labels, mode="seq")
 
@@ -3646,27 +3704,27 @@ class TestChunkPasses(TestCase):
 
         fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
         positions = fake_mode.from_tensor(
-            torch.arange(4).repeat(2, 1),
+            torch.arange(4).repeat(2),
             source=LocalSource("positions", is_input=True),
             symbolic_context=StatelessSymbolicContext(
-                dynamic_sizes=[DimDynamic.STATIC, DimDynamic.UNBACKED],
-                shape_ids={1: "torchtitan_chunk_seq"},
+                dynamic_sizes=[DimDynamic.UNBACKED],
+                shape_ids={0: "torchtitan_chunk_seq"},
             ),
         )
         block_mask = create_block_mask(
             lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
-            B=2,
+            B=1,
             H=None,
-            Q_LEN=4,
-            KV_LEN=4,
+            Q_LEN=8,
+            KV_LEN=8,
             device="cpu",
         )
 
         prepared = prepare_ep_overlap_trace_call_inputs(
             config.compile,
             (
-                torch.empty(2, 4),
-                torch.empty(2, 4),
+                torch.empty(8, 4),
+                torch.empty(8),
                 torch.tensor(8),
                 {"positions": positions, "attention_masks": block_mask},
             ),
@@ -3676,7 +3734,7 @@ class TestChunkPasses(TestCase):
         self.assertIsNotNone(prepared)
         prepared_args, _ = prepared
         rebound_mask = prepared_args[3]["attention_masks"]
-        seq_len = positions.shape[1]
+        seq_len = positions.shape[0]
         self.assertEqual(rebound_mask.seq_lengths[0].node.expr, seq_len.node.expr)
         self.assertEqual(rebound_mask.seq_lengths[1].node.expr, seq_len.node.expr)
 
@@ -6169,6 +6227,82 @@ class TestCanonicalizeGraphPass(TestCase):
         self.assertEqual(gm(x), x.reshape(2, 8))
 
 
+class TestStandaloneInductorCompilationPass(TestCase):
+    def test_prunes_unused_placeholders_and_restores_outer_signature(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            standalone_inductor_compilation_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x_node = graph.placeholder("x")
+        y_node = graph.placeholder("y")
+        unused_node = graph.placeholder("unused")
+        x_node.meta["marker"] = "x"
+        unused_node.meta["marker"] = "unused"
+        result = graph.call_function(torch.ops.aten.add.Tensor, args=(x_node, y_node))
+        graph.output(result)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        x = torch.ones(4)
+        y = torch.full((4,), 2.0)
+        unused = torch.full((4,), 3.0)
+        seen = {}
+
+        def fake_standalone_compile(compile_gm, compile_inputs, **kwargs):
+            import torch._inductor.config as ic
+
+            seen["placeholder_targets"] = [
+                node.target for node in compile_gm.graph.find_nodes(op="placeholder")
+            ]
+            seen["placeholder_meta"] = [
+                node.meta for node in compile_gm.graph.find_nodes(op="placeholder")
+            ]
+            seen["compile_inputs"] = compile_inputs
+            seen["kwargs"] = kwargs
+            seen["reorder_for_peak_memory"] = ic.reorder_for_peak_memory
+
+            def compiled_fn(a, b):
+                return a - b
+
+            seen["compiled_fn"] = compiled_fn
+            return compiled_fn
+
+        with patch(
+            "torch._inductor.standalone_compile", side_effect=fake_standalone_compile
+        ):
+            wrapped = standalone_inductor_compilation_pass(
+                gm,
+                (x, y, unused),
+                inductor_configs={"reorder_for_peak_memory": False},
+            )
+
+        self.assertEqual(seen["placeholder_targets"], ["x", "y"])
+        self.assertEqual(seen["placeholder_meta"][0]["marker"], "x")
+        self.assertEqual(len(seen["compile_inputs"]), 2)
+        self.assertIs(seen["compile_inputs"][0], x)
+        self.assertIs(seen["compile_inputs"][1], y)
+        self.assertEqual(
+            seen["kwargs"],
+            {
+                "dynamic_shapes": "from_tracing_context",
+                "aot": True,
+                "donate_graph_module": False,
+            },
+        )
+        self.assertFalse(seen["reorder_for_peak_memory"])
+
+        wrapped_placeholders = [
+            node.target for node in wrapped.graph.find_nodes(op="placeholder")
+        ]
+        self.assertEqual(wrapped_placeholders, ["x", "y", "unused"])
+        wrapped_call = next(
+            node for node in wrapped.graph.nodes if node.op == "call_function"
+        )
+        self.assertIs(wrapped_call.target.__wrapped__, seen["compiled_fn"])
+
+        torch.testing.assert_close(wrapped(x, y, unused), x - y)
+
+
 class TestAsyncTensorParallelPass(FSDPTest):
     """Verify async_tensor_parallel_pass produces fused ops."""
 
@@ -6894,10 +7028,10 @@ class TestEagerChunking(TestCase):
             model,
             self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
         )
-        x = torch.randn(2, 4, 3)
+        x = torch.randn(8, 3)
 
         self.assertEqual(model(x), x)
-        self.assertEqual(seen_shapes, [(2, 2, 3), (2, 2, 3)])
+        self.assertEqual(seen_shapes, [(4, 3), (4, 3)])
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):

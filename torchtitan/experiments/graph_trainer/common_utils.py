@@ -8,6 +8,7 @@ import fnmatch
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 import torch
@@ -18,7 +19,6 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel as dtensor_data_parallel,
@@ -27,6 +27,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 from torchtitan.experiments.graph_trainer.simple_fsdp_spmd import (
     data_parallel as spmd_data_parallel,
 )
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
 
@@ -34,6 +35,29 @@ from torchtitan.tools.logging import logger
 BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
 LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
 AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
+
+
+class GraphTrainerScaledDotProductAttention(ScaledDotProductAttention):
+    """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ScaledDotProductAttention.Config):
+        pass
+
+    def forward(
+        self,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        out_BLNH = super().forward(
+            q_TNH.unsqueeze(0),
+            k_TNH.unsqueeze(0),
+            v_TNH.unsqueeze(0),
+            **kwargs,
+        )
+        return out_BLNH.squeeze(0)
 
 
 @contextmanager
@@ -60,18 +84,18 @@ def build_decoder_config_for_backend(
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``ScaledDotProductAttention.Config()``. Production code
-    never reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no
-    model registry can construct an SDPA language model outside these tests.
+    ``inner_attention`` to ``GraphTrainerScaledDotProductAttention.Config()``.
+    The adapter adds a singleton batch around the flat graph-trainer inputs and
+    delegates to the common batched SDPA implementation. Production code never
+    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
+    registry can construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
         return config_builder(attn_backend=attn_backend, **builder_kwargs)
 
-    from torchtitan.models.common.attention import ScaledDotProductAttention
-
     config = config_builder(attn_backend="flex", **builder_kwargs)
     for layer in config.layers:
-        layer.attention.inner_attention = ScaledDotProductAttention.Config()
+        layer.attention.inner_attention = GraphTrainerScaledDotProductAttention.Config()
     return config
 
 
@@ -398,19 +422,6 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def apply_cp_to_attention(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-) -> None:
-    """Wrap each layer's inner attention with CP logic."""
-    attention_modules = [
-        # pyrefly: ignore [missing-attribute]
-        block.attention.inner_attention
-        for block in model.layers.values()
-    ]
-    apply_cp_to_forward(attention_modules, parallel_dims.get_mesh("cp"))
-
-
 def apply_simple_fsdp(
     model: nn.Module,
     *,
@@ -423,16 +434,10 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
-    data_parallel = (
-        spmd_data_parallel
-        if get_spmd_backend() == "spmd_types"
-        else dtensor_data_parallel
-    )
+    use_spmd_types = get_spmd_backend() == "spmd_types"
     fsdp_axis = "fsdp"
     dense_non_dp_mesh = (
-        parallel_dims.get_activated_mesh(["tp"])
-        if get_spmd_backend() == "spmd_types"
-        else None
+        parallel_dims.get_activated_mesh(["tp"]) if use_spmd_types else None
     )
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
@@ -481,22 +486,45 @@ def apply_simple_fsdp(
             if efsdp_degree * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
-                inner_experts,
-                edp_mesh,
-                expert_dp_mode,
-                mp_policy=mp_policy,
-                shard_dim=experts_shard_dim,
-                non_dp_mesh=expert_non_dp_mesh,
-            )
+            if use_spmd_types:
+                sparse_storage_mesh = parallel_dims.spmd_sparse_storage_mesh()
+                assert sparse_storage_mesh is not None
+                moe.routed_experts.inner_experts = spmd_data_parallel(
+                    inner_experts,
+                    edp_mesh,
+                    expert_dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=experts_shard_dim,
+                    non_dp_mesh=expert_non_dp_mesh,
+                    storage_mesh=sparse_storage_mesh,
+                )
+            else:
+                moe.routed_experts.inner_experts = dtensor_data_parallel(
+                    inner_experts,
+                    edp_mesh,
+                    expert_dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=experts_shard_dim,
+                    non_dp_mesh=expert_non_dp_mesh,
+                )
 
-    model = data_parallel(
-        model,
-        dp_mesh,
-        dp_mode,
-        mp_policy=mp_policy,
-        non_dp_mesh=dense_non_dp_mesh,
-    )
+    if use_spmd_types:
+        model = spmd_data_parallel(
+            model,
+            dp_mesh,
+            dp_mode,
+            mp_policy=mp_policy,
+            non_dp_mesh=dense_non_dp_mesh,
+            storage_mesh=parallel_dims.spmd_dense_storage_mesh(),
+        )
+    else:
+        model = dtensor_data_parallel(
+            model,
+            dp_mesh,
+            dp_mode,
+            mp_policy=mp_policy,
+            non_dp_mesh=dense_non_dp_mesh,
+        )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
     )

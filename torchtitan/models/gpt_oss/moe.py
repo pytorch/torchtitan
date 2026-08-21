@@ -20,7 +20,6 @@ from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
 
-@spmd.register_autograd_function
 class ScaleBiasForward(torch.autograd.Function):
     """
     Custom autograd function that scales bias in forward pass but not in backward.
@@ -38,7 +37,7 @@ class ScaleBiasForward(torch.autograd.Function):
         return bias.to(dtype)
 
     @staticmethod
-    def typecheck_forward(bias, tp_degree, dtype):
+    def spmd_typecheck(out, *, bias):
         """
         Typecheck for bias scaling, already interleaved to num tokens shape.
         If EP enabled, V on all axes. If disabled, TP axis: R->V.
@@ -53,9 +52,7 @@ class ScaleBiasForward(torch.autograd.Function):
             in_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R}
             out_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V}
         spmd.assert_type(bias, in_type)
-        out = ScaleBiasForward.apply(bias, tp_degree, dtype)
         spmd.assert_type(out, out_type)
-        return out
 
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -125,9 +122,11 @@ class GptOssGroupedExperts(GroupedExperts):
             mlp2_weight_EDF = self.mlp2_weight_EDF
             mlp2_bias_ED = self.mlp2_bias_ED
 
-        # Determine tp_degree from device mesh if available
+        # Determine tp_degree from the active backend's device mesh.
         tp_degree = 1
-        if isinstance(self.mlp1_weight_EGD, DTensor):
+        if get_spmd_backend() == "spmd_types":
+            tp_degree = spmd_mesh_size("tp")
+        elif isinstance(self.mlp1_weight_EGD, DTensor):
             mesh_dim_names = self.mlp1_weight_EGD.device_mesh.mesh_dim_names
             # pyrefly: ignore[not-iterable]
             if "tp" in mesh_dim_names:
@@ -140,8 +139,11 @@ class GptOssGroupedExperts(GroupedExperts):
             and spmd.is_type_checking()
             and spmd_mesh_size("ep") == 1
         ):
-            for axis in ("dp", "cp"):
-                spmd.mutate_type(num_tokens_per_expert_E, axis, src=spmd.P, dst=spmd.V)
+            spmd.mutate_type(
+                num_tokens_per_expert_E,
+                src=spmd.P,
+                dst={"dp": spmd.V, "cp": spmd.V},
+            )
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave

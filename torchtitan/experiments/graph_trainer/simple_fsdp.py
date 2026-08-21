@@ -13,7 +13,6 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 
-from spmd_types.runtime import get_partition_spec, has_local_type
 from spmd_types.types import partition_spec_get_shard
 from torch.distributed._tensor import (
     distribute_tensor,
@@ -60,13 +59,13 @@ def _spmd_local_tensor_to_dtensor(
     """Reconstruct model-parallel DTensor metadata from an SPMD local tensor."""
     if (
         get_spmd_backend() != "spmd_types"
-        or not has_local_type(tensor)
+        or not spmd.has_local_type(tensor)
         or non_dp_mesh is None
     ):
         return tensor
 
     assert non_dp_mesh.mesh_dim_names is not None
-    partition_spec = get_partition_spec(tensor)
+    partition_spec = spmd.get_partition_spec(tensor)
     with spmd.set_current_mesh(non_dp_mesh):
         placements = tuple(
             spmd.spmd_type_to_dtensor_placement(
@@ -213,7 +212,6 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        full_dtensor: bool = False,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -226,7 +224,6 @@ class ReplicateComputation(Module):
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
-        self.full_dtensor = full_dtensor
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -236,10 +233,6 @@ class ReplicateComputation(Module):
         non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
-            if self.full_dtensor:
-                raise NotImplementedError(
-                    "full_dtensor not implemented for nD parallelisms"
-                )
             dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
@@ -280,9 +273,7 @@ class ReplicateComputation(Module):
                 forward_dtype=self.param_dtype,
                 backward_dtype=self.reduce_dtype,
             )
-
-            if not self.full_dtensor:
-                output = output.to_local(grad_placements=self.grad_placements)
+            output = output.to_local(grad_placements=self.grad_placements)
         else:
             raise AssertionError(
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
@@ -308,7 +299,6 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
-    full_dtensor: bool = False,
     non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
@@ -368,7 +358,6 @@ def data_parallel(
                 param_sharding,
                 mode,
                 mp_policy=mp_policy,
-                full_dtensor=full_dtensor,
             ),
         )
     return model

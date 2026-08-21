@@ -13,7 +13,8 @@
 # permutation) and compares against the reference. Correct CP attention matches
 # to fp32 noise (rel < 1e-4); bf16 mixed precision masks this, so we force fp32.
 #
-# Run: torchrun --nproc_per_node=2 tests/test_flex_cp_numerical.py \
+# Run: torchrun --nproc_per_node=2 \
+#          -m torchtitan.experiments.transformers_modeling_backend.tests.test_flex_cp_numerical \
 #          [--balancer none|headtail|ptrr]
 
 import argparse
@@ -71,8 +72,8 @@ def main():
         else transformers_modeling_backend_debugmodel()
     )
     cfg.hf_model = args.hf_model
-    cfg.training.seq_len = args.seq_len
-    cfg.training.local_batch_size = args.bs
+    cfg.training.max_context_length = args.seq_len
+    cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
@@ -105,13 +106,9 @@ def main():
     ref_model, _ = build_model(swap_moe=args.moe)
     ref_model.eval()
     torch.manual_seed(0)
-    input_ids = torch.randint(0, 100, (args.bs, args.seq_len), device=device)
-    positions = (
-        torch.arange(args.seq_len, device=device)
-        .unsqueeze(0)
-        .expand(args.bs, -1)
-        .contiguous()
-    )
+    num_tokens = args.bs * args.seq_len
+    input_ids = torch.randint(0, 100, (num_tokens,), device=device)
+    positions = torch.arange(args.seq_len, device=device).repeat(args.bs)
     full_mask = ref_model.get_attention_masks(positions)
     with torch.no_grad():
         ref_logits = ref_model(
@@ -143,12 +140,7 @@ def main():
     # permutation when reconstructing full logits for the comparison.
     cp_mesh = parallel_dims.get_mesh("cp")
     full_mask_cp = cp_model.get_attention_masks(positions)
-    gidx = (
-        torch.arange(args.seq_len, device=device)
-        .unsqueeze(0)
-        .expand(args.bs, -1)
-        .contiguous()
-    )
+    gidx = torch.arange(num_tokens, device=device)
     (loc_input, loc_pos, loc_gidx), loc_mask = cp_shard(
         cp_mesh,
         (input_ids, positions, gidx),
@@ -175,7 +167,7 @@ def main():
     dist.all_gather(gathered_gidx, loc_gidx.contiguous())
     full = torch.zeros_like(ref_logits)
     for lg, gi in zip(gathered_logits, gathered_gidx):
-        full[:, gi[0].long(), :] = lg.float()
+        full[gi.long(), :] = lg.float()
 
     max_abs = (full.float() - ref_logits.float()).abs().max().item()
     ref_scale = ref_logits.float().abs().max().item()

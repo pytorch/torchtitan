@@ -8,10 +8,17 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
+import spmd_types as spmd
+import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
+from torch.distributed.tensor import DTensor
+from torch.utils._pytree import tree_map_only
 
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import plain_tensor_to_dtensor_state_dict
 from torchtitan.tools.logging import logger
 from .model import BaseModel
 
@@ -37,7 +44,6 @@ class BaseStateDictAdapter(ABC):
     ):
         pass
 
-    @abstractmethod
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert from native model state dict to HuggingFace format.
 
@@ -47,9 +53,8 @@ class BaseStateDictAdapter(ABC):
         Returns:
             The converted HuggingFace format state dict
         """
-        pass
+        return self.convert_save_state_dict(state_dict)
 
-    @abstractmethod
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Obtain native model state dict from HuggingFace format.
 
@@ -59,9 +64,16 @@ class BaseStateDictAdapter(ABC):
         Returns:
             The converted native model state dict
         """
+        return self.convert_load_state_dict(hf_state_dict)
+
+    @abstractmethod
+    def convert_save_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         pass
 
     @abstractmethod
+    def convert_load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        pass
+
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
@@ -74,7 +86,7 @@ class BaseStateDictAdapter(ABC):
             The HuggingFace storage reader to read from HF checkpoint
 
         """
-        pass
+        raise NotImplementedError
 
 
 class StateDictAdapter(BaseStateDictAdapter):
@@ -110,6 +122,20 @@ class StateDictAdapter(BaseStateDictAdapter):
         else:
             self.fqn_to_index_mapping = None
 
+    def convert_save_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return self.to_hf(state_dict)
+
+    def convert_load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return self.from_hf(state_dict)
+
+    @abstractmethod
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        pass
+
     def _validate_hf_rope_config(
         self,
         expected_rope_cls: type,
@@ -131,3 +157,63 @@ class StateDictAdapter(BaseStateDictAdapter):
                 "Loading from quantized checkpoint format is not supported for this model."
             )
         return HuggingFaceStorageReader(path)
+
+
+class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
+    def __init__(
+        self,
+        state_dict_layouts: Mapping[str, spmd.SpmdType] | None = None,
+        parallel_dims: ParallelDims | None = None,
+    ) -> None:
+        self.state_dict_layouts = state_dict_layouts
+        self.parallel_dims = parallel_dims
+        self.optimizers = None
+
+    @staticmethod
+    def _optimizer_layouts(optimizers, state_dict):
+        params = {
+            fqn: param
+            for optimizer in optimizers.optimizers
+            for group in optimizer.param_groups
+            for fqn, param in zip(group["param_names"], group["params"], strict=True)
+        }
+        return {
+            key: spmd.SpmdType(
+                dict(spmd.get_local_type(param)), spmd.get_partition_spec(param)
+            )
+            for key, value in state_dict.items()
+            for fqn, param in params.items()
+            if key.startswith(f"state.{fqn}.")
+            and isinstance(value, torch.Tensor)
+            and value.shape == param.shape
+            and spmd.has_local_type(param)
+        }
+
+    def convert_save_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        converted = plain_tensor_to_dtensor_state_dict(
+            state_dict,
+            state_dict_layouts=self.state_dict_layouts,
+            parallel_dims=self.parallel_dims,
+        )
+        self.optimizers = state_dict.get("optimizer")
+        if self.optimizers is not None:
+            optimizer_state = self.optimizers.state_dict()
+            layouts = self._optimizer_layouts(self.optimizers, optimizer_state)
+            converted_optimizer = dict(optimizer_state)
+            converted_optimizer.update(
+                plain_tensor_to_dtensor_state_dict(
+                    {key: optimizer_state[key] for key in layouts},
+                    state_dict_layouts=layouts,
+                )
+            )
+            converted["optimizer"] = converted_optimizer
+        return converted
+
+    def convert_load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        converted = tree_map_only(DTensor, lambda value: value.to_local(), state_dict)
+        if self.optimizers is not None and "optimizer" in converted:
+            # Optimizer state may not exist before loading, so preserve its
+            # normal load_state_dict path after DCP fills the target shards.
+            self.optimizers.load_state_dict(converted["optimizer"])
+            converted["optimizer"] = self.optimizers
+        return converted

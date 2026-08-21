@@ -75,8 +75,10 @@ Design references:
 
 ```bash
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
+  --training.disable_cuda_graphs \
   --compile.mode aot_fx_trace \
   --parallelism.pipeline_parallel_degree 2 \
+  --parallelism.num_pp_microbatches 8 \
   --parallelism.pipeline_parallel_schedule Interleaved1F1B \
   --parallelism.data_parallel_shard_degree 4 \
   --parallelism.expert_parallel_degree 2
@@ -116,6 +118,12 @@ MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --comp
 
 # Numerics-changing optimizations (e.g. RMSNorm Inductor fusion)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.numerics_changing_optim
+
+# Full recompute while saving selected module operations
+MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_671b ./run_train.sh \
+  --compile.memory_policy full \
+  --compile.full_recompute_save_ops \
+  'layers.*.moe.router.gate::aten.mm.default | layers.*.attention.wkv_a::aten.mm.default'
 
 # CPU activation offloading
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.memory_policy cpu_offload_all
