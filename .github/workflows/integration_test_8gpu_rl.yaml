@@ -8,8 +8,7 @@ on:
       - 'torchtitan/models/qwen3_5/**'
       - '.github/workflows/integration_test_8gpu_rl.yaml'
   pull_request:
-    types: [labeled, synchronize]
-    branches: [ main ]
+    types: [labeled, synchronize, reopened, ready_for_review]
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
