@@ -460,7 +460,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
                 for m in self.model_parts:
                     m.to_empty(device=init_device)
-                    with torch.no_grad():
+                    with (
+                        torch.no_grad(),
+                        dist_utils.get_spmd_context(
+                            parallel_dims=parallel_dims,
+                        )(),
+                    ):
                         # TODO: Change this back to init_weights once
                         # autoparallel contains the wrap_init_states
                         cast(BaseModel, m).init_weights(buffer_device=buffer_device)
@@ -487,7 +492,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     )
 
                 model.to_empty(device=init_device)
-                with torch.no_grad():
+                with (
+                    torch.no_grad(),
+                    dist_utils.get_spmd_context(
+                        parallel_dims=parallel_dims,
+                    )(),
+                ):
                     # TODO: Change this back to init_weights once
                     # autoparallel contains the wrap_init_states
                     cast(BaseModel, model).init_weights(buffer_device=buffer_device)
@@ -839,6 +849,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return torch.sum(torch.stack(losses)).to(self.device)
         return torch.tensor([-1.0], device=self.device)
 
+    def _clip_grad_norm(self, parameters: list[torch.Tensor]) -> torch.Tensor:
+        return dist_utils.clip_grad_norm_(
+            parameters,
+            self.config.training.max_norm,
+            foreach=True,
+            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=self.parallel_dims.ep_enabled,
+        )
+
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
@@ -916,12 +935,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     accumulated_loss.add_(detached_loss)
 
         with sl.log_trace_span("optim"):
-            grad_norm = dist_utils.clip_grad_norm_(
-                [p for m in self.model_parts for p in m.parameters()],
-                self.config.training.max_norm,
-                foreach=True,
-                pp_mesh=parallel_dims.get_optional_mesh("pp"),
-                ep_enabled=parallel_dims.ep_enabled,
+            grad_norm = self._clip_grad_norm(
+                [p for m in self.model_parts for p in m.parameters()]
             )
             # Only the last PP stage owns the loss. First combine its DP/CP
             # replicas, then propagate the result across PP. TP replicas have

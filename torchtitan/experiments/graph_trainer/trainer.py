@@ -8,9 +8,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer.utils import canonical_fqn
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -41,8 +45,40 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
+from torchtitan.protocols.state_dict_adapter import PlainToDTensorStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
+
+
+def _get_state_dict_layouts(model_parts: list[nn.Module]):
+    layouts = {}
+    exposed_keys = {key for model in model_parts for key in model.state_dict()}
+    for model in model_parts:
+        for name, tensor in (
+            *model.named_parameters(remove_duplicate=False),
+            *model.named_buffers(remove_duplicate=False),
+        ):
+            if not spmd.has_local_type(tensor):
+                continue
+            name = canonical_fqn(name)
+            layout = spmd.SpmdType(
+                dict(spmd.get_local_type(tensor)), spmd.get_partition_spec(tensor)
+            )
+            names = [name]
+            if name.endswith(("wqkv.weight", "wqkv.bias")):
+                prefix, kind = name.rsplit("wqkv.", 1)
+                names = [f"{prefix}{proj}.{kind}" for proj in ("wq", "wk", "wv")]
+            elif name.endswith("w13"):
+                prefix = name[: -len("w13")]
+                names = [
+                    f"{prefix}{key}"
+                    for key in ("w1.weight", "w3.weight", "w1_EFD", "w3_EFD")
+                ]
+            layouts.update(dict.fromkeys(names, layout))
+    missing = exposed_keys - layouts.keys()
+    if missing:
+        raise ValueError(f"Missing SPMD checkpoint layouts: {sorted(missing)}")
+    return layouts
 
 
 def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
@@ -111,6 +147,13 @@ class GraphTrainer(Trainer):
     def __init__(self, config):
         super().__init__(config)
 
+        if config.parallelism.spmd_backend == "spmd_types" and self.checkpointer.enable:
+            if not isinstance(self.checkpointer, CheckpointManager):
+                raise ValueError("GraphTrainer SPMD checkpoints require DCP")
+            self.checkpointer.state_dict_adapter = PlainToDTensorStateDictAdapter(
+                _get_state_dict_layouts(self.model_parts)
+            )
+
         validate_memory_policy_config(self.config.compile)
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
@@ -130,6 +173,16 @@ class GraphTrainer(Trainer):
 
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+
+    def _clip_grad_norm(self, parameters: list[torch.Tensor]) -> torch.Tensor:
+        if self.config.parallelism.spmd_backend != "spmd_types":
+            return super()._clip_grad_norm(parameters)
+        return dist_utils.clip_grad_norm_spmd_(
+            parameters,
+            self.config.training.max_norm,
+            foreach=True,
+            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+        )
 
     def forward_backward_step(
         self,
@@ -241,7 +294,21 @@ class GraphTrainer(Trainer):
                     compile_config=self.config.compile,
                 )
         with self.train_context():
-            outputs = run_traced(self._traced_step, module=model)(
+            precompile_meshes = None
+            if (
+                self.config.compile.precompile_artifact_dir
+                and self.config.parallelism.spmd_backend == "spmd_types"
+            ):
+                from torchtitan.experiments.graph_trainer.precompile import (
+                    get_spmd_precompile_meshes,
+                )
+
+                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+            outputs = run_traced(
+                self._traced_step,
+                module=model,
+                precompile_meshes=precompile_meshes,
+            )(
                 inputs,
                 labels,
                 global_valid_tokens,

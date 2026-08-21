@@ -15,9 +15,13 @@ from collections.abc import Callable
 from typing import Literal
 
 import torch
+from spmd_types import get_local_type, get_partition_spec, has_local_type, SpmdType
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import (
+    device_mesh_from_spmd_axes,
+    spmd_distribute_tensor,
+)
 from torchtitan.models.common.attention import (
     FlexAttention,
     FusedQKVLinear,
@@ -163,15 +167,26 @@ def _fused_qkv_param_init(
                 # avoids the "unflatten unevenly sharded" error when dp_shard*tp
                 # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
                 # gather, since fused is already replicated.
-                if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
+                if not isinstance(t, DTensor):
                     # RL generator init_weights() only needs non-persistent
                     # buffers; weights come from trainer state dict. Until it has
                     # a DTensor static state dict path, copy this TP shard here.
                     # TODO: Remove once RL can init buffers without weight init.
-                    mesh = current_spmd_mesh()
-                    assert mesh is not None
-                    tp_rank = mesh.get_local_rank("tp")
-                    fused = fused.chunk(tp_size, dim=0)[tp_rank]
+                    annotation = get_local_type(t) if has_local_type(t) else None
+                    if annotation is not None:
+                        mesh = device_mesh_from_spmd_axes(
+                            annotation.keys(),
+                            storage_mesh=True,
+                        )
+                        assert mesh is not None, (
+                            "Fused QKV parameter annotation does not match a "
+                            f"registered storage mesh: {annotation}"
+                        )
+                        fused = spmd_distribute_tensor(
+                            fused,
+                            mesh,
+                            SpmdType(dict(get_local_type(t)), get_partition_spec(t)),
+                        )
                 t.copy_(fused)
 
         return _init
