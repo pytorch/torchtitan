@@ -105,7 +105,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         self.assertTrue(all(type(m) is MXFP8FusedGroupedExperts for m in fused))
         self.assertTrue(all(m.fuse_activation for m in fused))
 
-    def test_grouped_forward_routes_through_the_hook(self):
+    def test_grouped_forward_validates_and_applies_the_function(self):
         cfg = self._grouped_experts_config(self._grouped_model_config())
         module = cfg.build()
         num_tokens = torch.zeros(cfg.num_experts, dtype=torch.int64)
@@ -113,13 +113,14 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         x = torch.randn(2, cfg.dim)
         sentinel = torch.zeros(2, cfg.dim, dtype=torch.bfloat16)
         with mock.patch(
-            "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_swiglu_grouped_mlp_w13",
+            "torchtitan.overrides.mxfp8_fused_swiglu._validate_grouped_inputs"
+        ) as validate, mock.patch(
+            "torchtitan.overrides.mxfp8_fused_swiglu._MXFP8SwiGLUGroupedMLP.apply",
             return_value=sentinel,
-        ) as composite:
+        ) as function:
             out = module(x, num_tokens)
-        composite.assert_called_once()
-        args, kwargs = composite.call_args
-        self.assertEqual(kwargs, {"fuse_activation": True})
+        function.assert_called_once()
+        args = function.call_args.args
         self.assertEqual(args[0].dtype, torch.bfloat16)
         self.assertEqual(
             tuple(args[1].shape), (cfg.num_experts, cfg.hidden_dim, 2, cfg.dim)
@@ -129,22 +130,8 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         )
         self.assertEqual(args[3].dtype, torch.int32)
         self.assertEqual(args[3].tolist(), torch.cumsum(num_tokens, dim=0).tolist())
-        self.assertEqual(out.dtype, x.dtype)
-
-    def test_grouped_hook_is_an_extension_seam(self):
-        class _ProbeGroupedMLP(MXFP8FusedGroupedExperts):
-            def _run_grouped_mlp(self, x, w13, w2_t, offsets):
-                return torch.zeros(
-                    x.shape[0], w2_t.shape[-1], dtype=x.dtype, device=x.device
-                )
-
-        cfg = self._grouped_experts_config(self._grouped_model_config())
-        module = _ProbeGroupedMLP(cfg)
-        num_tokens = torch.zeros(cfg.num_experts, dtype=torch.int64)
-        num_tokens[0] = 2
-        x = torch.randn(2, cfg.dim)
-        out = module(x, num_tokens)  # never touches the MXFP8 kernels
-        self.assertEqual(tuple(out.shape), (2, cfg.dim))
+        self.assertEqual(args[4], True)
+        validate.assert_called_once_with(args[0], args[1], args[2], args[3])
         self.assertEqual(out.dtype, x.dtype)
 
     def test_grouped_checkpoint_keys_and_param_shapes_unchanged(self):

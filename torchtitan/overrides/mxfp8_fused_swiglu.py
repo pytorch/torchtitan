@@ -98,7 +98,6 @@ __all__ = [
     "MXFP8FusedSwiGLU",
     "mxfp8_fused_grouped_experts",
     "mxfp8_fused_swiglu",
-    "mxfp8_swiglu_grouped_mlp_w13",
     "mxfp8_swiglu_mlp_w13",
 ]
 
@@ -512,36 +511,6 @@ def _validate_grouped_inputs(x, w13, w2_t, offs):
             torch._check(cond)
 
 
-def mxfp8_swiglu_grouped_mlp_w13(x, w13, down_weight_t, offs, *, fuse_activation=True):
-    """Grouped-expert MXFP8 SwiGLU MLP with a fused (E, F, 2, D) w13 weight.
-
-    Args:
-        x: BF16 token rows of shape (M, D) in expert-major order, with every
-            expert's group padded to a multiple of 128 rows (padded rows must
-            be zero) so 32x1 scale blocks never cross group boundaries.
-        w13: BF16 fused gate/up weight of shape (E, F, 2, D); w13[:, :, 0] is
-            the gate and w13[:, :, 1] the up projection.
-        down_weight_t: BF16 down-projection weight of shape (E, F, D_out) in
-            per-expert column-major layout (a transposed view of (E, D_out, F)).
-        offs: int32 group end offsets of shape (E,), each a multiple of 128.
-        fuse_activation: quantize the SwiGLU boundary with the unified
-            SwiGLU+MXFP8 kernel instead of standalone BF16 + cast kernels.
-
-    Returns:
-        BF16 tensor of shape (M, D_out).
-
-    Raises:
-        NotImplementedError: the MXFP8 CuTeDSL kernels are unavailable.
-        ValueError: DTensor operands, non-BF16 dtypes, or shapes the kernels
-            cannot execute (128-multiple dims and token groups). Symbolic
-            (routing-dependent) token counts become deferred runtime asserts
-            under compile. There is no silent fallback; change the config
-            instead.
-    """
-    _validate_grouped_inputs(x, w13, down_weight_t, offs)
-    return _MXFP8SwiGLUGroupedMLP.apply(x, w13, down_weight_t, offs, fuse_activation)
-
-
 class MXFP8FusedSwiGLU(FusedSwiGLU):
     """:class:`FusedSwiGLU` whose forward runs the composite MXFP8 SwiGLU MLP.
 
@@ -598,26 +567,6 @@ class MXFP8FusedGroupedExperts(FusedGroupedExperts):
         super().__init__(config)
         self.fuse_activation = config.fuse_activation
 
-    def _run_grouped_mlp(
-        self,
-        x: torch.Tensor,
-        w13: torch.Tensor,
-        w2_t: torch.Tensor,
-        offsets: torch.Tensor,
-    ) -> torch.Tensor:
-        """Numerical/autograd backend seam.
-
-        Future implementations may also require backend-specific parameter
-        layout, checkpoint hooks, dispatcher padding, and factory validation.
-        """
-        return mxfp8_swiglu_grouped_mlp_w13(
-            x,
-            w13,
-            w2_t,
-            offsets,
-            fuse_activation=self.fuse_activation,
-        )
-
     def forward(
         self,
         x_RD: torch.Tensor,
@@ -632,11 +581,16 @@ class MXFP8FusedGroupedExperts(FusedGroupedExperts):
             w2_EDF = self.w2_EDF
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        return self._run_grouped_mlp(
-            x_RD.bfloat16(),
-            w13.bfloat16(),
-            w2_EDF.bfloat16().transpose(-2, -1),
+        x = x_RD.bfloat16()
+        w13 = w13.bfloat16()
+        w2_t = w2_EDF.bfloat16().transpose(-2, -1)
+        _validate_grouped_inputs(x, w13, w2_t, offsets_E)
+        return _MXFP8SwiGLUGroupedMLP.apply(
+            x,
+            w13,
+            w2_t,
             offsets_E,
+            self.fuse_activation,
         ).type_as(x_RD)
 
 
