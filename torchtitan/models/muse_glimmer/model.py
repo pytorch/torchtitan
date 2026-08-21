@@ -32,11 +32,11 @@ from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import multimodal_context
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
-from .sharding import muse_glimmer_input_sharding
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
 
@@ -381,7 +381,7 @@ class MuseGlimmerModel(Decoder):
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
                 batch["attention_masks"] = self.get_attention_masks(positions=positions)
 
-        input_sharding = {**decoder_input_sharding(), **muse_glimmer_input_sharding()}
+        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         if parallel_dims.cp_enabled:
             batch = prepare_context_parallel_input(
                 batch,

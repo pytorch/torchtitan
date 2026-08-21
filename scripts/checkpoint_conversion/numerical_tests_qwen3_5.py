@@ -308,7 +308,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             tokens.to(device),
             pixel_values=pixel_values.half().to(device),
             grid_thw=grid_thw.to(device),
-            mrope_positions=mrope_positions.to(device),
+            positions=mrope_positions.to(device),
             special_tokens=special_tokens,
         )
         outputs.append(logits[:, -1:, :].cpu())

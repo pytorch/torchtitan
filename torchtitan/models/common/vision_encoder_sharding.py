@@ -22,6 +22,23 @@ DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
 
+def multimodal_input_sharding() -> dict[str, SpmdLayout]:
+    """SPMD layouts for VLM vision inputs (folded into a model's input_sharding).
+
+    The vision tensors are DP-local (``V@DP``) -- each DP rank owns its own
+    images -- and TP-invariant (``I@TP``): the model consumes them inside
+    ``multimodal_context`` (a DP-local mesh) and the vision encoder runs per-rank.
+    Shared by every VLM decoder (Qwen3.5, Kimi K2.5, Muse Glimmer).
+    """
+    layout = SpmdLayout({DP: spmd.V, TP: spmd.I})
+    return {
+        "pixel_values": layout,
+        "pixel_values_videos": layout,
+        "grid_thw": layout,
+        "grid_thw_videos": layout,
+    }
+
+
 def invariant_norm_config() -> ShardingConfig:
     """Norm whose state and activations are invariant across TP ranks."""
     return ShardingConfig(

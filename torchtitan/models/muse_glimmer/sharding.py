@@ -36,23 +36,6 @@ DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
 
-def muse_glimmer_input_sharding() -> dict[str, SpmdLayout]:
-    """SPMD layouts for Muse Glimmer multimodal inputs (folded into input_sharding).
-
-    The vision tensors are DP-local (``V@DP``) -- each DP rank owns its own
-    images -- and TP-invariant (``I@TP``); ``MuseGlimmerModel.forward`` consumes
-    them inside ``multimodal_context`` (a DP-local mesh) and the vision encoder
-    runs per-rank.
-    """
-    multimodal_layout = SpmdLayout({DP: spmd.V, TP: spmd.I})
-    return {
-        "pixel_values": multimodal_layout,
-        "grid_thw": multimodal_layout,
-        "pixel_values_videos": multimodal_layout,
-        "grid_thw_videos": multimodal_layout,
-    }
-
-
 def set_muse_glimmer_sharding_config(
     config: "MuseGlimmerModel.Config",
     *,

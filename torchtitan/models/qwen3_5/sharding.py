@@ -58,24 +58,6 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def qwen35_input_sharding() -> dict[str, SpmdLayout]:
-    """SPMD layouts for Qwen3.5 structured inputs (folded into input_sharding).
-
-    The GatedDeltaNet ``cu_seq_q`` offsets live nested inside ``attention_masks``
-    and cannot be typed by name here; they are annotated at construction
-    (see ``annotate_deltanet_cu_seqlens``).
-    """
-    token_layout = SpmdLayout({DP: spmd.S(0), TP: spmd.R})
-    multimodal_layout = SpmdLayout({DP: spmd.V, TP: spmd.I})
-    return {
-        "mrope_positions": token_layout,
-        "pixel_values": multimodal_layout,
-        "pixel_values_videos": multimodal_layout,
-        "grid_thw": multimodal_layout,
-        "grid_thw_videos": multimodal_layout,
-    }
-
-
 def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> None:
     """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
 

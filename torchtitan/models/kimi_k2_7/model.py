@@ -29,9 +29,10 @@ from torchtitan.models.common.multimodal import (
     multimodal_context,
     scatter_vision_embeds,
 )
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-from .sharding import multimodal_input_sharding, set_kimi_k2_5_sharding_config
+from .sharding import set_kimi_k2_5_sharding_config
 from .vision_encoder import KimiK25VisionEncoder
 
 

@@ -47,17 +47,6 @@ if TYPE_CHECKING:
 _REPLICATE_ACT = dense_activation_placement(tp=spmd.R)
 
 
-def multimodal_input_sharding() -> dict[str, SpmdLayout]:
-    """SPMD layouts for Kimi K2.5 multimodal inputs."""
-    multimodal_layout = SpmdLayout({DP: spmd.V, TP: spmd.I})
-    return {
-        "pixel_values": multimodal_layout,
-        "grid_thw": multimodal_layout,
-        "pixel_values_videos": multimodal_layout,
-        "grid_thw_videos": multimodal_layout,
-    }
-
-
 def set_kimi_k2_5_sharding_config(
     config: "KimiK25Model.Config",
     *,
