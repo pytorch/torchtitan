@@ -6,7 +6,7 @@
 
 import unittest
 from dataclasses import dataclass
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import spmd_types as spmd
 import torch
@@ -353,6 +353,33 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
         nn.init.zeros_(m.linear.weight)
         m.init_states()
         self.assertTrue(torch.all(m.linear.weight == 1))
+
+
+class TestModuleSpmdStateDistribution(unittest.TestCase):
+    def test_preserves_parameter_requires_grad(self):
+        module = Module()
+        module.weight = nn.Parameter(torch.empty(4), requires_grad=False)
+        parallel_dims = MagicMock()
+        parallel_dims.get_optional_mesh.return_value = MagicMock(mesh_dim_names=("tp",))
+        layout = SpmdLayout({MeshAxisName.TP: spmd.S(0)})
+
+        with (
+            patch(
+                "torchtitan.protocols.module.spmd_distribute_tensor",
+                return_value=torch.empty(2),
+            ),
+            patch("torchtitan.protocols.module.set_current_spmd_mesh"),
+            patch("torchtitan.protocols.module.spmd.assert_type"),
+        ):
+            module._spmd_distribute_state(
+                parallel_dims,
+                "weight",
+                module.weight,
+                layout,
+                is_param=True,
+            )
+
+        self.assertFalse(module.weight.requires_grad)
 
 
 class TestModuleRedistributionDTensor(DTensorTestBase):
