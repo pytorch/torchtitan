@@ -120,7 +120,7 @@ def deepseek_v3_debugmodel_mxfp8_fused_swiglu() -> Trainer.Config:
     # composite quantizes every GEMM itself.
     config.compile = CompileConfig(enable=True, components=["model"])
     config.override.imports.append(
-        "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_grouped_experts"
+        "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_grouped_experts"
     )
     config.parallelism = ParallelismConfig(
         expert_parallel_degree=2,
