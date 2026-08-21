@@ -263,6 +263,10 @@ def test_metric_timing_math_and_prefix_override():
     assert aggregate["validation_generator/queue_time_ms/mean"] == pytest.approx(5)
     assert aggregate["validation_generator/time_to_first_token_ms/mean"] == 12
     assert aggregate["validation_generator/prefill_time_ms/mean"] == pytest.approx(12)
+    assert aggregate["validation_generator/e2e_latency_ms/mean"] == pytest.approx(47)
+    assert aggregate[
+        "validation_generator/output_tokens_per_second/mean"
+    ] == pytest.approx(4 / 0.047)
     assert aggregate["validation_generator/decode_time_ms/mean"] == pytest.approx(30)
     assert aggregate[
         "validation_generator/inter_token_latency_ms/mean"

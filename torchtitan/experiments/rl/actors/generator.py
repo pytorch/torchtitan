@@ -143,15 +143,21 @@ def _prepare_generation_request_metrics(
             metric_values[f"{prefix}/prefill_time_ms"] = (
                 inputs.first_token_ts - inputs.scheduled_ts
             ) * 1000
+            e2e_latency_s = inputs.last_token_ts - inputs.queued_ts
+            metric_values[f"{prefix}/e2e_latency_ms"] = e2e_latency_s * 1000
+            if e2e_latency_s > 0:
+                metric_values[f"{prefix}/output_tokens_per_second"] = (
+                    inputs.num_generation_tokens / e2e_latency_s
+                )
 
         if inputs.num_generation_tokens > 1:
             first_to_last_token_ms = (
                 inputs.last_token_ts - inputs.first_token_ts
             ) * 1000
             metric_values[f"{prefix}/decode_time_ms"] = first_to_last_token_ms
-            metric_values[
-                f"{prefix}/inter_token_latency_ms"
-            ] = first_to_last_token_ms / (inputs.num_generation_tokens - 1)
+            metric_values[f"{prefix}/inter_token_latency_ms"] = (
+                first_to_last_token_ms / (inputs.num_generation_tokens - 1)
+            )
 
     # Emit each value with both Mean and Max aggregators.
     return [
@@ -1164,11 +1170,13 @@ class VLLMGenerator(Actor, Configurable):
         # the predicate. In-flight requests keep the predicate true, so they need no notify.
         async with self._engine_loop_condition:
             await self._engine_loop_condition.wait_for(
-                lambda: self._close_request is not None
-                or self._model_state_dict_pull_request is not None
-                or self._queued_generation_requests
-                # In-flight requests (on any DP rank) keep rank 0 issuing STEP.
-                or self._request_dispatcher.rank0_has_pending_futures()
+                lambda: (
+                    self._close_request is not None
+                    or self._model_state_dict_pull_request is not None
+                    or self._queued_generation_requests
+                    # In-flight requests (on any DP rank) keep rank 0 issuing STEP.
+                    or self._request_dispatcher.rank0_has_pending_futures()
+                )
             )
 
             if self._close_request is not None:
@@ -1242,9 +1250,9 @@ class VLLMGenerator(Actor, Configurable):
         self._rank0_check_engine_loop_running("pull_model_state_dict")
 
         # A placeholder future for the engine loop to resolve once the pull has been applied.
-        pull_model_state_dict_future: asyncio.Future[
-            int
-        ] = asyncio.get_running_loop().create_future()
+        pull_model_state_dict_future: asyncio.Future[int] = (
+            asyncio.get_running_loop().create_future()
+        )
 
         # `_engine_loop_condition` wakes the engine loop, if asleep, when a pull is queued.
         async with self._engine_loop_condition:

@@ -80,7 +80,11 @@ def combine_microbatch_metrics(
 
 
 def compute_perf_ratio_metrics(
-    *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
+    *,
+    num_global_valid_tokens: int,
+    time_metrics: list[m.Metric],
+    trainer_gpu_count: int = 1,
+    total_gpu_count: int = 1,
 ) -> list[m.Metric]:
     """Trainer-side timing ratios from the flushed step timers. A ratio is emitted only if every span
     it needs was recorded this step (no fallback zeros)."""
@@ -113,6 +117,23 @@ def compute_perf_ratio_metrics(
     def _add_metric(key: str, value: float) -> None:
         out.append(m.Metric(key, m.NoReduce(value)))
 
+    # Stable, comparison-facing names. Keep the existing trainer throughput
+    # metrics below for backwards compatibility with current dashboards.
+    _add_metric("perf/policy_step_time_s", step_s)
+    _add_metric("perf/valid_tokens", float(num_global_valid_tokens))
+    _add_metric("perf/trainer_gpu_count", float(trainer_gpu_count))
+    _add_metric("perf/total_gpu_count", float(total_gpu_count))
+    if trainer_gpu_count > 0:
+        _add_metric(
+            "perf/valid_tokens_per_trainer_gpu_second",
+            num_global_valid_tokens / (trainer_gpu_count * step_s),
+        )
+    if total_gpu_count > 0:
+        _add_metric(
+            "perf/valid_tokens_per_gpu_second",
+            num_global_valid_tokens / (total_gpu_count * step_s),
+        )
+
     # Throughput over the whole step (includes the idle wait for the next batch).
     _add_metric(
         "perf/trainer/tokens_per_second_full_step", num_global_valid_tokens / step_s
@@ -135,6 +156,7 @@ def compute_perf_ratio_metrics(
     # Compute = forward/backward + optim: its share of the step, and its idle-free throughput.
     if fwd_bwd_s is not None and optim_s is not None:
         compute_s = fwd_bwd_s + optim_s
+        _add_metric("perf/trainer_compute_time_s", compute_s)
         _add_metric("perf/trainer/step_time_ratio/fwd_bwd", compute_s / step_s)
         if compute_s:
             _add_metric(

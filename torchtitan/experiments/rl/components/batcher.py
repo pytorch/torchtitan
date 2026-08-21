@@ -171,6 +171,10 @@ class Batcher(Configurable):
             num_global_valid_tokens=num_global_valid_tokens,
             metrics=[
                 *metrics,
+                m.Metric(
+                    "train_batch/valid_tokens",
+                    m.NoReduce(float(num_global_valid_tokens)),
+                ),
                 # Keep this response-level metric exact without adding a second
                 # token-count field to TrainingBatch.
                 m.Metric(

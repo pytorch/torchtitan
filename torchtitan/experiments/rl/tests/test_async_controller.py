@@ -10,6 +10,7 @@ the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID
 import asyncio
 
 import pytest
+import torch
 
 from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
@@ -21,6 +22,7 @@ from torchtitan.experiments.rl.controller_metrics import (
     compute_policy_age_metrics,
     MetricsTimer,
 )
+from torchtitan.experiments.rl.losses.dapo import compute_logprob_comparison_metrics
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.types import (
@@ -117,9 +119,17 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     ratios = {
         metric.key: metric.value.value
         for metric in compute_perf_ratio_metrics(
-            num_global_valid_tokens=100, time_metrics=time_metrics
+            num_global_valid_tokens=100,
+            time_metrics=time_metrics,
+            trainer_gpu_count=2,
+            total_gpu_count=4,
         )
     }
+    assert ratios["perf/policy_step_time_s"] == 2.0
+    assert ratios["perf/valid_tokens"] == 100.0
+    assert ratios["perf/valid_tokens_per_gpu_second"] == 12.5
+    assert ratios["perf/valid_tokens_per_trainer_gpu_second"] == 25.0
+    assert ratios["perf/trainer_compute_time_s"] == 1.0
     assert ratios["perf/trainer/tokens_per_second_full_step"] == 50.0
     assert ratios["perf/trainer/step_time_ratio/fwd_bwd"] == 0.5
     assert ratios["perf/trainer/tokens_per_second_fwd_bwd"] == 100.0
@@ -134,12 +144,49 @@ def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
             num_global_valid_tokens=100, time_metrics=time_metrics
         )
     }
-    assert keys == {"perf/trainer/tokens_per_second_full_step"}
+    assert keys == {
+        "perf/policy_step_time_s",
+        "perf/valid_tokens",
+        "perf/trainer_gpu_count",
+        "perf/total_gpu_count",
+        "perf/valid_tokens_per_trainer_gpu_second",
+        "perf/valid_tokens_per_gpu_second",
+        "perf/trainer/tokens_per_second_full_step",
+    }
 
 
 def test_compute_perf_ratio_metrics_returns_empty_without_total() -> None:
     assert (
         compute_perf_ratio_metrics(num_global_valid_tokens=100, time_metrics=[]) == []
+    )
+
+
+def test_compute_logprob_comparison_metrics_uses_selected_tokens() -> None:
+    metrics = compute_logprob_comparison_metrics(
+        policy_logprobs=torch.tensor([[-0.2, -1.1, -9.0]]),
+        reference_logprobs=torch.tensor([[-0.3, -1.0, -2.0]]),
+        loss_mask=torch.tensor([[True, True, False]]),
+        global_valid_tokens=2,
+        prefix="comparison/correctness/post_update",
+    )
+
+    assert metrics[
+        "comparison/correctness/post_update/sampled_kl_reference_to_policy/mean"
+    ].item() == pytest.approx(0.0, abs=1e-6)
+    assert metrics[
+        "comparison/correctness/post_update/selected_logprob_diff/mean"
+    ].item() == pytest.approx(0.0, abs=1e-6)
+    assert metrics[
+        "comparison/correctness/post_update/selected_logprob_abs_diff/mean"
+    ].item() == pytest.approx(0.1, abs=1e-6)
+    assert metrics[
+        "comparison/correctness/post_update/selected_logprob_abs_diff/max"
+    ].item() == pytest.approx(0.1, abs=1e-6)
+    assert (
+        metrics[
+            "comparison/correctness/post_update/policy_logprob_nonfinite_frac/mean"
+        ].item()
+        == 0.0
     )
 
 

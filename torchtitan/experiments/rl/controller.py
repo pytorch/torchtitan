@@ -205,8 +205,7 @@ class AsyncLoopConfig(Configurable.Config):
             )
         if self.window_fraction is not None and not (0 < self.window_fraction <= 1):
             raise ValueError(
-                "window_fraction must be None or in (0, 1], got "
-                f"{self.window_fraction}"
+                f"window_fraction must be None or in (0, 1], got {self.window_fraction}"
             )
         if (
             self.window_fraction is not None
@@ -424,6 +423,20 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        trainer_parallelism = config.trainer.parallelism
+        self.trainer_gpu_count = (
+            trainer_parallelism.data_parallel_replicate_degree
+            * max(trainer_parallelism.data_parallel_shard_degree, 1)
+            * trainer_parallelism.tensor_parallel_degree
+            * trainer_parallelism.pipeline_parallel_degree
+            * trainer_parallelism.context_parallel_degree
+        )
+        generator_parallelism = config.generator.parallelism
+        self.generator_gpu_count = config.num_generators * (
+            generator_parallelism.data_parallel_degree
+            * generator_parallelism.tensor_parallel_degree
+        )
+        self.total_gpu_count = self.trainer_gpu_count + self.generator_gpu_count
         self.trainer: PolicyTrainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -1087,12 +1100,14 @@ class Controller(Configurable):
                 await self.generator_router.sync_log_step.call_one(step)
             step_timer = MetricsTimer()
 
-            with sl.log_trace_span("train_step"), step_timer.record(
-                "timing/step/total"
+            with (
+                sl.log_trace_span("train_step"),
+                step_timer.record("timing/step/total"),
             ):
                 # Waits for a TrainingBatch to be ready (or None on shutdown).
-                with sl.log_trace_span("wait_for_training_batch"), step_timer.record(
-                    "timing/step/wait_for_training_batch"
+                with (
+                    sl.log_trace_span("wait_for_training_batch"),
+                    step_timer.record("timing/step/wait_for_training_batch"),
                 ):
                     packed = await training_batch_queue.get()
 
@@ -1114,8 +1129,9 @@ class Controller(Configurable):
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
                 #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optim.
-                with sl.log_trace_span("forward_backward"), step_timer.record(
-                    "timing/step/forward_backward"
+                with (
+                    sl.log_trace_span("forward_backward"),
+                    step_timer.record("timing/step/forward_backward"),
                 ):
                     # fwd_bwd on all microbatches
                     microbatch_metrics = [
@@ -1134,26 +1150,47 @@ class Controller(Configurable):
                         break
 
                 # Await trainer weight push to finish before optim step mutates the weights.
-                with sl.log_trace_span(
-                    "blocking_trainer_push_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_trainer_push_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
                 ):
                     push_metrics = await self._weight_sync.wait_prev_push()
 
-                with sl.log_trace_span("optim_step"), step_timer.record(
-                    "timing/step/optim"
+                with (
+                    sl.log_trace_span("optim_step"),
+                    step_timer.record("timing/step/optim"),
                 ):
                     optim_result = self._get_rank_0_value(
                         await self.trainer.optim_step.call()
                     )
                 self._trainer_policy_version = optim_result.policy_version
 
+                post_update_metrics: dict[str, float] = {}
+                if self.config.trainer.enable_post_update_metrics:
+                    with (
+                        sl.log_trace_span("post_update_metrics"),
+                        step_timer.record("timing/step/post_update_metrics"),
+                    ):
+                        post_update_microbatch_metrics = [
+                            self._get_rank_0_value(
+                                await self.trainer.post_update_metrics.call(
+                                    microbatch, packed.num_global_valid_tokens
+                                )
+                            )
+                            for microbatch in packed.microbatches
+                        ]
+                        post_update_metrics = combine_microbatch_metrics(
+                            post_update_microbatch_metrics
+                        )
+
                 # Await generator weight pull to finish before the trainer's next push.
-                with sl.log_trace_span(
-                    "blocking_generator_pull_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_generator_pull_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_generator_pull_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_generator_pull_model_state_dict"
+                    ),
                 ):
                     pull_metrics = await self._weight_sync.wait_prev_pull()
 
@@ -1179,6 +1216,10 @@ class Controller(Configurable):
                             m.Metric(key, m.NoReduce(value))
                             for key, value in optim_result.metrics.items()
                         ],
+                        *[
+                            m.Metric(key, m.NoReduce(value))
+                            for key, value in post_update_metrics.items()
+                        ],
                         *self._group_buffer.metrics(),
                         *time_metrics,
                         *policy_age_panel,
@@ -1188,6 +1229,8 @@ class Controller(Configurable):
                         *compute_perf_ratio_metrics(
                             num_global_valid_tokens=packed.num_global_valid_tokens,
                             time_metrics=time_metrics,
+                            trainer_gpu_count=self.trainer_gpu_count,
+                            total_gpu_count=self.total_gpu_count,
                         ),
                     ],
                 )

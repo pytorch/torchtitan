@@ -20,6 +20,41 @@ from torchtitan.config import CompileConfig
 _MAX_LOG_RATIO = 10.0
 
 
+def compute_logprob_comparison_metrics(
+    *,
+    policy_logprobs: torch.Tensor,
+    reference_logprobs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    global_valid_tokens: float | None,
+    prefix: str,
+) -> dict[str, torch.Tensor]:
+    """Metrics on selected tokens for comparing a policy with a reference.
+
+    The sampled KL is the Monte-Carlo estimate of KL(reference || policy)
+    using tokens sampled by the reference policy. It is intentionally named
+    ``sampled_kl`` because it is not the full-vocabulary categorical KL used by
+    the cross-framework fixed-batch parity harness.
+    """
+    effective_mask = loss_mask & torch.isfinite(reference_logprobs)
+    logprob_diff = policy_logprobs - reference_logprobs
+    masked_diff = torch.where(
+        effective_mask, logprob_diff, torch.zeros_like(logprob_diff)
+    )
+    denominator = max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
+    return {
+        f"{prefix}/sampled_kl_reference_to_policy/mean": -masked_diff.float().sum()
+        / denominator,
+        f"{prefix}/selected_logprob_diff/mean": masked_diff.float().sum() / denominator,
+        f"{prefix}/selected_logprob_abs_diff/mean": masked_diff.float().abs().sum()
+        / denominator,
+        f"{prefix}/selected_logprob_abs_diff/max": masked_diff.float().abs().max(),
+        f"{prefix}/policy_logprob_nonfinite_frac/mean": (
+            (~torch.isfinite(policy_logprobs) & effective_mask).float().sum()
+            / denominator
+        ),
+    }
+
+
 class DAPOLoss(BaseLoss):
     """Per-token clipped surrogate loss with DAPO-style "clip-higher".
 
@@ -132,5 +167,14 @@ class DAPOLoss(BaseLoss):
                 "trainer/entropy/mean": (token_entropy * effective_loss_mask).sum()
                 / loss_denominator,
             }
+            metrics.update(
+                compute_logprob_comparison_metrics(
+                    policy_logprobs=trainer_logprobs,
+                    reference_logprobs=generator_logprobs,
+                    loss_mask=loss_mask,
+                    global_valid_tokens=global_valid_tokens,
+                    prefix="comparison/correctness/pre_update",
+                )
+            )
 
         return loss, metrics

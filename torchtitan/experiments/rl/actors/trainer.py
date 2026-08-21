@@ -14,7 +14,7 @@ import torchstore as ts
 from monarch.actor import Actor, concurrent_endpoint, current_rank
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
+from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, compute_logprobs
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
     apply_overrides,
@@ -34,6 +34,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.losses.dapo import compute_logprob_comparison_metrics
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
@@ -86,6 +87,13 @@ class PolicyTrainer(Actor, Configurable):
         Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
+        enable_post_update_metrics: bool = False
+        """Run an extra fixed-batch forward after each optimizer step.
+
+        This emits selected-token post-update policy-vs-behavior metrics for
+        correctness comparisons. It is disabled by default because the extra
+        forward pass changes performance measurements.
+        """
 
     def __init__(
         self,
@@ -370,8 +378,7 @@ class PolicyTrainer(Actor, Configurable):
             dict[str, float]: Globally-reduced metrics.
         """
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer forward_backward "
-            f"step {self.policy_version}"
+            f"{os.getpid()=} PolicyTrainer forward_backward step {self.policy_version}"
         )
 
         # RL does not support pipeline parallelism yet, so the trainer
@@ -472,6 +479,52 @@ class PolicyTrainer(Actor, Configurable):
                 "trainer/lr": current_lr,
                 "trainer/policy_version": float(self.policy_version),
             },
+        )
+
+    @concurrent_endpoint
+    @sl.log_trace_span("post_update_metrics")
+    async def post_update_metrics(
+        self,
+        training_data: list[TrainingMicrobatch],
+        num_global_valid_tokens: int,
+    ) -> dict[str, float]:
+        """Evaluate the updated policy on the same fixed batch used for the step."""
+        if len(self.model_parts) != 1:
+            raise ValueError(
+                "PolicyTrainer expects exactly one model part for post-update metrics"
+            )
+
+        model = self.model_parts[0]
+        local_batch = training_data[self.dp_rank]
+        token_ids = local_batch.token_ids.to(self.device)
+        labels = local_batch.labels.to(self.device)
+        positions = local_batch.positions.to(self.device)
+        loss_mask = local_batch.loss_mask.to(self.device)
+        generator_logprobs = local_batch.generator_logprobs.to(self.device)
+        attention_masks = model.get_attention_masks(positions)
+
+        with torch.no_grad(), self.train_context():
+            logits = model(
+                token_ids, attention_masks=attention_masks, positions=positions
+            )
+            policy_logprobs = compute_logprobs(logits, labels)
+
+        metrics = compute_logprob_comparison_metrics(
+            policy_logprobs=policy_logprobs,
+            reference_logprobs=generator_logprobs,
+            loss_mask=loss_mask,
+            global_valid_tokens=num_global_valid_tokens,
+            prefix="comparison/correctness/post_update",
+        )
+        sum_reduced_metrics = {
+            key: value for key, value in metrics.items() if not key.endswith("/max")
+        }
+        max_reduced_metrics = {
+            key: value for key, value in metrics.items() if key.endswith("/max")
+        }
+        return self.reduce_forward_backward_metrics(
+            sum_reduced_metrics=sum_reduced_metrics,
+            max_reduced_metrics=max_reduced_metrics,
         )
 
     @concurrent_endpoint

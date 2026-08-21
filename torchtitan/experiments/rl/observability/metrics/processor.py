@@ -56,6 +56,7 @@ class MetricsProcessor(Configurable):
                 # --- the perf/ panel: the 12 metrics that diagnose any bottleneck at a glance ---
                 # 7 trainer/buffer keys (everything under perf/); 5 generator keys below.
                 "perf/",
+                "comparison/",
                 "generator/inflight_requests_at_completion/max",
                 "generator/inter_token_latency_ms/mean",
                 "generator/queue_time_ms/mean",
