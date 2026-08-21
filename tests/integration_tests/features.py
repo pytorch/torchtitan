@@ -66,6 +66,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             test_descr="Checkpoint Integration Test - Save Load Full Checkpoint",
             test_name="full_checkpoint",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[
@@ -77,17 +78,20 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 "HF definition and format"
             ),
             test_name="model_only_hf_checkpoint",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_last_save_model_only_bf16],
             test_descr="Checkpoint Integration Test - Save Model Only bf16",
             test_name="last_save_model_only_bf16",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp2_1f1b],
             test_descr="PP 1D test 1F1B",
             test_name="pp_1f1b",
             ngpu=2,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[
@@ -96,11 +100,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             test_descr="PP+DP 1F1B 2D test",
             test_name="pp_dp_1f1b",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
             test_descr="PP+TP GPipe 2D test",
             test_name="pp_tp_gpipe",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[
@@ -110,12 +116,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="PP+DP+TP 3D test with save/load resume ckpt",
             test_name="pp_dp_tp",
             ngpu=8,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2_compile],
             test_descr="PP+DP+TP 3D test with torch.compile",
             test_name="3d_compile",
             ngpu=8,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[
@@ -125,6 +133,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="PP looped 1F1B test",
             test_name="pp_looped_1f1b",
             ngpu=4,
+            use_real_pg=True,
         ),
         # TODO: Disabled with the FlexAttention default (SDPA is no longer a
         # language-model backend). Zero-bubble / multi schedules split backward
@@ -144,6 +153,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="pp_looped_zero_bubble",
             ngpu=4,
             disabled=True,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp2_zbv],
@@ -151,6 +161,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="pp_zbv",
             ngpu=2,
             disabled=True,
+            use_real_pg=True,
         ),
         # TODO: Disabled for the same reason as the zero-bubble PP tests above:
         # the custom CSV schedule splits backward (separate input-grad step),
@@ -162,6 +173,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="pp_custom_csv",
             ngpu=2,
             disabled=True,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_optimizer_bf16_states],
@@ -230,6 +242,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             test_descr="Optional checkpoint",
             test_name="optional_checkpoint",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_gradient_accumulation],
@@ -242,6 +255,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="Validation test with tp, cp, pp",
             test_name="validation_tp_cp_pp",
             ngpu=8,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fused_swiglu_tp2],
@@ -257,6 +271,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ),
             test_name="override_fused_grouped_experts",
             ngpu=4,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_varlen_attn_fsdp4_sac],
@@ -264,12 +279,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="fsdp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_float8_emulate_lora_tp2_pp2],
             test_descr="Float8 emulate + LoRA training test",
             test_name="float8_emulate_lora",
             ngpu=8,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_torchcomms_cp2_pp2_compile],
@@ -281,6 +298,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             # with use_local_synchronization=True; split_group requires all
             # ranks in the parent group to participate.
             disabled=True,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_torchcomms_tp2_pp2_compile],
@@ -291,12 +309,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             # torchcomms-managed TP PG not registered in c10d;
             # resolve fails under compile
             disabled=True,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_sft],
-            test_descr="SFT ChatDataset integration test",
+            test_descr="SFT ChatDataset integration and numerics test",
             test_name="sft",
             ngpu=2,
+            golden_numerics_path=("tests/assets/losses/{execution_mode}/sft_a10g.txt"),
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_seed_checkpoint],
@@ -304,5 +324,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="seed_checkpoint",
             ngpu=1,
             timeout=30,
+            use_real_pg=True,
         ),
     ]
