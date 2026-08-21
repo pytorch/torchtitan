@@ -426,11 +426,11 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
 
     def forward(
         self,
-        query_BLC: torch.Tensor,
-        key_BLC: torch.Tensor,
-        value_BLC: torch.Tensor,
-        a_BLN: torch.Tensor,
-        b_BLN: torch.Tensor,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        a_TN: torch.Tensor,
+        b_TN: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
         conv_k_weight_C1W: torch.Tensor,
         conv_v_weight_C1W: torch.Tensor,
@@ -447,18 +447,14 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
 
         assert key_head_dim == self.head_k_dim
         assert value_head_dim == self.head_v_dim
-        mixed_qkv_BLC = torch.cat([query_BLC, key_BLC, value_BLC], dim=-1)
+        mixed_qkv_TC = torch.cat([query_TC, key_TC, value_TC], dim=-1)
         conv_weight_CW = torch.cat(
             [conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W],
             dim=0,
         ).squeeze(1)
         assert conv_weight_CW.shape[-1] == self.conv_kernel_size
 
-        batch_size, seq_len, num_channels = mixed_qkv_BLC.shape
-        num_tokens = batch_size * seq_len
-        mixed_qkv_TC = mixed_qkv_BLC.reshape(num_tokens, num_channels)
-        a_TN = a_BLN.reshape(num_tokens, a_BLN.shape[-1])
-        b_TN = b_BLN.reshape(num_tokens, b_BLN.shape[-1])
+        num_tokens = mixed_qkv_TC.shape[0]
         # Padded rows must remain defined across vLLM graph replays.
         output_TNV = mixed_qkv_TC.new_zeros(
             num_tokens, self.local_num_v_heads, self.head_v_dim
@@ -473,10 +469,4 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             dt_bias_N,
             output_TNV,
         )
-        output_BLNV = output_TNV.reshape(
-            batch_size,
-            seq_len,
-            self.local_num_v_heads,
-            self.head_v_dim,
-        )
-        return output_BLNV
+        return output_TNV

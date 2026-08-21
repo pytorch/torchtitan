@@ -129,8 +129,10 @@ def llama3_debugmodel_pp2_1f1b() -> Trainer.Config:
     """
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 1
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -139,8 +141,10 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -155,8 +159,10 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "GPipe"
     config.parallelism.tensor_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -166,8 +172,10 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
     _use_spmd_types(config, typechecking=False)
     config.checkpoint.enable = True
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -182,8 +190,10 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.compile.enable = True
     config.training.disable_cuda_graphs = True
     return config
@@ -193,6 +203,8 @@ def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
     """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.num_pp_microbatches = 8
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -213,7 +225,9 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
 def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.activation_checkpoint = FullAC.Config()
     config.training.disable_cuda_graphs = True
     return config
@@ -222,11 +236,13 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
 def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "PipelineScheduleMulti"
     config.parallelism.pipeline_parallel_schedule_csv = (
         "./tests/assets/custom_schedule.csv"
     )
     config.activation_checkpoint = FullAC.Config()
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -324,15 +340,11 @@ def llama3_debugmodel_optional_checkpoint_load_tp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
-    """Two gradient accumulation steps on 2 GPUs.
-
-    Local batch size 8 over 2 ranks gives a default global batch size of 16;
-    doubling it to 32 asks for two accumulation steps.
-    """
+    """Two gradient accumulation steps on 2 GPUs."""
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=True)
-    config.training.local_batch_size = 8
-    config.training.global_batch_size = 32
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 65536
     return config
 
 
@@ -343,6 +355,8 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -382,6 +396,8 @@ def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
     _use_spmd_types(config, typechecking=False)
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     return config
 
@@ -393,6 +409,8 @@ def llama3_debugmodel_torchcomms_cp2_pp2_compile() -> Trainer.Config:
     config.comm.mode = "torchcomms"
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.compile.enable = True
     config.training.disable_cuda_graphs = True
     return config
@@ -404,6 +422,8 @@ def llama3_debugmodel_torchcomms_tp2_pp2_compile() -> Trainer.Config:
     config.comm.mode = "torchcomms"
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.compile.enable = True
     config.training.disable_cuda_graphs = True
     return config

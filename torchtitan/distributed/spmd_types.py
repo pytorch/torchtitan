@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from threading import local
 from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.utils import get_spmd_backend
 
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
 __all__ = [
     "annotate_input_spmd_types",
     "current_spmd_mesh",
+    "dtensor_to_plain_tensor_state_dict",
+    "maybe_set_sparse_mesh",
+    "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -38,11 +42,53 @@ __all__ = [
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
-    "maybe_set_sparse_mesh",
 ]
 
 
 _MESH_TLS = local()
+
+
+def plain_tensor_to_dtensor_state_dict(
+    state_dict: dict[str, Any],
+    *,
+    state_dict_layouts: Mapping[str, "SpmdLayout"],
+    parallel_dims: "ParallelDims",
+) -> dict[str, Any]:
+    """Represent plain local state tensors as DTensors for state transfer."""
+    from torchtitan.distributed.parallel_dims import unfold_dp_axes
+    from torchtitan.protocols.sharding import resolve_placements
+
+    dtensor_state_dict = dict(state_dict)
+    with torch.no_grad():
+        for name, target in state_dict.items():
+            if not isinstance(target, torch.Tensor) or isinstance(target, DTensor):
+                continue
+
+            layout = state_dict_layouts.get(name)
+            if layout is None:
+                raise KeyError(f"{name} is missing SPMD layout metadata")
+
+            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(layout.axes()))
+            if mesh is None:
+                continue
+
+            dtensor_state_dict[name] = DTensor.from_local(
+                target,
+                mesh,
+                resolve_placements(layout, mesh),
+                run_check=False,
+            )
+    return dtensor_state_dict
+
+
+def dtensor_to_plain_tensor_state_dict(
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace DTensor state-dict entries with their plain local tensors."""
+    return {
+        name: value.to_local() if isinstance(value, DTensor) else value
+        for name, value in state_dict.items()
+    }
 
 
 def set_spmd_meshes(
@@ -141,29 +187,36 @@ def annotate_input_spmd_types(
     """Annotate decoder inputs/labels with SPMD types.
 
     Hardcodes the standard decoder convention: inputs and positions are
-    ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
+    ``S(0)@DP, S(0)@CP, R@TP``; labels are
+    ``S(0)@DP, S(0)@CP, I@TP``.
     """
     from torchtitan.distributed.parallel_dims import MeshAxisName
 
-    token_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.R,
-    }
-    label_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.I,
-    }
+    token_type = (
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.R,
+        },
+        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+    )
+    label_type = (
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.I,
+        },
+        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+    )
 
     mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):
-        spmd.assert_type(inputs, token_type)
-        spmd.assert_type(labels, label_type)
+        spmd.assert_type(inputs, *token_type)
+        spmd.assert_type(labels, *label_type)
         if "positions" in extra_kwargs and isinstance(
             extra_kwargs["positions"], torch.Tensor
         ):
-            spmd.assert_type(extra_kwargs["positions"], token_type)
+            spmd.assert_type(extra_kwargs["positions"], *token_type)
     return inputs, labels, extra_kwargs
 
 

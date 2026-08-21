@@ -19,12 +19,12 @@ from torchtitan.models.common.config_utils import (
 class _PassthroughRoutedExperts(nn.Module):
     def forward(
         self,
-        x_BLD,
-        topk_scores_BLK,
-        topk_expert_ids_BLK,
+        x_TD,
+        topk_scores_TK,
+        topk_expert_ids_TK,
         num_local_tokens_per_expert_E,
     ):
-        return x_BLD
+        return x_TD
 
 
 class _FixedRouter(nn.Module):
@@ -33,14 +33,14 @@ class _FixedRouter(nn.Module):
         self.num_experts = num_experts
         self.top_k = top_k
 
-    def forward(self, x_BLD, expert_bias_E):
-        B, L, _ = x_BLD.shape
-        topk_scores_BLK = x_BLD.new_ones(B, L, self.top_k)
-        topk_expert_ids_BLK = torch.zeros(
-            B, L, self.top_k, dtype=torch.int64, device=x_BLD.device
+    def forward(self, x_TD, expert_bias_E):
+        num_tokens = x_TD.shape[0]
+        topk_scores_TK = x_TD.new_ones(num_tokens, self.top_k)
+        topk_expert_ids_TK = torch.zeros(
+            num_tokens, self.top_k, dtype=torch.int64, device=x_TD.device
         )
-        scores_BLE = x_BLD.new_zeros(B, L, self.num_experts)
-        return topk_scores_BLK, topk_expert_ids_BLK, scores_BLE
+        scores_TE = x_TD.new_zeros(num_tokens, self.num_experts)
+        return topk_scores_TK, topk_expert_ids_TK, scores_TE
 
 
 class TestMoE(unittest.TestCase):
@@ -68,9 +68,9 @@ class TestMoE(unittest.TestCase):
         moe.router = _FixedRouter(num_experts, top_k)
         moe.routed_experts = _PassthroughRoutedExperts()
 
-        x_BLD = torch.randn(2, 3, dim)
+        x_TD = torch.randn(6, dim)
         moe.train()
-        moe(x_BLD)
+        moe(x_TD)
         torch.testing.assert_close(
             moe.tokens_per_expert_E,
             moe.tokens_per_expert_E.new_tensor([2 * 3 * top_k, 0]),
@@ -79,7 +79,7 @@ class TestMoE(unittest.TestCase):
 
         moe.eval()
         with torch.no_grad():
-            moe(x_BLD)
+            moe(x_TD)
 
         torch.testing.assert_close(
             moe.tokens_per_expert_E,

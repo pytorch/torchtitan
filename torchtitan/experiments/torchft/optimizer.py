@@ -34,11 +34,8 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         *,
         model_parts: list[nn.Module],
         ft_manager: "TorchFTManager",
-        model_is_partial: bool = False,
     ) -> None:
-        super().__init__(
-            config, model_parts=model_parts, model_is_partial=model_is_partial
-        )
+        super().__init__(config, model_parts=model_parts)
 
         # Force to initialize the optimizer state so that `optim.step()`
         # won't be called by state_dict() and load_state_dict().

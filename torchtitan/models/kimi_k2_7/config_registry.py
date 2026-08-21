@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -33,7 +32,6 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.pipeline_parallel import pipeline_stage_layer_ids
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -113,8 +111,8 @@ def kimi_k2_5_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * 512,
+            max_context_length=512,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -157,8 +155,8 @@ def moonlight_16b_a3b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -203,8 +201,8 @@ def kimi_vl_a3b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=1 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -247,8 +245,8 @@ def kimi_k2_5() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -284,78 +282,6 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
             0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
         },
     )
-
-
-# Routed experts redistribute over a different transport group than the rest of
-# a layer, so they always get their own bucket. Their FQN is the marker, matching
-# how _align_dist_muon_expert_compute_layouts identifies them.
-_ROUTED_EXPERT_MARKER = ".moe.routed_experts.inner_experts."
-
-
-def _bucket_layer_ids(
-    stage_layer_ids: Sequence[Sequence[int]],
-) -> tuple[tuple[int, ...], ...]:
-    """Group each stage's layers into DistMuon buckets of at most two layers.
-
-    Layer 0 carries a much larger dense MLP than a MoE layer, so it is never
-    paired. Grouping restarts at every stage so no bucket spans a boundary; see
-    ``_dist_muon_bucket_configs`` for why that matters.
-    """
-    buckets: list[tuple[int, ...]] = []
-    for layer_ids in stage_layer_ids:
-        remaining = list(layer_ids)
-        if remaining and remaining[0] == 0:
-            buckets.append((0,))
-            remaining = remaining[1:]
-        buckets.extend(
-            tuple(remaining[index : index + 2]) for index in range(0, len(remaining), 2)
-        )
-    return tuple(buckets)
-
-
-def _dist_muon_bucket_configs(
-    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
-    *,
-    parallelism: ParallelismConfig,
-    num_layers: int,
-) -> tuple[BucketConfig, ...]:
-    """Order DistMuon parameters into collective buckets, one group per bucket.
-
-    Layer 0 has a much larger dense MLP, so keep it separate while amortizing
-    collective launch overhead across pairs of MoE layers.
-
-    Pairs never span a pipeline stage. Each stage builds its own DistMuon over
-    its own layers, so a pair straddling a boundary is divided between two of
-    them and costs up to one extra collective launch. Whether that happens is
-    invisible from the config -- it appears and disappears with the stage layer
-    counts -- so the grouping follows the split rather than ignoring it.
-    """
-    fqns_by_layer: dict[int, list[str]] = {
-        layer_id: [] for layer_id in range(num_layers)
-    }
-    for fqn in compute_sharding_by_fqn:
-        fqns_by_layer[int(fqn.split(".", 2)[1])].append(fqn)
-    bucket_configs: list[BucketConfig] = []
-    for layer_ids in _bucket_layer_ids(
-        pipeline_stage_layer_ids(parallelism, num_layers)
-    ):
-        fqns = tuple(fqn for layer_id in layer_ids for fqn in fqns_by_layer[layer_id])
-        name = "layers." + "-".join(map(str, layer_ids))
-        routed_fqns = tuple(fqn for fqn in fqns if _ROUTED_EXPERT_MARKER in fqn)
-        bucket_configs.append(
-            BucketConfig(
-                name=name,
-                patterns=tuple(fqn for fqn in fqns if _ROUTED_EXPERT_MARKER not in fqn),
-            )
-        )
-        if routed_fqns:
-            bucket_configs.append(
-                BucketConfig(
-                    name=f"{name}.routed-experts",
-                    patterns=routed_fqns,
-                )
-            )
-    return tuple(bucket_configs)
 
 
 def _dist_muon_optimizer(
@@ -459,11 +385,43 @@ def _dist_muon_optimizer(
         for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
         for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
     }
-    bucket_configs = _dist_muon_bucket_configs(
-        compute_sharding_by_fqn,
-        parallelism=parallelism,
-        num_layers=num_layers,
+    layer_bucket_fqns = tuple(
+        tuple(layer_compute_sharding_by_fqn)
+        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
     )
+    # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
+    # collective launch overhead across pairs of MoE layers.
+    bucket_layer_ids = ((0,),) + tuple(
+        tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
+        for first_layer_id in range(1, num_layers, 2)
+    )
+    bucket_fqns = tuple(
+        tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
+        for layer_ids in bucket_layer_ids
+    )
+    bucket_configs_list = []
+    for layer_ids, fqns in zip(bucket_layer_ids, bucket_fqns, strict=True):
+        name = "layers." + "-".join(map(str, layer_ids))
+        routed_fqns = tuple(
+            fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is per_expert
+        )
+        non_routed_fqns = tuple(
+            fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is not per_expert
+        )
+        bucket_configs_list.append(
+            BucketConfig(
+                name=name,
+                patterns=non_routed_fqns,
+            )
+        )
+        if routed_fqns:
+            bucket_configs_list.append(
+                BucketConfig(
+                    name=f"{name}.routed-experts",
+                    patterns=routed_fqns,
+                )
+            )
+    bucket_configs = tuple(bucket_configs_list)
     # Muon is designed for matrix parameters; Moonlight uses AdamW for
     # non-matrix parameters such as RMSNorm, LM head, and embeddings. Expert
     # tensors below are batch-first stacks of matrices. See Sec. 2.2:
@@ -550,45 +508,6 @@ def _align_dist_muon_expert_compute_layouts(
     )
 
 
-def _align_dist_muon_bucket_layers(
-    optimizer_config: OptimizersContainer.Config,
-    *,
-    parallelism: ParallelismConfig,
-    num_layers: int,
-) -> OptimizersContainer.Config:
-    """Regroup DistMuon buckets against the final pipeline split.
-
-    The registry builds buckets from the recipe's declared parallelism, but the
-    CLI can still override ``pipeline_parallel_degree``, the schedule, or the
-    per-stage layer counts afterwards. All of those move the stage boundaries
-    that bucket grouping aligns to, so the buckets have to be rebuilt here.
-    """
-    # TODO: Remove this function once parallelism can no longer be overridden
-    # from the CLI; the registry buckets are then already final.
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
-        return optimizer_config
-    bucket_configs = _dist_muon_bucket_configs(
-        cast(dict[str, ComputeLayout], dist_muon_kwargs["compute_sharding_by_fqn"]),
-        parallelism=parallelism,
-        num_layers=num_layers,
-    )
-    if bucket_configs == tuple(dist_muon_kwargs["bucket_configs"]):
-        return optimizer_config
-
-    dist_muon_kwargs["bucket_configs"] = bucket_configs
-    return replace(
-        optimizer_config,
-        optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
-    )
-
-
 @dataclass(kw_only=True, slots=True)
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
@@ -596,11 +515,6 @@ class _KimiTrainerConfig(Trainer.Config):
         self.optimizer = _align_dist_muon_expert_compute_layouts(
             self.optimizer,
             parallelism=self.parallelism,
-        )
-        self.optimizer = _align_dist_muon_bucket_layers(
-            self.optimizer,
-            parallelism=self.parallelism,
-            num_layers=len(cast(KimiK25Model.Config, self.model_spec.model).layers),
         )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
         if self.parallelism.tensor_parallel_degree > 1:

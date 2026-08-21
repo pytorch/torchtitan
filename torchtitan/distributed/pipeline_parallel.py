@@ -7,7 +7,7 @@ import copy
 import dataclasses
 import math
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -34,10 +34,8 @@ from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
 # pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
-# setup. pipeline_stage_layer_ids exposes the layer split alone, for config code
-# that must agree with it before a model exists. Everything else in this module
-# is an implementation detail and stays private.
-__all__ = ["pipeline_llm", "pipeline_vlm", "pipeline_stage_layer_ids"]
+# setup. Helpers in this module are implementation details and stay private.
+__all__ = ["pipeline_llm", "pipeline_vlm"]
 
 
 def _build_get_mesh_callback(
@@ -126,7 +124,7 @@ def pipeline_llm(
 
     pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        num_microbatches=parallelism.num_pp_microbatches,
         stages=stages,
         loss_fn=loss_fn,
     )
@@ -203,6 +201,10 @@ def _get_pipeline_metadata(
     Extracted from ``pipeline_llm`` so that Graph PP can compute stage
     metadata without running the full eager pipeline setup.
     """
+    # Determine the number of virtual stages based on schedule type
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
+    is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
+    layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
     if hasattr(model_config, "layers"):
         num_layers = len(model_config.layers)
     else:
@@ -210,27 +212,6 @@ def _get_pipeline_metadata(
 
     # You can adjust these weights based on the computational cost of embeddings and output layers
     # Higher weights mean these modules are treated as "heavier" in the distribution
-    input_weight = parallelism.pipeline_parallel_first_stage_less_layers
-    output_weight = parallelism.pipeline_parallel_last_stage_less_layers
-    num_virtual_stages = _num_virtual_stages(parallel_dims.pp, parallelism, num_layers)
-    return num_virtual_stages, num_layers, input_weight, output_weight
-
-
-def _num_virtual_stages(
-    pp_degree: int,
-    parallelism: ParallelismConfig,
-    num_layers: int,
-) -> int:
-    """Number of virtual pipeline stages implied by the parallelism config.
-
-    Split out of ``_get_pipeline_metadata`` so callers that already know the
-    layer count -- and have no ``ParallelDims`` -- can reuse the same rules
-    rather than restate them.
-    """
-    # Determine the number of virtual stages based on schedule type
-    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
-    is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
-    layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
 
@@ -246,25 +227,25 @@ def _num_virtual_stages(
         # Validation: check stages per rank based on schedule type
         model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
         stage_distribution_info = (
-            f"resulting in {num_virtual_stages=} across {pp_degree} PP ranks"
+            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
         )
 
-        if num_virtual_stages % pp_degree != 0:
+        if num_virtual_stages % parallel_dims.pp != 0:
             raise ValueError(
                 f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
-                f"pipeline parallel size ({pp_degree}). "
+                f"pipeline parallel size ({parallel_dims.pp}). "
                 f"{model_config_info}. "
                 f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
-                f"divisible by {pp_degree}."
+                f"divisible by {parallel_dims.pp}."
             )
 
-        stages_per_rank = num_virtual_stages // pp_degree
+        stages_per_rank = num_virtual_stages // parallel_dims.pp
 
         if is_single_stage_schedule and stages_per_rank != 1:
             raise ValueError(
                 f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
                 f"{model_config_info}, {stage_distribution_info}. "
-                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // pp_degree} or higher "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
                 f"to achieve 1 stage per rank."
             )
 
@@ -279,14 +260,14 @@ def _num_virtual_stages(
         # For multi-stage schedules, default is 2 virtual stages per rank
         # For single-stage schedules, default is 1 virtual stage per rank
         stages_per_rank = 1 if is_single_stage_schedule else 2
-        num_virtual_stages = pp_degree * stages_per_rank
-    return num_virtual_stages
+        num_virtual_stages = parallel_dims.pp * stages_per_rank
+    return num_virtual_stages, num_layers, input_weight, output_weight
 
 
 def _build_pipeline_schedule(
     *,
     parallelism: ParallelismConfig,
-    local_batch_size: int,
+    num_microbatches: int,
     stages: list[PipelineStage],
     loss_fn: Callable,
     # Graph PP runs explicit backward graphs instead of autograd
@@ -299,7 +280,7 @@ def _build_pipeline_schedule(
 
     Args:
         parallelism (ParallelismConfig): The parallelism configuration.
-        local_batch_size (int): The local batch size for computing microbatches.
+        num_microbatches (int): Number of pipeline microbatches.
         stages (list[PipelineStage]): The stages to be scheduled.
         loss_fn (Callable): The loss function.
 
@@ -319,20 +300,11 @@ def _build_pipeline_schedule(
         schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    microbatch_size = parallelism.pipeline_parallel_microbatch_size
-    batch_size = local_batch_size
-    # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
-    if batch_size % microbatch_size != 0:
-        raise ValueError(
-            f"Batch size {local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
-            "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
-        )
-    n_microbatches = batch_size // microbatch_size
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
     num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
-    if n_microbatches < num_total_stages:
+    if num_microbatches < num_total_stages:
         logger.warning(
-            f"Number of microbatches ({n_microbatches}) is less than the total number "
+            f"Number of microbatches ({num_microbatches}) is less than the total number "
             f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
@@ -350,7 +322,7 @@ def _build_pipeline_schedule(
     if looped_schedule:
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
-            n_microbatches=n_microbatches,
+            n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
@@ -358,13 +330,13 @@ def _build_pipeline_schedule(
     else:
         schedule = schedule_class(
             stages[0],
-            n_microbatches=n_microbatches,
+            n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
         )
     logger.info(
         f"Using pipeline schedule {parallelism.pipeline_parallel_schedule} "
-        f"with {n_microbatches} microbatches and {num_total_stages} stages."
+        f"with {num_microbatches} microbatches and {num_total_stages} stages."
     )
 
     if pp_schedule_csv:
@@ -495,101 +467,6 @@ def _generate_llm_fqn_per_model_part(
     return module_names_per_stage
 
 
-def pipeline_stage_layer_ids(
-    parallelism: ParallelismConfig,
-    num_layers: int,
-) -> tuple[tuple[int, ...], ...]:
-    """Decoder layer ids each pipeline stage will own, in stage order.
-
-    A pure function of the parallelism config, so a model's config registry can
-    align FQN-keyed optimizer state with the split before any model or mesh
-    exists. This matters for state whose grouping is a performance decision:
-    DistMuon's ``bucket_configs`` batch layers into one collective, and a bucket
-    spanning a stage boundary is silently divided between two stages, which can
-    cost an extra launch per boundary.
-
-    Returns one group holding every layer when pipeline parallelism is off, so
-    callers need no separate non-PP path.
-    """
-    if parallelism.pipeline_parallel_degree <= 1:
-        return (tuple(range(num_layers)),)
-    module_names_per_stage = parallelism.module_fqns_per_model_part
-    if module_names_per_stage is None:
-        module_names_per_stage = _generate_llm_fqn_per_model_part(
-            _num_virtual_stages(
-                parallelism.pipeline_parallel_degree, parallelism, num_layers
-            ),
-            num_layers,
-            parallelism.pipeline_parallel_first_stage_less_layers,
-            parallelism.pipeline_parallel_last_stage_less_layers,
-        )
-    return tuple(
-        tuple(
-            int(name.split(".", 1)[1])
-            for name in stage_names
-            if name.startswith("layers.")
-        )
-        for stage_names in module_names_per_stage
-    )
-
-
-def _named_state(module: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
-    """Every parameter and buffer under ``module``, paired with its FQN.
-
-    Passes ``remove_duplicate=False`` so a tied tensor is reported under each
-    name it is reachable from, rather than only the first one encountered.
-    """
-    yield from module.named_parameters(remove_duplicate=False)
-    yield from module.named_buffers(remove_duplicate=False)
-
-
-def _validate_split_preserves_fqns(
-    fqns_before: dict[int, set[str]],
-    model_chunk: nn.Module,
-    module_names: list[str],
-) -> None:
-    """Check that a stage spells its retained FQNs the way the whole model does.
-
-    Splitting may drop a name but must never rename one, because downstream
-    components key global state by whole-model FQN and neither notices a
-    rename. The checkpointer flattens the per-stage state dicts into a single
-    dict and lets the last writer win for a colliding key, so a stage's tensors
-    vanish. DistMuon resolves a parameter's compute layout and communication
-    bucket by name, so it binds the entry belonging to some other parameter and
-    training continues with a plausible loss.
-
-    Renaming comes from containers that address children by position:
-    ``nn.ModuleList`` renumbers survivors from zero, so any stage that does not
-    begin at index 0 renames every layer it keeps. Comparing FQNs as sets would
-    miss exactly that case -- the renumbered names are names the whole model
-    also has, just for other layers -- so identity decides, keyed on the
-    pre-split snapshot in ``fqns_before``.
-
-    Args:
-        fqns_before: Maps each pre-split tensor to every FQN it was reachable
-            under, as built by ``_split_module`` before it prunes.
-        model_chunk: The pruned stage module.
-        module_names: The stage's requested modules, for the error message.
-    """
-    renamed = sorted(
-        (min(fqns_before[id(tensor)]), name)
-        for name, tensor in _named_state(model_chunk)
-        if name not in fqns_before[id(tensor)]
-    )
-    if not renamed:
-        return
-    moves = ", ".join(f"{before} -> {after}" for before, after in renamed)
-    raise ValueError(
-        f"Pipeline splitting renamed parameters for the stage holding "
-        f"{module_names}: {moves}. Splitting must preserve fully qualified "
-        "names so that checkpointing and FQN-keyed optimizers stay bound to "
-        "the parameters they were configured for. Containers indexed by "
-        "position (nn.ModuleList) renumber their children once a split drops "
-        "earlier entries -- use a keyed container (ModuleDict) for any module "
-        "pipeline parallelism splits."
-    )
-
-
 def _split_module(
     whole_model: nn.Module,
     module_names: list[str],
@@ -604,22 +481,11 @@ def _split_module(
     Returns:
         The split module
 
-    Raises:
-        ValueError: If splitting renamed a retained parameter or buffer instead
-            of dropping it. See ``_validate_split_preserves_fqns``.
-
     Example usage:
         module_names = ["tok_embeddings", "layers.0", "layers.1", "norm", "output"]
         split_module(whole_model, module_names)
     """
     model = copy.deepcopy(whole_model)
-    # Snapshot names before pruning can rename anything. Holding the pairs in a
-    # local keeps every pre-split tensor alive, so the ids stay unique for the
-    # lifetime of the check even after pruning drops a tensor's last reference.
-    state_before = list(_named_state(model))
-    fqns_before: dict[int, set[str]] = {}
-    for name, tensor in state_before:
-        fqns_before.setdefault(id(tensor), set()).add(name)
     # Create a set of modules to keep for faster lookup
     modules_to_keep = set(module_names)
     for module_name, module_value in model.named_children():
@@ -660,7 +526,6 @@ def _split_module(
         elif module_name not in modules_to_keep:
             # Replace with None
             setattr(model, module_name, None)
-    _validate_split_preserves_fqns(fqns_before, model, module_names)
     return model
 
 
