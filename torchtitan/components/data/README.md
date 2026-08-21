@@ -175,6 +175,69 @@ packed_tokens_ds = ConcatThenSplitPackingConfig(
 )
 ```
 
+## Synthetic length-distribution data (experiments)
+
+For DP load-balancing and throughput experiments you often want sequences whose
+token *content* is irrelevant but whose *lengths* follow a chosen distribution.
+`SyntheticLengthSource` is an infinite stream that emits `{"length": L}` records
+drawn from a `LengthSpec`, and `RandomTokenProcessor` fills each with random
+token ids. No dataset is written to disk.
+
+```python
+from torchtitan.components.data import (
+    BucketLengthSpec,
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    LengthBucket,
+    RandomTokenProcessor,
+    SingleDatasetConfig,
+    SyntheticLengthSource,
+)
+
+synthetic_ds = SingleDatasetConfig(
+    source=SyntheticLengthSource.Config(
+        length_spec=BucketLengthSpec(
+            buckets=(
+                # keep max_len < training.max_context_length; longer draws are dropped
+                LengthBucket(min_len=1, max_len=128, weight=3.0),
+                LengthBucket(min_len=1024, max_len=2000, weight=1.0),
+            ),
+        ),
+        seed=0,
+    ),
+    processor=RandomTokenProcessor.Config(),  # vocab from tokenizer
+    post_filters=(lambda sample: sample is not None,),
+)
+
+# Pack whole sequences into rows, as SFT does. FirstFit preserves each sampled
+# length; ConcatThenSplit would re-chunk into uniform blocks and erase the
+# distribution you configured.
+synthetic_packed_ds = FirstFitPackingConfig(dataset=synthetic_ds)
+
+config.dataloader = GrainDataLoader.Config(dataset=synthetic_packed_ds, shuffle=False)
+```
+
+Notes:
+- Content is random and irrelevant for perf/load-balancing; only the length
+  distribution matters.
+- Lengths are exact (token ids are generated directly, so there is no
+  retokenization drift).
+- Each DP rank derives an independent, reproducible stream from the source
+  `seed` + loader policy seed + `dp_rank`, and the source is
+  checkpoint-resumable.
+- Sequences longer than `max_context_length` are dropped (by the processor, and
+  again by FirstFit), so keep `post_filters=(lambda s: s is not None,)` and size
+  buckets to your `max_context_length` — otherwise long draws are silently
+  dropped and the realized distribution is biased.
+- Use `BucketLengthSpec` (default) for weighted ranges or `ParametricLengthSpec`
+  (`uniform`/`normal`/`lognormal`/`zipf`) for a parametric shape.
+- Token content: `RandomTokenProcessor` (random ids) for MoE-representative
+  routing; `ConstantTokenProcessor(constant_token_id=...)` (no RNG) for the
+  cheapest **dense-only** runs — constant tokens collapse MoE routing to one
+  expert, so use random ids for MoE.
+- Inspect a spec without training via
+  `python -m scripts.preview_synthetic_lengths --spec spec.json --dp 8`.
+
 # SFT
 
 SFT changes the processor and packing policy, not the loader:
