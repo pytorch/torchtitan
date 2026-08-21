@@ -18,7 +18,6 @@ from torchtitan.config.configs import ParallelismConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
 
-
 __all__ = [
     "MeshAxisName",
     "ParallelDims",
