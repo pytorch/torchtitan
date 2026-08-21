@@ -4,16 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `TrainingSampleBuilder.rollout_to_training_samples`."""
+"""Unit tests for `TrainingSampleBuilder`."""
 
 from __future__ import annotations
 
 import pytest
 
+from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
-from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.rollout import (
+    Rollout,
+    RolloutGroup,
+    RolloutStatus,
+    RolloutTurn,
+)
 from torchtitan.experiments.rl.types import RolloutTurnID
 
 _GROUP_ID = "step=1/group=0"
@@ -31,12 +37,18 @@ def _turn(
     version: int,
     max_version: int | None = None,
     content: str = "x",
+    completion_logprobs: list[float] | None = None,
+    rollout_id: int = 0,
 ) -> RolloutTurn:
     return RolloutTurn(
-        rollout_id=RolloutTurnID(group_id=_GROUP_ID, rollout_id=0, turn_id=0),
+        rollout_id=RolloutTurnID(group_id=_GROUP_ID, rollout_id=rollout_id, turn_id=0),
         prompt_token_ids=prompt_token_ids,
         completion_token_ids=completion_token_ids,
-        completion_logprobs=[-0.1] * len(completion_token_ids),
+        completion_logprobs=(
+            [-0.1] * len(completion_token_ids)
+            if completion_logprobs is None
+            else completion_logprobs
+        ),
         min_policy_version=version,
         max_policy_version=version if max_version is None else max_version,
         completion_message={"role": "assistant", "content": content},
@@ -44,16 +56,99 @@ def _turn(
 
 
 def _scored_rollout(
-    turns: list[RolloutTurn], *, reward: float, advantage: float
+    turns: list[RolloutTurn], *, reward: float, advantage: float, rollout_id: int = 0
 ) -> Rollout:
     return Rollout(
         group_id=_GROUP_ID,
-        rollout_id=0,
+        rollout_id=rollout_id,
         status=RolloutStatus.COMPLETED,
         turns=turns,
         reward=reward,
         advantage=advantage,
     )
+
+
+def _single_turn_rollout(
+    *, rollout_id: int, prompt_token_ids: list[int], completion_logprobs: list[float]
+) -> Rollout:
+    return _scored_rollout(
+        [
+            _turn(
+                prompt_token_ids=prompt_token_ids,
+                completion_token_ids=list(range(10, 10 + len(completion_logprobs))),
+                completion_logprobs=completion_logprobs,
+                version=1,
+                rollout_id=rollout_id,
+            )
+        ],
+        reward=float(rollout_id),
+        advantage=float(rollout_id),
+        rollout_id=rollout_id,
+    )
+
+
+def test_build_from_group_drops_samples_without_valid_loss_tokens() -> None:
+    rollouts = [
+        _single_turn_rollout(
+            rollout_id=0,
+            prompt_token_ids=[1],
+            completion_logprobs=[float("nan"), float("inf")],
+        ),
+        _single_turn_rollout(
+            rollout_id=1,
+            prompt_token_ids=[],
+            completion_logprobs=[-0.1],
+        ),
+    ]
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=rollouts)
+        )
+    )
+
+    assert group.training_samples == []
+    [drop_metric] = [
+        metric
+        for metric in group.metrics
+        if metric.key == "training_sample_builder/num_samples_dropped_no_valid_tokens"
+    ]
+    assert drop_metric.value.value == 2.0
+
+
+def test_builder_filter_then_oversized_filter_can_empty_group() -> None:
+    builder = TrainingSampleBuilder.Config().build()
+    group = builder.build_from_group(
+        rollout_group=RolloutGroup(
+            group_id=_GROUP_ID,
+            rollouts=[
+                _single_turn_rollout(
+                    rollout_id=0,
+                    prompt_token_ids=[1, 2],
+                    completion_logprobs=[float("nan"), -0.2],
+                ),
+                _single_turn_rollout(
+                    rollout_id=1,
+                    prompt_token_ids=[1],
+                    completion_logprobs=[float("nan")],
+                ),
+            ],
+        )
+    )
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [0]
+
+    batcher = Batcher.Config(batch=BatchConfig(seq_len=2)).build(
+        num_prompts_per_train_step=1, dp_degree=1, pad_id=0
+    )
+    prepared = batcher.prepare_training_sample_group(training_sample_group=group)
+
+    assert prepared.training_samples == []
+    assert {
+        "training_sample_builder/num_samples_dropped_no_valid_tokens",
+        "batcher/num_samples_dropped_oversized",
+    }.issubset(metric.key for metric in prepared.metrics)
 
 
 def test_single_turn_packs_one_training_sample() -> None:

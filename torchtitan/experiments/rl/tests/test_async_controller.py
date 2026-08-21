@@ -189,18 +189,9 @@ def test_untrainable_group_releases_before_training() -> None:
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
 
-        masked_out_sample = _training_sample(group_id=0, rollout_id=0)
-        masked_out_sample.loss_mask = [False, False, False]
-        non_finite_sample = _training_sample(group_id=0, rollout_id=1)
-        non_finite_sample.logprobs = [0.0, float("nan"), float("inf")]
-        training_sample_group = batcher.prepare_training_sample_group(
-            training_sample_group=TrainingSampleGroup(
-                group_id=0,
-                training_samples=[masked_out_sample, non_finite_sample],
-                metrics=[],
-            )
+        training_sample_group = TrainingSampleGroup(
+            group_id=0, training_samples=[], metrics=[]
         )
-        assert training_sample_group.training_samples == []
         await buffer.release_active_groups(1, reason="untrainable_group")
         assert (
             batcher.add_training_samples(training_sample_group=training_sample_group)

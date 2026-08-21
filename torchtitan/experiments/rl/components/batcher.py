@@ -127,7 +127,7 @@ class Batcher(Configurable):
     def prepare_training_sample_group(
         self, *, training_sample_group: TrainingSampleGroup
     ) -> TrainingSampleGroup:
-        """Drop oversized samples and groups with no valid loss tokens."""
+        """Drop samples too long to pack into one seq_len row."""
         samples = training_sample_group.training_samples
         kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
         num_dropped = len(samples) - len(kept)
@@ -145,19 +145,6 @@ class Batcher(Configurable):
                     m.Sum(float(num_dropped)),
                 )
             )
-
-        has_valid_loss_token = any(
-            include_in_loss and math.isfinite(generator_logprob)
-            for sample in kept
-            for include_in_loss, generator_logprob in zip(
-                sample.loss_mask[1:], sample.logprobs[1:], strict=True
-            )
-        )
-        if kept and not has_valid_loss_token:
-            metrics.append(
-                m.Metric("batcher/num_groups_dropped_no_valid_tokens", m.Sum(1.0))
-            )
-            kept = []
 
         return replace(
             training_sample_group,
