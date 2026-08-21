@@ -600,13 +600,24 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
 
 
 def _apply_deepep_cudagraph_generator(
-    config: Controller.Config, *, max_num_batched_tokens: int
+    config: Controller.Config,
+    *,
+    max_num_batched_tokens: int,
+    mxfp8_experts: bool = False,
 ) -> None:
+    # Gate+up fusion for the routed experts. The stock override only accepts a
+    # bf16 GroupedExperts.Config, so the mxfp8 path needs its own; they claim the
+    # same config node, so pick exactly one (listing both is a claim conflict).
+    fused_experts_override = (
+        "torchtitan.overrides.mxfp8_fused_grouped_experts.mxfp8_fused_grouped_experts"
+        if mxfp8_experts
+        else "torchtitan.overrides.fused_swiglu.fused_grouped_experts"
+    )
     # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
     config.generator.override = OverrideConfig(
         imports=[
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+            fused_experts_override,
             (
                 "torchtitan.overrides.moe_token_dispatcher.deepep_override",
                 {"cudagraphable": True},
@@ -890,7 +901,9 @@ def _qwen3_30b_a3b_varlen_pg(
     if deepep:
         # seq_len is 2048 (async_loop.batcher). With SP disabled in the generator,
         # a rank feeds the full budget into the EXPAND dispatch -> dropless.
-        _apply_deepep_cudagraph_generator(config, max_num_batched_tokens=2048)
+        _apply_deepep_cudagraph_generator(
+            config, max_num_batched_tokens=2048, mxfp8_experts=mxfp8_experts
+        )
     return config
 
 

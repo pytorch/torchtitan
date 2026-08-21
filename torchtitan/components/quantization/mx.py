@@ -232,6 +232,15 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
     _mxfp8_kernel_preference = None
     _mxfp8_scale_calculation_mode = None
 
+    # The expert weights to cache. A subclass with a different weight layout
+    # (e.g. a fused gate+up parameter) overrides this and ``_mxfp8_weight_t``.
+    _mxfp8_cached_weights: tuple[str, ...] = ("w1_EFD", "w2_EDF", "w3_EFD")
+
+    def _mxfp8_weight_t(self, name: str, hp: torch.Tensor) -> torch.Tensor:
+        """Map a high-precision expert weight to the ``weight_t`` grouped_mm sees."""
+        # (E, F, D) -> (E, D, F) == (E, K, N).
+        return hp.bfloat16().transpose(-2, -1)
+
     def update_mxfp8_weight_cache(self) -> None:
         from torchao.prototype.moe_training.mxfp8_grouped_mm import (
             quantize_grouped_weight_for_cache,
@@ -254,7 +263,7 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
         # different grad states, and mixing them would trip the "view created in
         # no_grad modified in grad mode" guard on the in-place copy_.
         with torch.no_grad():
-            for name in ("w1_EFD", "w2_EDF", "w3_EFD"):
+            for name in self._mxfp8_cached_weights:
                 param = getattr(self, name)
                 # DTensor (outer) wraps the mxfp8 weight-wrapper (local) under EP/TP;
                 # mirror GroupedExperts.forward, which uses the local tensor.
@@ -264,8 +273,7 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
                 kernel_preference = wrapper.config.kernel_preference  # type: ignore[missing-attribute]
                 scale_calculation_mode = wrapper.config.scale_calculation_mode  # type: ignore[missing-attribute]
                 hp = unwrap_weight(wrapper)
-                # (E, F, D) -> (E, D, F) == (E, K, N), the weight_t passed to grouped_mm.
-                weight_t = hp.bfloat16().transpose(-2, -1)
+                weight_t = self._mxfp8_weight_t(name, hp)
                 weight_e4m3, weight_scales_blocked = quantize_grouped_weight_for_cache(
                     weight_t, scale_calculation_mode
                 )
@@ -282,6 +290,27 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
     def clear_mxfp8_weight_cache(self) -> None:
         self._mxfp8_weight_cache = None
 
+    def _mxfp8_cached_grouped_mm(
+        self,
+        act: torch.Tensor,
+        weight_key: str,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """One grouped GEMM against a pre-quantized cached weight."""
+        from torchao.prototype.moe_training.mxfp8_grouped_mm import (
+            mxfp8_scaled_grouped_mm_cached_weight,
+        )
+
+        weight_e4m3, weight_scales_blocked = self._mxfp8_weight_cache[weight_key]
+        return mxfp8_scaled_grouped_mm_cached_weight(
+            act,
+            weight_e4m3,
+            weight_scales_blocked,
+            offsets_E,
+            scale_calculation_mode=self._mxfp8_scale_calculation_mode,
+            kernel_preference=self._mxfp8_kernel_preference,
+        )
+
     def forward(
         self,
         x_RD: torch.Tensor,
@@ -290,32 +319,15 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
         if self._mxfp8_weight_cache is None:
             return super().forward(x_RD, num_tokens_per_expert_E)  # type: ignore[missing-attribute]
 
-        from torchao.prototype.moe_training.mxfp8_grouped_mm import (
-            mxfp8_scaled_grouped_mm_cached_weight,
-        )
-
         # Cached inference path: mirrors GroupedExperts.forward (silu(x@w1) * (x@w3),
         # then @w2) but reuses the pre-quantized weights. Token groups are already
         # padded by the mxfp8 token dispatcher, so no padding happens here.
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        cache = self._mxfp8_weight_cache
-        kp = self._mxfp8_kernel_preference
-        sm = self._mxfp8_scale_calculation_mode
+        grouped_mm = self._mxfp8_cached_grouped_mm
 
-        def grouped_mm(act, weight_key):
-            weight_e4m3, weight_scales_blocked = cache[weight_key]
-            return mxfp8_scaled_grouped_mm_cached_weight(
-                act,
-                weight_e4m3,
-                weight_scales_blocked,
-                offsets_E,
-                scale_calculation_mode=sm,
-                kernel_preference=kp,
-            )
-
-        h_RF = F.silu(grouped_mm(x_RD.bfloat16(), "w1_EFD"))
-        h_RF = h_RF * grouped_mm(x_RD.bfloat16(), "w3_EFD")
-        return grouped_mm(h_RF, "w2_EDF").type_as(x_RD)
+        h_RF = F.silu(grouped_mm(x_RD.bfloat16(), "w1_EFD", offsets_E))
+        h_RF = h_RF * grouped_mm(x_RD.bfloat16(), "w3_EFD", offsets_E)
+        return grouped_mm(h_RF, "w2_EDF", offsets_E).type_as(x_RD)
 
 
 _mxfp8_experts_cache: dict[type, type] = {}
@@ -472,6 +484,10 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
 
     MXFP8QATGroupedExperts.__name__ = f"MXFP8QAT{parent_cls.__name__}"
     MXFP8QATGroupedExperts.__qualname__ = f"MXFP8QAT{parent_cls.__name__}"
+    # The unquantized class this wraps. Lets a later config transform (e.g. an
+    # override that fuses gate+up) recognize what was quantized without having
+    # to infer it from the MRO.
+    MXFP8QATGroupedExperts._unquantized_cls = parent_cls
     _mxfp8_qat_experts_cache[parent_cls] = MXFP8QATGroupedExperts
     return MXFP8QATGroupedExperts
 
