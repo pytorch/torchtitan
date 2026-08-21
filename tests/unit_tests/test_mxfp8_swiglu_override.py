@@ -106,10 +106,6 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         self.assertTrue(all(m.fuse_activation for m in fused))
 
     def test_grouped_forward_routes_through_the_hook(self):
-        # forward owns the plumbing (DTensor localization, BF16 conversion,
-        # offset construction, output-dtype restoration); _run_grouped_mlp
-        # owns the numerics and hands the current composite exactly the
-        # operands it received.
         cfg = self._grouped_experts_config(self._grouped_model_config())
         module = cfg.build()
         num_tokens = torch.zeros(cfg.num_experts, dtype=torch.int64)
@@ -136,10 +132,6 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         self.assertEqual(out.dtype, x.dtype)
 
     def test_grouped_hook_is_an_extension_seam(self):
-        # A subclass overriding _run_grouped_mlp alone swaps the whole
-        # numerical implementation (the seam a future fully fused
-        # grouped GEMM + SwiGLU + dual MXFP8 quantization backend uses)
-        # while inheriting all of forward's plumbing.
         class _ProbeGroupedMLP(MXFP8FusedGroupedExperts):
             def _run_grouped_mlp(self, x, w13, w2_t, offsets):
                 return torch.zeros(

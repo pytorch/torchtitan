@@ -586,11 +586,6 @@ class MXFP8FusedGroupedExperts(FusedGroupedExperts):
     the ``mxfp8_fused_grouped_experts`` factory swaps the token dispatcher
     accordingly. Inherits ``w13``, checkpoint hooks, and sharding from
     :class:`FusedGroupedExperts`.
-
-    ``forward`` owns the plumbing -- DTensor localization, BF16 conversion,
-    expert-offset construction, output-dtype restoration -- and delegates
-    the numerical grouped-MLP forward/autograd to :meth:`_run_grouped_mlp`,
-    the backend seam.
     """
 
     @dataclass(kw_only=True, slots=True)
