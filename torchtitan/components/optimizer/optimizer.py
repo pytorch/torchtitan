@@ -97,6 +97,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     Args:
         config (Config): Optimizer configuration with param group definitions.
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        model_is_partial (bool): Set when ``model_parts`` holds only a slice of
+            the model, as under pipeline parallelism. A param group is then
+            allowed to claim nothing here, because the parameters it targets may
+            live on another stage.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -135,6 +139,41 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         ``ParamGroupConfig.optimizer_kwargs``.
         """
 
+        def validate_against_model(self, model: nn.Module) -> None:
+            """Check these param groups against a complete, unsplit model.
+
+            Call this before pipeline parallelism splits the model, while every
+            rank still holds an identical copy of the whole thing. Both
+            invariants -- every pattern claims a parameter, and every trainable
+            parameter is claimed -- are then decided from identical input, so
+            every rank reaches the same verdict without a collective. A stage
+            cannot answer either question alone: a pattern targeting a layer on
+            another stage legitimately claims nothing locally, which is what
+            ``model_is_partial`` tells ``OptimizersContainer`` to tolerate.
+            """
+            groups, _, matches = OptimizersContainer._resolve_param_groups(
+                model, self.param_groups, impl_kwargs={}
+            )
+            OptimizersContainer._validate_param_group_matches(
+                self.param_groups, matches
+            )
+            claimed = {
+                id(param)
+                for opt_groups in groups.values()
+                for group in opt_groups
+                for param in group["params"]
+            }
+            unclaimed = [
+                name
+                for name, param in model.named_parameters()
+                if param.requires_grad and id(param) not in claimed
+            ]
+            if unclaimed:
+                raise ValueError(
+                    f"{len(unclaimed)} trainable parameters match no optimizer "
+                    f"param_groups pattern, e.g. {unclaimed[:3]}"
+                )
+
     optimizers: list[T]
     model_parts: list[nn.Module]
 
@@ -164,31 +203,41 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "foreach": config.implementation == "foreach",
         }
 
-    @staticmethod
+    @classmethod
     def _build_param_groups(
+        cls,
         model: nn.Module,
         param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
     ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
-        """Build PyTorch param groups from model parameters, partitioned by optimizer.
+        """Build groups for a single non-PP model, retaining local validation."""
+        groups, patterns, matches = cls._resolve_param_groups(
+            model, param_group_configs, impl_kwargs
+        )
+        cls._validate_param_group_matches(param_group_configs, matches)
+        return groups, patterns
+
+    @staticmethod
+    def _resolve_param_groups(
+        model: nn.Module,
+        param_group_configs: list[ParamGroupConfig],
+        impl_kwargs: dict[str, Any],
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]], list[bool]]:
+        """Resolve configs against one model part.
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
-
-        Returns two dicts keyed by optimizer name and aligned by index: the param
-        group dicts to pass to the optimizer constructor, and the regex pattern of
-        each group. Patterns are returned separately (not stored on the group) so
-        they stay out of the saved optimizer state dict; they are logging-only.
-
-        Each param group dict carries a ``param_names`` list (canonical FQNs
-        aligned with ``params``) so PyTorch records the names on the group; the
-        checkpoint utilities use those names to build FQN-keyed optimizer state.
+        Empty groups are omitted locally, since ``torch.optim.Optimizer`` rejects
+        a group with no params. The returned match bitmap keeps an entry for them
+        so it stays index-aligned with ``param_group_configs``, which is what lets
+        the caller can fold it across model parts.
         """
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         patterns: dict[str, list[str]] = defaultdict(list)
+        matches: list[bool] = []
         claimed: set[str] = set()  # first-match-wins
 
-        for pg in param_group_configs:
-            pattern = re.compile(pg.pattern)
+        for config in param_group_configs:
+            pattern = re.compile(config.pattern)
             params: list[nn.Parameter] = []
             param_names: list[str] = []
             for name, param in model.named_parameters():
@@ -197,60 +246,77 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     param_names.append(canonical_fqn(name))
                     claimed.add(name)
 
+            matches.append(bool(params))
             if not params:
-                # Under pipeline parallelism a rank holds one stage while the
-                # config still describes the global model, so a pattern such as
-                # an lm_head one legitimately claims nothing on stage 0. Drop
-                # the group rather than build an optimizer over no parameters.
-                #
-                # This deliberately leaves no dead-pattern check anywhere: a
-                # pattern owning nothing on any stage is now silently ignored,
-                # for PP and non-PP alike, so a typo in a param_groups pattern
-                # falls through to the following pattern rather than failing
-                # loudly.
-                # TODO: restore the check against the complete model, before PP
-                # splits it -- only there can a dead pattern be told apart from
-                # one whose parameters live on another stage.
                 continue
 
-            groups[pg.optimizer_name].append(
+            groups[config.optimizer_name].append(
                 {
                     "params": params,
                     "param_names": param_names,
                     **impl_kwargs,
-                    **pg.optimizer_kwargs,
+                    **config.optimizer_kwargs,
                 }
             )
-            patterns[pg.optimizer_name].append(pg.pattern)
+            patterns[config.optimizer_name].append(config.pattern)
 
-        return groups, patterns
+        return groups, patterns, matches
 
-    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        model_parts: list[nn.Module],
+        model_is_partial: bool = False,
+    ) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
         param_group_configs = config.param_groups
-        all_params = []
         self.optimizers = []
         self.model_parts = model_parts
 
-        for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
-                model, param_group_configs, impl_kwargs
+        resolved_by_part = [
+            self._resolve_param_groups(model, param_group_configs, impl_kwargs)
+            for model in self.model_parts
+        ]
+        param_groups_by_part = [
+            (groups_by_opt_name, patterns_by_opt_name)
+            for groups_by_opt_name, patterns_by_opt_name, _ in resolved_by_part
+        ]
+        assigned_params = self._collect_assigned_params(param_groups_by_part)
+        # Coverage is answerable from a single part either way: every trainable
+        # parameter present here must belong to some optimizer.
+        self._validate_params(assigned_params)
+        if not model_is_partial:
+            # Only a whole model can prove a pattern is dead. Under PP a pattern
+            # matching nothing here may still own parameters on another stage.
+            self._validate_param_group_matches(
+                param_group_configs,
+                [
+                    any(matches[i] for _, _, matches in resolved_by_part)
+                    for i in range(len(param_group_configs))
+                ],
             )
+
+        # Resolve all configured factories before any stage constructs an
+        # optimizer, so invalid names fail consistently across PP ranks.
+        optimizer_factories = {
+            group.optimizer_name: self._resolve_optimizer_factory(group.optimizer_name)
+            for group in param_group_configs
+        }
+        for part_idx, (groups_by_opt_name, patterns_by_opt_name) in enumerate(
+            param_groups_by_part
+        ):
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = self._resolve_optimizer_factory(opt_name)(
+                optimizer = optimizer_factories[opt_name](
                     opt_param_groups,
                     **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
                 )
                 self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
-                for group in opt_param_groups:
-                    all_params.extend(group["params"])
-
-        self._validate_params(all_params)
 
         if config.implementation == "fused_opt_states_bf16":
             self._register_bf16_optimizer_state_hook()
-        self._post_init(all_params)
+        self._post_init(assigned_params)
 
     def _log_optimizer(
         self, optimizer: Optimizer, part_idx: int, patterns: list[str]
@@ -289,6 +355,40 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             f"{len(actual)} in optimizers"
         )
 
+    @staticmethod
+    def _collect_assigned_params(
+        param_groups_by_part: list[
+            tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]
+        ],
+    ) -> list[nn.Parameter]:
+        return [
+            param
+            for groups_by_opt_name, _ in param_groups_by_part
+            for opt_param_groups in groups_by_opt_name.values()
+            for group in opt_param_groups
+            for param in group["params"]
+        ]
+
+    @staticmethod
+    def _validate_param_group_matches(
+        param_group_configs: list[ParamGroupConfig],
+        matches: list[bool],
+    ) -> None:
+        """Require every config to claim at least one parameter.
+
+        ``strict`` enforces the index alignment the match bitmap depends on: a
+        short bitmap would otherwise truncate the zip and skip validating the
+        tail configs entirely.
+        """
+        for param_group_config, matched in zip(
+            param_group_configs, matches, strict=True
+        ):
+            if not matched:
+                raise ValueError(
+                    "Optimizer param_groups pattern "
+                    f"{param_group_config.pattern!r} matched no parameters"
+                )
+
     def __iter__(self) -> Iterator[T]:
         return iter(self.optimizers)
 
@@ -305,6 +405,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         assert closure is None, "OptimizersContainer does not support closures"
+        # Optimizers run in sequence. An interleaved pipeline schedule gives a
+        # rank several model parts, and the loop above builds one optimizer per
+        # (part, optimizer name), so a bucketed optimizer like DistMuon drains
+        # one virtual stage's collectives before the next stage's begin. The
+        # total collective count is unchanged -- each bucket still covers the
+        # same parameters -- but overlap across virtual stages is lost.
         for optimizer in self.optimizers:
             optimizer.step()
         return None
