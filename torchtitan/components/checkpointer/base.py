@@ -194,6 +194,7 @@ class BaseCheckpointManager(Configurable, ABC):
     """
 
     enable: bool
+    staging_future: Future | None
     save_future: Future | None
     folder: str
     keep_latest_k: int
@@ -220,7 +221,7 @@ class BaseCheckpointManager(Configurable, ABC):
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
-        if not self.enable:
+        if not self.enable or getattr(self, "staging_future", None) is None:
             return
         self._maybe_wait_for_staging()
 
@@ -231,6 +232,8 @@ class BaseCheckpointManager(Configurable, ABC):
         # raised before assigning ``enable``.
         if not getattr(self, "enable", False):
             return
+        self.maybe_wait_for_staging()
+        self.maybe_wait_for_saving()
         self._close()
 
     def maybe_wait_for_saving(self) -> None:
@@ -239,7 +242,7 @@ class BaseCheckpointManager(Configurable, ABC):
         A manager with no asynchronous save in flight leaves ``save_future`` at
         ``None`` and never reaches ``_wait_for_saving``.
         """
-        if not self.enable or self.save_future is None:
+        if not self.enable or getattr(self, "save_future", None) is None:
             return
         self._wait_for_saving()
 
