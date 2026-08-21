@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import auto, Enum
 from typing import Any
 
-from monarch.actor import Actor, current_size, endpoint
+from monarch.actor import Actor, concurrent_endpoint, current_size
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.routing.strategies import (
@@ -247,7 +247,7 @@ class InterGeneratorRouter(Actor, Configurable):
         #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
-    @endpoint
+    @concurrent_endpoint
     async def generate(
         self,
         prompt_token_ids: list[int],
@@ -274,25 +274,25 @@ class InterGeneratorRouter(Actor, Configurable):
             ),
         )
 
-    @endpoint
+    @concurrent_endpoint
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""
         await self._fanout("start_engine_loop")
 
-    @endpoint
+    @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         """Set the step counter in this process and in every generator rank."""
         sl.set_step(step)
         await self._fanout("sync_log_step", step)
 
-    @endpoint
+    @concurrent_endpoint
     async def pull_model_state_dict(self, policy_version: int) -> None:
         """Pull the given policy version's state dict into every generator."""
         # Wrapper the logic in a private method so we can test it independently
         # without the need to spawn the Monarch actor mesh.
         await self._pull_model_state_dict(policy_version=policy_version)
 
-    @endpoint
+    @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""
         return await self._fanout("close", return_exceptions=True)

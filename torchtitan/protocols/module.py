@@ -15,14 +15,13 @@ from typing import Any
 import spmd_types as spmd
 import torch
 import torch.nn as nn
-from spmd_types.runtime import get_local_type, get_partition_spec, has_local_type
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import layout_axes, ParallelDims, SpmdLayout
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
     set_current_spmd_mesh,
@@ -138,24 +137,18 @@ class Module(nn.Module, Configurable):
 
         saved = {
             fqn: SpmdLayout(
-                # pyrefly: ignore [bad-argument-type]
-                axis_types=get_local_type(buf),
-                partition_spec=get_partition_spec(buf),
+                dict(spmd.get_local_type(buf)),
+                spmd.get_partition_spec(buf),
             )
             for fqn, buf in self.named_buffers()
-            if has_local_type(buf)
+            if spmd.has_local_type(buf)
         }
         try:
             yield
         finally:
             for fqn, buf in self.named_buffers():
-                if fqn in saved and not has_local_type(buf):
-                    layout = saved[fqn]
-                    spmd.assert_type(
-                        buf,
-                        layout.axis_types,
-                        partition_spec=layout.partition_spec,
-                    )
+                if fqn in saved and not spmd.has_local_type(buf):
+                    spmd.assert_type(buf, saved[fqn])
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own direct parameters.
@@ -305,7 +298,8 @@ class Module(nn.Module, Configurable):
         # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
         # using all axes, and defer size-1 axis filtering to spmd_types internals.
         mesh = parallel_dims.get_optional_mesh(
-            [axis.value for axis in layout.axes()], include_singleton_axes=True
+            [axis.value for axis in layout_axes(layout)],
+            include_singleton_axes=True,
         )
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
@@ -319,14 +313,10 @@ class Module(nn.Module, Configurable):
             self.register_buffer(name, tensor, persistent=persistent)
             registered = self._buffers[name]
 
-        # assert_type resolves SpmdLayout's string mesh axis names to concrete
+        # assert_type resolves SpmdType's string mesh axis names to concrete
         # runtime mesh-axis objects, so a mesh context is required here.
         with set_current_spmd_mesh(mesh):
-            spmd.assert_type(
-                registered,
-                layout.axis_types,
-                layout.partition_spec,
-            )
+            spmd.assert_type(registered, layout)
 
     def _distribute_states(self, parallel_dims: ParallelDims) -> None:
         """Distribute params and buffers per ``state_shardings``.
@@ -355,7 +345,7 @@ class Module(nn.Module, Configurable):
                     is_param=True,
                 )
                 continue
-            axes = spmd_layout.axes()
+            axes = layout_axes(spmd_layout)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -398,7 +388,7 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
                 continue
-            axes = spmd_layout.axes()
+            axes = layout_axes(spmd_layout)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -503,14 +493,14 @@ class Module(nn.Module, Configurable):
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         in_types = tuple(
-            (layout.axis_types, layout.partition_spec) for layout in in_named
+            (layout.local_type, layout.partition_spec) for layout in in_named
         )
         out_types = tree_map(
-            lambda layout: (layout.axis_types, layout.partition_spec),
+            lambda layout: (layout.local_type, layout.partition_spec),
             out_src,
-            is_leaf=lambda x: isinstance(x, SpmdLayout),
+            is_leaf=lambda x: isinstance(x, spmd.SpmdType),
         )
-        return spmd.local_map(
+        return spmd.no_typecheck(
             in_types=in_types,
             out_types=out_types,
         )(fn)
@@ -566,11 +556,7 @@ class Module(nn.Module, Configurable):
                 # before redistributing so typechecking catches placement mismatch.
                 # Gate assertion so compile doesn't error.
                 if spmd.is_type_checking():
-                    spmd.assert_type(
-                        value,
-                        src_spmd_layout.axis_types,
-                        src_spmd_layout.partition_spec,
-                    )
+                    spmd.assert_type(value, src_spmd_layout)
 
                 if dst_spmd_layout is None:
                     new_kwargs[name] = value
@@ -578,10 +564,8 @@ class Module(nn.Module, Configurable):
                 value = spmd_redistribute_per_axis(
                     value,
                     current_spmd_mesh(),
-                    # pyrefly: ignore [bad-argument-type]
-                    src_spmd_layout.per_axis_spmd_types(),
-                    # pyrefly: ignore [bad-argument-type]
-                    dst_spmd_layout.per_axis_spmd_types(),
+                    src_spmd_layout,
+                    dst_spmd_layout,
                 )
                 new_kwargs[name] = value
                 continue
@@ -589,12 +573,6 @@ class Module(nn.Module, Configurable):
             mesh = parallel_dims.resolve_shared_mesh([src_spmd_layout, dst_spmd_layout])
             if mesh is None:
                 continue
-
-            if (
-                not isinstance(value, DTensor)
-                and parallel_dims.spmd_backend == "full_dtensor"
-            ):
-                raise ValueError("Got a plain Tensor under the full_dtensor mode.")
 
             if not isinstance(value, DTensor) and src_spmd_layout is not None:
                 layout = resolve_placements(src_spmd_layout, mesh)
@@ -662,21 +640,15 @@ class Module(nn.Module, Configurable):
             # before redistributing so typechecking catches placement mismatch.
             # Gate assertion so compile doesn't error.
             if spmd.is_type_checking():
-                spmd.assert_type(
-                    outputs,
-                    out_src.axis_types,
-                    out_src.partition_spec,
-                )
+                spmd.assert_type(outputs, out_src)
 
             if out_dst is None:
                 return outputs
             return spmd_redistribute_per_axis(
                 outputs,
                 current_spmd_mesh(),
-                # pyrefly: ignore [bad-argument-type]
-                out_src.per_axis_spmd_types(),
-                # pyrefly: ignore [bad-argument-type]
-                out_dst.per_axis_spmd_types(),
+                out_src,
+                out_dst,
             )
 
         if isinstance(out_src, tuple):

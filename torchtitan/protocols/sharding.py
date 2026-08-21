@@ -19,6 +19,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import (
+    layout_axes,
     MeshAxisName,
     SpmdLayout,
     unfold_dp_axis,
@@ -31,12 +32,6 @@ __all__ = [
     "SpmdLayout",
     "resolve_placements",
 ]
-
-# Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
-# tensor dim 0, but it doesn't need to be annotated today.
-# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
-# carrying explicit shard-order info) once that lands.
 
 
 @dataclass(kw_only=True, slots=True)
@@ -146,22 +141,30 @@ def resolve_placements(
     # TODO(fegin): remove the size-1 ``Shard(d)``/``Partial`` to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-    axis_types = {}
-    for axis_name, axis_type in layout.per_axis_spmd_types().items():
+    axis_types = dict(layout.local_type)
+    if layout.partition_spec is not None:
+        for dim, entry in enumerate(layout.partition_spec):
+            for axis_name in (
+                () if entry is None else entry if isinstance(entry, tuple) else (entry,)
+            ):
+                axis_types[axis_name] = spmd.S(dim)
+    concrete_axis_types = {}
+    for axis_name in layout_axes(layout):
+        axis_type = axis_types[axis_name]
         for concrete_axis_name in unfold_dp_axis(axis_name):
-            axis_types[concrete_axis_name] = axis_type
+            concrete_axis_types[concrete_axis_name] = axis_type
 
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
-        if key not in axis_types:
+        if key not in concrete_axis_types:
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
-                f"{sorted(k.value for k in layout.axes())}; "
+                f"{sorted(k.value for k in layout_axes(layout))}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
-        p = spmd.spmd_type_to_dtensor_placement(axis_types[key])
+        p = spmd.spmd_type_to_dtensor_placement(concrete_axis_types[key])
         if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)

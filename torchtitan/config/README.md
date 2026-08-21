@@ -5,7 +5,7 @@ A run is described by a **full configuration**: a function that returns a comple
 Select one with `--module` (the module that defines the function) and `--config` (the function):
 
 ```bash
-NGPU=4 MODULE=torchtitan_recipes.tests CONFIG=llama3_debugmodel_fsdp2_cp2 ./run_train.sh
+NGPU=4 MODULE=torchtitan_recipes.tests.features CONFIG=llama3_debugmodel_fsdp2_cp2 ./run_train.sh
 ```
 
 The parallelism degrees are in the configuration but the world size is not. So `NGPU` still has to match the product of them. If you want to change any behavior, change the configuration directly -- write your own function, instead of using CLI flags, to return a new `Trainer.Config`:
@@ -29,7 +29,7 @@ The [torchtitan_recipes](../../torchtitan_recipes/) package holds full configura
 
 ### Writing your own
 
-A different cluster usually means a different sharding layout, and therefore a different configuration. That needs no code change: add a function to `torchtitan_recipes`, in a module named for the model, and name it on the command line. (`torchtitan_recipes/tests.py` is separate -- it holds the configurations the integration tests run.)
+A different cluster usually means a different sharding layout, and therefore a different configuration. That needs no code change: add a function to `torchtitan_recipes`, in a module named for the model, and name it on the command line. (`torchtitan_recipes/tests/` is separate -- it holds the configurations the integration tests run, one module per suite.)
 
 ```python
 # torchtitan_recipes/llama3.py
@@ -57,7 +57,7 @@ The set of `--section.option` CLI flags will not grow. New features express thei
 
 Everything already on the command line keeps working, for backward compatibility rather than because it is the recommended path. The eventual goal is to remove the flags entirely and keep only `--module` and `--config`, or even remove tyro completely.
 
-Frozen means the CLI, not the config dataclasses. New fields still go in the config tree: on the component they belong to, on the model, or -- for the few options with no other home, such as `training.local_batch_size` -- in [configs.py](configs.py), which is not closed, after discussing with the maintainers.
+Frozen means the CLI, not the config dataclasses. New fields still go in the config tree: on the component they belong to, on the model, or -- for the few options with no other home, such as `training.num_tokens_per_microbatch_per_dp_rank` -- in [configs.py](configs.py), which is not closed, after discussing with the maintainers.
 
 A field on a component config, or in `configs.py`, needs `tyro.conf.Suppress`: it is a CLI option unless you annotate it, and that annotation is what keeps the CLI from growing while a configuration can still set the field. A field in the model config needs nothing, since `model_spec` is annotated already and takes the whole tree under it off the command line.
 
@@ -71,7 +71,7 @@ new_job_level_knob: Annotated[int, tyro.conf.Suppress] = 3
 
 What this repository ships, which is deliberately a small set:
 
-- `tests.py` -- the configurations the integration tests run
+- `tests/` -- the configurations the integration tests run, one module per suite
 - golden configurations verified on specific hardware, named for that hardware so a benchmark run is reproducible from its name alone
 - configurations that demonstrate new features
 

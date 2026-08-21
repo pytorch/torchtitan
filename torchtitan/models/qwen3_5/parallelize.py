@@ -26,11 +26,8 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
-)
-from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
-    validate_config,
 )
 
 
@@ -43,17 +40,18 @@ def parallelize_qwen3_5(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
     parallelism to the Qwen3.5 model.
 
+    ``skip_dp=True`` applies TP/AC/compile but no FSDP/DP -- used by the vLLM
+    generator, which replicates params across vLLM DP groups (not TorchTitan FSDP).
+
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.spmd_backend == "full_dtensor":
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -65,12 +63,12 @@ def parallelize_qwen3_5(
             "and multimodal CP needs vision scatter before CP sharding."
         )
 
-    if parallelism.spmd_backend == "spmd_types":
-        validate_config(parallel_dims, model)
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
-    elif parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        # pyrefly: ignore [not-callable]
-        model.parallelize(parallel_dims)
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
@@ -90,6 +88,10 @@ def parallelize_qwen3_5(
                 compile_config=compile_config,
                 parallel_dims=parallel_dims,
             )
+
+    # Generator inference: TP/AC/compile only, no FSDP/DP (vLLM owns DP).
+    if skip_dp:
+        return model
 
     if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)

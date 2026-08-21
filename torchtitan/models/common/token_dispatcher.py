@@ -20,7 +20,7 @@ from torchtitan.distributed.minimal_async_ep import (
     init_buffer as minimal_async_ep_init_buffer,
     MinimalAsyncEPDispatchMetadata,
 )
-from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_sparse_mesh
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
@@ -421,22 +421,16 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         if (
             get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
         ):  # sparse mesh reinterpret
-            for axis in ["dp", "cp", "tp"]:
-                spmd.mutate_type(
-                    num_local_tokens_per_expert_E,
-                    axis,
-                    src=spmd.P,
-                    dst=spmd.V,
-                )
+            spmd.mutate_type(
+                num_local_tokens_per_expert_E,
+                src=spmd.P,
+                dst={"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+            )
 
         # generate the input splits and output splits for all-to-all
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group(  # pyrefly: ignore [missing-attribute]
-                    "ep"
-                )
-                if get_spmd_backend() == "spmd_types"
-                else self.ep_mesh.get_group()
+                "ep" if get_spmd_backend() == "spmd_types" else self.ep_mesh.get_group()
             )
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 num_local_tokens_per_expert_E = spmd.reinterpret_mesh(
@@ -586,11 +580,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         with maybe_set_sparse_mesh():
             pg = (
-                current_spmd_mesh().get_group(  # pyrefly: ignore [missing-attribute]
-                    "ep"
-                )
-                if get_spmd_backend() == "spmd_types"
-                else self.ep_mesh.get_group()
+                "ep" if get_spmd_backend() == "spmd_types" else self.ep_mesh.get_group()
             )
             # Reverse expert-major reordering
             routed_output_RD = self._unpermute(
@@ -1221,17 +1211,18 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
         num_token_shards = (
             parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
         )
-        if training.seq_len % num_token_shards != 0:
+        num_tokens_per_microbatch = training.num_tokens_per_microbatch_per_dp_rank
+        if num_tokens_per_microbatch % num_token_shards != 0:
             raise ValueError(
-                f"training.seq_len ({training.seq_len}) must be divisible by "
+                "training.num_tokens_per_microbatch_per_dp_rank "
+                f"({num_tokens_per_microbatch}) must be divisible by "
                 "context_parallel_degree * tensor_parallel_degree "
                 f"({num_token_shards}) so CP and TP/SP produce equal local "
-                "token counts. Pad training.seq_len to a multiple of "
-                f"{num_token_shards}."
+                "token counts. Set "
+                "training.num_tokens_per_microbatch_per_dp_rank to a multiple "
+                f"of {num_token_shards}."
             )
-        required_num_max_tokens_per_rank = (
-            training.local_batch_size * training.seq_len // num_token_shards
-        )
+        required_num_max_tokens_per_rank = num_tokens_per_microbatch // num_token_shards
 
     for token_dispatcher_cfg in dispatcher_cfgs:
         assert required_num_max_tokens_per_rank is not None

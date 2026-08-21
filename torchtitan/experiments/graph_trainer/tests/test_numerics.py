@@ -250,7 +250,8 @@ DSV3_PARALLELISM = (
     " --parallelism.expert_parallel_degree=2"
 )
 DSV3_EP_OVERLAP_GRAPH_PARALLELISM = (
-    "--parallelism.data_parallel_shard_degree=8"
+    "--training.disable_cuda_graphs"
+    " --parallelism.data_parallel_shard_degree=8"
     " --parallelism.tensor_parallel_degree=1"
     " --parallelism.expert_parallel_degree=2"
 )
@@ -345,11 +346,12 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
 
 
 GRAPH_PP_DSV3_PP_OPTIONS = (
-    "--parallelism.pipeline_parallel_degree=2"
+    "--training.disable_cuda_graphs"
+    " --parallelism.pipeline_parallel_degree=2"
+    " --parallelism.num_pp_microbatches=8"
     " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
-    " --training.local_batch_size=8"
-    " --training.global_batch_size=32"
+    " --training.num_tokens_per_microbatch_per_dp_rank=2048"
     # Eager PP cannot be the baseline for ZBVZeroBubble or DualPipeV here:
     # FlexAttention needs torch.compile, and torch.compile is incompatible with
     # those eager PP schedules. Compare GraphPP schedules against eager
@@ -468,7 +470,8 @@ def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
 
 
 QWEN3_MOE_PARALLELISM = (
-    "--parallelism.data_parallel_shard_degree=4"
+    "--training.disable_cuda_graphs"
+    " --parallelism.data_parallel_shard_degree=4"
     " --parallelism.tensor_parallel_degree=2"
     " --parallelism.expert_parallel_degree=2"
 )

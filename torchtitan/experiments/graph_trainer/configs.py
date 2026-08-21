@@ -98,13 +98,22 @@ class GraphTrainerCompileConfig(CompileConfig):
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
-        full: full recompute — only layer outputs are saved. Mirrors
-            eager's full AC (checkpoint_wrapper with no context_fn).
+        full: full recompute, saving layer outputs and operations selected by
+            full_recompute_save_ops. With no selectors, this mirrors eager's
+            full AC (checkpoint_wrapper with no context_fn).
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+    """
+
+    full_recompute_save_ops: str = ""
+    """Operations to save instead of recomputing under the ``full`` policy.
+
+    Each selector has the form ``MODULE_FQN_PATTERN::OP``. Separate multiple
+    selectors with ``|`` and quote the full argument in the shell. For example:
+    ``layers.*.moe.router.gate::aten.mm.default | layers.*.attention.wkv_a::aten.mm.default``.
     """
 
     pass_pipeline: str = "default"
@@ -241,6 +250,8 @@ def to_graph_trainer_config(
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
+    # TODO: Adopt spmd_types to re-enable CP; partial_dtensor does not apply
+    # the CP placements declared in ShardingConfig.
     d["parallelism"] = replace(
         base_config.parallelism,
         spmd_backend="partial_dtensor",

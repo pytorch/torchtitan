@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from threading import local
 from typing import Any, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.utils import get_spmd_backend
 
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
 __all__ = [
     "annotate_input_spmd_types",
     "current_spmd_mesh",
+    "dtensor_to_plain_tensor_state_dict",
+    "maybe_set_sparse_mesh",
+    "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -38,11 +42,55 @@ __all__ = [
     "spmd_validate_redistributions",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
-    "maybe_set_sparse_mesh",
 ]
 
 
 _MESH_TLS = local()
+
+
+def plain_tensor_to_dtensor_state_dict(
+    state_dict: dict[str, Any],
+    *,
+    state_dict_layouts: Mapping[str, spmd.SpmdType],
+    parallel_dims: "ParallelDims",
+) -> dict[str, Any]:
+    """Represent plain local state tensors as DTensors for state transfer."""
+    from torchtitan.distributed.parallel_dims import layout_axes, unfold_dp_axes
+    from torchtitan.protocols.sharding import resolve_placements
+
+    dtensor_state_dict = dict(state_dict)
+    with torch.no_grad():
+        for name, target in state_dict.items():
+            if not isinstance(target, torch.Tensor) or isinstance(target, DTensor):
+                continue
+
+            layout = state_dict_layouts.get(name)
+            if layout is None:
+                raise KeyError(f"{name} is missing SPMD layout metadata")
+
+            mesh = parallel_dims.get_activated_mesh(
+                unfold_dp_axes(layout_axes(layout))
+            )
+            if mesh is None:
+                continue
+
+            dtensor_state_dict[name] = DTensor.from_local(
+                target,
+                mesh,
+                resolve_placements(layout, mesh),
+                run_check=False,
+            )
+    return dtensor_state_dict
+
+
+def dtensor_to_plain_tensor_state_dict(
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace DTensor state-dict entries with their plain local tensors."""
+    return {
+        name: value.to_local() if isinstance(value, DTensor) else value
+        for name, value in state_dict.items()
+    }
 
 
 def set_spmd_meshes(
@@ -141,32 +189,48 @@ def annotate_input_spmd_types(
     """Annotate decoder inputs/labels with SPMD types.
 
     Hardcodes the standard decoder convention: inputs and positions are
-    ``S(0)@DP, S(1)@CP, R@TP``; labels are ``S(0)@DP, S(1)@CP, I@TP``.
-    Analogous to ``full_dtensor.parallelize_inputs()`` but for the
-    ``spmd_types`` path.
+    ``S(0)@DP, S(0)@CP, R@TP``; labels are
+    ``S(0)@DP, S(0)@CP, I@TP``.
     """
     from torchtitan.distributed.parallel_dims import MeshAxisName
 
-    token_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.R,
-    }
-    label_type = {
-        MeshAxisName.DP: spmd.S(0),
-        MeshAxisName.CP: spmd.S(1),
-        MeshAxisName.TP: spmd.I,
-    }
+    token_type = (
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.R,
+        },
+        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+    )
+    label_type = (
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.I,
+        },
+        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP)),
+    )
 
     mesh = parallel_dims.spmd_dense_mesh()
     with set_current_spmd_mesh(mesh):
-        spmd.assert_type(inputs, token_type)
-        spmd.assert_type(labels, label_type)
+        spmd.assert_type(inputs, *token_type)
+        spmd.assert_type(labels, *label_type)
         if "positions" in extra_kwargs and isinstance(
             extra_kwargs["positions"], torch.Tensor
         ):
-            spmd.assert_type(extra_kwargs["positions"], token_type)
+            spmd.assert_type(extra_kwargs["positions"], *token_type)
     return inputs, labels, extra_kwargs
+
+
+def _per_axis_types(layout: "SpmdLayout") -> spmd.PerMeshAxisSpmdTypes:
+    result = dict(layout.local_type)
+    if layout.partition_spec is not None:
+        for dim, entry in enumerate(layout.partition_spec):
+            for axis in (
+                () if entry is None else entry if isinstance(entry, tuple) else (entry,)
+            ):
+                result[axis] = spmd.S(dim)
+    return result
 
 
 def spmd_validate_redistributions(sharding_config: Any) -> None:
@@ -182,11 +246,12 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
     or we should write collective-based (not placement-based) redistributions
-    after full_dtensor backend is removed.
+    once the partial_dtensor backend is removed.
     """
+    from torchtitan.distributed.parallel_dims import MeshAxisName
 
     def _normalize_partition_spec(
-        axis_types: dict["MeshAxisName", spmd.PerMeshAxisSpmdType],
+        axis_types: Mapping["MeshAxisName", spmd.PerMeshAxisSpmdType],
         *,
         ndim: int,
     ) -> tuple[tuple["MeshAxisName", ...], ...]:
@@ -195,13 +260,15 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         for axis_name, axis_type in axis_types.items():
             if not isinstance(axis_type, spmd.Shard):
                 continue
+            if not isinstance(axis_name, str):
+                raise TypeError("ShardingConfig SpmdType axes must be names")
             dim = axis_type.dim if axis_type.dim >= 0 else ndim + axis_type.dim
             if dim < 0 or dim >= ndim:
                 raise ValueError(
                     f"Cannot compare SPMD layout with shard dim {axis_type.dim} "
                     f"against PartitionSpec of rank {ndim}."
                 )
-            entries[dim] = (axis_name,)
+            entries[dim] = (MeshAxisName(axis_name),)
         return tuple(entries)
 
     def _validate_redistribute_spmd_pair(
@@ -211,10 +278,10 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         name: str,
     ) -> None:
         """Validate a SPMD redistribution is expressible with one-axis collective."""
-        # 1) Checks based on per_axis_spmd_types(), that only one axis mismatches.
+        # 1) Check that only one axis mismatches.
         # Store the changed_axes so we know what to look for in PartitionSpec.
-        src_types = src.per_axis_spmd_types()
-        dst_types = dst.per_axis_spmd_types()
+        src_types = _per_axis_types(src)
+        dst_types = _per_axis_types(dst)
         if set(src_types) != set(dst_types):
             raise ValueError(
                 "SpmdLayout-based redistribute axis keys do not match for "
@@ -229,7 +296,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         if len(changed_axes) > 1:
             raise ValueError(
                 f"{name}: SpmdLayout-based redistribution changes multiple mesh "
-                f"axes ({sorted(axis.value for axis in changed_axes)}). "
+                f"axes ({sorted(str(axis) for axis in changed_axes)}). "
                 "spmd_redistribute_per_axis only supports one single-axis "
                 "redistribution."
             )
@@ -239,7 +306,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
             axis = changed_axes[0]
             raise ValueError(
                 f"{name}: SpmdLayout-based redistribution changes mesh axis "
-                f"{axis.value!r} with spmd.V as the source or destination type. "
+                f"{str(axis)!r} with spmd.V as the source or destination type. "
                 "Config-based redistribution requires non-V types; write an "
                 "explicit collective when the value semantics are unclear."
             )
@@ -257,9 +324,9 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         )
         src_spec, dst_spec = src.partition_spec, dst.partition_spec
         if src_spec is None:
-            src_spec = _normalize_partition_spec(src.axis_types, ndim=ndim)
+            src_spec = _normalize_partition_spec(src.local_type, ndim=ndim)
         if dst_spec is None:
-            dst_spec = _normalize_partition_spec(dst.axis_types, ndim=ndim)
+            dst_spec = _normalize_partition_spec(dst.local_type, ndim=ndim)
 
         # A one-axis redistribute may only leave each tensor dim's shard axes
         # unchanged, add the changed axis as the innermost shard, or remove it
@@ -312,8 +379,8 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
 def spmd_redistribute_per_axis(
     x: torch.Tensor,
     mesh: DeviceMesh | None,
-    src_types: spmd.PerMeshAxisSpmdTypes,
-    dst_types: spmd.PerMeshAxisSpmdTypes,
+    src: "SpmdLayout",
+    dst: "SpmdLayout",
 ) -> torch.Tensor:
     """Redistribute a local tensor along axes whose SPMD type changes.
 
@@ -328,6 +395,8 @@ def spmd_redistribute_per_axis(
     if mesh is None:
         return x
 
+    src_types = _per_axis_types(src)
+    dst_types = _per_axis_types(dst)
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
     for axis_name, dst_t in dst_types.items():
         src_t = src_types.get(axis_name)
@@ -353,7 +422,7 @@ def spmd_redistribute_per_axis(
 def spmd_distribute_tensor(
     tensor: torch.Tensor,
     mesh: DeviceMesh,
-    layout: SpmdLayout,
+    layout: spmd.SpmdType,
 ) -> torch.Tensor:
     """Materialize local state shards according to the declared SPMD layout.
 
@@ -362,11 +431,10 @@ def spmd_distribute_tensor(
     same tensor dim, e.g. ``(DP, CP)`` means shard by DP, then shard each DP
     slice by CP.
     """
-    shard_types = layout.per_axis_spmd_types()
     if layout.partition_spec is None:
         axis_shard_dims = [
             (axis_name, axis_type.dim)
-            for axis_name, axis_type in shard_types.items()
+            for axis_name, axis_type in layout.local_type.items()
             if isinstance(axis_type, spmd.Shard)
         ]
     else:

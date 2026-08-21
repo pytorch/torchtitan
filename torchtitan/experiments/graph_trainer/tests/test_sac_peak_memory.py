@@ -22,8 +22,7 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
 DTYPE = torch.bfloat16
-BATCH_SIZE = 2
-SEQ_LEN = 2048
+NUM_TOKENS = 2 * 2048
 MAX_PEAK_MEMORY_RATIO = 1.10
 DEBUGMODEL = "debugmodel"
 
@@ -61,12 +60,9 @@ def _measure_step(
     model.zero_grad(set_to_none=True)
     global_valid_tokens = torch.tensor(labels.numel(), dtype=torch.float, device="cuda")
     # The dataloader always supplies per-document positions, which the trainer
-    # requires to build the FlexAttention mask. Single-document positions here.
-    positions = (
-        torch.arange(tokens.shape[1], device="cuda", dtype=torch.int32)
-        .unsqueeze(0)
-        .expand(tokens.shape[0], tokens.shape[1])
-    )
+    # requires to build the FlexAttention mask. Reset positions between the
+    # packed documents.
+    positions = torch.arange(NUM_TOKENS, device="cuda", dtype=torch.int32) % 2048
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
@@ -98,8 +94,8 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         }
         del model
         torch.cuda.empty_cache()
-        self.tokens = torch.randint(0, 2048, (BATCH_SIZE, SEQ_LEN), device="cuda")
-        self.labels = torch.randint(0, 2048, (BATCH_SIZE, SEQ_LEN), device="cuda")
+        self.tokens = torch.randint(0, 2048, (NUM_TOKENS,), device="cuda")
+        self.labels = torch.randint(0, 2048, (NUM_TOKENS,), device="cuda")
 
     def tearDown(self):
         torch.use_deterministic_algorithms(False)

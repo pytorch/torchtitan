@@ -15,6 +15,7 @@ Adds TorchFT fault tolerance support on top of the base CheckpointManager:
 from __future__ import annotations
 
 import time
+from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -22,7 +23,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from torchtitan.components.checkpoint import (
+from torchtitan.components.checkpointer import (
     AsyncMode,
     CheckpointManager,
     DATALOADER,
@@ -31,7 +32,7 @@ from torchtitan.components.checkpoint import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -140,7 +141,7 @@ class TorchFTCheckpointManager(CheckpointManager):
                 self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
     @torch.no_grad()
-    def _save(self, curr_step: int, last_step: bool = False) -> None:
+    def _save(self, curr_step: int, last_step: bool = False) -> bool:
         # FT dataloader checkpoint is saved every step (not gated by interval)
         # to minimize data replay on replica failure.
         if self.enable_ft_dataloader_checkpoints:
@@ -151,14 +152,18 @@ class TorchFTCheckpointManager(CheckpointManager):
             # pyrefly: ignore [missing-attribute]
             and self.ft_manager.participating_rank() == 0
         ):
-            super()._save(curr_step, last_step)
-        elif self.enable_ft_dataloader_checkpoints:
+            return super()._save(curr_step, last_step)
+        if self.enable_ft_dataloader_checkpoints:
             assert self.ft_manager is not None
             logger.info(
                 "Replica %d doesn't save checkpoint.",
                 # pyrefly: ignore [missing-attribute]
                 self.ft_manager.participating_rank(),
             )
+        # The per-replica dataloader checkpoint above is a side channel, not the
+        # checkpoint this return value describes, so a replica that skipped the
+        # full save reports False.
+        return False
 
     @torch.no_grad()
     def _load(self, step: int = -1) -> bool:
@@ -177,7 +182,8 @@ class TorchFTCheckpointManager(CheckpointManager):
         # so save_future can exist even when self.async_mode is DISABLED. The DCP
         # manager would incorrectly raise in that case, so we override to handle
         # it. BaseCheckpointManager.maybe_wait_for_saving has already checked
-        # that save_future is set.
+        # that save_future is set; assert to narrow it for the type checker.
+        assert self.save_future is not None
         self.save_future.result()
         # ASYNC_WITH_PINNED_MEM: the stager manages the future's lifecycle;
         # all other modes (ASYNC, DISABLED with FT) should clear the future.
@@ -199,9 +205,13 @@ class TorchFTCheckpointManager(CheckpointManager):
         begin = time.monotonic()
         self.maybe_wait_for_saving()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self.save_future = self.dcp_save(
+        result = self.dcp_save(
             self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
         )
+        # AsyncMode.ASYNC always yields a plain Future; the AsyncSaveResponse and
+        # None arms of dcp_save's return type belong to the other modes.
+        assert isinstance(result, Future)
+        self.save_future = result
         logger.info(f"Staging torchft checkpoint took {time.monotonic() - begin} secs.")
 
     def _ft_load(self) -> None:
