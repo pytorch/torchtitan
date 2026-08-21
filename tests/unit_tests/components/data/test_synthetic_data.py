@@ -6,7 +6,7 @@
 
 import numpy as np
 import pytest
-from torchtitan.components.data.synthetic import BucketLengthSpec, LengthBucket
+from torchtitan.components.data import BucketLengthSpec, LengthBucket
 
 
 def test_bucket_spec_lengths_stay_within_bucket_ranges():
@@ -51,7 +51,7 @@ def test_bucket_spec_requires_at_least_one_bucket():
         BucketLengthSpec(buckets=())
 
 
-from torchtitan.components.data.synthetic import ParametricLengthSpec
+from torchtitan.components.data import ParametricLengthSpec
 
 
 def test_parametric_uniform_within_bounds():
@@ -94,7 +94,7 @@ def test_parametric_rejects_invalid(kwargs):
         ParametricLengthSpec(**kwargs)
 
 
-from torchtitan.components.data.synthetic import SyntheticLengthSource
+from torchtitan.components.data import SyntheticLengthSource
 from torchtitan.components.data.types import DatasetIterationPolicy
 
 
@@ -167,7 +167,7 @@ from dataclasses import replace
 import grain.python as grain
 
 from torchtitan.components.data.dataset import TextSequence
-from torchtitan.components.data.synthetic import RandomTokenProcessor
+from torchtitan.components.data import RandomTokenProcessor
 from torchtitan.components.data.types import DatasetBuildContext
 
 
@@ -220,7 +220,7 @@ def test_random_token_processor_uses_tokenizer_vocab_when_unset():
     assert (seq.input_ids < 7).all()
 
 
-from torchtitan.components.data.synthetic import ConstantTokenProcessor
+from torchtitan.components.data import ConstantTokenProcessor
 
 
 def _const_processor(constant_token_id=5, max_context_length=128):
@@ -250,17 +250,6 @@ def test_constant_processor_rejects_negative_id():
     ctx = replace(CONTEXT, max_context_length=128)
     with pytest.raises(ValueError):
         ConstantTokenProcessor.Config(constant_token_id=-1).build(context=ctx)
-
-
-def test_public_exports_are_importable():
-    from torchtitan.components.data import (  # noqa: F401
-        BucketLengthSpec as B,
-        ConstantTokenProcessor as C,
-        LengthBucket as L,
-        ParametricLengthSpec as P,
-        RandomTokenProcessor as R,
-        SyntheticLengthSource as S,
-    )
 
 
 import torch
