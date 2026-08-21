@@ -522,8 +522,9 @@ class ChunkedLossWrapper(BaseLoss):
     FSDP2 composability:
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
-        unsharded across all chunks (avoiding repeated all-gathers). Reduce-scatter
-        fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
+        unsharded across all chunks (avoiding repeated all-gathers). By default,
+        gradient synchronization is deferred until the final chunk. Pipeline
+        schedules can instead own gradient synchronization across microbatches.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -556,10 +557,20 @@ class ChunkedLossWrapper(BaseLoss):
         self.num_chunks = config.num_chunks
         self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
         self.lm_head: nn.Module | None = None
+        self.reshard_after_loss = True
+        self.sync_gradients_on_last_chunk = True
 
-    def set_lm_head(self, lm_head: nn.Module) -> None:
-        """Set the lm_head module. Must be called before the first __call__."""
+    def set_lm_head(
+        self,
+        lm_head: nn.Module,
+        *,
+        reshard_after_loss: bool = True,
+        sync_gradients_on_last_chunk: bool = True,
+    ) -> None:
+        """Set the lm_head and whether this wrapper owns FSDP finalization."""
         self.lm_head = lm_head
+        self.reshard_after_loss = reshard_after_loss
+        self.sync_gradients_on_last_chunk = sync_gradients_on_last_chunk
 
     def __call__(
         self,
@@ -656,9 +667,9 @@ class ChunkedLossWrapper(BaseLoss):
             metrics: dict[str, torch.Tensor] = {}
 
             # Disable FSDP reshard on lm_head to keep weight unsharded across
-            # all chunks, avoiding repeated all-gathers. Coalesce per-chunk
-            # grad sync into a single reduce-scatter at the last chunk by
-            # disabling gradient sync for chunks 0..N-2.
+            # all chunks, avoiding repeated all-gathers. Disable gradient sync
+            # for the chunk loop. The wrapper normally re-enables it for the
+            # final chunk, while pipeline schedules defer it across microbatches.
             if fsdp_enabled:
                 lm_head.set_reshard_after_forward(False)
                 lm_head.set_reshard_after_backward(False)
@@ -674,7 +685,7 @@ class ChunkedLossWrapper(BaseLoss):
 
             last_idx = len(h_chunks) - 1
             for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-                if fsdp_enabled and i == last_idx:
+                if fsdp_enabled and self.sync_gradients_on_last_chunk and i == last_idx:
                     lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
                         True, recurse=False
                     )
@@ -699,7 +710,7 @@ class ChunkedLossWrapper(BaseLoss):
                         grad_accumulator.add(h_chunk.grad)
                         h_chunk.grad = None
 
-            if fsdp_enabled:
+            if fsdp_enabled and self.reshard_after_loss:
                 lm_head.set_reshard_after_forward(True)
                 lm_head.set_reshard_after_backward(True)
                 lm_head.set_requires_gradient_sync(True, recurse=False)
