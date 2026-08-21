@@ -11,6 +11,7 @@ from torchtitan.trainer import Trainer
 
 __all__ = [
     "OverrideDefinitions",
+    "validate_fake_pg_compatibility",
 ]
 
 
@@ -35,6 +36,12 @@ class OverrideDefinitions:
     disabled: bool = False
     skip_rocm_test: bool = False
     timeout: int | None = None
+    golden_numerics_path: str | None = None
+    """Run through loss_compare.py using this mode-specific golden path."""
+    fake_pg_numerics_config: Callable[[], Trainer.Config] | None = None
+    """Optional stable topology used only for Fake-PG numerical comparison."""
+    use_real_pg: bool = False
+    """Whether the test requires communication semantics from a real PG."""
     configs: Sequence[Callable[[], Trainer.Config]] = ()
     """One configuration per run, selected with ``--module``/``--config``.
 
@@ -52,6 +59,40 @@ class OverrideDefinitions:
                 f"{self.test_name}: {len(self.configs)} configs but "
                 f"{len(self.override_args)} override_args; they pair up per run."
             )
+        if self.fake_pg_numerics_config is not None and (
+            self.golden_numerics_path is None or len(self.configs) != 1
+        ):
+            raise ValueError(
+                "fake_pg_numerics_config requires one config and "
+                "golden_numerics_path"
+            )
 
     def __repr__(self):
         return self.test_descr
+
+
+def validate_fake_pg_compatibility(
+    test: OverrideDefinitions, config: Trainer.Config
+) -> None:
+    """Require explicit real-PG marking for incompatible configurations."""
+    incompatibilities = []
+
+    if config.checkpoint.enable or config.checkpoint.create_seed_checkpoint:
+        incompatibilities.append("checkpointing")
+    if config.parallelism.pipeline_parallel_degree > 1:
+        incompatibilities.append("pipeline parallelism")
+    if config.comm.mode not in ("default", "fake_backend"):
+        incompatibilities.append(f"comm.mode={config.comm.mode}")
+
+    # TODO: FSDP + selective AC backward recompute has a shard/storage shape
+    # mismatch with Fake PG under spmd_types. Keep this test on a real PG until
+    # that interaction is fixed. Issue #4149.
+    if "varlen_attn+per_op_sac" in test.test_name:
+        incompatibilities.append("FSDP + selective AC under spmd_types")
+
+    if incompatibilities and not test.use_real_pg:
+        reasons = ", ".join(dict.fromkeys(incompatibilities))
+        raise ValueError(
+            f"Integration test '{test.test_name}' is incompatible with Fake PG "
+            f"because it uses {reasons}; set use_real_pg=True explicitly"
+        )
