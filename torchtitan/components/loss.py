@@ -19,7 +19,11 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
-from torchtitan.distributed.spmd_types import get_mesh_pg, spmd_mesh_size
+from torchtitan.distributed.spmd_types import (
+    current_spmd_mesh,
+    get_mesh_pg,
+    spmd_mesh_size,
+)
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.embedding import get_tp_rank
 from torchtitan.tools.logging import logger
@@ -41,24 +45,24 @@ def cross_entropy_loss(
         assert get_spmd_backend() == "partial_dtensor"
         if pred.placements == (Shard(pred.ndim - 1),):
             return _LossParallelCrossEntropy.apply(
-                pred.to_local().flatten(0, 1).float(),
-                labels.flatten(0, 1),
+                pred.to_local().flatten(0, -2).float(),
+                labels.flatten(),
                 pred.device_mesh.get_group("tp"),
                 pred.shape[-1],
                 "sum",
             )
     elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
         return _LossParallelCrossEntropy.apply(
-            pred.flatten(0, 1).float(),
-            labels.flatten(0, 1),
+            pred.flatten(0, -2).float(),
+            labels.flatten(),
             get_mesh_pg("tp"),
             global_vocab_size,
             "sum",
         )
 
     return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(),
-        labels.flatten(0, 1),
+        pred.flatten(0, -2).float(),
+        labels.flatten(),
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )
@@ -255,12 +259,14 @@ class BaseLoss(ABC, Configurable):
         """Return the scaled loss and any metrics computed by the loss."""
         del kwargs
         loss = self.fn(pred, labels)
-        if get_spmd_backend() == "spmd_types":  # loss: V->P, annotate global_valid_tokens
+        # loss: V->P, annotate global_valid_tokens
+        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            spmd.assert_type(
-                global_valid_tokens,
-                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-            )
+            if global_valid_tokens is not None:
+                spmd.assert_type(
+                    global_valid_tokens,
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+                )
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss, {}
@@ -288,12 +294,14 @@ class CrossEntropyLoss(BaseLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
-        if get_spmd_backend() == "spmd_types":  # loss: V->P, annotate global_valid_tokens
+        # loss: V->P, annotate global_valid_tokens
+        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            spmd.assert_type(
-                global_valid_tokens,
-                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-            )
+            if global_valid_tokens is not None:
+                spmd.assert_type(
+                    global_valid_tokens,
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+                )
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss, {}
