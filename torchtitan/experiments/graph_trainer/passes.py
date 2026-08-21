@@ -31,6 +31,8 @@ from collections.abc import Callable
 
 import torch
 
+from torchtitan.experiments.graph_trainer.coda_passes import get_coda_pattern_passes
+
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
@@ -336,6 +338,8 @@ def compile_time_passes(
 
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    passes.extend(get_coda_pattern_passes(config.compile.coda_patterns))
 
     if not include_inductor:
         return passes

@@ -134,6 +134,13 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
 
+    coda_patterns: list[str] = field(default_factory=list)
+    """CODA fusion patterns to apply after distributed scheduling.
+
+    Each entry enables one independently logged pass for graph-dump and
+    performance ablation. Supported entries are defined in ``coda_passes``.
+    """
+
     cpu_offload_prefetch_n_layers: int = 1
     """Prefetch reloads this many layers ahead in the backward graph
     to overlap H2D transfers with compute."""
