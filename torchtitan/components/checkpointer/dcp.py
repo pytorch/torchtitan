@@ -159,6 +159,9 @@ class CheckpointManager(BaseCheckpointManager):
 
         # Loading & Saving Policy
         self.load_only = config.load_only
+        self.eval_freq = config.eval_freq
+        self.keep_eval_checkpoints = config.keep_eval_checkpoints
+        self._eval_checkpoint_callback = None
         self.exclude_from_loading = config.exclude_from_loading
         self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
@@ -412,6 +415,9 @@ class CheckpointManager(BaseCheckpointManager):
 
         if last_step:
             self._save_last_step(curr_step)
+            self._track_save_completion(
+                curr_step, self._create_checkpoint_id(curr_step)
+            )
             logger.info(
                 f"Last step checkpoint completed in {time.monotonic() - begin:.2f}s"
             )
@@ -463,7 +469,7 @@ class CheckpointManager(BaseCheckpointManager):
                 enable_garbage_collection=True,
             )
 
-        self._purge_stale_checkpoints()
+        self._track_save_completion(curr_step, checkpoint_id)
 
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
@@ -640,6 +646,11 @@ class CheckpointManager(BaseCheckpointManager):
         self.save_future.result()
         self.save_future = None
 
+    def _complete_pending_save(self) -> None:
+        if getattr(self, "_pending_save", None) is not None:
+            self._purge_stale_checkpoints()
+        super()._complete_pending_save()
+
     def _find_load_step(self, folder: str = "") -> int:
         """Identify the highest available checkpoint step in the specified directory.
 
@@ -771,11 +782,13 @@ class CheckpointManager(BaseCheckpointManager):
             states = self.states[MODEL].state_dict()
 
             states = {
-                k: v.to(self.export_dtype)
-                if isinstance(v, torch.Tensor)
-                and v.is_floating_point()
-                and v.dtype != self.export_dtype
-                else v
+                k: (
+                    v.to(self.export_dtype)
+                    if isinstance(v, torch.Tensor)
+                    and v.is_floating_point()
+                    and v.dtype != self.export_dtype
+                    else v
+                )
                 for k, v in states.items()
             }
             logger.info(
@@ -810,6 +823,9 @@ class CheckpointManager(BaseCheckpointManager):
         if curr_step % self.interval == 0:
             return True
 
+        if self._is_eval_step(curr_step):
+            return True
+
         return False
 
     def _should_purge(self) -> bool:
@@ -839,6 +855,13 @@ class CheckpointManager(BaseCheckpointManager):
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 
-            for _, path in to_delete:
+            for step, path in to_delete:
+                if self.keep_eval_checkpoints and self._is_eval_step(step):
+                    logger.info(
+                        "Checkpointer is preserving eval checkpoint %s outside "
+                        "keep_latest_k.",
+                        path,
+                    )
+                    continue
                 assert self.purge_thread is not None
                 self.purge_queue.put(path)

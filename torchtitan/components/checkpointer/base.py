@@ -28,6 +28,7 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+EvalCheckpointCallback = Callable[[int, str], None]
 
 
 def purge_thread(
@@ -153,7 +154,12 @@ class BaseCheckpointManager(Configurable, ABC):
     """
 
     enable: bool
+    load_only: bool
     save_future: Future | None
+    eval_freq: int
+    keep_eval_checkpoints: bool
+    _eval_checkpoint_callback: EvalCheckpointCallback | None
+    _pending_save: tuple[int, str] | None
 
     # A disabled manager returns early from ``__init__`` without setting up any
     # state, so none of its attributes exist. The public entry points below own
@@ -161,6 +167,37 @@ class BaseCheckpointManager(Configurable, ABC):
     # ``_``-prefixed hooks only when enabled. Subclasses override the hooks, not
     # these methods: overriding a public method here would silently bypass the
     # guard and run against uninitialized state.
+
+    def register_eval_checkpoint_callback(
+        self, callback: EvalCheckpointCallback
+    ) -> None:
+        """Register a callback invoked after an eval checkpoint is persisted."""
+        self._eval_checkpoint_callback = callback
+
+    def _is_eval_step(self, step: int) -> bool:
+        """Whether async evaluation requested a checkpoint for this step."""
+        return (
+            getattr(self, "_eval_checkpoint_callback", None) is not None
+            and step % self.eval_freq == 0
+        )
+
+    def _track_save_completion(self, step: int, checkpoint_id: str) -> None:
+        """Track a save and notify immediately when it completed synchronously."""
+        assert getattr(self, "_pending_save", None) is None
+        self._pending_save = (step, checkpoint_id)
+        if self.save_future is None:
+            self._complete_pending_save()
+
+    def _complete_pending_save(self) -> None:
+        """Notify async evaluation when its pending checkpoint is persisted."""
+        pending_save = getattr(self, "_pending_save", None)
+        if pending_save is None:
+            return
+        self._pending_save = None
+        if self._is_eval_step(pending_save[0]):
+            callback = self._eval_checkpoint_callback
+            assert callback is not None
+            callback(*pending_save)
 
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
@@ -172,6 +209,8 @@ class BaseCheckpointManager(Configurable, ABC):
         """Persist state for ``curr_step``."""
         if not self.enable:
             return False
+        if self.save_future is not None and self.save_future.done():
+            self.maybe_wait_for_saving()
         return self._save(curr_step, last_step)
 
     def maybe_wait_for_staging(self) -> None:
@@ -187,6 +226,7 @@ class BaseCheckpointManager(Configurable, ABC):
         # raised before assigning ``enable``.
         if not getattr(self, "enable", False):
             return
+        self.maybe_wait_for_saving()
         self._close()
 
     def maybe_wait_for_saving(self) -> None:
@@ -198,6 +238,7 @@ class BaseCheckpointManager(Configurable, ABC):
         if not self.enable or self.save_future is None:
             return
         self._wait_for_saving()
+        self._complete_pending_save()
 
     @abstractmethod
     def _wait_for_saving(self) -> None:
@@ -231,6 +272,13 @@ class BaseCheckpointManager(Configurable, ABC):
 
         interval: int = 500
         """Checkpointing interval in steps."""
+
+        eval_freq: int = 100
+        """Checkpointing interval in steps for async evaluation."""
+
+        keep_eval_checkpoints: bool = True
+        """Whether async evaluation checkpoints are exempt from
+        keep_latest_k cleanup."""
 
         initial_load_path: str | None = None
         """Optional checkpoint path used when the output checkpoint folder is empty."""
@@ -277,6 +325,10 @@ class BaseCheckpointManager(Configurable, ABC):
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:
                 raise ValueError("Checkpoint interval needs to be at least 1 step.")
+            if self.eval_freq < 1:
+                raise ValueError(
+                    "Async eval checkpoint frequency needs to be at least 1 step."
+                )
             if self.keep_latest_k < 0:
                 raise ValueError("keep_latest_k cannot be negative.")
             if self.keep_latest_k == 1:
