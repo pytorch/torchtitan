@@ -24,19 +24,39 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 - NVIDIA B200 (SM100 or SM100a)
 - PyTorch nightly
-- TorchAO v0.14.0 or newer ([TorchAO Installation Guide](https://github.com/pytorch/ao#installation))
-
-Note: GB200 is also supported but requires building torchao from source (see installation guide above).
+- TorchAO 0.18.0 or later, with `nvidia-cutlass-dsl` and `apache-tvm-ffi`
 
 ### How MXFP8 Works
 
 MXFP8 differs from standard Float8 training in its scaling approach:
 
 - **Granular scaling factor**: Instead of using a single scale factor per tensor (tensorwise) or per row/column (rowwise), MXFP8 uses a more granular, block-based scaling with a default block size of 1x32 elements. Each block of 32 elements shares a common scale factor. The data dtype is `torch.float8_e4m3fn`, and the scale factor dtype is `torch.float8_e8mfnu`.
-- **Native hardware support**: On NVIDIA B200 (Blackwell) GPUs, MXFP8 GEMMs and Grouped GEMMs are accelerated using cuBLAS and CUTLASS kernels exposed via `torch._scaled_mm` and `torch._scaled_grouped_mm`, achieving up to 2x speedup over bfloat16 on common shapes.
-- **Dynamic quantization**: For every MXFP8 Linear or Grouped GEMM, activations and weights are dynamically quantized to MXFP8, then a MXFP8 GEMM/Grouped GEMM is performed, resulting in a net speedup.
+- **Native hardware support**: On NVIDIA B200 (Blackwell) GPUs, MXFP8 GEMMs and Grouped GEMMs are accelerated using cuBLAS and CUTLASS kernels exposed via `torch.nn.functional.scaled_mm` and `torch._scaled_grouped_mm`, achieving up to 2x speedup over bfloat16 on common shapes.
+- **Dynamic activation quantization**: Linear and Grouped GEMM activations use
+  standard 1x32 MXFP8 scaling and are dynamically quantized for each operation.
+  Forward scales are computed independently within each token row, so scale
+  calculation cannot carry information between causal positions. Linear WGRAD
+  can either retain the high-precision input and quantize it columnwise in
+  backward, or retain a columnwise MXFP8 operands produced in forward.
+  Neither choice affects causal forward outputs.
+- **FSDP-managed dense weights**: After FSDP all-gathers a dense Linear weight
+  in BF16, TorchTitan's post-all-gather hook quantizes it with square 32x32
+  scale tiles to create FPROP and DGRAD operands. FSDP owns those
+  buffers, so their lifetime follows the normal reshard-after-forward and
+  reshard-after-backward policies. The temporary BF16 all-gather output is
+  released after the independent MXFP8 operands is constructed.
+
+Dense MXFP8 linear layers combine 32x32 square scale tiles for weights with
+1x32 tiles for activations. Square weight tiles still introduce quantization
+error, but they are orientation-symmetric: FPROP and DGRAD use the same
+quantized values and share one cached qdata allocation. This avoids choosing
+two independently quantized weight operands for the two GEMM
+orientations.
 
 ### MXFP8 for Linear Modules
+
+Dense weights always use square 32x32 scale tiles, and both local weight
+dimensions must be divisible by 32. Activations use standard 1D scaling.
 
 #### Usage
 
@@ -52,7 +72,6 @@ model_spec = model_registry(
     "flux-schnell",
     quantization=[
         MXFP8LinearConverter.Config(
-            recipe_name="mxfp8_rceil",
             fqns=["double_blocks", "single_blocks"],
             model_compile_enabled=True,
         ),
@@ -60,14 +79,8 @@ model_spec = model_registry(
 )
 ```
 
-**Configuration Options:**
-
-* `recipe_name`: MXFP8 recipe name. Options:
-  * `"mxfp8_rceil"` (default): MXFP8 dynamic quantization with RCEIL rounding mode when computing the e8m0 scale factors.
-  * `"mxfp8_cublas"`: Use the cuBLAS-based MXFP8 recipe for best performance on B200 GPUs.
-  * `"mxfp8_cublas_rceil"`: Uses round-ceiling mode for scale calculation.
-* `fqns` (optional): List of fully qualified names to filter which Linear modules to convert. Only `Linear.Config` entries whose FQN contains a match are swapped to `MXFP8Linear.Config`. If empty, all Linear modules are converted.
-* `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model (required for competitive performance).
+The converter and linear config field docstrings describe the memory trade-off
+between saving BF16 and MXFP8 input activations.
 
 **Hardware Requirements:**
 
@@ -180,7 +193,7 @@ Single-node training on 8x power limited B200 GPUs, batch size 1, sequence lengt
 
 Training runs on 64 node GB200 cluster with TorchTitan Llama4 Scout show that MXFP8 MoE training has equivalent convergence to bfloat16 training baseline. In fact, after 3,000 steps it finishes with slightly *lower* loss than bfloat16! This is consistent with our scaling experiments with [MXFP8 training for dense models](https://pytorch.org/blog/accelerating-2k-scale-pre-training-up-to-1-28x-with-torchao-mxfp8-and-torchtitan-on-crusoe-b200-cluster/).
 
-![MXFP8 vs BF16 Training Loss Curves](../../../assets/images/mxfp8_with_loss.png)
+![MXFP8 vs BF16 Training Loss Curves](../../../../assets/images/mxfp8_with_loss.png)
 
 *Training loss curves over 3,000 steps showing MXFP8 achieves equivalent convergence to bfloat16 baseline.*
 
@@ -210,7 +223,6 @@ All distributed communication for MXFP8 training is currently done in high preci
 ### Known Limitations
 - Currently in prototype stage - no BC guarantees.
 - Requires torch nightly - important bug fixes have landed since 2.9.1
-- For GB200s, requires building torchao from source
 
 ### Additional Resources
 
