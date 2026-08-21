@@ -32,7 +32,6 @@ from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
-
 __all__ = ["Decoder", "TransformerBlock"]
 
 
@@ -197,6 +196,15 @@ class Decoder(BaseModel):
                     raise ValueError(
                         f"tensor_parallel_degree ({tp}) must divide "
                         f"n_kv_heads ({n_kv_heads})."
+                    )
+
+            ep = parallelism.expert_parallel_degree
+            for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
+                assert isinstance(moe, MoE.Config)
+                if moe.num_experts % ep != 0:
+                    raise ValueError(
+                        f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
+                        f"divisible by expert_parallel_degree ({ep})."
                     )
 
             update_ep_token_dispatcher_config(self, config)
