@@ -691,7 +691,7 @@ def _prepare_redistributed(
         prepared_views = tuple(
             _tensor_region_view(prepared, span.region).reshape(-1) for span in spans
         )
-        _foreach_copy_or_fallback_(packed_views, prepared_views)
+        _copy_region_views_(packed_views, prepared_views)
 
 
 def _compute_redistributed(
@@ -729,7 +729,7 @@ def _compute_redistributed(
             ].view(span.region.shape)
             for span in received_spans
         )
-        _foreach_copy_or_fallback_(compute_views, received_views)
+        _copy_region_views_(compute_views, received_views)
 
         compute(item, compute_tensor)
 
@@ -744,7 +744,7 @@ def _compute_redistributed(
             _tensor_region_view(compute_tensor, span.region).reshape(-1)
             for span in output_spans
         )
-        _foreach_copy_or_fallback_(packed_views, compute_output_views)
+        _copy_region_views_(packed_views, compute_output_views)
 
 
 def _finalize_redistributed(
@@ -777,39 +777,32 @@ def _finalize_redistributed(
             ].view(span.region.shape)
             for span in spans
         )
-        _foreach_copy_or_fallback_(update_views, packed_views)
+        _copy_region_views_(update_views, packed_views)
         finalize(item, update)
 
 
-def _foreach_copy_or_fallback_(
+def _copy_region_views_(
     destinations: tuple[Tensor, ...],
     sources: tuple[Tensor, ...],
 ) -> None:
-    """Copy aligned tensor views with one foreach launch when supported."""
+    """Copy aligned region views with a single foreach launch.
+
+    Each destination is paired with a source built from the same
+    ``_TensorRegion``, so the two always have equal shape.
+    ``torch._foreach_copy_`` requires that -- unlike ``Tensor.copy_`` it does
+    not broadcast -- and raises if it is ever violated. Differing dtype or
+    device and non-contiguous views it handles correctly on its own, so none of
+    those need guarding here.
+    """
     if len(destinations) != len(sources):
         raise ValueError("destinations and sources must have equal length")
     if not destinations:
         return
     if len(destinations) == 1:
+        # Skip the foreach setup for the common single-span parameter.
         destinations[0].copy_(sources[0])
         return
-
-    reference_device = destinations[0].device
-    reference_dtype = destinations[0].dtype
-    foreach_compatible = all(
-        destination.layout is torch.strided
-        and source.layout is torch.strided
-        and destination.shape == source.shape
-        and destination.device == source.device == reference_device
-        and destination.dtype == source.dtype == reference_dtype
-        for destination, source in zip(destinations, sources, strict=True)
-    )
-    if foreach_compatible:
-        torch._foreach_copy_(destinations, sources)
-        return
-
-    for destination, source in zip(destinations, sources, strict=True):
-        destination.copy_(source)
+    torch._foreach_copy_(destinations, sources)
 
 
 def _tensor_region_view(tensor: Tensor, region: _TensorRegion) -> Tensor:
