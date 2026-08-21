@@ -1,0 +1,325 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import pytest
+import torch
+from torch import nn
+from torch.utils.checkpoint import checkpoint
+
+
+pytest.importorskip("torchao")
+pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
+
+import torchtitan.components.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
+from torchtitan.components.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
+from torchtitan.components.quantization.mxfp8.quantize import (  # noqa: E402
+    get_mxfp8_weight_quantization_strategy,
+    MXFP8WeightOperands,
+    MXFP8WeightQuantizationStrategy,
+    quantize_mxfp8_weight,
+    register_mxfp8_weight_quantization_strategy,
+)
+from torchtitan.components.quantization.mxfp8.tensor import (  # noqa: E402
+    MXFP8FSDPComputeWeight,
+    MXFP8FSDPWeight,
+)
+
+
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+    pytest.mark.skipif(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() < (10, 0),
+        reason="MXFP8 requires SM100 or later",
+    ),
+]
+
+
+def _make_mxfp8_linear(
+    in_features: int = 128,
+    out_features: int = 96,
+    *,
+    bias: bool = True,
+    weight_quantization: str = "32x32",
+    input_activation_save_format: str = "bf16",
+) -> MXFP8Linear:
+    return (
+        MXFP8Linear.Config(
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            weight_quantization=weight_quantization,
+            input_activation_save_format=input_activation_save_format,
+        )
+        .build()
+        .cuda()
+        .bfloat16()
+    )
+
+
+@pytest.mark.parametrize("input_activation_save_format", ["bf16", "mxfp8"])
+def test_mxfp8_linear_saves_selected_input_activation(
+    input_activation_save_format,
+):
+    linear = _make_mxfp8_linear(
+        input_activation_save_format=input_activation_save_format,
+    )
+    x = torch.randn(
+        37,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    saved_tensors = []
+
+    def pack_hook(tensor):
+        saved_tensors.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack_hook, lambda tensor: tensor):
+        output = linear(x)
+        output.backward(torch.randn_like(output))
+
+    assert output.shape == (37, linear.out_features)
+    if input_activation_save_format == "bf16":
+        assert len(saved_tensors) == 3
+        assert saved_tensors[0].dtype == torch.bfloat16
+        assert saved_tensors[0].untyped_storage()._cdata == x.untyped_storage()._cdata
+        assert sum(tensor.dtype == torch.float8_e4m3fn for tensor in saved_tensors) == 1
+        assert (
+            sum(tensor.dtype == torch.float8_e8m0fnu for tensor in saved_tensors) == 1
+        )
+    else:
+        assert len(saved_tensors) == 4
+        assert all(tensor.dtype != torch.bfloat16 for tensor in saved_tensors)
+        assert sum(tensor.dtype == torch.float8_e4m3fn for tensor in saved_tensors) == 2
+        assert (
+            sum(tensor.dtype == torch.float8_e8m0fnu for tensor in saved_tensors) == 2
+        )
+    assert all(type(tensor) is torch.Tensor for tensor in saved_tensors)
+    assert isinstance(linear.weight, MXFP8FSDPWeight)
+
+
+@pytest.mark.parametrize(
+    ("input_activation_save_format", "expected_quantize_calls"),
+    [
+        ("bf16", [(True, False), (True, True), (False, True)]),
+        ("mxfp8", [(True, True), (True, True)]),
+    ],
+)
+def test_mxfp8_input_activation_save_format_controls_quantization_work(
+    monkeypatch,
+    input_activation_save_format,
+    expected_quantize_calls,
+):
+    original_quantize = mxfp8_linear.mxfp8_quantize_cuda
+    quantize_calls = []
+
+    def record_quantize(*args, **kwargs):
+        quantize_calls.append((kwargs["rowwise"], kwargs["colwise"]))
+        return original_quantize(*args, **kwargs)
+
+    monkeypatch.setattr(mxfp8_linear, "mxfp8_quantize_cuda", record_quantize)
+    linear = _make_mxfp8_linear(
+        bias=False,
+        input_activation_save_format=input_activation_save_format,
+    )
+    x = torch.randn(
+        64,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    linear(x).sum().backward()
+
+    assert quantize_calls == expected_quantize_calls
+
+
+def test_mxfp8_square_weight_dgrad_qdata_is_transpose_view():
+    weight_NK = torch.randn(
+        96,
+        128,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    operands = quantize_mxfp8_weight(weight_NK, "32x32")
+    compute_weight = MXFP8FSDPComputeWeight(
+        operands,
+        weight_quantization="32x32",
+        logical_shape=weight_NK.shape,
+        logical_stride=weight_NK.stride(),
+        logical_storage_offset=int(weight_NK.storage_offset()),
+        orig_dtype=weight_NK.dtype,
+    )
+
+    q_weight_dgrad_NK = compute_weight.q_weight_dgrad_NK
+
+    assert len(compute_weight.fsdp_managed_tensors()) == 3
+    assert q_weight_dgrad_NK.data_ptr() == operands.q_weight_fprop_KN.data_ptr()
+    assert torch.equal(q_weight_dgrad_NK, operands.q_weight_fprop_KN.t())
+
+
+def test_mxfp8_linear_supports_plain_bf16_weight():
+    linear = _make_mxfp8_linear()
+    linear.weight = nn.Parameter(linear.weight._data.detach().clone())
+    x = torch.randn(
+        32,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    output = linear(x)
+    output.sum().backward()
+
+    assert output.shape == (32, linear.out_features)
+    assert x.grad is not None
+    assert linear.weight.grad is not None
+
+
+@pytest.mark.parametrize("input_activation_save_format", ["bf16", "mxfp8"])
+def test_mxfp8_linear_compiles_forward_and_backward(input_activation_save_format):
+    linear = _make_mxfp8_linear(
+        bias=False,
+        input_activation_save_format=input_activation_save_format,
+    )
+    compiled_linear = torch.compile(linear, fullgraph=True)
+    x = torch.randn(
+        64,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    output = compiled_linear(x)
+    output.backward(torch.randn_like(output))
+
+    assert output.shape == (64, linear.out_features)
+    assert x.grad is not None
+    assert linear.weight.grad is not None
+    assert type(linear.weight.grad) is torch.Tensor
+
+
+@pytest.mark.parametrize("input_activation_save_format", ["bf16", "mxfp8"])
+def test_mxfp8_linear_nonreentrant_checkpoint(input_activation_save_format):
+    linear = _make_mxfp8_linear(
+        bias=False,
+        input_activation_save_format=input_activation_save_format,
+    )
+    x = torch.randn(
+        64,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    output = checkpoint(linear, x, use_reentrant=False)
+    output.backward(torch.randn_like(output))
+
+    assert x.grad is not None
+    assert linear.weight.grad is not None
+
+
+def test_mxfp8_input_activation_save_formats_match():
+    bf16 = _make_mxfp8_linear(
+        bias=False,
+        input_activation_save_format="bf16",
+    )
+    mxfp8 = _make_mxfp8_linear(
+        bias=False,
+        input_activation_save_format="mxfp8",
+    )
+    mxfp8.load_state_dict(bf16.state_dict())
+
+    x_hp = torch.randn(
+        64,
+        bf16.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    x_mxfp8 = x_hp.detach().clone().requires_grad_()
+    grad_output = torch.randn(
+        64,
+        bf16.out_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+
+    output_hp = bf16(x_hp)
+    output_mxfp8 = mxfp8(x_mxfp8)
+    output_hp.backward(grad_output)
+    output_mxfp8.backward(grad_output)
+
+    torch.testing.assert_close(output_hp, output_mxfp8, rtol=0, atol=0)
+    torch.testing.assert_close(x_hp.grad, x_mxfp8.grad, rtol=0, atol=0)
+    torch.testing.assert_close(
+        bf16.weight.grad,
+        mxfp8.weight.grad,
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_mxfp8_weight_quantization_strategy_is_pluggable():
+    square = get_mxfp8_weight_quantization_strategy("32x32")
+
+    class TestWeightQuantization(MXFP8WeightQuantizationStrategy):
+        name = "test_independent"
+
+        def quantize(self, weight_NK):
+            operands = square.quantize(weight_NK)
+            return MXFP8WeightOperands(
+                q_weight_fprop_KN=operands.q_weight_fprop_KN,
+                s_weight_fprop_blocked=operands.s_weight_fprop_blocked,
+                q_weight_dgrad_NK=operands.q_weight_dgrad_NK.clone(),
+                s_weight_dgrad_blocked=operands.s_weight_dgrad_blocked,
+            )
+
+    register_mxfp8_weight_quantization_strategy(
+        TestWeightQuantization(),
+        replace=True,
+    )
+    linear = _make_mxfp8_linear(weight_quantization="test_independent")
+    operands = quantize_mxfp8_weight(linear.weight._data, "test_independent")
+    compute_weight = MXFP8FSDPComputeWeight(
+        operands,
+        weight_quantization="test_independent",
+        logical_shape=linear.weight.shape,
+        logical_stride=linear.weight.stride(),
+        logical_storage_offset=int(linear.weight.storage_offset()),
+        orig_dtype=linear.weight.dtype,
+    )
+    inner_tensor_names, metadata = compute_weight.__tensor_flatten__()
+    rebuilt_compute_weight = MXFP8FSDPComputeWeight.__tensor_unflatten__(
+        {name: getattr(compute_weight, name) for name in inner_tensor_names},
+        metadata,
+        compute_weight.shape,
+        compute_weight.stride(),
+    )
+    x = torch.randn(
+        32,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+    linear(x).sum().backward()
+
+    assert len(compute_weight.fsdp_managed_tensors()) == 4
+    assert len(rebuilt_compute_weight.fsdp_managed_tensors()) == 4
+    assert (
+        compute_weight.q_weight_dgrad_NK.data_ptr()
+        != compute_weight.q_weight_fprop_KN.data_ptr()
+    )
+    assert linear.weight.weight_quantization == "test_independent"
+    assert x.grad is not None

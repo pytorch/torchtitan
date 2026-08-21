@@ -31,6 +31,27 @@ from . import model_registry
 from .model import Llama3Model
 
 
+def llama3_mxfp8_linear_converter_config(
+    *, model_compile_enabled: bool
+) -> MXFP8LinearConverter.Config:
+    """Build the MXFP8 policy shared by eager and GraphTrainer configs.
+
+    The fused QKV and FFN down projections have unique inputs, so their
+    columnwise MXFP8 representations replace BF16 storage. Other projections
+    retain the conservative BF16 save format because their inputs are shared or
+    retained elsewhere. This selection is based on activation ownership, not
+    the activation-checkpointing policy. Checkpointing changes when the selected
+    representation is recreated and how long it remains live.
+    """
+    return MXFP8LinearConverter.Config(
+        model_compile_enabled=model_compile_enabled,
+        input_activation_save_format_by_fqn={
+            "attention.qkv_linear.wqkv": "mxfp8",
+            "feed_forward.w2": "mxfp8",
+        },
+    )
+
+
 def llama3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
     return Trainer.Config(
@@ -102,6 +123,18 @@ def llama3_debugmodel_float8() -> Trainer.Config:
         "debugmodel",
         converters=[
             Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_mxfp8() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.compile = CompileConfig(enable=True, components=["model"])
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
         ],
     )
     return config
@@ -248,7 +281,7 @@ def llama3_8b_mxfp8() -> Trainer.Config:
     config.model_spec = model_registry(
         "8B",
         converters=[
-            MXFP8LinearConverter.Config(model_compile_enabled=True),
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
         ],
     )
     return config

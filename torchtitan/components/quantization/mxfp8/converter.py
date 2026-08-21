@@ -11,40 +11,24 @@ from typing import Literal
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
-from .utils import swap_token_dispatcher
+from ..utils import swap_token_dispatcher
+
+WeightQuantization = Literal["32x32"]
+InputActivationSaveFormat = Literal["bf16", "mxfp8"]
+_WEIGHT_QUANTIZATION_STRATEGIES = ("32x32",)
+_INPUT_ACTIVATION_SAVE_FORMATS = ("bf16", "mxfp8")
+
+_mxfp8_linear_import_error: ImportError | None = None
 
 try:
-    from torchao.prototype.moe_training.mxfp8_linear import (
-        MXFP8Linear as TorchAOMXFP8Linear,
-    )
+    from .linear import MXFP8Linear
 
-    class MXFP8Linear(TorchAOMXFP8Linear, Module):
-        """Inherits from Module (not Linear) to satisfy the Module protocol
-        (init_states, _param_init) while avoiding MRO conflicts with
-        Linear.__init__. Config still inherits from Linear.Config for
-        field compatibility.
-        """
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(Linear.Config):
-            """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
-
-            pass
-
-        def __init__(self, config: Config):
-            TorchAOMXFP8Linear.__init__(
-                self,
-                config.in_features,
-                config.out_features,
-                bias=config.bias,
-            )
-
-except ImportError:
+except ImportError as import_error:
     MXFP8Linear = None
+    _mxfp8_linear_import_error = import_error
 
 
 class MXFP8LinearConverter(QuantizationConverter):
@@ -58,14 +42,53 @@ class MXFP8LinearConverter(QuantizationConverter):
         Only Linear.Config entries whose FQN contains a match are converted.
         If empty, all Linear modules are converted.
         """
+        weight_quantization: WeightQuantization = "32x32"
+        """Dense-weight quantization strategy.
+
+        ``"32x32"`` uses square scale tiles. The same quantized values can be
+        consumed by FPROP and DGRAD because the tiles are invariant under
+        transpose.
+        """
+        input_activation_save_format_by_fqn: dict[
+            str, InputActivationSaveFormat
+        ] = field(default_factory=dict)
+        """Input-activation format to save for selected Linear modules.
+
+        Keys are FQN substrings. ``"bf16"`` saves the original activation and
+        quantizes it columnwise during backward. ``"mxfp8"`` saves columnwise
+        qdata and scales produced during forward. Unmatched modules use
+        ``"bf16"`` to avoid retaining an additional quantized representation
+        when another operation may already keep the BF16 activation alive.
+        """
+
+        def __post_init__(self) -> None:
+            if self.weight_quantization not in _WEIGHT_QUANTIZATION_STRATEGIES:
+                raise ValueError(
+                    "MXFP8 weight_quantization must be one of "
+                    f"{_WEIGHT_QUANTIZATION_STRATEGIES}; got "
+                    f"{self.weight_quantization!r}."
+                )
+            for fqn, save_format in self.input_activation_save_format_by_fqn.items():
+                if not fqn:
+                    raise ValueError(
+                        "MXFP8 input_activation_save_format_by_fqn cannot contain "
+                        "an empty FQN selector."
+                    )
+                if save_format not in _INPUT_ACTIVATION_SAVE_FORMATS:
+                    raise ValueError(
+                        "MXFP8 input_activation_save_format_by_fqn values must be "
+                        f"one of {_INPUT_ACTIVATION_SAVE_FORMATS}; got "
+                        f"{save_format!r} for {fqn!r}."
+                    )
 
     def __init__(self, config: Config):
         self.config = config
 
         if MXFP8Linear is None:
             raise ImportError(
-                "torchao is not installed. Please install it to use MXFP8 linear layers."
-            )
+                "TorchAO with the MXFP8 32x32 swizzled cast kernels is required "
+                "for MXFP8 linear layers. Install TorchAO from source."
+            ) from _mxfp8_linear_import_error
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
@@ -79,22 +102,61 @@ class MXFP8LinearConverter(QuantizationConverter):
     def convert(self, model_config):
         assert MXFP8Linear is not None
         fqns = self.config.fqns
-        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
-            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                new_config = MXFP8Linear.Config(
-                    in_features=config.in_features,
-                    out_features=config.out_features,
-                    bias=config.bias,
-                    param_init=config.param_init,
-                )
-                if parent is None:
-                    model_config = new_config
-                elif isinstance(parent, list):
-                    parent[attr] = new_config
-                else:
-                    setattr(parent, attr, new_config)
+        targets = [
+            entry
+            for entry in model_config.traverse(Linear.Config)
+            if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
+        ]
 
-        logger.info("Converted Linear layers to MXFP8Linear")
+        save_format_by_fqn: dict[str, InputActivationSaveFormat] = {}
+        matched_selectors: set[str] = set()
+        save_formats = self.config.input_activation_save_format_by_fqn
+        for fqn, _config, _parent, _attr in targets:
+            matches = [selector for selector in save_formats if selector in fqn]
+            if len(matches) > 1:
+                raise ValueError(
+                    "MXFP8 input_activation_save_format_by_fqn contains multiple "
+                    f"selectors matching {fqn!r}: {matches}."
+                )
+            if matches:
+                selector = matches[0]
+                matched_selectors.add(selector)
+                save_format_by_fqn[fqn] = save_formats[selector]
+            else:
+                save_format_by_fqn[fqn] = "bf16"
+
+        unmatched_selectors = set(save_formats) - matched_selectors
+        if unmatched_selectors:
+            raise ValueError(
+                "MXFP8 input_activation_save_format_by_fqn selectors did not match "
+                f"any converted Linear.Config: {sorted(unmatched_selectors)}."
+            )
+
+        for fqn, config, parent, attr in targets:
+            new_config = MXFP8Linear.Config(
+                in_features=config.in_features,
+                out_features=config.out_features,
+                bias=config.bias,
+                param_init=config.param_init,
+                weight_quantization=self.config.weight_quantization,
+                input_activation_save_format=save_format_by_fqn[fqn],
+            )
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
+        num_bf16 = sum(
+            save_format == "bf16" for save_format in save_format_by_fqn.values()
+        )
+        num_mxfp8 = len(save_format_by_fqn) - num_bf16
+        logger.info(
+            "Converted Linear layers to MXFP8Linear with saved input activation "
+            f"formats: {num_bf16} bf16, {num_mxfp8} mxfp8"
+        )
+        logger.debug(f"MXFP8 input activation save format by FQN: {save_format_by_fqn}")
         return model_config
 
 
