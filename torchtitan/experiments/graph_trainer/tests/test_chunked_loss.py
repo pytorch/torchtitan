@@ -55,6 +55,20 @@ def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
 
 
 class TestChunkedLossWrapperWithParamGrads(TestCase):
+    def test_selected_logits_match_unchunked_lm_head(self):
+        torch.manual_seed(7)
+        batch_size, seq_len, dim, vocab_size = 2, 8, 16, 32
+        model, chunked_loss = _make_model_and_loss(dim, vocab_size, num_chunks=4)
+        hidden_states = torch.randn(batch_size, seq_len, dim)
+        selection_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
+        selection_mask[0, [1, 6]] = True
+        selection_mask[1, [0, 7]] = True
+
+        expected = model.output(hidden_states)[selection_mask]
+        actual = chunked_loss.compute_selected_logits(hidden_states, selection_mask)
+
+        self.assertEqual(actual, expected)
+
     def test_config_builds_param_grads_loss(self):
         loss = ChunkedLossWrapperWithParamGrads.Config(num_chunks=4).build()
         self.assertIsInstance(loss, ChunkedLossWrapperWithParamGrads)

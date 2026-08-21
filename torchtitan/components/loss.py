@@ -565,6 +565,83 @@ class ChunkedLossWrapper(BaseLoss):
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
 
+    def _chunk(self, tensor: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Split a sequence tensor into equal local chunks."""
+
+        def _chunk_local(local_tensor: torch.Tensor) -> tuple[torch.Tensor, ...]:
+            seq_len = local_tensor.shape[1]
+            torch._check(
+                seq_len % self.num_chunks == 0,
+                lambda: (
+                    "ChunkedLossWrapper sequence length must be divisible by num_chunks"
+                ),
+            )
+            chunk_len = seq_len // self.num_chunks
+            return tuple(
+                chunk.contiguous()
+                for chunk in torch.split(
+                    local_tensor, [chunk_len] * self.num_chunks, dim=1
+                )
+            )
+
+        if not isinstance(tensor, DTensor):
+            return _chunk_local(tensor)
+        placements = tensor.placements
+        wrapped = local_map(
+            _chunk_local,
+            out_placements=(placements,) * self.num_chunks,
+            in_placements=(placements,),
+            device_mesh=tensor.device_mesh,
+        )
+        return wrapped(tensor)
+
+    @torch.no_grad()
+    def compute_selected_logits(
+        self, pred: torch.Tensor, selection_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """Return full-vocabulary logits only for selected token positions.
+
+        The operation follows the same bounded-memory lm-head chunking and FSDP
+        lifecycle as training, making it suitable for exact offline KL artifacts.
+        """
+        from torch.distributed._composable.fsdp import FSDPModule
+
+        lm_head = self.lm_head
+        assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+        fsdp_enabled = isinstance(lm_head, FSDPModule)
+
+        with spmd.local():
+            hidden_chunks = self._chunk(pred)
+            mask_chunks = self._chunk(selection_mask)
+            selected_logits = []
+            selected_flat_indices = []
+            sequence_length = selection_mask.shape[1]
+            chunk_length = sequence_length // self.num_chunks
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(False)
+                with spmd.no_typecheck():
+                    lm_head.unshard()
+            try:
+                for chunk_index, (hidden_chunk, mask_chunk) in enumerate(
+                    zip(hidden_chunks, mask_chunks)
+                ):
+                    logits = lm_head(hidden_chunk)
+                    selected_logits.append(logits[mask_chunk])
+                    coordinates = mask_chunk.nonzero(as_tuple=False)
+                    selected_flat_indices.append(
+                        coordinates[:, 0] * sequence_length
+                        + chunk_index * chunk_length
+                        + coordinates[:, 1]
+                    )
+            finally:
+                if fsdp_enabled:
+                    lm_head.set_reshard_after_forward(True)
+                    lm_head.reshard()
+
+        logits = torch.cat(selected_logits, dim=0)
+        flat_indices = torch.cat(selected_flat_indices, dim=0)
+        return logits[flat_indices.argsort()]
+
     def __call__(
         self,
         pred: torch.Tensor,
@@ -603,38 +680,16 @@ class ChunkedLossWrapper(BaseLoss):
         # non-DTensor (eager) path we call ``_chunk_local`` directly.
         # Equal chunk sizes also match GradAccumulator's sequential slice
         # writes, which use one chunk length for each write offset.
-        def _chunk_local(t):
-            seq_len = t.shape[1]
-            torch._check(
-                seq_len % num_chunks == 0,
-                lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
-            )
-            chunk_len = seq_len // num_chunks
-            return tuple(
-                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=1)
-            )
-
-        def _chunk(t):
-            if not isinstance(t, DTensor):
-                return _chunk_local(t)
-            p = t.placements
-            wrapped = local_map(
-                _chunk_local,
-                out_placements=(p,) * num_chunks,
-                in_placements=(p,),
-                device_mesh=t.device_mesh,
-            )
-            return wrapped(t)
-
         with spmd.local():
             # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
             # accumulates ``.grad`` for ``GradAccumulator``.
             h_chunks = [
-                c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+                c.detach().requires_grad_(requires_grad)
+                for c in self._chunk(hidden_states)
             ]
-            label_chunks = list(_chunk(labels))
+            label_chunks = list(self._chunk(labels))
             input_chunks = {
-                key: _chunk(value) if isinstance(value, torch.Tensor) else value
+                key: self._chunk(value) if isinstance(value, torch.Tensor) else value
                 for key, value in loss_inputs.items()
             }
 

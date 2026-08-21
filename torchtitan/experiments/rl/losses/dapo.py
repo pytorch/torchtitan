@@ -41,13 +41,18 @@ def compute_logprob_comparison_metrics(
         effective_mask, logprob_diff, torch.zeros_like(logprob_diff)
     )
     denominator = max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
+    max_abs_diff = (
+        masked_diff.float().abs().max()
+        if masked_diff.numel()
+        else masked_diff.new_zeros((), dtype=torch.float32)
+    )
     return {
         f"{prefix}/sampled_kl_reference_to_policy/mean": -masked_diff.float().sum()
         / denominator,
         f"{prefix}/selected_logprob_diff/mean": masked_diff.float().sum() / denominator,
         f"{prefix}/selected_logprob_abs_diff/mean": masked_diff.float().abs().sum()
         / denominator,
-        f"{prefix}/selected_logprob_abs_diff/max": masked_diff.float().abs().max(),
+        f"{prefix}/selected_logprob_abs_diff/max": max_abs_diff,
         f"{prefix}/policy_logprob_nonfinite_frac/mean": (
             (~torch.isfinite(policy_logprobs) & effective_mask).float().sum()
             / denominator

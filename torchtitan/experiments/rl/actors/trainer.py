@@ -7,6 +7,7 @@
 import logging
 import os
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -93,6 +94,10 @@ class PolicyTrainer(Actor, Configurable):
         correctness comparisons. It is disabled by default because the extra
         forward pass changes performance measurements.
         """
+        enable_kl_artifact_logging: bool = False
+        """Save fixed-batch full-vocabulary logits before and after each step."""
+        kl_artifact_max_tokens_per_rank: int = 64
+        """Maximum exact-KL token positions saved by each trainer rank."""
 
     def __init__(
         self,
@@ -109,15 +114,21 @@ class PolicyTrainer(Actor, Configurable):
         logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         if not config.dump_folder:
             config.dump_folder = output_dir
+        actor_rank = current_rank().rank
         sl.init_structured_logger(
             source="rl_trainer",
             output_dir=output_dir,
-            rank=current_rank().rank,
+            rank=actor_rank,
             enable=config.debug.enable_structured_logging,
         )
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        self.actor_rank = actor_rank
+        self.output_dir = Path(output_dir)
+        self.model_name = model_spec.name
+        self.model_flavor = model_spec.flavor
+        self.hf_assets_path = hf_assets_path
         self.compile_config = compile_config
         self.loss_fn = config.loss.build()
         # TODO: add support to compile the loss.
@@ -488,6 +499,21 @@ class PolicyTrainer(Actor, Configurable):
         num_global_valid_tokens: int,
     ) -> dict[str, float]:
         """Evaluate the updated policy on the same fixed batch used for the step."""
+        metrics, _ = self._comparison_snapshot(
+            training_data=training_data,
+            num_global_valid_tokens=num_global_valid_tokens,
+            include_artifact=False,
+        )
+        return self._reduce_comparison_metrics(metrics)
+
+    def _comparison_snapshot(
+        self,
+        *,
+        training_data: list[TrainingMicrobatch],
+        num_global_valid_tokens: int,
+        include_artifact: bool,
+    ) -> tuple[dict[str, torch.Tensor], dict[str, Any] | None]:
+        """Evaluate the current policy and optionally materialize a KL artifact."""
         if len(self.model_parts) != 1:
             raise ValueError(
                 "PolicyTrainer expects exactly one model part for post-update metrics"
@@ -506,9 +532,9 @@ class PolicyTrainer(Actor, Configurable):
             pred = model(
                 token_ids, attention_masks=attention_masks, positions=positions
             )
-            # Reuse the configured loss path so ChunkedLossWrapper applies the
-            # model's lm_head in bounded-memory chunks. Its no-grad path emits
-            # the same log-prob metrics without running backward.
+            # Reuse the configured loss path for the all-token sampled-logprob
+            # metrics. Materializing full-vocabulary logits for every rollout
+            # token would make a production artifact tens of gigabytes.
             _, loss_metrics = self.loss_fn(
                 pred,
                 labels,
@@ -525,6 +551,69 @@ class PolicyTrainer(Actor, Configurable):
             for key, value in loss_metrics.items()
             if key.startswith(pre_update_prefix)
         }
+        artifact = None
+        if include_artifact:
+            effective_flat_indices = (
+                (loss_mask & torch.isfinite(generator_logprobs))
+                .flatten()
+                .nonzero(as_tuple=False)
+                .flatten()
+            )
+            max_tokens = self.config.kl_artifact_max_tokens_per_rank
+            if max_tokens <= 0:
+                raise ValueError(
+                    "kl_artifact_max_tokens_per_rank must be greater than zero"
+                )
+            if effective_flat_indices.numel() > max_tokens:
+                sample_offsets = (
+                    torch.linspace(
+                        0,
+                        effective_flat_indices.numel() - 1,
+                        steps=max_tokens,
+                        device=effective_flat_indices.device,
+                    )
+                    .round()
+                    .long()
+                )
+                selected_flat_indices = effective_flat_indices[sample_offsets]
+            else:
+                selected_flat_indices = effective_flat_indices
+            artifact_mask = torch.zeros_like(loss_mask, dtype=torch.bool).flatten()
+            artifact_mask[selected_flat_indices] = True
+            artifact_mask = artifact_mask.view_as(loss_mask)
+
+            with torch.no_grad(), self.train_context():
+                if isinstance(self.loss_fn, ChunkedLossWrapper):
+                    selected_logits = self.loss_fn.compute_selected_logits(
+                        pred, artifact_mask
+                    )
+                else:
+                    selected_logits = pred[artifact_mask]
+            artifact = {
+                "format_version": 1,
+                "framework": "torchtitan",
+                "trainer_rank": self.actor_rank,
+                "policy_version": self.policy_version,
+                "model_name": self.model_name,
+                "model_flavor": self.model_flavor,
+                "hf_assets_path": self.hf_assets_path,
+                "num_global_valid_tokens": num_global_valid_tokens,
+                "token_ids": local_batch.token_ids.cpu(),
+                "labels": local_batch.labels.cpu(),
+                "positions": local_batch.positions.cpu(),
+                "loss_mask": local_batch.loss_mask.cpu(),
+                "generator_logprobs": local_batch.generator_logprobs.float().cpu(),
+                "advantages": local_batch.advantages.float().cpu(),
+                "selection_strategy": "evenly_spaced_effective_tokens_per_rank",
+                "num_effective_tokens": effective_flat_indices.numel(),
+                "selected_flat_indices": selected_flat_indices.cpu(),
+                "selected_logits": selected_logits.float().cpu(),
+            }
+        return metrics, artifact
+
+    def _reduce_comparison_metrics(
+        self, metrics: dict[str, torch.Tensor]
+    ) -> dict[str, float]:
         sum_reduced_metrics = {
             key: value for key, value in metrics.items() if not key.endswith("/max")
         }
@@ -535,6 +624,41 @@ class PolicyTrainer(Actor, Configurable):
             sum_reduced_metrics=sum_reduced_metrics,
             max_reduced_metrics=max_reduced_metrics,
         )
+
+    @concurrent_endpoint
+    @sl.log_trace_span("capture_kl_artifact")
+    async def capture_kl_artifact(
+        self,
+        training_data: list[TrainingMicrobatch],
+        num_global_valid_tokens: int,
+        step: int,
+        microbatch_index: int,
+        phase: str,
+    ) -> dict[str, float]:
+        """Save full-vocabulary logits and their exact input batch for KL0/KL1."""
+        if phase not in {"kl0", "kl1"}:
+            raise ValueError(f"phase must be kl0 or kl1, got {phase!r}")
+        metrics, artifact = self._comparison_snapshot(
+            training_data=training_data,
+            num_global_valid_tokens=num_global_valid_tokens,
+            include_artifact=True,
+        )
+        assert artifact is not None
+        artifact.update(
+            {"step": step, "microbatch_index": microbatch_index, "phase": phase}
+        )
+        artifact_dir = self.output_dir / "kl_artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        path = artifact_dir / (
+            f"step_{step:06d}_microbatch_{microbatch_index:04d}_"
+            f"rank_{self.actor_rank:05d}_{phase}.pt"
+        )
+        temporary_path = path.with_suffix(".tmp")
+        torch.save(artifact, temporary_path)
+        os.replace(temporary_path, path)
+        logger.info("Saved %s artifact to %s", phase.upper(), path)
+
+        return self._reduce_comparison_metrics(metrics)
 
     @concurrent_endpoint
     @sl.log_trace_span("save_checkpoint")

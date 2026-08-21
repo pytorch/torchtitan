@@ -1126,6 +1126,22 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
+                if self.config.trainer.enable_kl_artifact_logging:
+                    with (
+                        sl.log_trace_span("capture_kl0_artifacts"),
+                        step_timer.record("timing/step/capture_kl0_artifacts"),
+                    ):
+                        for microbatch_index, microbatch in enumerate(
+                            packed.microbatches
+                        ):
+                            await self.trainer.capture_kl_artifact.call(
+                                microbatch,
+                                packed.num_global_valid_tokens,
+                                step,
+                                microbatch_index,
+                                "kl0",
+                            )
+
                 # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
                 #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optim.
@@ -1168,7 +1184,29 @@ class Controller(Configurable):
                 self._trainer_policy_version = optim_result.policy_version
 
                 post_update_metrics: dict[str, float] = {}
-                if self.config.trainer.enable_post_update_metrics:
+                if self.config.trainer.enable_kl_artifact_logging:
+                    with (
+                        sl.log_trace_span("capture_kl1_artifacts"),
+                        step_timer.record("timing/step/capture_kl1_artifacts"),
+                    ):
+                        post_update_microbatch_metrics = [
+                            self._get_rank_0_value(
+                                await self.trainer.capture_kl_artifact.call(
+                                    microbatch,
+                                    packed.num_global_valid_tokens,
+                                    step,
+                                    microbatch_index,
+                                    "kl1",
+                                )
+                            )
+                            for microbatch_index, microbatch in enumerate(
+                                packed.microbatches
+                            )
+                        ]
+                        post_update_metrics = combine_microbatch_metrics(
+                            post_update_microbatch_metrics
+                        )
+                elif self.config.trainer.enable_post_update_metrics:
                     with (
                         sl.log_trace_span("post_update_metrics"),
                         step_timer.record("timing/step/post_update_metrics"),
