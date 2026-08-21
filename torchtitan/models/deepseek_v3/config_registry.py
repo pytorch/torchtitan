@@ -109,6 +109,25 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_mxfp8_fused_swiglu() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    # Routed experts via the self-contained MXFP8 fused-SwiGLU override: one
+    # composite runs the whole expert MLP (both grouped GEMMs and the SwiGLU
+    # boundary) in MXFP8. The override swaps the token dispatcher for the
+    # padded variant its kernels require (128-row token groups), and that
+    # padded dispatch is only produced by the EP permute path, hence
+    # expert_parallel_degree=2. No quantization converter is needed: the
+    # composite quantizes every GEMM itself.
+    config.compile = CompileConfig(enable=True, components=["model"])
+    config.override.imports.append(
+        "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_grouped_experts"
+    )
+    config.parallelism = ParallelismConfig(
+        expert_parallel_degree=2,
+    )
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(
