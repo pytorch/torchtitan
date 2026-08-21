@@ -1,12 +1,10 @@
-name: 8 GPU Feature Tests (CUDA)
+name: 8 GPU Feature Tests (ROCm)
 
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    tags:
+      - ciflow/rocm/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:
@@ -32,7 +30,7 @@ jobs:
     if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      gpu-arch: cuda
+      gpu-arch: rocm
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
@@ -56,9 +54,8 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
-        # Log CUDA driver version for debugging.
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
-        echo "CUDA driver version: ${DRIVER_VERSION}"
+        # Log ROCm device info for debugging.
+        rocm-smi || true
 
         pip config --user set global.progress_bar off
 
@@ -73,20 +70,21 @@ jobs:
         # The torchcomms feature tests are currently disabled, so do not install
         # torchcomms in the main feature job. Its wheel pins torch exactly and
         # can force CI off the latest torch nightly.
-        # if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
-        #   python -m pip install --pre torchcomms --index-url ${{ matrix.index-url }}
-        # fi
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
+
+        HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+        if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+          export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
+        fi
+
+        export PYTORCH_ALLOC_CONF="expandable_segments:False"
 
         start=$(date +%s)
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
         end=$(date +%s)
         echo "pip install torchao took $((end - start)) seconds"
-
-        # Run the GPU-only DistMuon test that CPU unit CI skips.
-        python -m pytest tests/unit_tests/flex_shard/test_dist_muon.py \
-          --durations=20 -vv
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
@@ -99,9 +97,12 @@ jobs:
         export baseline_options="--parallelism.data_parallel_replicate_degree=1"
         export test_options="--parallelism.data_parallel_replicate_degree=4"
 
-        # Set architecture-specific parameters
-        LOSS_FILE="tests/assets/losses/llama3_cuda.txt"
-        STEPS=1
+        # The loss results of FSDP and HSDP start to diverge after 5th
+        # step when running with ROCm, we also need to adjust this.
+        # But this is more an unknown issue that AMD people may want to
+        # figure out the root cause or confirm that this is an expected
+        # behavior.
+        LOSS_FILE="tests/assets/losses/llama3_rocm_mi350x.txt"
 
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --export-result="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs/result.txt" --steps=100
 
@@ -113,20 +114,20 @@ jobs:
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
+        # Skipped on ROCm 7.14: exploding gradients in Qwen3 MoE TP+EP training
+        # (https://github.com/pytorch/pytorch/issues/194004). Remove skip when
+        # pytorch has ROCm 7.15.
         # MoE loss comparison: verify Qwen3 MoE FSDP+TP+EP deterministic losses match reference
-        MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_cuda.txt"
-
-        echo "Checking Qwen3 MoE FSDP+TP+EP loss parity against reference"
-        # qwen3_moe_debug uses EP=1, where CUDA graphs are supported. This test
-        # overrides EP to 4 without changing the AllToAll token dispatcher,
-        # whose CPU synchronization is incompatible with CUDA graph capture.
-        python3 scripts/loss_compare.py . . \
-          --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
-          --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
-          --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
-          --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
-          --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
-        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+        # MOE_LOSS_FILE="tests/assets/losses/qwen3_moe_rocm_mi350x.txt"
+        #
+        # echo "Checking Qwen3 MoE FSDP+TP+EP loss parity against reference"
+        # python3 scripts/loss_compare.py . . \
+        #   --baseline-module=qwen3 --baseline-config=qwen3_moe_debug \
+        #   --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+        #   --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
+        #   --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/moe_loss_comparison" \
+        #   --import-result="${MOE_LOSS_FILE}" --assert-equal --steps=100
+        # rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
