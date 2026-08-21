@@ -309,7 +309,12 @@ class PolicyTrainer(Actor, Configurable):
         )
 
         model.to_empty(device=device_type)
-        with torch.no_grad():
+        with (
+            torch.no_grad(),
+            dist_utils.get_spmd_context(
+                parallel_dims=self.parallel_dims,
+            )(),
+        ):
             model.init_weights(buffer_device=None)
 
         return model

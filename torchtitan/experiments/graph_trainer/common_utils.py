@@ -19,9 +19,13 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
-    data_parallel,
+    data_parallel as dtensor_data_parallel,
     MixedPrecisionPolicy,
+)
+from torchtitan.experiments.graph_trainer.simple_fsdp_spmd import (
+    data_parallel as spmd_data_parallel,
 )
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -430,15 +434,20 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
+    use_spmd_types = get_spmd_backend() == "spmd_types"
+    fsdp_axis = "fsdp"
+    dense_non_dp_mesh = (
+        parallel_dims.get_activated_mesh(["tp"]) if use_spmd_types else None
+    )
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
+            dp_mesh_dim_names = ["dp_replicate", fsdp_axis]
             dp_mode = "hybrid_shard"
         else:
             dp_mesh_dim_names = ["dp_replicate"]
             dp_mode = "replicate"
     else:
-        dp_mesh_dim_names = ["fsdp"]
+        dp_mesh_dim_names = [fsdp_axis]
         dp_mode = "fully_shard"
 
     dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
@@ -455,6 +464,16 @@ def apply_simple_fsdp(
         )
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
+        efsdp_degree = edp_mesh["efsdp"].size()
+        if parallel_dims.dp_replicate_enabled and efsdp_degree > 1:
+            expert_dp_mode = "hybrid_shard"
+        elif parallel_dims.dp_replicate_enabled:
+            edp_mesh = edp_mesh["dp_replicate"]
+            expert_dp_mode = "replicate"
+        else:
+            expert_dp_mode = "fully_shard"
+
+        expert_non_dp_mesh = parallel_dims.get_mesh("ep")
 
         for _, transformer_block in model.layers.items():
             if not isinstance(transformer_block, TransformerBlock):
@@ -464,23 +483,48 @@ def apply_simple_fsdp(
                 continue
             inner_experts = moe.routed_experts.inner_experts
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
+            if efsdp_degree * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
-                inner_experts,
-                edp_mesh,
-                dp_mode,
-                mp_policy=mp_policy,
-                shard_dim=experts_shard_dim,
-            )
+            if use_spmd_types:
+                sparse_storage_mesh = parallel_dims.spmd_sparse_storage_mesh()
+                assert sparse_storage_mesh is not None
+                moe.routed_experts.inner_experts = spmd_data_parallel(
+                    inner_experts,
+                    edp_mesh,
+                    expert_dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=experts_shard_dim,
+                    non_dp_mesh=expert_non_dp_mesh,
+                    storage_mesh=sparse_storage_mesh,
+                )
+            else:
+                moe.routed_experts.inner_experts = dtensor_data_parallel(
+                    inner_experts,
+                    edp_mesh,
+                    expert_dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=experts_shard_dim,
+                    non_dp_mesh=expert_non_dp_mesh,
+                )
 
-    model = data_parallel(
-        model,
-        dp_mesh,
-        dp_mode,
-        mp_policy=mp_policy,
-    )
+    if use_spmd_types:
+        model = spmd_data_parallel(
+            model,
+            dp_mesh,
+            dp_mode,
+            mp_policy=mp_policy,
+            non_dp_mesh=dense_non_dp_mesh,
+            storage_mesh=parallel_dims.spmd_dense_storage_mesh(),
+        )
+    else:
+        model = dtensor_data_parallel(
+            model,
+            dp_mesh,
+            dp_mode,
+            mp_policy=mp_policy,
+            non_dp_mesh=dense_non_dp_mesh,
+        )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
     )
