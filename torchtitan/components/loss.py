@@ -252,12 +252,14 @@ class BaseLoss(ABC, Configurable):
         """Return the scaled loss and any metrics computed by the loss."""
         del kwargs
         loss = self.fn(pred, labels)
-        if get_spmd_backend() == "spmd_types":  # loss: V->P, annotate global_valid_tokens
+        # loss: V->P, annotate global_valid_tokens
+        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            spmd.assert_type(
-                global_valid_tokens,
-                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-            )
+            if global_valid_tokens is not None:
+                spmd.assert_type(
+                    global_valid_tokens,
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+                )
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss, {}
@@ -285,12 +287,14 @@ class CrossEntropyLoss(BaseLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
-        if get_spmd_backend() == "spmd_types":  # loss: V->P, annotate global_valid_tokens
+        # loss: V->P, annotate global_valid_tokens
+        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            spmd.assert_type(
-                global_valid_tokens,
-                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-            )
+            if global_valid_tokens is not None:
+                spmd.assert_type(
+                    global_valid_tokens,
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+                )
         if global_valid_tokens is not None:
             loss = loss / global_valid_tokens
         return loss, {}

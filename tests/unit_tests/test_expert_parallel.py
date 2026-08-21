@@ -6,10 +6,38 @@
 
 import unittest
 import unittest.mock
+from types import SimpleNamespace
 
 import torch
-
+from torchtitan.config import ParallelismConfig
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.qwen3 import model_registry
+
+
+class TestExpertParallelConfigValidation(unittest.TestCase):
+    @staticmethod
+    def _config(ep: int):
+        model_config = model_registry("debugmodel_moe").model
+        runtime_config = SimpleNamespace(
+            parallelism=ParallelismConfig(expert_parallel_degree=ep)
+        )
+        return model_config, runtime_config
+
+    def test_all_moe_layers_divisible(self):
+        model_config, runtime_config = self._config(ep=8)
+        model_config.update_from_config(config=runtime_config)
+
+    def test_later_moe_layer_not_divisible(self):
+        model_config, runtime_config = self._config(ep=8)
+        moe = model_config.layers[1].moe
+        assert moe is not None
+        moe.num_experts = 63
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"layers\.1\.moe\.num_experts \(63\).*expert_parallel_degree \(8\)",
+        ):
+            model_config.update_from_config(config=runtime_config)
 
 
 class TestPermute(unittest.TestCase):
