@@ -17,6 +17,12 @@ from torchtitan.models.utils import MoEStateDictAdapter
 from .model import KimiK3Model
 
 
+_UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {
+    "language_model.model.layers.0.self_attention_res_norm.weight",
+    "language_model.model.layers.0.self_attention_res_proj.weight",
+}
+
+
 class KimiK3StateDictAdapter(MoEStateDictAdapter):
     def __init__(
         self,
@@ -235,6 +241,22 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 f"vision_tower.encoder.blocks.{layer_num}.wqkv.weight"
             ] = torch.cat((qkv["q"], qkv["k"], qkv["v"]), dim=0)
 
+        # The released HF model contain these unused layer-0 attn res parameters.
+        # TT omits them, so synthesize deterministic, placeholders to preserve strict HF state-dict loading.
+        if self.kimi_config.layers[0].attention_res_norm is None:
+            norm_template_key = (
+                "language_model.model.layers.1.self_attention_res_norm.weight"
+            )
+            proj_template_key = (
+                "language_model.model.layers.1.self_attention_res_proj.weight"
+            )
+            hf_state_dict[
+                "language_model.model.layers.0.self_attention_res_norm.weight"
+            ] = torch.ones_like(hf_state_dict[norm_template_key])
+            hf_state_dict[
+                "language_model.model.layers.0.self_attention_res_proj.weight"
+            ] = torch.zeros_like(hf_state_dict[proj_template_key])
+
         if unmapped:
             raise ValueError(
                 "KimiK3StateDictAdapter found TorchTitan keys without a "
@@ -249,6 +271,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         unmapped: list[str] = []
 
         for key, value in hf_state_dict.items():
+            if key in _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS:
+                continue
             if key.endswith("rotary_emb.inv_freq"):
                 continue
 

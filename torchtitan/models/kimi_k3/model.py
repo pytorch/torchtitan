@@ -163,8 +163,8 @@ class KimiK3TransformerBlock(Module):
         moe: KimiLatentMoE.Config | None
         attention_norm: RMSNorm.Config
         ffn_norm: RMSNorm.Config
-        attention_res_norm: RMSNorm.Config
-        attention_res_proj: Linear.Config
+        attention_res_norm: RMSNorm.Config | None
+        attention_res_proj: Linear.Config | None
         ffn_res_norm: RMSNorm.Config
         ffn_res_proj: Linear.Config
 
@@ -193,8 +193,16 @@ class KimiK3TransformerBlock(Module):
         self.moe_enabled = self.moe is not None
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
-        self.attention_res_norm = config.attention_res_norm.build()
-        self.attention_res_proj = config.attention_res_proj.build()
+        self.attention_res_norm = (
+            config.attention_res_norm.build()
+            if config.attention_res_norm is not None
+            else None
+        )
+        self.attention_res_proj = (
+            config.attention_res_proj.build()
+            if config.attention_res_proj is not None
+            else None
+        )
         self.ffn_res_norm = config.ffn_res_norm.build()
         self.ffn_res_proj = config.ffn_res_proj.build()
 

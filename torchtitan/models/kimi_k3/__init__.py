@@ -424,8 +424,8 @@ def _kimi_k3_config(
                 ),
                 attention_norm=_norm(dim),
                 ffn_norm=_norm(dim),
-                attention_res_norm=_norm(dim),
-                attention_res_proj=_linear(dim, 1),
+                attention_res_norm=None if layer_idx == 0 else _norm(dim),
+                attention_res_proj=None if layer_idx == 0 else _linear(dim, 1),
                 ffn_res_norm=_norm(dim),
                 ffn_res_proj=_linear(dim, 1),
             )
