@@ -140,6 +140,11 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="must be -1 or greater than 0"):
             TrainingConfig(num_tokens_per_train_step=0)
 
+    def test_max_context_length_must_be_positive(self):
+        for max_context_length in (0, -1):
+            with pytest.raises(ValueError, match="must be greater than 0"):
+                TrainingConfig(max_context_length=max_context_length)
+
     def test_num_pp_microbatches_does_not_constrain_non_pp_training(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
