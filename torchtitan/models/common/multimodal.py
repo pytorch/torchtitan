@@ -76,15 +76,11 @@ def get_vision_positions(
             f"exactly one placeholder run."
         )
 
-    # Convert all metadata at once. Per-item ``.item()`` calls would synchronize
-    # CUDA once per scalar.
-    region_starts_list, run_lengths, num_vision_tokens_per_item_list = torch.stack(
-        (
-            region_starts,
-            region_ends - region_starts + 1,
-            num_vision_tokens_per_item,
-        )
-    ).tolist()
+    # Convert each metadata tensor once. Per-item ``.item()`` calls would
+    # synchronize CUDA once per scalar.
+    region_starts_list = region_starts.tolist()
+    run_lengths = (region_ends - region_starts + 1).tolist()
+    num_vision_tokens_per_item_list = num_vision_tokens_per_item.tolist()
     positions: list[tuple[int, int, int]] = []
     for i in range(num_items):
         start = int(region_starts_list[i])
