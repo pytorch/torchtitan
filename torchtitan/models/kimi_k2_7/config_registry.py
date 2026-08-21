@@ -525,3 +525,12 @@ class _KimiTrainerConfig(Trainer.Config):
                 "tensor_parallel_degree=1: tensor parallelism can produce "
                 "unsupported _StridedShard parameter layouts."
             )
+        # Pipeline parallelism works, with one precondition: every stage must
+        # own at least one transformer layer. OptimizersContainer rejects a
+        # param_groups pattern that claims no parameter, and the DistMuon
+        # pattern claims only matrix parameters inside layers -- so a stage
+        # holding just norm and lm_head raises "matched no parameters" while
+        # building the optimizer. Reaching that needs the stage count to
+        # approach the layer count (61 for Kimi K2), which no real
+        # configuration does, so it is left as a loud build-time failure rather
+        # than loosening a check every torchtitan optimizer shares.

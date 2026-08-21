@@ -198,20 +198,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     claimed.add(name)
 
             if not params:
-                # Under pipeline parallelism a rank holds one stage while the
-                # config still describes the global model, so a pattern such as
-                # an lm_head one legitimately claims nothing on stage 0. Drop
-                # the group rather than build an optimizer over no parameters.
-                #
-                # This deliberately leaves no dead-pattern check anywhere: a
-                # pattern owning nothing on any stage is now silently ignored,
-                # for PP and non-PP alike, so a typo in a param_groups pattern
-                # falls through to the following pattern rather than failing
-                # loudly.
-                # TODO: restore the check against the complete model, before PP
-                # splits it -- only there can a dead pattern be told apart from
-                # one whose parameters live on another stage.
-                continue
+                raise ValueError(
+                    f"Optimizer param_groups pattern '{pg.pattern}' "
+                    f"matched no parameters"
+                )
 
             groups[pg.optimizer_name].append(
                 {

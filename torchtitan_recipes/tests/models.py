@@ -209,7 +209,7 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
     # Four microbatches match the four virtual pipeline stages.
-    config.training.local_batch_size = 4
+    config.parallelism.num_pp_microbatches = 4
     config.training.steps = 1
     config.training.disable_cuda_graphs = True
     return config
