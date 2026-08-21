@@ -691,7 +691,7 @@ def _prepare_redistributed(
         prepared_views = tuple(
             _tensor_region_view(prepared, span.region).reshape(-1) for span in spans
         )
-        _copy_region_views_(packed_views, prepared_views)
+        _batched_copy_(packed_views, prepared_views)
 
 
 def _compute_redistributed(
@@ -729,7 +729,7 @@ def _compute_redistributed(
             ].view(span.region.shape)
             for span in received_spans
         )
-        _copy_region_views_(compute_views, received_views)
+        _batched_copy_(compute_views, received_views)
 
         compute(item, compute_tensor)
 
@@ -744,7 +744,7 @@ def _compute_redistributed(
             _tensor_region_view(compute_tensor, span.region).reshape(-1)
             for span in output_spans
         )
-        _copy_region_views_(packed_views, compute_output_views)
+        _batched_copy_(packed_views, compute_output_views)
 
 
 def _finalize_redistributed(
@@ -777,11 +777,11 @@ def _finalize_redistributed(
             ].view(span.region.shape)
             for span in spans
         )
-        _copy_region_views_(update_views, packed_views)
+        _batched_copy_(update_views, packed_views)
         finalize(item, update)
 
 
-def _copy_region_views_(
+def _batched_copy_(
     destinations: tuple[Tensor, ...],
     sources: tuple[Tensor, ...],
 ) -> None:

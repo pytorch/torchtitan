@@ -9,23 +9,21 @@ from unittest.mock import patch
 
 import torch
 
-from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
-    _copy_region_views_,
-)
+from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import _batched_copy_
 
 
-class TestCopyRegionViews(unittest.TestCase):
+class TestBatchedCopy(unittest.TestCase):
     def test_rejects_mismatched_lists(self):
         with self.assertRaisesRegex(ValueError, "equal length"):
-            _copy_region_views_((torch.empty(1),), ())
+            _batched_copy_((torch.empty(1),), ())
 
     def test_empty_and_single_copy_bypass_foreach(self):
-        _copy_region_views_((), ())
+        _batched_copy_((), ())
 
         source = torch.arange(6).reshape(2, 3)
         destination = torch.empty_like(source)
         with patch.object(torch, "_foreach_copy_") as foreach_copy:
-            _copy_region_views_((destination,), (source,))
+            _batched_copy_((destination,), (source,))
         foreach_copy.assert_not_called()
         torch.testing.assert_close(destination, source)
 
@@ -41,7 +39,7 @@ class TestCopyRegionViews(unittest.TestCase):
             "_foreach_copy_",
             wraps=original_foreach_copy,
         ) as foreach_copy:
-            _copy_region_views_(destinations, sources)
+            _batched_copy_(destinations, sources)
         foreach_copy.assert_called_once()
         for destination, source in zip(destinations, sources, strict=True):
             torch.testing.assert_close(destination, source)
@@ -52,7 +50,7 @@ class TestCopyRegionViews(unittest.TestCase):
         sources = (source_base[:, ::2], source_base[:, 1::2])
         destinations = (destination_base[:, ::2], destination_base[:, 1::2])
 
-        _copy_region_views_(destinations, sources)
+        _batched_copy_(destinations, sources)
 
         torch.testing.assert_close(destination_base, source_base)
 
@@ -67,14 +65,14 @@ class TestCopyRegionViews(unittest.TestCase):
         )
         original = torch._foreach_copy_
         with patch.object(torch, "_foreach_copy_", wraps=original) as foreach_copy:
-            _copy_region_views_(destinations, sources)
+            _batched_copy_(destinations, sources)
         foreach_copy.assert_called_once()
         for destination, source in zip(destinations, sources, strict=True):
             torch.testing.assert_close(destination, source.to(destination.dtype))
 
     def test_rejects_mismatched_shapes(self):
         with self.assertRaises(RuntimeError):
-            _copy_region_views_(
+            _batched_copy_(
                 (torch.empty(3), torch.empty(4)), (torch.empty(9), torch.empty(4))
             )
 
