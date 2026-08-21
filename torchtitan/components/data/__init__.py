@@ -26,11 +26,22 @@ from torchtitan.components.data.sources import (
     RandomAccessDataSource,
     SourceConfig,
 )
+from torchtitan.components.data.synthetic import (
+    BucketLengthSpec,
+    ConstantTokenProcessor,
+    LengthBucket,
+    LengthSpec,
+    ParametricLengthSpec,
+    RandomTokenProcessor,
+    SyntheticLengthSource,
+)
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 
 __all__ = [
+    "BucketLengthSpec",
     "Collator",
     "ConcatThenSplitPackingConfig",
+    "ConstantTokenProcessor",
     "DatasetBuildContext",
     "DatasetConcatConfig",
     "DatasetConfig",
@@ -41,10 +52,15 @@ __all__ = [
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
+    "LengthBucket",
+    "LengthSpec",
+    "ParametricLengthSpec",
     "RandomAccessDataSource",
+    "RandomTokenProcessor",
     "SampleProcessor",
     "SingleDatasetConfig",
     "SourceConfig",
+    "SyntheticLengthSource",
     "TextCollator",
     "TextSequence",
     "TrainerBatch",
