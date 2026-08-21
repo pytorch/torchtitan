@@ -15,10 +15,15 @@ from torchtitan.components.data import (
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.quantization import Float8Linear
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
-from torchtitan.components.quantization.mx import _get_mxfp8_grouped_experts_cls
+from torchtitan.components.quantization.mxfp8.converter import (
+    _get_mxfp8_grouped_experts_cls,
+    MXFP8Linear,
+    MXFP8LinearConverter,
+)
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
@@ -365,3 +370,202 @@ def test_quantized_grouped_experts():
     assert issubclass(float8_cls, GptOssGroupedExperts)
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
+
+
+def test_mxfp8_linear_uses_fsdp_weight_wrapper():
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    from torchtitan.components.quantization.mxfp8.tensor import MXFP8FSDPWeight
+
+    with pytest.raises(ValueError, match="in_features divisible by 32"):
+        MXFP8Linear.Config(in_features=127, out_features=128)
+    with pytest.raises(ValueError, match="out_features divisible by 32"):
+        MXFP8Linear.Config(in_features=128, out_features=127)
+    with pytest.raises(ValueError, match="Unknown MXFP8 weight quantization strategy"):
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            weight_quantization="missing",
+        )
+    with pytest.raises(ValueError, match="input_activation_save_format must be one of"):
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            input_activation_save_format="missing",
+        )
+
+    for sharding_config in (colwise_config(), rowwise_config()):
+        linear = MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            bias=False,
+            sharding_config=sharding_config,
+        ).build()
+        assert isinstance(linear.weight, MXFP8FSDPWeight)
+        assert linear.weight.weight_quantization == "32x32"
+        assert linear._sharding_config is not None
+        assert linear._sharding_config.local_map is not None
+        assert "input" in linear._sharding_config.in_src_shardings
+        assert "input" in linear._sharding_config.in_dst_shardings
+
+
+def test_mxfp8_converter_propagates_linear_options(monkeypatch):
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(
+        MXFP8LinearConverter.Config(
+            model_compile_enabled=True,
+            weight_quantization="32x32",
+        )
+    )
+
+    converted = converter.convert(
+        Linear.Config(in_features=128, out_features=128, bias=False)
+    )
+
+    assert isinstance(converted, MXFP8Linear.Config)
+    assert converted.weight_quantization == "32x32"
+    assert converted.input_activation_save_format == "bf16"
+
+
+def test_mxfp8_converter_applies_input_activation_save_formats(monkeypatch):
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(
+        MXFP8LinearConverter.Config(
+            model_compile_enabled=True,
+            input_activation_save_format_by_fqn={"w2": "mxfp8"},
+        )
+    )
+    converted = converter.convert(
+        FeedForward.Config(
+            w1=Linear.Config(in_features=128, out_features=128),
+            w2=Linear.Config(in_features=128, out_features=128),
+            w3=Linear.Config(in_features=128, out_features=128),
+        )
+    )
+
+    assert isinstance(converted.w1, MXFP8Linear.Config)
+    assert isinstance(converted.w2, MXFP8Linear.Config)
+    assert isinstance(converted.w3, MXFP8Linear.Config)
+    assert converted.w1.input_activation_save_format == "bf16"
+    assert converted.w2.input_activation_save_format == "mxfp8"
+    assert converted.w3.input_activation_save_format == "bf16"
+
+
+@pytest.mark.parametrize(
+    "save_formats, match",
+    [
+        (
+            {"missing": "mxfp8"},
+            "selectors did not match any converted Linear.Config",
+        ),
+        (
+            {"w": "bf16", "w1": "mxfp8"},
+            "multiple selectors matching 'w1'",
+        ),
+    ],
+)
+def test_mxfp8_converter_rejects_invalid_input_activation_save_formats(
+    monkeypatch, save_formats, match
+):
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(
+        MXFP8LinearConverter.Config(
+            model_compile_enabled=True,
+            input_activation_save_format_by_fqn=save_formats,
+        )
+    )
+    model_config = FeedForward.Config(
+        w1=Linear.Config(in_features=128, out_features=128),
+        w2=Linear.Config(in_features=128, out_features=128),
+        w3=Linear.Config(in_features=128, out_features=128),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        converter.convert(model_config)
+
+
+@pytest.mark.parametrize(
+    "config_factory, mxfp8_fqns",
+    [
+        (
+            "llama3",
+            ("attention.qkv_linear.wqkv", "feed_forward.w2"),
+        ),
+        (
+            "llama3_graph",
+            ("attention.qkv_linear.wqkv", "feed_forward.w2"),
+        ),
+        (
+            "deepseek_v3",
+            ("attention.wkv_b", "feed_forward.w2", "shared_experts.w2"),
+        ),
+        (
+            "deepseek_v3_graph",
+            ("attention.wkv_b", "feed_forward.w2", "shared_experts.w2"),
+        ),
+    ],
+)
+def test_builtin_mxfp8_configs_assign_input_activation_save_format(
+    monkeypatch, config_factory, mxfp8_fqns
+):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    if config_factory == "llama3":
+        from torchtitan.models.llama3.config_registry import (
+            llama3_debugmodel_mxfp8 as build_config,
+        )
+    elif config_factory == "llama3_graph":
+        from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+            graph_trainer_llama3_debugmodel_mxfp8 as build_config,
+        )
+    elif config_factory == "deepseek_v3":
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_mxfp8 as build_config,
+        )
+    else:
+        from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+            graph_trainer_deepseek_v3_debugmodel_mxfp8 as build_config,
+        )
+
+    trainer_config = build_config()
+    assert trainer_config.model_spec is not None
+    model_config = trainer_config.model_spec.model
+    assignments = {
+        fqn: config.input_activation_save_format
+        for fqn, config, _parent, _attr in model_config.traverse(MXFP8Linear.Config)
+    }
+
+    assert assignments
+    assert "bf16" in assignments.values()
+    assert "mxfp8" in assignments.values()
+    for fqn, save_format in assignments.items():
+        expected = (
+            "mxfp8" if any(selector in fqn for selector in mxfp8_fqns) else "bf16"
+        )
+        assert save_format == expected, f"Unexpected policy for {fqn}"
+
+
+def test_mxfp8_linear_loads_stock_checkpoint():
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    from torchtitan.components.quantization.mxfp8.tensor import MXFP8FSDPWeight
+
+    stock = Linear.Config(in_features=128, out_features=96).build()
+    mxfp8 = MXFP8Linear.Config(in_features=128, out_features=96).build()
+    with torch.no_grad():
+        stock.weight.normal_()
+
+    mxfp8.load_state_dict(stock.state_dict())
+    assert isinstance(mxfp8.weight, MXFP8FSDPWeight)
+    assert torch.equal(mxfp8.weight._data, stock.weight)

@@ -25,6 +25,29 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
+def deepseek_v3_mxfp8_linear_converter_config(
+    *, model_compile_enabled: bool
+) -> MXFP8LinearConverter.Config:
+    """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
+
+    The KV up projection and FFN down projections have unique inputs, so their
+    columnwise MXFP8 representations replace BF16 storage. Shared-input and
+    attention output projections use the conservative BF16 save format. This
+    selection is based on activation ownership, not the activation-checkpointing
+    policy. Checkpointing changes when the selected representation is recreated
+    and how long it remains live.
+    """
+    return MXFP8LinearConverter.Config(
+        model_compile_enabled=model_compile_enabled,
+        fqns=["attention", "shared_experts", "feed_forward"],
+        input_activation_save_format_by_fqn={
+            "attention.wkv_b": "mxfp8",
+            "feed_forward.w2": "mxfp8",
+            "shared_experts.w2": "mxfp8",
+        },
+    )
+
+
 def enable_fused_swiglu(config: Trainer.Config) -> None:
     # fused_swiglu.py registers two overrides (dense FeedForward + MoE grouped
     # experts); activate both by naming each factory.
@@ -96,9 +119,8 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     config.model_spec = model_registry(
         "debugmodel",
         converters=[
-            MXFP8LinearConverter.Config(
+            deepseek_v3_mxfp8_linear_converter_config(
                 model_compile_enabled=model_compile_enabled,
-                fqns=["attention", "shared_experts", "feed_forward"],
             ),
             MXFP8GroupedExpertsConverter.Config(
                 model_compile_enabled=model_compile_enabled,
