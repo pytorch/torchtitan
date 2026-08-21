@@ -138,6 +138,7 @@ class CheckpointManager(BaseCheckpointManager):
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
+        state_dict_adapter: BaseStateDictAdapter | None = None,
     ) -> None:
 
         self.enable = config.enable
@@ -146,6 +147,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
+        self.state_dict_adapter = state_dict_adapter
 
         self.states = states
         self.states.update(
@@ -259,6 +261,9 @@ class CheckpointManager(BaseCheckpointManager):
         storage_writer: HuggingFaceStorageWriter | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
 
+        if self.state_dict_adapter is not None:
+            state_dict = self.state_dict_adapter.convert_save_state_dict(state_dict)
+
         # HF Format Conversion
         if to_hf:
             assert self.sd_adapter is not None, "sd_adapter is required for to_hf=True"
@@ -353,6 +358,9 @@ class CheckpointManager(BaseCheckpointManager):
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
 
+        if self.state_dict_adapter is not None:
+            state_dict = self.state_dict_adapter.convert_save_state_dict(state_dict)
+
         if from_hf:
             assert self.sd_adapter is not None, (
                 "trying to load checkpoint in HF safetensors format, "
@@ -367,9 +375,14 @@ class CheckpointManager(BaseCheckpointManager):
             dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            if self.state_dict_adapter is not None:
+                state_dict = self.state_dict_adapter.convert_load_state_dict(state_dict)
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
+
+            if self.state_dict_adapter is not None:
+                state_dict = self.state_dict_adapter.convert_load_state_dict(state_dict)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
