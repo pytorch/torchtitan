@@ -14,13 +14,11 @@ TorchTitan models for vLLM.
 import dataclasses
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
@@ -32,18 +30,14 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import (
-    current_spmd_mesh,
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-)
+from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import SpmdLayout
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import PlainToDTensorStateDictAdapter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -117,41 +111,6 @@ def _replace_vllm_layer_configs(model_config):
         new_layers.append(new_layer_cfg)
 
     return dataclasses.replace(model_config, layers=new_layers)
-
-
-class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
-    """Add plain local tensor handling to a model-format state-dict adapter."""
-
-    def __init__(
-        self,
-        adapter: BaseStateDictAdapter,
-        state_dict_layouts: dict[str, SpmdLayout],
-        parallel_dims: ParallelDims,
-    ) -> None:
-        self.adapter = adapter
-        self.state_dict_layouts = state_dict_layouts
-        self.parallel_dims = parallel_dims
-        self.fqn_to_index_mapping = adapter.fqn_to_index_mapping
-        self.hf_assets_path = adapter.hf_assets_path
-
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        return self.adapter.to_hf(
-            plain_tensor_to_dtensor_state_dict(
-                state_dict,
-                state_dict_layouts=self.state_dict_layouts,
-                parallel_dims=self.parallel_dims,
-            )
-        )
-
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        return dtensor_to_plain_tensor_state_dict(self.adapter.from_hf(hf_state_dict))
-
-    def get_hf_storage_reader(
-        self,
-        path: str,
-        from_quantized: bool = False,
-    ) -> HuggingFaceStorageReader:
-        return self.adapter.get_hf_storage_reader(path, from_quantized)
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
@@ -544,14 +503,14 @@ class VLLMModelWrapper(Module):
             return
 
         sd_adapter = None
+        state_dict_adapter = None
         if self.state_dict_adapter is not None:
             sd_adapter = self.state_dict_adapter(
                 model_config=self.config,
                 hf_assets_path=cfg.initial_load_path,
             )
             if self.parallel_dims.spmd_backend == "spmd_types":
-                sd_adapter = PlainToDTensorStateDictAdapter(
-                    sd_adapter,
+                state_dict_adapter = PlainToDTensorStateDictAdapter(
                     self.get_state_dict_layouts(),
                     self.parallel_dims,
                 )
@@ -566,6 +525,7 @@ class VLLMModelWrapper(Module):
             lr_schedulers=None,
             states={},
             sd_adapter=sd_adapter,
+            state_dict_adapter=state_dict_adapter,
         )
         checkpointer.load()
         # Free the large transient allocations the HF load/from_hf conversion left in the
