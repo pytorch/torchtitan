@@ -337,14 +337,8 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(groups[1]["betas"], (0.9, 0.999))
         self.assertEqual(groups[2]["betas"], (0.9, 0.95))
 
-    def test_pattern_matching_nothing_is_skipped(self):
-        """A pattern claiming no parameters yields no group rather than raising.
-
-        Under pipeline parallelism this is the normal case -- the model here is
-        one stage, and the pattern may own parameters on another. Detecting a
-        genuinely dead pattern needs a view of the whole model and is checked
-        elsewhere.
-        """
+    def test_error_on_zero_matches(self):
+        """Patterns that match no parameters raise ValueError."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
             param_groups=[
@@ -358,11 +352,10 @@ class TestParamGroupConfig(unittest.TestCase):
         )
         impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
 
-        groups, patterns = OptimizersContainer._build_param_groups(
-            model, config.param_groups, impl_kwargs
-        )
-        self.assertEqual(patterns["AdamW"], [_DEFAULT_ADAMW.pattern])
-        self.assertEqual(len(groups["AdamW"]), 1)
+        with self.assertRaises(ValueError):
+            OptimizersContainer._build_param_groups(
+                model, config.param_groups, impl_kwargs
+            )
 
     def test_all_params_covered(self):
         """Every requires_grad param appears in exactly one group."""
