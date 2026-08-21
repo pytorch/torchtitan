@@ -450,9 +450,12 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             if node in self.scheduled:
                 continue
 
-            if node_type == "bucketed_reduce_scatter":
+            if node_type in ("bucketed_reduce_scatter", "bucketed_all_reduce"):
                 current_rs_start_nodes.append(node)
-            elif node_type == "bucketed_reduce_scatter_wait":
+            elif node_type in (
+                "bucketed_reduce_scatter_wait",
+                "bucketed_all_reduce_wait",
+            ):
                 if current_rs_start_nodes:
                     for delayed in delayed_rs_wait_nodes:
                         for rs_start in current_rs_start_nodes:
