@@ -173,7 +173,12 @@ class TestKimiK3(unittest.TestCase):
         num_heads = 3
 
         def parameter(*shape: int) -> torch.Tensor:
-            return torch.randn(*shape, device="cuda", requires_grad=True)
+            return torch.randn(
+                *shape,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
 
         for lower_bound in (-5.0, None):
             with self.subTest(lower_bound=lower_bound):
