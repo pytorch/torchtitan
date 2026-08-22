@@ -137,28 +137,6 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
 
-    def _prepare_batch(
-        self,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        model_parts: list[nn.Module],
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Prepare a validation batch via the model's input pipeline.
-
-        Validation counterpart of ``Trainer._prepare_batch``: delegates to
-        ``model.preprocess_inputs`` and returns the forward inputs. Takes
-        ``model_parts`` explicitly (the validator is not the model owner). The
-        validator tracks its own token count, so no token accounting happens here.
-        """
-        inputs, labels, extra_kwargs = cast(
-            BaseModel, model_parts[0]
-        ).preprocess_inputs(
-            {**input_dict, "labels": labels},
-            parallel_dims=self.parallel_dims,
-            parallelism=self.parallelism,
-        )
-        return inputs, labels, extra_kwargs
-
     @sl.log_trace_span("eval")
     @torch.no_grad()
     def validate(
@@ -240,8 +218,12 @@ class Validator(BaseValidator):
                 )
 
                 for input_dict, labels in microbatches:
-                    inputs, labels, extra_kwargs = self._prepare_batch(
-                        input_dict, labels, model_parts
+                    inputs, labels, extra_kwargs = cast(
+                        BaseModel, model_parts[0]
+                    ).preprocess_inputs(
+                        {**input_dict, "labels": labels},
+                        parallel_dims=self.parallel_dims,
+                        parallelism=self.parallelism,
                     )
                     if self.pp_has_first_stage:
                         arg_mbs.append((inputs,))
@@ -269,8 +251,12 @@ class Validator(BaseValidator):
             else:
                 assert len(microbatches) == 1
                 input_dict, labels = microbatches[0]
-                inputs, labels, extra_kwargs = self._prepare_batch(
-                    input_dict, labels, model_parts
+                inputs, labels, extra_kwargs = cast(
+                    BaseModel, model_parts[0]
+                ).preprocess_inputs(
+                    {**input_dict, "labels": labels},
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.parallelism,
                 )
                 with self.validation_context():
                     assert len(model_parts) == 1

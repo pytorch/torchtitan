@@ -680,34 +680,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
-    @sl.log_trace_span("preprocess_inputs")
-    def _prepare_batch(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Run the model's input pipeline and accumulate token accounting.
-
-        Delegates to ``model.preprocess_inputs`` (which builds forward inputs,
-        CP-shards, and SPMD-wraps) and folds the CP-sharded label token count
-        (``labels.numel()``) into ``self.ntokens_seen``. Called once per step on
-        the non-PP path and once per microbatch on the PP path, so token
-        accounting matches the batch stream.
-
-        TODO: fold labels into the batch at the dataloader instead of here --
-        have the dataloader yield a single input_dict with "labels" already
-        included, so preprocess_inputs receives it directly and this merge
-        (and the separate `labels` param threaded through the microbatch/PP
-        paths) can go away.
-        """
-        inputs, labels, extra_kwargs = cast(
-            BaseModel, self.model_parts[0]
-        ).preprocess_inputs(
-            {**input_dict, "labels": labels},
-            parallel_dims=self.parallel_dims,
-            parallelism=self.config.parallelism,
-        )
-        self.ntokens_seen += labels.numel()
-        return inputs, labels, extra_kwargs
-
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
         self,
@@ -730,7 +702,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         assert isinstance(input_dict, dict)
         assert isinstance(labels, torch.Tensor)
-        inputs, labels, extra_kwargs = self._prepare_batch(input_dict, labels)
+        with sl.log_trace_span("preprocess_inputs"):
+            inputs, labels, extra_kwargs = cast(
+                BaseModel, self.model_parts[0]
+            ).preprocess_inputs(
+                {**input_dict, "labels": labels},
+                parallel_dims=self.parallel_dims,
+                parallelism=self.config.parallelism,
+            )
+            self.ntokens_seen += labels.numel()
 
         assert len(model_parts) == 1
         return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
@@ -773,7 +753,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         kwarg_mbs: list[dict[str, Any]] = []
         target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
         for input_dict, labels in zip(input_dict_mbs, label_mbs, strict=True):
-            inputs, labels, extra_kwargs = self._prepare_batch(input_dict, labels)
+            with sl.log_trace_span("preprocess_inputs"):
+                inputs, labels, extra_kwargs = cast(
+                    BaseModel, self.model_parts[0]
+                ).preprocess_inputs(
+                    {**input_dict, "labels": labels},
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.config.parallelism,
+                )
+                self.ntokens_seen += labels.numel()
             if self.pp_has_first_stage:
                 arg_mbs.append((inputs,))
             kwarg_mbs.append(extra_kwargs)
