@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import enum
 import os
 import queue
@@ -398,6 +399,29 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in self.states:
                 self.states[MODEL].load_state_dict(state_dict)
 
+    def _track_async_save(self, *, save_future: Future, started_at: float) -> None:
+        # The callback can run after training has advanced to another step.
+        # Preserve the submitting step for structured logging attribution.
+        logging_context = contextvars.copy_context()
+
+        def log_duration(completed_save: Future) -> None:
+            try:
+                completed_save.result()
+            except Exception:
+                return
+
+            logging_context.run(
+                sl.log_trace_scalar,
+                {
+                    "train.checkpoint_write.native_dcp.execute.async_total.latency_ms": (
+                        time.monotonic() - started_at
+                    )
+                    * 1000
+                },
+            )
+
+        save_future.add_done_callback(log_duration)
+
     @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
@@ -453,6 +477,7 @@ class CheckpointManager(BaseCheckpointManager):
                     )
                 )
 
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -463,9 +488,14 @@ class CheckpointManager(BaseCheckpointManager):
             assert isinstance(result, AsyncSaveResponse)
             self.staging_future = result.staging_completion
             self.save_future = result.upload_completion
+            self._track_async_save(
+                save_future=self.save_future,
+                started_at=async_save_started_at,
+            )
 
         elif self.async_mode == AsyncMode.ASYNC:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -475,6 +505,10 @@ class CheckpointManager(BaseCheckpointManager):
 
             assert isinstance(result, Future)
             self.save_future = result
+            self._track_async_save(
+                save_future=self.save_future,
+                started_at=async_save_started_at,
+            )
 
         else:
             self.dcp_save(

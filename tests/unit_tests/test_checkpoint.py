@@ -645,7 +645,8 @@ class TestCheckpointManager(unittest.TestCase):
         # Initially staging_future should be None
         self.assertIsNone(manager.staging_future)
 
-        manager.save(curr_step=1, last_step=False)
+        with mock.patch.object(manager, "_track_async_save") as track_async_save:
+            manager.save(curr_step=1, last_step=False)
         # After save, staging_future shouldn't be None ...
         self.assertIsNotNone(manager.staging_future)
         # ... and staging should be running
@@ -653,6 +654,10 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Verify that `maybe_wait_for_staging` actually waits for staging future to complete
         staging_future = manager.staging_future
+        track_async_save.assert_called_once_with(
+            save_future=manager.save_future,
+            started_at=mock.ANY,
+        )
         manager.maybe_wait_for_staging()
         staging_future.result.assert_called_once()
 
@@ -701,6 +706,49 @@ class TestCheckpointManager(unittest.TestCase):
         # New future created
         new_future = manager.save_future
         new_future.result.assert_not_called()
+
+    def test_tracks_async_save_duration_at_originating_step(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        save_future: Future[None] = Future()
+        logged: list[tuple[dict[str, float], int | None, int | None]] = []
+
+        def record_metric(metrics: dict[str, float]) -> None:
+            logged.append((metrics, sl.get_step(), sl.get_relative_step()))
+
+        with (
+            mock.patch(
+                "torchtitan.components.checkpointer.dcp.time.monotonic",
+                return_value=12.0,
+            ),
+            mock.patch.object(sl, "log_trace_scalar", side_effect=record_metric),
+        ):
+            sl.set_step(50, relative_step=5)
+            manager._track_async_save(save_future=save_future, started_at=10.0)
+            sl.set_step(100, relative_step=10)
+            save_future.set_result(None)
+
+        self.assertEqual(
+            logged,
+            [
+                (
+                    {
+                        "train.checkpoint_write.native_dcp.execute.async_total.latency_ms": 2000.0
+                    },
+                    50,
+                    5,
+                )
+            ],
+        )
+
+    def test_async_save_failure_does_not_log_duration(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        save_future: Future[None] = Future()
+
+        with mock.patch.object(sl, "log_trace_scalar") as log_trace_scalar:
+            manager._track_async_save(save_future=save_future, started_at=10.0)
+            save_future.set_exception(RuntimeError("save failed"))
+
+        log_trace_scalar.assert_not_called()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
