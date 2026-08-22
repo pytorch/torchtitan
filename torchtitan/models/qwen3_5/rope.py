@@ -32,6 +32,15 @@ class MRoPE(CosSinRoPE):
             raise ValueError(
                 f"mrope_section must have 3 entries, got {config.mrope_section}."
             )
+        if any(section < 0 for section in config.mrope_section):
+            raise ValueError(
+                f"mrope_section entries must be non-negative, got {config.mrope_section}."
+            )
+        if sum(config.mrope_section) != config.dim // 2:
+            raise ValueError(
+                f"mrope_section must sum to dim // 2 ({config.dim // 2}), "
+                f"got {config.mrope_section}."
+            )
         super().__init__(config)
 
     def _reshape_cache(
@@ -46,6 +55,11 @@ class MRoPE(CosSinRoPE):
         ``None``) falls back to the plain ``CosSinRoPE`` lookup.
         """
         if positions is not None and positions.ndim == 2:
+            if positions.shape[-1] != 3:
+                raise ValueError(
+                    "2D MRoPE positions must have shape (num_tokens, 3), "
+                    f"got {tuple(positions.shape)}."
+                )
             return self._compute_mrope_cache(positions)
         return super()._reshape_cache(query, positions)
 
