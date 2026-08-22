@@ -58,6 +58,8 @@ class TrainingConfig:
             )
         if self.num_tokens_per_train_step != -1 and self.num_tokens_per_train_step <= 0:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
+        if self.max_context_length <= 0:
+            raise ValueError("max_context_length must be greater than 0.")
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
