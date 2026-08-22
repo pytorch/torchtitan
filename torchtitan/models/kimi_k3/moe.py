@@ -17,8 +17,8 @@ from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
 # Shape suffixes:
-# B = batch, L = sequence length, D = model dimension, E = experts,
-# F = expert hidden dimension, R = routed tokens, S = selected experts per token.
+# T = packed tokens, D = model dimension, E = experts,
+# F = expert hidden dimension, R = routed tokens, K = selected experts per token.
 
 
 def _situ_glu(
@@ -122,23 +122,23 @@ class KimiLatentMoE(MoE):
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
 
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        weights_BLS, expert_ids_BLS, scores_BLE = self.router(x_BLD, self.expert_bias_E)
-        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
-            -1, expert_ids_BLS, True
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        weights_TK, expert_ids_TK, scores_TE = self.router(x_TD, self.expert_bias_E)
+        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+            -1, expert_ids_TK, True
         )
-        num_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
+        num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
         if self.training:
             with torch.no_grad():
                 self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
-        routed_BLD = self.routed_experts(
-            self.routed_down(x_BLD),
-            weights_BLS,
-            expert_ids_BLS,
+        routed_TD = self.routed_experts(
+            self.routed_down(x_TD),
+            weights_TK,
+            expert_ids_TK,
             num_tokens_per_expert_E,
         )
-        out_BLD = self.routed_up(self.routed_norm(routed_BLD))
+        out_TD = self.routed_up(self.routed_norm(routed_TD))
         if self.shared_experts is not None:
-            out_BLD = out_BLD + self.shared_experts(x_BLD)
-        return out_BLD
+            out_TD = out_TD + self.shared_experts(x_TD)
+        return out_TD

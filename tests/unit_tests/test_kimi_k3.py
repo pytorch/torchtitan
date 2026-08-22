@@ -143,7 +143,7 @@ class TestKimiK3(unittest.TestCase):
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()
-        positions = torch.arange(4, dtype=torch.int32).unsqueeze(0)
+        positions = torch.arange(4, dtype=torch.int32)
         attention_masks = model.get_attention_masks(positions)
         self.assertIsInstance(attention_masks, BlockMask)
 
@@ -286,6 +286,7 @@ class TestKimiK3FSDP(DTensorTestBase):
             pipeline_parallel_degree=1,
             context_parallel_degree=1,
             expert_parallel_degree=1,
+            spmd_backend="partial_dtensor",
         )
         parallel_dims = ParallelDims.from_config(parallelism, world_size=1)
         with patch(
@@ -297,8 +298,8 @@ class TestKimiK3FSDP(DTensorTestBase):
             model,
             parallel_dims=parallel_dims,
             training=TrainingConfig(
-                local_batch_size=1,
-                seq_len=6,
+                num_tokens_per_microbatch_per_dp_rank=6,
+                max_context_length=6,
                 steps=1,
                 dtype="bfloat16",
             ),
@@ -312,20 +313,19 @@ class TestKimiK3FSDP(DTensorTestBase):
         self.assertIsInstance(model, FSDPModule)
         self.assertIsInstance(model.vision_encoder, FSDPModule)
 
-        positions_BL = torch.arange(
+        positions_T = torch.arange(
             6,
             dtype=torch.int32,
             device=self.device_type,
-        ).unsqueeze(0)
-        attention_masks = reference.get_attention_masks(positions_BL)
+        )
+        attention_masks = reference.get_attention_masks(positions_T)
         inputs = {
             "tokens": torch.tensor(
-                [[1, 7, 2, 3, 4, 5]],
+                [1, 7, 2, 3, 4, 5],
                 dtype=torch.long,
                 device=self.device_type,
             ),
             "pixel_values": torch.randn(
-                1,
                 4,
                 3 * 2 * 2,
                 device=self.device_type,
@@ -336,16 +336,16 @@ class TestKimiK3FSDP(DTensorTestBase):
                 device=self.device_type,
             ),
             "special_tokens": {"image_id": 7},
-            "positions": positions_BL,
+            "positions": positions_T,
             "attention_masks": attention_masks,
         }
 
-        actual_BLV = model(**inputs)  # pyrefly: ignore [not-callable]
-        expected_BLV = reference(**inputs)
-        torch.testing.assert_close(actual_BLV, expected_BLV, atol=0.0, rtol=0.0)
+        actual_TV = model(**inputs)  # pyrefly: ignore [not-callable]
+        expected_TV = reference(**inputs)
+        torch.testing.assert_close(actual_TV, expected_TV, atol=0.0, rtol=0.0)
 
-        actual_BLV.float().square().mean().backward()
-        expected_BLV.float().square().mean().backward()
+        actual_TV.float().square().mean().backward()
+        expected_TV.float().square().mean().backward()
 
         reference_parameters = dict(reference.named_parameters())
         compared_gradients = 0

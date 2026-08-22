@@ -8,18 +8,19 @@
 
 Shape suffixes:
 - N = number of visual items
-- P = maximum patches per item (padded)
+- T = total packed patches
 - D = vision hidden dimension
 - H = number of attention heads
 - K = attention head dimension
 - C = number of complex-valued head-dimension pairs
-- M = maximum merged tokens per item (padded)
+- M = total merged tokens
 - F = merged feature dimension
 - O = projected text dimension
 """
 
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
@@ -28,8 +29,7 @@ from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
-    compiled_create_block_mask,
-    get_vision_block_mask_mod,
+    create_block_diagonal_mask,
     VisionAttention,
     VisionMLP,
 )
@@ -52,19 +52,9 @@ def _get_temporal_pos_embed(
     return torch.cat((angles.sin(), angles.cos()), dim=-1)
 
 
-def _pad_sequence(x: torch.Tensor, target_length: int) -> torch.Tensor:
-    """Pad the leading sequence dimension without modifying ``x`` in place."""
-    padding_length = target_length - x.shape[0]
-    if padding_length == 0:
-        return x
-    padding = x.new_zeros(padding_length, *x.shape[1:])
-    return torch.cat((x, padding), dim=0)
-
-
 def _compute_learned_pos_embeds(
     pos_embed: torch.Tensor,
     grids: list[list[int]],
-    max_num_patches: int,
     interpolation_mode: str,
     max_num_frames: int,
 ) -> torch.Tensor:
@@ -73,7 +63,7 @@ def _compute_learned_pos_embeds(
     pos_grid = pos_embed.permute(2, 0, 1).unsqueeze(0).float()
 
     cached_spatial: dict[tuple[int, int], torch.Tensor] = {}
-    padded_positions = []
+    positions = []
     for num_frames, grid_h, grid_w in grids:
         if num_frames > max_num_frames:
             raise ValueError(
@@ -104,20 +94,19 @@ def _compute_learned_pos_embeds(
             temporal = _get_temporal_pos_embed(num_frames, dim, device=pos_embed.device)
             item_pos = spatial.unsqueeze(0) + temporal.unsqueeze(1).to(spatial.dtype)
             item_pos = item_pos.reshape(num_frames * grid_h * grid_w, dim)
-        padded_positions.append(_pad_sequence(item_pos, max_num_patches))
+        positions.append(item_pos)
 
-    return torch.stack(padded_positions)
+    return torch.cat(positions)
 
 
 def _compute_2d_rope_cache(
     freq_table: torch.Tensor,
     grids: list[list[int]],
-    max_num_patches: int,
     head_dim: int,
 ) -> torch.Tensor:
     """Build the real-valued 2D RoPE cache in raster patch order."""
     cached_spatial: dict[tuple[int, int], torch.Tensor] = {}
-    padded_angles = []
+    item_angles = []
     for num_frames, grid_h, grid_w in grids:
         spatial = cached_spatial.get((grid_h, grid_w))
         if spatial is None:
@@ -128,34 +117,34 @@ def _compute_2d_rope_cache(
                 grid_h * grid_w, head_dim // 2
             )
             cached_spatial[(grid_h, grid_w)] = spatial
-        item_angles = spatial.repeat(num_frames, 1)
-        padded_angles.append(_pad_sequence(item_angles, max_num_patches))
+        item_angles.append(spatial.repeat(num_frames, 1))
 
-    angles = torch.stack(padded_angles)
+    angles = torch.cat(item_angles)
     # ComplexRoPE.apply_rotary_emb multiplies in complex64; float() only widens
     # the container, so cos/sin keep whatever precision angles were computed in.
     cos_sin = torch.stack((angles.cos(), angles.sin()), dim=-1).float()
-    return torch.view_as_complex(cos_sin).unsqueeze(2)
+    return torch.view_as_complex(cos_sin).unsqueeze(1)
 
 
 def _temporal_pool_and_merge(
-    hidden_NPD: torch.Tensor,
+    hidden_TD: torch.Tensor,
     grids: list[list[int]],
     merge_kernel_size: tuple[int, int],
 ) -> torch.Tensor:
     """Temporally pool and concatenate neighboring spatial patch features."""
-    _, _, dim = hidden_NPD.shape
+    dim = hidden_TD.shape[-1]
     kernel_h, kernel_w = merge_kernel_size
     merged_dim = kernel_h * kernel_w * dim
-    max_merged = max(
-        (grid_h // kernel_h) * (grid_w // kernel_w) for _, grid_h, grid_w in grids
-    )
 
-    padded_items = []
-    for item_idx, (num_frames, grid_h, grid_w) in enumerate(grids):
+    merged_items = []
+    offset = 0
+    for num_frames, grid_h, grid_w in grids:
+        num_patches = num_frames * grid_h * grid_w
+        item = hidden_TD[offset : offset + num_patches]
+        offset += num_patches
         merged_h = grid_h // kernel_h
         merged_w = grid_w // kernel_w
-        item = hidden_NPD[item_idx, : num_frames * grid_h * grid_w].view(
+        item = item.view(
             num_frames,
             merged_h,
             kernel_h,
@@ -164,10 +153,9 @@ def _temporal_pool_and_merge(
             dim,
         )
         item = item.permute(0, 1, 3, 2, 4, 5).mean(dim=0)
-        item = item.reshape(merged_h * merged_w, merged_dim)
-        padded_items.append(_pad_sequence(item, max_merged))
+        merged_items.append(item.reshape(merged_h * merged_w, merged_dim))
 
-    return torch.stack(padded_items)
+    return torch.cat(merged_items)
 
 
 class VisionRotaryEmbedding2D(Module):
@@ -234,18 +222,18 @@ class KimiK3VisionBlock(Module):
 
     def forward(
         self,
-        x_NPD: torch.Tensor,
+        x_TD: torch.Tensor,
         *,
         rope_cache: torch.Tensor,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x_NPD = x_NPD + self.attn(
-            self.norm1(x_NPD),
+        x_TD = x_TD + self.attn(
+            self.norm1(x_TD),
             rope_cache=rope_cache,
             rope_apply=ComplexRoPE.apply_rotary_emb,
             attention_mask=attention_mask,
         )
-        return x_NPD + self.mlp(self.norm2(x_NPD))
+        return x_TD + self.mlp(self.norm2(x_TD))
 
 
 class KimiK3VisionProjector(Module):
@@ -265,9 +253,9 @@ class KimiK3VisionProjector(Module):
         self.post_norm = config.post_norm.build()
         self.activation = config.activation.build()
 
-    def forward(self, merged_NMF: torch.Tensor) -> torch.Tensor:
-        projected_NMO = self.linear_2(self.activation(self.linear_1(merged_NMF)))
-        return self.post_norm(projected_NMO)
+    def forward(self, merged_MF: torch.Tensor) -> torch.Tensor:
+        projected_MO = self.linear_2(self.activation(self.linear_1(merged_MF)))
+        return self.post_norm(projected_MO)
 
 
 class KimiK3VisionEncoder(Module):
@@ -313,7 +301,7 @@ class KimiK3VisionEncoder(Module):
         self.projector = config.projector.build()
 
     def _compute_position_embeddings(
-        self, grids: list[list[int]], max_num_patches: int
+        self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         max_grid_side = max(max(grid_h, grid_w) for _, grid_h, grid_w in grids)
         if (
@@ -324,14 +312,12 @@ class KimiK3VisionEncoder(Module):
         learned_pos = _compute_learned_pos_embeds(
             self.pos_embed,
             grids,
-            max_num_patches,
             self.interpolation_mode,
             self.max_num_frames,
         )
         rope_cache = _compute_2d_rope_cache(
             self._cached_freq_table,
             grids,
-            max_num_patches,
             self.rotary_pos_emb.head_dim,
         )
         return learned_pos, rope_cache
@@ -342,33 +328,41 @@ class KimiK3VisionEncoder(Module):
         *,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
-        """Encode padded raster-order patches and return padded text features."""
-        num_items, max_num_patches, _ = pixel_values.shape
+        """Encode packed raster-order patches and return packed text features."""
         grids = grid_thw.tolist()
 
         kernel_h, kernel_w = self.merge_kernel_size
-        num_patches_N = grid_thw.prod(dim=-1).to(torch.long)
+        for _, grid_h, grid_w in grids:
+            if grid_h % kernel_h != 0 or grid_w % kernel_w != 0:
+                raise ValueError(
+                    f"Vision grid {grid_h}x{grid_w} is not divisible by "
+                    f"merge kernel {self.merge_kernel_size}."
+                )
 
-        learned_pos, rope_cache = self._compute_position_embeddings(
-            grids, max_num_patches
-        )
-        hidden_NPD = self.patch_embed(pixel_values) + learned_pos
+        segment_lengths = grid_thw.prod(dim=-1)
+        total_tokens = pixel_values.shape[0]
+        expected_tokens = sum(t * h * w for t, h, w in grids)
+        if total_tokens != expected_tokens:
+            raise ValueError(
+                f"pixel_values contains {total_tokens} patches but grid_thw "
+                f"describes {expected_tokens}."
+            )
 
-        mask_mod = get_vision_block_mask_mod(num_patches_N)
-        attention_mask = compiled_create_block_mask(
-            mask_mod,
-            num_items,
-            None,
-            max_num_patches,
-            max_num_patches,
-            device=hidden_NPD.device,
-        )
+        learned_pos, rope_cache = self._compute_position_embeddings(grids)
+        hidden_TD = self.patch_embed(pixel_values) + learned_pos
+
+        with spmd.no_typecheck():
+            attention_mask = create_block_diagonal_mask(
+                segment_lengths,
+                total_tokens,
+                hidden_TD.device,
+            )
         for block in self.layers.values():
-            hidden_NPD = block(
-                hidden_NPD,
+            hidden_TD = block(
+                hidden_TD,
                 rope_cache=rope_cache,
                 attention_mask=attention_mask,
             )
-        hidden_NPD = self.final_norm(hidden_NPD)
-        merged_NMF = _temporal_pool_and_merge(hidden_NPD, grids, self.merge_kernel_size)
-        return self.projector(merged_NMF)
+        hidden_TD = self.final_norm(hidden_TD)
+        merged_MF = _temporal_pool_and_merge(hidden_TD, grids, self.merge_kernel_size)
+        return self.projector(merged_MF)

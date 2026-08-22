@@ -48,9 +48,10 @@ def parallelize_kimi_k3(
             "Kimi K3 currently supports FSDP2 data parallelism "
             f"only; disable {', '.join(unsupported_parallelisms)}."
         )
-    if parallelism.spmd_backend != "default":
+    if parallelism.spmd_backend != "partial_dtensor":
         raise NotImplementedError(
-            "Kimi K3 FSDP2 currently supports the default SPMD backend only."
+            "Kimi K3 FSDP2 currently supports the partial_dtensor SPMD backend "
+            "only; the config registry pins it."
         )
     if compile_config.enable and "model" in compile_config.components:
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")

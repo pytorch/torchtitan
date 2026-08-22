@@ -18,7 +18,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:
-# B = batch, L = sequence length, D = model dimension, H = heads,
+# T = packed tokens, D = model dimension, H = heads,
 # K = key head dimension, V = value head dimension, C = projection channels.
 
 
@@ -128,13 +128,13 @@ class KimiDeltaAttention(Module):
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
-    def _causal_conv(self, x_BLC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
-        x_BCL = F.pad(x_BLC.transpose(1, 2), (self.conv_kernel_size - 1, 0))
-        return F.silu(conv(x_BCL)).transpose(1, 2)
+    def _causal_conv(self, x_TC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
+        x_1CT = F.pad(x_TC.T.unsqueeze(0), (self.conv_kernel_size - 1, 0))
+        return F.silu(conv(x_1CT)).squeeze(0).T
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -144,32 +144,32 @@ class KimiDeltaAttention(Module):
                 "Kimi K3 reference KDA does not support packed-document masks."
             )
 
-        B, L, _ = x_BLD.shape
-        q_BLHK = self._causal_conv(self.q_proj(x_BLD), self.q_conv).view(
-            B, L, self.num_heads, self.head_dim
+        num_tokens = x_TD.shape[0]
+        q_THK = self._causal_conv(self.q_proj(x_TD), self.q_conv).view(
+            num_tokens, self.num_heads, self.head_dim
         )
-        k_BLHK = self._causal_conv(self.k_proj(x_BLD), self.k_conv).view(
-            B, L, self.num_heads, self.head_dim
+        k_THK = self._causal_conv(self.k_proj(x_TD), self.k_conv).view(
+            num_tokens, self.num_heads, self.head_dim
         )
-        v_BLHV = self._causal_conv(self.v_proj(x_BLD), self.v_conv).view(
-            B, L, self.num_heads, self.head_dim
+        v_THV = self._causal_conv(self.v_proj(x_TD), self.v_conv).view(
+            num_tokens, self.num_heads, self.head_dim
         )
-        forget_BLHK = self.forget_b(self.forget_a(x_BLD)).view(
-            B, L, self.num_heads, self.head_dim
+        forget_THK = self.forget_b(self.forget_a(x_TD)).view(
+            num_tokens, self.num_heads, self.head_dim
         )
-        beta_BLH = self.beta(x_BLD).float()
+        beta_TH = self.beta(x_TD).float()
 
-        out_BLHV = self.kernel(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
-            forget_BLHK,
-            beta_BLH,
+        out_THV = self.kernel(
+            q_THK.unsqueeze(0),
+            k_THK.unsqueeze(0),
+            v_THV.unsqueeze(0),
+            forget_THK.unsqueeze(0),
+            beta_TH.unsqueeze(0),
             self.A_log,
             self.dt_bias,
+        ).squeeze(0)
+        output_gate_THV = self.output_gate(x_TD).view(
+            num_tokens, self.num_heads, self.head_dim
         )
-        output_gate_BLHV = self.output_gate(x_BLD).view(
-            B, L, self.num_heads, self.head_dim
-        )
-        out_BLHV = self.output_norm(out_BLHV, output_gate_BLHV)
-        return self.output_proj(out_BLHV.reshape(B, L, -1))
+        out_THV = self.output_norm(out_THV, output_gate_THV)
+        return self.output_proj(out_THV.reshape(num_tokens, -1))

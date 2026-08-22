@@ -29,8 +29,8 @@ from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
 # Shape suffixes:
-# B = batch, L = sequence length, D = model dimension, H = heads,
-# K = key head dimension, V = value head dimension, T = flattened tokens,
+# T = packed tokens, D = model dimension, H = heads,
+# K = key head dimension, V = value head dimension,
 # N = attention-residual entries.
 
 
@@ -82,49 +82,48 @@ class KimiMLAAttention(BaseAttention):
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
 
-        B, L, _ = x_BLD.shape
-        q_BLHK = self.wq_b(self.q_norm(self.wq_a(x_BLD))).view(
-            B, L, self.n_heads, self.q_head_dim
+        num_tokens = x_TD.shape[0]
+        q_THK = self.wq_b(self.q_norm(self.wq_a(x_TD))).view(
+            num_tokens, self.n_heads, self.q_head_dim
         )
 
-        compressed_kv_BLC = self.wkv_a(x_BLD)
-        kv_latent_BLC, k_rope_BLK = torch.split(
-            compressed_kv_BLC,
+        compressed_kv_TC = self.wkv_a(x_TD)
+        kv_latent_TC, k_rope_TK = torch.split(
+            compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
-        kv_BLHC = self.wkv_b(self.kv_norm(kv_latent_BLC)).view(
-            B,
-            L,
+        kv_THC = self.wkv_b(self.kv_norm(kv_latent_TC)).view(
+            num_tokens,
             self.n_heads,
             self.qk_nope_head_dim + self.v_head_dim,
         )
-        k_nope_BLHK, v_BLHV = torch.split(
-            kv_BLHC,
+        k_nope_THK, v_THV = torch.split(
+            kv_THC,
             [self.qk_nope_head_dim, self.v_head_dim],
             dim=-1,
         )
-        k_rope_BLHK = k_rope_BLK.view(B, L, 1, self.qk_rope_head_dim).expand(
-            -1, -1, self.n_heads, -1
+        k_rope_THK = k_rope_TK.view(num_tokens, 1, self.qk_rope_head_dim).expand(
+            -1, self.n_heads, -1
         )
-        k_BLHK = torch.cat((k_nope_BLHK, k_rope_BLHK), dim=-1)
+        k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
 
-        out_BLHV = self.inner_attention(
-            q_BLHK,
-            k_BLHK,
-            v_BLHV,
+        out_THV = self.inner_attention(
+            q_THK,
+            k_THK,
+            v_THV,
             attention_masks=attention_masks,
             scale=self.scale,
         )
-        out_BLD = out_BLHV.reshape(B, L, self.n_heads * self.v_head_dim)
-        out_BLD = out_BLD * torch.sigmoid(self.gate(x_BLD))
-        return self.wo(out_BLD)
+        out_TD = out_THV.reshape(num_tokens, self.n_heads * self.v_head_dim)
+        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
+        return self.wo(out_TD)
 
 
 def _apply_attention_residual(
@@ -208,53 +207,54 @@ class KimiK3TransformerBlock(Module):
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        B, L, D = x_BLD.shape
-        prefix_sum_BLD = x_BLD
+        prefix_sum_TD = x_TD
 
         if block_residual_TND.shape[1] > 0:
-            x_BLD = _apply_attention_residual(
-                prefix_sum_BLD.reshape(-1, D),
+            assert self.attention_res_proj is not None
+            assert self.attention_res_norm is not None
+            x_TD = _apply_attention_residual(
+                prefix_sum_TD,
                 block_residual_TND,
                 self.attention_res_proj,
                 self.attention_res_norm,
-            ).view(B, L, D)
+            )
 
         opens_block = self.layer_id % self.attn_res_block_size == 0
         if opens_block:
             block_residual_TND = torch.cat(
                 (
                     block_residual_TND,
-                    prefix_sum_BLD.reshape(-1, D).unsqueeze(1),
+                    prefix_sum_TD.unsqueeze(1),
                 ),
                 dim=1,
             )
 
-        h_BLD = self.attention_norm(x_BLD)
+        h_TD = self.attention_norm(x_TD)
         if self.attention is not None:
-            h_BLD = self.attention(h_BLD, attention_masks, positions)
+            h_TD = self.attention(h_TD, attention_masks, positions)
         else:
             assert self.delta_attention is not None
-            h_BLD = self.delta_attention(h_BLD, None, positions)
-        prefix_sum_BLD = h_BLD if opens_block else prefix_sum_BLD + h_BLD
+            h_TD = self.delta_attention(h_TD, None, positions)
+        prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
 
-        h_BLD = _apply_attention_residual(
-            prefix_sum_BLD.reshape(-1, D),
+        h_TD = _apply_attention_residual(
+            prefix_sum_TD,
             block_residual_TND,
             self.ffn_res_proj,
             self.ffn_res_norm,
-        ).view(B, L, D)
-        h_BLD = self.ffn_norm(h_BLD)
+        )
+        h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
-            h_BLD = self.moe(h_BLD)
+            h_TD = self.moe(h_TD)
         else:
             assert self.feed_forward is not None
-            h_BLD = self.feed_forward(h_BLD)
-        return prefix_sum_BLD + h_BLD, block_residual_TND
+            h_TD = self.feed_forward(h_TD)
+        return prefix_sum_TD + h_TD, block_residual_TND
 
 
 class KimiK3Model(Decoder):
@@ -311,14 +311,14 @@ class KimiK3Model(Decoder):
         grid_thw: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
-        embeddings = self.tok_embeddings(tokens)
+        embeddings_TD = self.tok_embeddings(tokens)
         if (pixel_values is None) != (grid_thw is None):
             raise ValueError(
                 "pixel_values and grid_thw must either both be provided or "
                 "both be omitted."
             )
         if pixel_values is None:
-            return embeddings
+            return embeddings_TD
         assert grid_thw is not None
         if self.vision_encoder is None:
             raise ValueError("pixel_values were provided without a vision encoder.")
@@ -339,7 +339,7 @@ class KimiK3Model(Decoder):
             special_tokens["image_id"],
         )
         return scatter_vision_embeds(
-            embeddings,
+            embeddings_TD,
             vision_embeds=vision_embeds,
             vision_positions=vision_positions,
         )
@@ -359,32 +359,32 @@ class KimiK3Model(Decoder):
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
         if self.tok_embeddings is not None:
-            h_BLD = self._prepare_multimodal_embeds(
+            h_TD = self._prepare_multimodal_embeds(
                 tokens,
                 pixel_values=pixel_values,
                 grid_thw=grid_thw,
                 special_tokens=special_tokens,
             )
         else:
-            h_BLD = tokens
+            h_TD = tokens
 
-        B, L, D = h_BLD.shape
-        block_residual_TND = h_BLD.new_zeros(B * L, 0, D)
+        num_tokens, D = h_TD.shape
+        block_residual_TND = h_TD.new_zeros(num_tokens, 0, D)
         for layer in self.layers.values():
-            h_BLD, block_residual_TND = layer(
-                h_BLD,
+            h_TD, block_residual_TND = layer(
+                h_TD,
                 block_residual_TND,
                 attention_masks,
                 positions,
             )
 
-        h_BLD = _apply_attention_residual(
-            h_BLD.reshape(-1, D),
+        h_TD = _apply_attention_residual(
+            h_TD,
             block_residual_TND,
             self.output_res_proj,
             self.output_res_norm,
-        ).view(B, L, D)
-        h_BLD = self.norm(h_BLD) if self.norm is not None else h_BLD
+        )
+        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
         if self._skip_lm_head:
-            return h_BLD
-        return self.lm_head(h_BLD) if self.lm_head is not None else h_BLD
+            return h_TD
+        return self.lm_head(h_TD) if self.lm_head is not None else h_TD

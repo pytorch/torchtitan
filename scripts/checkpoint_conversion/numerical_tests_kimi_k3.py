@@ -272,7 +272,7 @@ def _expand_image_placeholder(
     return torch.cat(
         (input_ids[:, :position], image_tokens, input_ids[:, position + 1 :]),
         dim=1,
-    )
+    ).squeeze(0)
 
 
 def _print_routing_comparison(
@@ -312,21 +312,21 @@ def _force_hf_routing(model, expert_indices, device) -> None:
     for layer_idx, layer in model.layers.items():
         if (moe := cast(Any, layer.moe)) is None:
             continue
-        ids = expert_indices[int(layer_idx)].unsqueeze(0).to(device)
+        ids = expert_indices[int(layer_idx)].to(device)
         router, original = moe.router, moe.router.forward
 
         def forced_forward(
-            x_BLD,
+            x_TD,
             expert_bias_E=None,
             _router=router,
             _original=original,
             _ids=ids,
         ):
-            _, _, scores_BLE = _original(x_BLD, expert_bias_E)
-            weights = scores_BLE.gather(dim=-1, index=_ids)
+            _, _, scores_TE = _original(x_TD, expert_bias_E)
+            weights = scores_TE.gather(dim=-1, index=_ids)
             if _router.route_norm:
                 weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
-            return weights * _router.route_scale, _ids, scores_BLE
+            return weights * _router.route_scale, _ids, scores_TE
 
         router.forward = forced_forward
 
@@ -381,7 +381,7 @@ def run_tt(
         merge_size=_MERGE_SIZE,
         patch_order="raster",
     )
-    pixel_values = patches.unsqueeze(0).to(device=device, dtype=vision_dtype)
+    pixel_values = patches.to(device=device, dtype=vision_dtype)
     grid_thw = grid.unsqueeze(0).to(device)
     num_vision_tokens = (grid[1] // _MERGE_SIZE) * (grid[2] // _MERGE_SIZE)
     tokens = _expand_image_placeholder(
@@ -390,10 +390,10 @@ def run_tt(
         int(num_vision_tokens.item()),
     ).to(device)
     positions = torch.arange(
-        tokens.shape[1],
+        tokens.shape[0],
         dtype=torch.int32,
         device=device,
-    ).unsqueeze(0)
+    )
     attention_masks = model.get_attention_masks(positions)
 
     print(
@@ -429,7 +429,7 @@ def run_tt(
         attention_masks=attention_masks,
     )
     _print_routing_comparison(ref["expert_indices"], expert_indices)
-    return logits[:, -1, :].float().cpu().squeeze()
+    return logits[-1].float().cpu()
 
 
 def compare(ref_logits: torch.Tensor, tt_logits: torch.Tensor) -> None:
