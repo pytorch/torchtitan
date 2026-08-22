@@ -23,6 +23,7 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
 from .kda import KimiDeltaAttention
 from .moe import KimiFeedForward, KimiLatentMoE
@@ -267,11 +268,9 @@ class KimiK3Model(Decoder):
 
         def update_from_config(self, *, config, **kwargs) -> None:
             # Unsupported parallelisms are rejected in parallelize_kimi_k3.
-            dataloader = getattr(config, "dataloader", None)
-            if getattr(dataloader, "packing_buffer_size", 0) > 0:
-                raise NotImplementedError(
-                    "Kimi K3 v1 does not support packed documents."
-                )
+            dataset = config.dataloader.dataset
+            if isinstance(dataset, MMSamplePackingConfig):
+                raise ValueError("Kimi K3 does not yet support sample packing.")
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(
