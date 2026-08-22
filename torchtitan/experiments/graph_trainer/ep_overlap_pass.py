@@ -32,6 +32,12 @@ For each selected forward/backward region:
   launched before their CPU scalar/list consumers;
 * after each marker pair, ready non-collective body work is emitted as filler
   before advancing to the next marker pair;
+* an optional deferred-compute set (dW-only work selected by
+  ``defer_param_grad_pass``) is withheld from filler until every token-exchange
+  launch of its backward region has been emitted, then released between those
+  launches and their waits; deferred nodes without a legal
+  launch -> deferred -> wait placement keep baseline order with a debug
+  message rather than an error;
 * all graph nodes remain in the sorted graph exactly once and the final graph
   must lint.
 
@@ -569,6 +575,62 @@ def _append_ready_blocks(
         made_progress = True
 
 
+def _deferrable_region_nodes(
+    *,
+    region: ChunkedRegion,
+    deferred_compute_nodes: set[fx.Node] | None,
+    closure_nodes: dict[int, set[fx.Node]],
+    launch_nodes: set[fx.Node],
+    order: dict[fx.Node, int],
+    chunk_order: tuple[int, ...],
+) -> set[fx.Node]:
+    """Return the requested deferred nodes this region can legally defer.
+
+    Deferral moves dW-only body work between a backward region's final
+    token-exchange launches and their waits. A requested node keeps its
+    baseline position (with a debug message, never an error) when a launch
+    closure depends on it or when no launch of this region follows its
+    original position, because no legal launch -> deferred -> wait placement
+    exists for it.
+    """
+    if not deferred_compute_nodes or not region.is_backward:
+        return set()
+    candidates = {
+        node
+        for chunk_id in chunk_order
+        for node in region.bodies_by_chunk[chunk_id].nodes
+        if node in deferred_compute_nodes
+    }
+    if not candidates:
+        return set()
+    launch_closure_deps = {
+        node
+        for node in candidates
+        if any(node in closure_nodes[chunk_id] for chunk_id in chunk_order)
+    }
+    last_launch = max(order[launch] for launch in launch_nodes)
+    already_after_launches = {
+        node for node in candidates - launch_closure_deps if order[node] > last_launch
+    }
+    deferrable = candidates - launch_closure_deps - already_after_launches
+    skipped = launch_closure_deps | already_after_launches
+    if skipped:
+        logger.debug(
+            "ep_overlap kept baseline order for %d deferred dW node(s) of %r "
+            "(backward) without a legal launch->dW->wait placement: %s",
+            len(skipped),
+            region.root_fqn,
+            ", ".join(sorted(node.name for node in skipped)[:8]),
+        )
+    if not deferrable:
+        logger.debug(
+            "ep_overlap fell back to the baseline schedule for %r (backward): "
+            "no deferred dW node has a legal launch->dW->wait placement.",
+            region.root_fqn,
+        )
+    return deferrable
+
+
 def _build_region_phases(
     *,
     region: ChunkedRegion,
@@ -577,6 +639,7 @@ def _build_region_phases(
     owner_by_node: dict[fx.Node, ChunkOwner],
     pair_first_token_exchange: bool,
     rewrite_token_count_sync_copies: bool,
+    deferred_compute_nodes: set[fx.Node] | None = None,
 ) -> tuple[tuple[fx.Node, ...], ...]:
     """Step 4: construct wait-gated phases for one scheduled region."""
     chunk_order = (1, 0) if region.is_backward else (0, 1)
@@ -614,8 +677,19 @@ def _build_region_phases(
         for chunk_exchanges in exchanges_by_chunk.values()
         for exchange in chunk_exchanges
     }
+    deferred = _deferrable_region_nodes(
+        region=region,
+        deferred_compute_nodes=deferred_compute_nodes,
+        closure_nodes=closure_nodes,
+        launch_nodes=launch_nodes,
+        order=order,
+        chunk_order=chunk_order,
+    )
+    final_exchange_idx = len(exchanges_by_chunk[0]) - 1
 
     def future_candidates(exchange_idx: int) -> dict[int, set[fx.Node]]:
+        # Deferred dW work stays out of filler until every launch is emitted.
+        withheld = deferred if exchange_idx < final_exchange_idx else set()
         return {
             chunk_id: {
                 node
@@ -623,7 +697,7 @@ def _build_region_phases(
                 for node in closure
                 if node not in launch_nodes
             }
-            | filler[chunk_id]
+            | (filler[chunk_id] - withheld)
             for chunk_id in chunk_order
         }
 
@@ -738,6 +812,7 @@ def _build_region_phases(
             include_waits=False,
         )
 
+    windowed_deferred = deferred & emitted
     remaining = {
         chunk_id: set(region.bodies_by_chunk[chunk_id].nodes) - emitted
         for chunk_id in chunk_order
@@ -756,6 +831,14 @@ def _build_region_phases(
                 owner_by_node=owner_by_node,
                 include_waits=True,
             )
+
+    if tail_deferred := deferred - windowed_deferred:
+        logger.debug(
+            "ep_overlap deferred dW node(s) for %r (backward) became ready "
+            "only after a token-exchange wait, so they gain no overlap: %s",
+            region.root_fqn,
+            ", ".join(sorted(node.name for node in tail_deferred)[:8]),
+        )
 
     missing = [
         node
@@ -788,6 +871,7 @@ def _plan_region(
     owner_by_node: dict[fx.Node, ChunkOwner],
     pair_first_token_exchange: bool,
     rewrite_token_count_sync_copies: bool,
+    deferred_compute_nodes: set[fx.Node] | None = None,
 ) -> _ScheduledRegion | None:
     """Steps 2-4: validate one chunked region and build its schedule phases."""
     root = region.root_fqn
@@ -846,6 +930,7 @@ def _plan_region(
         owner_by_node=owner_by_node,
         pair_first_token_exchange=pair_first_token_exchange,
         rewrite_token_count_sync_copies=rewrite_token_count_sync_copies,
+        deferred_compute_nodes=deferred_compute_nodes,
     )
     return _ScheduledRegion(region=region, phases=phases) if phases else None
 
@@ -908,6 +993,7 @@ def _schedule_ep_overlap_regions(
     require_all_to_all: bool,
     reorder: bool = True,
     pair_first_token_exchange: bool = False,
+    deferred_compute_nodes: set[fx.Node] | None = None,
 ) -> int:
     """Run validation or scheduling for all chunked regions matching a pattern."""
     order = ordered_nodes(gm)
@@ -928,6 +1014,7 @@ def _schedule_ep_overlap_regions(
                 owner_by_node=owner_by_node,
                 pair_first_token_exchange=pair_first_token_exchange,
                 rewrite_token_count_sync_copies=reorder,
+                deferred_compute_nodes=deferred_compute_nodes,
             )
         )
         is not None
@@ -981,6 +1068,7 @@ def ep_overlap_schedule_pass(
     module_pattern: str,
     require_all_to_all: bool = True,
     pair_first_token_exchange: bool = False,
+    deferred_compute_nodes: set[fx.Node] | None = None,
 ) -> fx.GraphModule:
     """Reorder already chunked regions around EP all-to-alls."""
     del example_inputs
@@ -989,6 +1077,7 @@ def ep_overlap_schedule_pass(
         module_pattern=module_pattern,
         require_all_to_all=require_all_to_all,
         pair_first_token_exchange=pair_first_token_exchange,
+        deferred_compute_nodes=deferred_compute_nodes,
     )
     logger.info(
         "Applied ep_overlap scheduling to %d chunked region(s): module=%s",

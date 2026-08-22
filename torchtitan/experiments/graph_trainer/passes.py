@@ -47,6 +47,9 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     snapshot_graph,
     tlparse_log_graph_pass,
 )
+from torchtitan.experiments.graph_trainer.defer_param_grad_pass import (
+    defer_param_grad_schedule_pass,
+)
 from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
     ep_overlap_chunk_pass,
     populate_chunk_dim_metadata_pass,
@@ -80,6 +83,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
 )
+from torchtitan.experiments.graph_trainer.registry import register_pass_pipeline
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -446,6 +450,39 @@ def construct_default_graph_passes(
             )
         )
     return passes
+
+
+@register_pass_pipeline("ep_overlap_deferred_dw")
+def construct_ep_overlap_deferred_dw_graph_passes(
+    traced_result: "TracedResult",
+    config: "GraphTrainer.Config",
+    *,
+    parallel_dims=None,
+) -> list[Callable]:
+    """Default pipeline with EP scheduling swapped for deferred-dW scheduling.
+
+    ``defer_param_grad_schedule_pass`` runs the baseline ep_overlap schedule
+    with backward dW-only work deferred into the backward all-to-all
+    launch -> wait windows (see ``defer_param_grad_pass``). Selected with
+    ``--compile.pass_pipeline ep_overlap_deferred_dw``; the schedule kwargs
+    bound by the default pipeline are reused unchanged.
+    """
+    if not config.compile.ep_overlap.enabled:
+        raise ValueError(
+            "pass_pipeline 'ep_overlap_deferred_dw' requires "
+            "--compile.ep_overlap.enabled."
+        )
+    passes = construct_default_graph_passes(
+        traced_result, config, parallel_dims=parallel_dims
+    )
+    return [
+        (
+            functools.partial(defer_param_grad_schedule_pass, **pass_fn.keywords)
+            if _get_pass_name(pass_fn) == "ep_overlap_schedule_pass"
+            else pass_fn
+        )
+        for pass_fn in passes
+    ]
 
 
 def _get_pass_name(pass_fn: Callable) -> str:

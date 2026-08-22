@@ -44,6 +44,10 @@ from torchtitan.experiments.graph_trainer.cudagraph import (
     is_cudagraphable,
     is_full_cudagraphable,
 )
+from torchtitan.experiments.graph_trainer.defer_param_grad_pass import (
+    _deferred_dw_nodes,
+    defer_param_grad_schedule_pass,
+)
 from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
     _chunk_copied_meta,
     _materialize_symint_arg,
@@ -64,6 +68,7 @@ from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _apply_schedule,
     _schedule_ep_overlap_regions,
     _ScheduledRegion,
+    ep_overlap_schedule_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     CHUNK_SYMBOL_HINTS_META,
@@ -99,6 +104,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
     selective_activation_remat_pass,
 )
+from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -3526,6 +3532,33 @@ class TestChunkPasses(TestCase):
             names.index("full_inductor_compilation_pass"),
         )
 
+    def test_ep_overlap_deferred_dw_pipeline_swaps_schedule_pass(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        traced_result.tensor_input_indices = []
+
+        pipeline = PASS_PIPELINE_REGISTRY["ep_overlap_deferred_dw"](
+            traced_result, config
+        )
+        names = [
+            pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
+            for pass_fn in pipeline
+        ]
+
+        self.assertNotIn("ep_overlap_schedule_pass", names)
+        self.assertLess(
+            names.index("defer_param_grad_schedule_pass"),
+            names.index("concretize_ep_chunk_symbolic_shapes_pass"),
+        )
+        swapped = pipeline[names.index("defer_param_grad_schedule_pass")]
+        self.assertEqual(swapped.keywords["module_pattern"], "layers.*")
+
+    def test_ep_overlap_deferred_dw_pipeline_requires_ep_overlap(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.ep_overlap.enabled = False
+
+        with self.assertRaisesRegex(ValueError, "ep_overlap.enabled"):
+            PASS_PIPELINE_REGISTRY["ep_overlap_deferred_dw"](traced_result, config)
+
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
             ("seq", "layers.*.moe"),
@@ -5435,6 +5468,270 @@ class TestChunkPasses(TestCase):
             if isinstance(node.args[0], torch.fx.Node)
         }
         self.assertNotIn(torch.ops.aten.flip.default, split_inputs)
+
+
+class TestDeferParamGradPass(TestCase):
+    """Unit tests for the deferred-dW EP overlap scheduling pass."""
+
+    _MOE_FQN = "layers.0.moe"
+
+    def _mark_backward_body(self, node, *, chunk_id, token_exchange=None):
+        custom = dict(node.meta.get("custom", {}))
+        custom[_MODULE_FQN] = self._MOE_FQN
+        if token_exchange is not None:
+            custom["EP"] = token_exchange
+            custom[_EP_TOKEN_EXCHANGE] = token_exchange
+        node.meta["custom"] = custom
+        node.meta["chunk_id"] = chunk_id
+        node.meta["chunked_region_fqn"] = self._MOE_FQN
+        node.meta["chunked_region_role"] = "body"
+        node.meta["autograd_backward"] = True
+
+    def _build_backward_moe_gm(
+        self,
+        *,
+        act_q_target=torch.ops.aten.neg.default,
+        dw_target=torch.ops.aten.add.Tensor,
+        dw_sink=None,
+        separable_dw=True,
+    ):
+        """Build a backward two-chunk MoE-shaped region with a wgrad branch.
+
+        Per chunk (original order): grad_seed -> combine-backward launch/wait
+        -> shared dgrad -> act_q + dw_mm (dW-only wgrad branch) ->
+        dispatch-backward launch/wait -> dx_tail. Outputs are
+        ``(dx, dw_c0, dw_c1)``, matching the trainer's ``[loss] + param_grads``
+        output slicing with one leading non-gradient output.
+        ``separable_dw=False`` emulates an opaque backward whose dgrad value
+        itself is the parameter gradient. ``dw_sink`` optionally consumes each
+        chunk's wgrad with a gradient-reduction collective or a buffer
+        mutation before the graph output.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        acc_bufs = {}
+        if dw_sink == "mutation":
+            for chunk_id in (1, 0):
+                acc_bufs[chunk_id] = graph.placeholder(f"acc_buf_{chunk_id}")
+        c10d = torch.ops._c10d_functional
+        refs = {}
+        for chunk_id in (1, 0):
+            grad_seed = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+            combine = graph.call_function(
+                c10d.all_to_all_single.default, args=(grad_seed, [], [], "ep")
+            )
+            combine_wait = graph.call_function(
+                c10d.wait_tensor.default, args=(combine,)
+            )
+            shared = graph.call_function(
+                torch.ops.aten.neg.default, args=(combine_wait,)
+            )
+            body = [grad_seed, combine, combine_wait, shared]
+            chunk = {
+                "combine": combine,
+                "combine_wait": combine_wait,
+                "shared": shared,
+            }
+            if separable_dw:
+                act_q = graph.call_function(act_q_target, args=(x,))
+                dw_mm = graph.call_function(dw_target, args=(shared, act_q))
+                dw_out = dw_mm
+                body.extend((act_q, dw_mm))
+                chunk.update({"act_q": act_q, "dw_mm": dw_mm})
+                if dw_sink == "collective":
+                    dw_reduce = graph.call_function(
+                        c10d.all_reduce.default, args=(dw_mm, "sum", "dp")
+                    )
+                    dw_reduce_wait = graph.call_function(
+                        c10d.wait_tensor.default, args=(dw_reduce,)
+                    )
+                    dw_out = dw_reduce_wait
+                    body.extend((dw_reduce, dw_reduce_wait))
+                    chunk.update(
+                        {"dw_reduce": dw_reduce, "dw_reduce_wait": dw_reduce_wait}
+                    )
+                elif dw_sink == "mutation":
+                    dw_acc = graph.call_function(
+                        torch.ops.aten.add_.Tensor,
+                        args=(acc_bufs[chunk_id], dw_mm),
+                    )
+                    dw_out = dw_acc
+                    body.append(dw_acc)
+                    chunk["dw_acc"] = dw_acc
+            else:
+                dw_out = shared
+            dispatch_pre = graph.call_function(
+                torch.ops.aten.relu.default, args=(shared,)
+            )
+            dispatch = graph.call_function(
+                c10d.all_to_all_single.default, args=(dispatch_pre, [], [], "ep")
+            )
+            dispatch_wait = graph.call_function(
+                c10d.wait_tensor.default, args=(dispatch,)
+            )
+            dx_tail = graph.call_function(
+                torch.ops.aten.neg.default, args=(dispatch_wait,)
+            )
+            body.extend((dispatch_pre, dispatch, dispatch_wait, dx_tail))
+            chunk.update(
+                {
+                    "dispatch": dispatch,
+                    "dispatch_wait": dispatch_wait,
+                    "dx_tail": dx_tail,
+                    "dw_out": dw_out,
+                }
+            )
+            for node in body:
+                token_exchange = None
+                if node is combine:
+                    token_exchange = "combine"
+                elif node is dispatch:
+                    token_exchange = "dispatch"
+                self._mark_backward_body(
+                    node, chunk_id=chunk_id, token_exchange=token_exchange
+                )
+            refs[chunk_id] = chunk
+
+        dx = graph.call_function(
+            torch.ops.aten.add.Tensor,
+            args=(refs[1]["dx_tail"], refs[0]["dx_tail"]),
+        )
+        graph.output((dx, refs[0]["dw_out"], refs[1]["dw_out"]))
+        return torch.fx.GraphModule(torch.nn.Module(), graph), refs
+
+    def _defer_and_order(self, gm):
+        defer_param_grad_schedule_pass(
+            gm,
+            module_pattern="layers.*.moe",
+            require_all_to_all=True,
+        )
+        return {node: idx for idx, node in enumerate(gm.graph.nodes)}
+
+    def _deferred_nodes(self, gm):
+        return _deferred_dw_nodes(
+            gm, module_pattern="layers.*.moe", num_non_grad_outputs=1
+        )
+
+    def test_dw_only_nodes_move_between_backward_launch_and_wait(self):
+        gm, refs = self._build_backward_moe_gm()
+        order = self._defer_and_order(gm)
+
+        last_launch = max(
+            order[refs[chunk_id][role]]
+            for chunk_id in (0, 1)
+            for role in ("combine", "dispatch")
+        )
+        first_wait = min(order[refs[chunk_id]["dispatch_wait"]] for chunk_id in (0, 1))
+        for chunk_id in (0, 1):
+            for role in ("act_q", "dw_mm"):
+                self.assertGreater(order[refs[chunk_id][role]], last_launch)
+                self.assertLess(order[refs[chunk_id][role]], first_wait)
+
+    def test_baseline_schedule_keeps_dw_work_ahead_of_combine_wait(self):
+        gm, refs = self._build_backward_moe_gm()
+        ep_overlap_schedule_pass(
+            gm, module_pattern="layers.*.moe", require_all_to_all=True
+        )
+        order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
+
+        # Without deferral the greedy filler emits the activation-side dW
+        # work in the combine window, ahead of the dgrad critical path. The
+        # deferred pass moves exactly this work past the dispatch launches.
+        self.assertLess(order[refs[1]["act_q"]], order[refs[1]["combine_wait"]])
+
+    def test_shared_di_dw_nodes_do_not_move(self):
+        gm, refs = self._build_backward_moe_gm()
+        deferred = self._deferred_nodes(gm)
+        for chunk_id in (0, 1):
+            self.assertNotIn(refs[chunk_id]["shared"], deferred)
+
+        order = self._defer_and_order(gm)
+        for chunk_id in (0, 1):
+            # Shared dI/dW work stays inside its dispatch launch closure.
+            self.assertLess(
+                order[refs[chunk_id]["shared"]], order[refs[chunk_id]["dispatch"]]
+            )
+
+    def test_collective_and_mutation_dw_sinks_are_not_deferred(self):
+        for dw_sink, sink_roles in (
+            ("collective", ("dw_reduce", "dw_reduce_wait")),
+            ("mutation", ("dw_acc",)),
+        ):
+            with self.subTest(dw_sink=dw_sink):
+                gm, refs = self._build_backward_moe_gm(dw_sink=dw_sink)
+                deferred = self._deferred_nodes(gm)
+                for chunk_id in (0, 1):
+                    self.assertIn(refs[chunk_id]["dw_mm"], deferred)
+                    for role in sink_roles:
+                        self.assertNotIn(refs[chunk_id][role], deferred)
+
+                before = sorted(node.name for node in gm.graph.nodes)
+                order = self._defer_and_order(gm)
+                self.assertEqual(sorted(node.name for node in gm.graph.nodes), before)
+                for chunk_id in (0, 1):
+                    self.assertLess(
+                        order[refs[chunk_id]["dw_mm"]],
+                        min(order[refs[chunk_id][role]] for role in sink_roles),
+                    )
+
+    def test_every_node_scheduled_exactly_once_and_graph_lints(self):
+        gm, _refs = self._build_backward_moe_gm()
+        before = [node.name for node in gm.graph.nodes]
+
+        defer_param_grad_schedule_pass(
+            gm, module_pattern="layers.*.moe", require_all_to_all=True
+        )
+
+        after = [node.name for node in gm.graph.nodes]
+        self.assertEqual(sorted(after), sorted(before))
+        self.assertEqual(len(after), len(set(after)))
+        gm.graph.lint()
+        gm.recompile()
+
+    def test_opaque_backward_keeps_baseline_ordering(self):
+        deferred_gm, _refs = self._build_backward_moe_gm(separable_dw=False)
+        self.assertEqual(self._deferred_nodes(deferred_gm), set())
+        defer_param_grad_schedule_pass(
+            deferred_gm, module_pattern="layers.*.moe", require_all_to_all=True
+        )
+
+        baseline_gm, _refs = self._build_backward_moe_gm(separable_dw=False)
+        ep_overlap_schedule_pass(
+            baseline_gm, module_pattern="layers.*.moe", require_all_to_all=True
+        )
+
+        self.assertEqual(
+            [node.name for node in deferred_gm.graph.nodes],
+            [node.name for node in baseline_gm.graph.nodes],
+        )
+
+    def test_bf16_and_quantized_shapes_share_schedule_shape(self):
+        flavors = {
+            "bf16": dict(
+                act_q_target=torch.ops.aten.neg.default,
+                dw_target=torch.ops.aten.add.Tensor,
+            ),
+            "mxfp8": dict(
+                act_q_target=torch.ops.aten.relu.default,
+                dw_target=torch.ops.aten.mul.Tensor,
+            ),
+        }
+        schedules = {}
+        for flavor, targets in flavors.items():
+            gm, refs = self._build_backward_moe_gm(**targets)
+            order = self._defer_and_order(gm)
+            roles_by_node = {
+                node: (chunk_id, role)
+                for chunk_id, chunk in refs.items()
+                for role, node in chunk.items()
+            }
+            schedules[flavor] = [
+                roles_by_node[node]
+                for node in sorted(order, key=order.__getitem__)
+                if node in roles_by_node
+            ]
+
+        self.assertEqual(schedules["bf16"], schedules["mxfp8"])
 
 
 class TestRemoveIdentityViewPass(TestCase):
