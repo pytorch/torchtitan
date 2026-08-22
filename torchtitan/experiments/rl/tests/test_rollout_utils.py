@@ -13,7 +13,12 @@ import pytest
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
-from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.experiments.rl.rollout import (
+    Rollout,
+    RolloutGroup,
+    RolloutStatus,
+    RolloutTurn,
+)
 from torchtitan.experiments.rl.types import RolloutTurnID
 
 _GROUP_ID = "step=1/group=0"
@@ -54,6 +59,37 @@ def _scored_rollout(
         reward=reward,
         advantage=advantage,
     )
+
+
+def test_build_from_group_drops_sample_without_valid_loss_tokens() -> None:
+    invalid = _scored_rollout(
+        [_turn(prompt_token_ids=[1], completion_token_ids=[2], version=0)],
+        reward=0.0,
+        advantage=-1.0,
+    )
+    invalid.turns[0].completion_logprobs = [float("nan")]
+    valid = _scored_rollout(
+        [_turn(prompt_token_ids=[1], completion_token_ids=[2], version=0)],
+        reward=1.0,
+        advantage=1.0,
+    )
+    valid.rollout_id = 1
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[invalid, valid])
+        )
+    )
+
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1]
+    [dropped] = [
+        metric
+        for metric in group.metrics
+        if metric.key == "training_sample_builder/num_samples_dropped_no_valid_tokens"
+    ]
+    assert dropped.value.value == 1.0
 
 
 def test_single_turn_packs_one_training_sample() -> None:

@@ -1007,16 +1007,15 @@ class Controller(Configurable):
                     rollout_group=rollout_group
                 )
 
-            if not training_sample_group.training_samples:
-                await group_buffer.release_active_groups(1, reason="untrainable_group")
-
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
             with sl.log_trace_span("batcher_pack"):
-                maybe_training_batch = await asyncio.to_thread(
-                    batcher.add_training_samples,
+                maybe_training_batch, group_is_trainable = await asyncio.to_thread(
+                    batcher.add_training_samples_with_status,
                     training_sample_group=training_sample_group,
                 )
+            if not group_is_trainable:
+                await group_buffer.release_active_groups(1, reason="untrainable_group")
             if maybe_training_batch is not None:
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)
