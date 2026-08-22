@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,9 @@ from torch_checkpointing.checkpoint_manager import (
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.distributed_metadata import (
+    METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage
@@ -41,6 +45,11 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+
+
+def _step_dir_pattern(temp_dir_prefix: str) -> re.Pattern[str]:
+    """Match published and in-flight checkpoint directory names."""
+    return re.compile(rf"(?P<tmp>{re.escape(temp_dir_prefix)})?step-(?P<step>\d+)")
 
 
 class _BackendCheckpointStorage:
@@ -183,6 +192,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             )
 
         manager_config = _default_backend_config()
+        self._step_dir_pattern = _step_dir_pattern(
+            manager_config.save.writer_config.temp_dir_prefix
+        )
         storage_config = manager_config.storage_config or LocalFileSystemStorageConfig()
         self._storage = _BackendCheckpointStorage(storage_config.create_storage())
         self._manager = manager_config.build()
@@ -207,6 +219,17 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _wait_for_saving(self) -> None:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement saving yet."
+        )
+
+    def _parse_step(self, filename: str) -> int | None:
+        match = self._step_dir_pattern.fullmatch(filename)
+        if match is None or match.group("tmp"):
+            return None
+        return int(match.group("step"))
+
+    def _is_valid_checkpoint(self, checkpoint_id: str) -> bool:
+        return self._storage.isfile(
+            filesystem.join(checkpoint_id, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
 
     def _maybe_wait_for_staging(self) -> None:
