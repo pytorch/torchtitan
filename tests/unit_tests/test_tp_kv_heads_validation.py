@@ -77,7 +77,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                     inner_attention=ScaledDotProductAttention.Config(),
                     rope=ComplexRoPE.Config(
                         dim=_DIM // n_heads,
-                        max_seq_len=4096,
+                        max_context_length=4096,
                         theta=500000,
                         scaling="llama",
                     ),

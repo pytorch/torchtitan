@@ -32,7 +32,6 @@ from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
-
 __all__ = ["Decoder", "TransformerBlock"]
 
 
@@ -128,12 +127,14 @@ class Decoder(BaseModel):
             )
 
         @property
-        def max_seq_len(self) -> int:
+        def max_context_length(self) -> int:
             # The first full-attention layer's RoPE defines the context length.
             rope_cfg = getattr(self.first_attention, "rope", None)
             if rope_cfg is None:
-                raise ValueError("Decoder config does not define RoPE max_seq_len.")
-            return rope_cfg.max_seq_len
+                raise ValueError(
+                    "Decoder config does not define RoPE max_context_length."
+                )
+            return rope_cfg.max_context_length
 
         def update_from_config(
             self,
@@ -144,7 +145,7 @@ class Decoder(BaseModel):
             """Apply runtime config to model config.
 
             When *config* is a ``Trainer.Config``, validates
-            ``training.seq_len`` against each attention layer's intrinsic
+            ``training.max_context_length`` against each attention layer's intrinsic
             RoPE max sequence length, resizes RoPE caches, and propagates
             debug flags. Non-trainer callers may pass any config-like
             object with a ``ParallelismConfig`` in its ``parallelism``
@@ -197,27 +198,37 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            ep = parallelism.expert_parallel_degree
+            for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
+                assert isinstance(moe, MoE.Config)
+                if moe.num_experts % ep != 0:
+                    raise ValueError(
+                        f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
+                        f"divisible by expert_parallel_degree ({ep})."
+                    )
+
             update_ep_token_dispatcher_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
-            # training.seq_len sync. Generated sequence length is not known
-            # ahead of time, so keep the RoPE cache at the model's max_seq_len.
+            # training.max_context_length sync. Generated sequence length is not known
+            # ahead of time, so keep the RoPE cache at the model's
+            # max_context_length.
             if isinstance(config, Trainer.Config):
                 debug = config.debug
-                seq_len = config.training.seq_len
-                max_seq_len = self.max_seq_len
-                if seq_len > max_seq_len:
+                seq_len = config.training.max_context_length
+                max_context_length = self.max_context_length
+                if seq_len > max_context_length:
                     raise ValueError(
                         f"Training sequence length {seq_len} exceeds "
                         f"attention RoPE maximum supported sequence "
-                        f"length {max_seq_len}."
+                        f"length {max_context_length}."
                     )
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
                     if attention_cfg is not None:
                         attention_cfg.rope = dataclasses.replace(
-                            attention_cfg.rope, max_seq_len=seq_len
+                            attention_cfg.rope, max_context_length=seq_len
                         )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
@@ -296,11 +307,10 @@ class Decoder(BaseModel):
         """Build a flex-attention BlockMask from mask_mods (ANDed together),
         respecting the config's block_size and batch-invariant mode."""
         assert isinstance(attn_config.inner_attention, FlexAttention.Config)
-        B = positions.shape[0]
-        seq_len = positions.shape[1]
+        seq_len = positions.shape[0]
         return create_attention_mask(
             and_masks(*mask_mods),
-            B,
+            1,
             None,
             seq_len,
             seq_len,

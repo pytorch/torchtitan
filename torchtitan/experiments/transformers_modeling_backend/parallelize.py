@@ -94,13 +94,6 @@ def parallelize_hf_transformers(
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
     # Only the partial-DTensor sharding backend is wired here.
     # TODO: wire spmd_types (next PR) -- see the migration TODO in hf_sharding.py.
     if parallel_dims.spmd_backend != "partial_dtensor":

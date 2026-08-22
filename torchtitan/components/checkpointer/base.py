@@ -481,6 +481,13 @@ class BaseCheckpointManager(Configurable, ABC):
                 )
             if MODEL in self.exclude_from_loading:
                 raise ValueError(f"{MODEL} key shouldn't be in exclude_from_loading.")
+            if (
+                OPTIMIZER in self.exclude_from_loading
+                and LR_SCHEDULER not in self.exclude_from_loading
+            ):
+                raise ValueError(
+                    f"{LR_SCHEDULER} must be excluded when {OPTIMIZER} is excluded."
+                )
 
             if self.initial_load_path:
                 self.initial_load_path = self.initial_load_path.strip()

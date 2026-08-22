@@ -139,24 +139,24 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
     def test_forward_outputs_are_contiguous_and_correct(self):
         """q/k/v are contiguous and match an independent per-projection matmul."""
         fused = _build_fused()
-        x = torch.randn(2, 3, _DIM)
-        xq, xk, xv = fused(x)
+        num_tokens = 6
+        x_TD = torch.randn(num_tokens, _DIM)
+        xq_TNH, xk_TNH, xv_TNH = fused(x_TD)
 
-        # The fix: all three are contiguous.
-        self.assertTrue(xq.is_contiguous())
-        self.assertTrue(xk.is_contiguous())
-        self.assertTrue(xv.is_contiguous())
+        self.assertEqual(xq_TNH.shape, (num_tokens, _N_HEADS, _HEAD_DIM))
+        self.assertEqual(xk_TNH.shape, (num_tokens, _N_KV_HEADS, _HEAD_DIM))
+        self.assertEqual(xv_TNH.shape, (num_tokens, _N_KV_HEADS, _HEAD_DIM))
+        self.assertTrue(xq_TNH.is_contiguous())
+        self.assertTrue(xk_TNH.is_contiguous())
+        self.assertTrue(xv_TNH.is_contiguous())
 
-        # Correctness: compare against an independent reference computed from the
-        # stock-layout weights the state_dict hook produces (wq/wk/wv) via plain
-        # matmul -- this does not reuse the fused forward's split logic.
         sd = fused.state_dict()
-        ref_q = (x @ sd["wq.weight"].T).view(2, 3, _N_HEADS, _HEAD_DIM)
-        ref_k = (x @ sd["wk.weight"].T).view(2, 3, _N_KV_HEADS, _HEAD_DIM)
-        ref_v = (x @ sd["wv.weight"].T).view(2, 3, _N_KV_HEADS, _HEAD_DIM)
-        torch.testing.assert_close(xq, ref_q)
-        torch.testing.assert_close(xk, ref_k)
-        torch.testing.assert_close(xv, ref_v)
+        ref_q_TNH = (x_TD @ sd["wq.weight"].T).view(num_tokens, _N_HEADS, _HEAD_DIM)
+        ref_k_TNH = (x_TD @ sd["wk.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        ref_v_TNH = (x_TD @ sd["wv.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        torch.testing.assert_close(xq_TNH, ref_q_TNH)
+        torch.testing.assert_close(xk_TNH, ref_k_TNH)
+        torch.testing.assert_close(xv_TNH, ref_v_TNH)
 
     def test_raw_pointer_read_needs_contiguous(self):
         """A consumer reading the base pointer with contiguous head-major strides
@@ -164,13 +164,13 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
         the correct bytes only after the forward's ``.contiguous()``.
         """
         fused = _build_fused()
-        x = torch.randn(2, 3, _DIM)
-        bs, seqlen, _ = x.shape
+        num_tokens = 6
+        x_TD = torch.randn(num_tokens, _DIM)
 
         # Reconstruct the pre-fix strided split (no .contiguous()).
-        qkv = fused.wqkv(x).view(bs, seqlen, _N_KV_HEADS, _R_DIM, _HEAD_DIM)
+        qkv = fused.wqkv(x_TD).view(num_tokens, _N_KV_HEADS, _R_DIM, _HEAD_DIM)
         _, xk_strided, _ = torch.split(qkv, [_HPK, 1, 1], dim=-2)
-        xk_strided = xk_strided.reshape(bs, seqlen, _N_KV_HEADS, _HEAD_DIM)
+        xk_strided = xk_strided.reshape(num_tokens, _N_KV_HEADS, _HEAD_DIM)
         self.assertFalse(xk_strided.is_contiguous())  # the bug precondition
 
         # Strides a contiguous tensor of this shape would have.
@@ -186,7 +186,7 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
 
         # The fix: the real forward returns contiguous xk, so the same raw read
         # now lands on the correct values.
-        xk_fixed = fused(x)[1]
+        xk_fixed = fused(x_TD)[1]
         self.assertTrue(xk_fixed.is_contiguous())
         raw_fixed = xk_fixed.as_strided(
             xk_fixed.shape, contig_strides, xk_fixed.storage_offset()

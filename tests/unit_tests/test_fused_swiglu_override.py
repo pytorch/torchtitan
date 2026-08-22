@@ -98,7 +98,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
                 "w2_EDF": rowwise,
                 "w3_EFD": colwise,
             },
-            in_src_shardings={"x_BLD": colwise},
+            in_src_shardings={"x_RD": colwise},
             local_map=LocalMapConfig(in_grad_placements=None),
         )
         cfg = GroupedExperts.Config(

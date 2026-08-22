@@ -44,7 +44,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
         config.parallelism.spmd_backend = spmd_backend
         config.parallelism.context_parallel_degree = cp
-        config.training.seq_len = 512
+        config.training.max_context_length = 512
         return config
 
     def test_rejects_cp_on_partial_dtensor(self):

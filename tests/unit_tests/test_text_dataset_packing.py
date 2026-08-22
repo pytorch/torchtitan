@@ -16,7 +16,7 @@ from torchtitan.hf_datasets.text_datasets import DATASETS
 _TOKENIZER_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "tokenizer")
 
 
-def _build_dataloader(seq_len: int) -> GrainDataLoader:
+def _build_dataloader(max_context_length: int) -> GrainDataLoader:
     return GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         shuffle=False,
@@ -25,19 +25,18 @@ def _build_dataloader(seq_len: int) -> GrainDataLoader:
         dp_world_size=1,
         dp_rank=0,
         tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
-        seq_len=seq_len,
-        local_batch_size=1,
+        max_context_length=max_context_length,
+        num_tokens_per_batch=max_context_length,
     )
 
 
 class TestTextDatasetPacking(unittest.TestCase):
-    """Greedy packing must emit exactly seq_len tokens with in-range positions.
+    """Packing must emit the configured token count with in-range positions.
 
     Inputs and labels are shifted per document at tokenization time, so a
-    packed sample is seq_len long (not seq_len + 1). Emitting one extra token
-    pushes the largest position to seq_len, which is one past the last entry of
-    a RoPE cache sized at max_seq_len == seq_len and only surfaces as an async
-    device-side assert deep inside the model.
+    packed sample contains exactly ``max_context_length`` tokens in this test.
+    Emitting one extra token would push the largest position one past the final
+    RoPE cache entry and only surface as an asynchronous device-side assertion.
     """
 
     def test_positions_are_contiguous_per_document_runs(self):
@@ -46,7 +45,7 @@ class TestTextDatasetPacking(unittest.TestCase):
             iterator = iter(dataloader)
             for _ in range(100):
                 input_dict, _labels = next(iterator)
-                positions = input_dict["positions"][0]
+                positions = input_dict["positions"]
                 steps = positions[1:] - positions[:-1]
                 # Each position either continues the current document (+1) or
                 # restarts a new one (back to 0).
@@ -63,19 +62,18 @@ class TestTextDatasetPacking(unittest.TestCase):
             iterator = iter(dataloader)
             for _ in range(100):
                 input_dict, labels = next(iterator)
-                input_ids = input_dict["input"][0]
-                positions = input_dict["positions"][0]
-                labels = labels[0]
+                input_ids = input_dict["input"]
+                positions = input_dict["positions"]
 
                 # EOS closes a document and is never fed back in; BOS opens one and
                 # is never a target.
                 self.assertFalse(bool(torch.any(input_ids == tokenizer.eos_id)))
                 self.assertFalse(bool(torch.any(labels == tokenizer.bos_id)))
 
-                starts = (positions == 0).nonzero().flatten()
+                starts = (input_ids == tokenizer.bos_id).nonzero().flatten()
                 starts = starts[starts > 0]
                 interior_doc_starts += len(starts)
-                self.assertTrue(bool(torch.all(input_ids[starts] == tokenizer.bos_id)))
+                self.assertTrue(bool(torch.all(positions[starts] == 0)))
                 # The token right before a document start predicts that document's
                 # own EOS, not the next document's first token.
                 self.assertTrue(bool(torch.all(labels[starts - 1] == tokenizer.eos_id)))

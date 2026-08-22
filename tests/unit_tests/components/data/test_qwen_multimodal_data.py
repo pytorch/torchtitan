@@ -43,8 +43,8 @@ class _RowsSource:
 
 CONTEXT = DatasetBuildContext(
     tokenizer=_Tokenizer(),
-    seq_len=9,
-    local_batch_size=1,
+    max_context_length=9,
+    num_tokens_per_batch=9,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
 )
 
@@ -220,7 +220,7 @@ def test_packing_preserves_ordered_media_when_merging_rows():
     assert row["input_ids"].tolist() == [1, 2, 3, 4, 0, 0, 0, 0, 0]
     assert torch.equal(
         row["labels"],
-        torch.tensor([1, 2, 3, 4] + [IGNORE_INDEX] * (CONTEXT.seq_len - 4)),
+        torch.tensor([1, 2, 3, 4] + [IGNORE_INDEX] * (CONTEXT.max_context_length - 4)),
     )
     assert row["positions"].tolist() == [0, 1, 0, 1, 0, 0, 0, 0, 0]
     assert len(row["pixel_values"]) == 2
@@ -295,10 +295,10 @@ def test_oversized_row_does_not_clear_valid_buffered_rows():
     )
 
 
-def test_multimodal_packing_uses_seq_len():
+def test_multimodal_packing_uses_max_context_length():
     row = next(iter(_dataset([_row(1, length=9)])))
 
-    assert len(row["input_ids"]) == CONTEXT.seq_len
+    assert len(row["input_ids"]) == CONTEXT.max_context_length
 
 
 def test_multimodal_collator_preserves_aligned_labels():
@@ -313,7 +313,7 @@ def test_multimodal_collator_preserves_aligned_labels():
 
     _, labels = collator([packed])
 
-    assert labels[0, :4].tolist() == [2, 9, 4, 10]
+    assert labels[:4].tolist() == [2, 9, 4, 10]
 
 
 def test_mm_finite_underfilled_tail_flushes():

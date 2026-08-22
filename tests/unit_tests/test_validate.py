@@ -54,7 +54,7 @@ def _generic_validator(loader):
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
     validator.seq_len = 4
-    validator.local_batch_size = 1
+    validator.num_tokens_per_batch = 4
     validator.metrics_processor = SimpleNamespace(
         ntokens_since_last_log=0,
         log_validation=mock.Mock(),
@@ -106,7 +106,7 @@ def _flux_validator(loader):
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
     validator.seq_len = 4
-    validator.local_batch_size = 1
+    validator.num_tokens_per_batch = 4
     validator.metrics_processor = SimpleNamespace(
         ntokens_since_last_log=0,
         log_validation=mock.Mock(),

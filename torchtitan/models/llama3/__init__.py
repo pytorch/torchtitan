@@ -135,7 +135,7 @@ def _debugmodel(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=500000,
                 scaling="llama",
             ),
@@ -179,7 +179,7 @@ def _1b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=500000,
                 scaling="llama",
             ),
@@ -223,7 +223,7 @@ def _3b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=500000,
                 scaling="llama",
             ),
@@ -264,7 +264,7 @@ def _8b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=500000,
                 scaling="llama",
             ),
@@ -305,7 +305,7 @@ def _70b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=500000,
                 scaling="llama",
             ),
@@ -346,7 +346,7 @@ def _405b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=500000,
                 scaling="llama",
             ),
