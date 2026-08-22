@@ -48,10 +48,6 @@ class TestDistMuon(DTensorTestBase):
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
         lr = 0.03
-        num_matrices = 3
-        matrix_rows = 4
-        # Two storage shards each own six rows, so their boundary splits the
-        # middle four-row matrix and exercises overshard redistribution.
         weight_decay = 0.2
         mesh = init_device_mesh(
             self.device_type,
@@ -59,6 +55,14 @@ class TestDistMuon(DTensorTestBase):
             mesh_dim_names=("dp_shard",),
         )
         device = torch.device(self.device_type, self.rank)
+        stack_shapes = {
+            # Two storage shards each own six rows, so their boundary splits
+            # the middle matrix and exercises overshard redistribution.
+            "layers.0.attention.oversharded": (3, 4, 3),
+            # These aligned siblings remain local and share one batched NS call.
+            "layers.0.attention.wq": (4, 5, 3),
+            "layers.0.attention.wkv": (4, 5, 3),
+        }
 
         def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
             return torch.nn.Parameter(
@@ -67,32 +71,49 @@ class TestDistMuon(DTensorTestBase):
 
         def make_optimizer(
             redistributed: torch.nn.Parameter,
-            local_blocks: torch.nn.Parameter,
+            stacks: dict[str, torch.nn.Parameter],
             ns_steps: int = 2,
         ):
             redistributed_fqn = "layers.0.redistributed"
-            local_blocks_fqn = "layers.0.local_blocks"
+            oversharded_fqn = "layers.0.attention.oversharded"
+            aligned_fqns = ("layers.0.attention.wq", "layers.0.attention.wkv")
+            aligned_compute_sharding = ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=5),
+                }
+            )
             return build_dist_muon(
                 [
                     {
-                        "params": [redistributed, local_blocks],
-                        "param_names": [redistributed_fqn, local_blocks_fqn],
+                        "params": [
+                            redistributed,
+                            stacks[oversharded_fqn],
+                            *(stacks[fqn] for fqn in aligned_fqns),
+                        ],
+                        "param_names": [
+                            redistributed_fqn,
+                            oversharded_fqn,
+                            *aligned_fqns,
+                        ],
                     }
                 ],
+                lr=lr,
+                weight_decay=weight_decay,
+                momentum=0.8,
+                nesterov=True,
+                ns_steps=ns_steps,
                 compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
                             "dp_shard": Owned(),
                         },
                     ),
-                    local_blocks_fqn: ComputeLayout(
+                    oversharded_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "dp_shard": BlockShard(
-                                dim=0,
-                                block_size=matrix_rows,
-                            )
+                            "dp_shard": BlockShard(dim=0, block_size=4),
                         },
                     ),
+                    **{fqn: aligned_compute_sharding for fqn in aligned_fqns},
                 },
                 bucket_configs=[
                     BucketConfig(
@@ -100,36 +121,106 @@ class TestDistMuon(DTensorTestBase):
                         name="layers.0",
                     )
                 ],
-                lr=lr,
-                weight_decay=weight_decay,
-                momentum=0.8,
-                nesterov=True,
-                ns_steps=ns_steps,
             )
+
+        def set_grads(
+            redistributed: torch.nn.Parameter,
+            stacks: dict[str, torch.nn.Parameter],
+            redistributed_grad: torch.Tensor,
+            stack_grads: dict[str, torch.Tensor],
+        ) -> None:
+            redistributed.grad = distribute_tensor(
+                redistributed_grad.clone(), mesh, (Shard(0),)
+            )
+            for name, parameter in stacks.items():
+                grad = stack_grads[name]
+                parameter.grad = distribute_tensor(grad.clone(), mesh, (Shard(0),))
+
+        def assert_matches_reference(
+            redistributed: torch.nn.Parameter,
+            stacks: dict[str, torch.nn.Parameter],
+            reference_redistributed: torch.nn.Parameter,
+            reference_stacks: dict[str, tuple[torch.nn.Parameter, ...]],
+            stacks_before: dict[str, torch.Tensor],
+            reference_stacks_before: dict[str, tuple[torch.Tensor, ...]],
+        ) -> None:
+            rank = mesh.get_local_rank()
+            expected_redistributed = reference_redistributed.detach().chunk(
+                self.world_size, dim=0
+            )[rank]
+            torch.testing.assert_close(
+                redistributed.to_local(),
+                expected_redistributed,
+                rtol=0,
+                atol=0,
+            )
+
+            for name, parameter in stacks.items():
+                reference_blocks = reference_stacks[name]
+                expected = torch.cat(
+                    [reference.detach() for reference in reference_blocks], dim=0
+                )
+                expected_before = torch.cat(reference_stacks_before[name], dim=0)
+                local_rows, row_offset = Shard.local_shard_size_and_offset(
+                    expected.shape[0], self.world_size, rank
+                )
+                expected = expected.narrow(0, row_offset, local_rows)
+                expected_before = expected_before.narrow(0, row_offset, local_rows)
+                decay = 1 - lr * weight_decay
+                adjusted_lr = _adjust_muon_learning_rate(
+                    lr, None, reference_blocks[0].shape
+                )
+                actual_update = (
+                    stacks_before[name] * decay - parameter.to_local()
+                ) / adjusted_lr
+                expected_update = (expected_before * decay - expected) / adjusted_lr
+                # Batched BF16 Newton-Schulz can differ slightly across GEMM schedules.
+                torch.testing.assert_close(
+                    actual_update,
+                    expected_update,
+                    rtol=0,
+                    atol=2e-2,
+                )
+
+        values = {}
+        start = 12
+        for name, (num_matrices, rows, columns) in stack_shapes.items():
+            numel = num_matrices * rows * columns
+            values[name] = (
+                torch.arange(start, start + numel, device=device)
+                .reshape(num_matrices * rows, columns)
+                .float()
+                .div_(10)
+            )
+            start += numel
 
         redistributed_value = (
             torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
         )
-        local_blocks_value = (
-            torch.arange(12, 48, device=device)
-            .reshape(num_matrices * matrix_rows, 3)
-            .float()
-            .div_(10)
-        )
         redistributed = make_parameter(redistributed_value)
-        local_blocks = make_parameter(local_blocks_value)
-        optimizer = make_optimizer(redistributed, local_blocks)
+        stacks = {name: make_parameter(value) for name, value in values.items()}
+        optimizer = make_optimizer(redistributed, stacks)
         self.assertIs(type(optimizer), DistMuon)
         with self.assertRaisesRegex(RuntimeError, "parameter groups are frozen"):
             optimizer.add_param_group({"params": []})
 
         reference_redistributed = torch.nn.Parameter(redistributed_value.clone())
-        reference_local_blocks = tuple(
-            torch.nn.Parameter(block.clone())
-            for block in local_blocks_value.view(num_matrices, matrix_rows, 3)
-        )
+        reference_stacks = {
+            name: tuple(
+                torch.nn.Parameter(matrix.clone())
+                for matrix in value.view(stack_shapes[name])
+            )
+            for name, value in values.items()
+        }
         reference_optimizer = torch.optim.Muon(
-            [reference_redistributed, *reference_local_blocks],
+            [
+                reference_redistributed,
+                *(
+                    parameter
+                    for stack in reference_stacks.values()
+                    for parameter in stack
+                ),
+            ],
             lr=lr,
             weight_decay=weight_decay,
             momentum=0.8,
@@ -140,102 +231,88 @@ class TestDistMuon(DTensorTestBase):
         def step_and_assert(
             current_optimizer,
             current_redistributed: torch.nn.Parameter,
-            current_local_blocks: torch.nn.Parameter,
+            current_stacks: dict[str, torch.nn.Parameter],
             redistributed_grad: torch.Tensor,
-            local_blocks_grad: torch.Tensor,
+            stack_grads: dict[str, torch.Tensor],
         ) -> None:
-            local_blocks_before = current_local_blocks.to_local().clone()
-            reference_local_blocks_before = tuple(
-                parameter.detach().clone() for parameter in reference_local_blocks
-            )
-            current_redistributed.grad = distribute_tensor(
-                redistributed_grad.clone(), mesh, (Shard(0),)
-            )
-            current_local_blocks.grad = distribute_tensor(
-                local_blocks_grad.clone(), mesh, (Shard(0),)
+            stacks_before = {
+                name: parameter.to_local().clone()
+                for name, parameter in current_stacks.items()
+            }
+            reference_stacks_before = {
+                name: tuple(parameter.detach().clone() for parameter in stack)
+                for name, stack in reference_stacks.items()
+            }
+            set_grads(
+                current_redistributed,
+                current_stacks,
+                redistributed_grad,
+                stack_grads,
             )
             reference_redistributed.grad = redistributed_grad.clone()
-            for parameter, grad in zip(
-                reference_local_blocks,
-                local_blocks_grad.view(num_matrices, matrix_rows, 3),
-                strict=True,
-            ):
-                parameter.grad = grad.clone()
+            for name, references in reference_stacks.items():
+                for parameter, grad in zip(
+                    references,
+                    stack_grads[name].view(stack_shapes[name]),
+                    strict=True,
+                ):
+                    parameter.grad = grad.clone()
 
             current_optimizer.step()
             reference_optimizer.step()
-
-            rank = mesh.get_local_rank()
-            expected_redistributed = reference_redistributed.detach().chunk(
-                self.world_size, dim=0
-            )[rank]
-            torch.testing.assert_close(
-                current_redistributed.to_local(),
-                expected_redistributed,
-                rtol=0,
-                atol=0,
-            )
-
-            expected_local_blocks = torch.cat(
-                tuple(parameter.detach() for parameter in reference_local_blocks)
-            ).chunk(self.world_size)[rank]
-            expected_local_blocks_before = torch.cat(
-                reference_local_blocks_before
-            ).chunk(self.world_size)[rank]
-            decay = 1 - lr * weight_decay
-            adjusted_lr = _adjust_muon_learning_rate(
-                lr, None, reference_local_blocks[0].shape
-            )
-            actual_update = (
-                local_blocks_before * decay - current_local_blocks.to_local()
-            ) / adjusted_lr
-            expected_update = (
-                expected_local_blocks_before * decay - expected_local_blocks
-            ) / adjusted_lr
-            # Batched BF16 Newton-Schulz can differ slightly across GEMM schedules.
-            torch.testing.assert_close(
-                actual_update,
-                expected_update,
-                rtol=0,
-                atol=2e-2,
+            assert_matches_reference(
+                current_redistributed,
+                current_stacks,
+                reference_redistributed,
+                reference_stacks,
+                stacks_before,
+                reference_stacks_before,
             )
 
         first_redistributed_grad = (
             torch.arange(1, 13, device=device).reshape(4, 3).float().div_(17)
         )
-        first_local_blocks_grad = (
-            torch.arange(13, 49, device=device)
-            .reshape(num_matrices * matrix_rows, 3)
+        first_stack_grads = {
+            name: torch.arange(1, value.numel() + 1, device=device)
+            .reshape_as(value)
             .float()
-            .div_(19)
+            .div_(19 + 2 * index)
+            for index, (name, value) in enumerate(values.items())
+        }
+        first_stack_grads["layers.0.attention.wkv"] = (
+            first_stack_grads["layers.0.attention.wkv"].flip(1).contiguous()
         )
         step_and_assert(
             optimizer,
             redistributed,
-            local_blocks,
+            stacks,
             first_redistributed_grad,
-            first_local_blocks_grad,
+            first_stack_grads,
         )
 
         flat_state_dict = get_flat_optim_state_dict(optimizer)
         resumed_redistributed = make_parameter(redistributed.full_tensor().detach())
-        resumed_local_blocks = make_parameter(local_blocks.full_tensor().detach())
+        resumed_stacks = {
+            name: make_parameter(parameter.full_tensor().detach())
+            for name, parameter in stacks.items()
+        }
         resumed_optimizer = make_optimizer(
             resumed_redistributed,
-            resumed_local_blocks,
+            resumed_stacks,
             ns_steps=3,
         )
         init_optim_state(resumed_optimizer)
         load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
 
-        second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
-        second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
         step_and_assert(
             resumed_optimizer,
             resumed_redistributed,
-            resumed_local_blocks,
-            second_redistributed_grad,
-            second_local_blocks_grad,
+            resumed_stacks,
+            first_redistributed_grad.flip(0).contiguous(),
+            {
+                name: grad.flip(0).contiguous()
+                for name, grad in first_stack_grads.items()
+            },
         )
 
 
