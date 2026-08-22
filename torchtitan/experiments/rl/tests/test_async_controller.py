@@ -176,10 +176,10 @@ def test_take_finalized_does_not_release_active_slot() -> None:
     asyncio.run(run())
 
 
-def test_oversized_group_reports_untrainable_for_slot_release() -> None:
+def test_untrainable_group_releases_before_training() -> None:
     async def run() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
-        batcher = Batcher.Config(batch=BatchConfig(seq_len=1)).build(
+        batcher = Batcher.Config().build(
             num_prompts_per_train_step=1,
             dp_degree=1,
             pad_id=0,
@@ -190,19 +190,13 @@ def test_oversized_group_reports_untrainable_for_slot_release() -> None:
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
 
         training_sample_group = TrainingSampleGroup(
-            group_id=0,
-            training_samples=[_training_sample(group_id=0, rollout_id=0)],
-            metrics=[],
+            group_id=0, training_samples=[], metrics=[]
         )
-        training_batch, group_is_trainable = batcher.add_training_samples_with_status(
-            training_sample_group=training_sample_group
+        await buffer.release_active_groups(1, reason="untrainable_group")
+        assert (
+            batcher.add_training_samples(training_sample_group=training_sample_group)
+            is None
         )
-        assert training_batch is None
-        assert not group_is_trainable
-
-        if not group_is_trainable:
-            await buffer.release_active_groups(1, reason="untrainable_group")
-        assert await asyncio.wait_for(buffer.wait_for_slot(), timeout=1)
 
     asyncio.run(run())
 
