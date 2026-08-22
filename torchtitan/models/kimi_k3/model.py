@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
+
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -23,7 +25,6 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
 from .kda import KimiDeltaAttention
 from .moe import KimiFeedForward, KimiLatentMoE
@@ -267,8 +268,9 @@ class KimiK3Model(Decoder):
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            # Unsupported parallelisms are rejected in parallelize_kimi_k3.
             dataset = config.dataloader.dataset
+            # TODO: Support sample packing by resetting the Q/K/V causal-convolution
+            # and KDA recurrent states at document boundaries.
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
             Decoder.Config.update_from_config(self, config=config, **kwargs)
