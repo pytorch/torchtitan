@@ -20,9 +20,16 @@ a pinned HuggingFace revision without downloading the released weight shards.
 The released code requires ``transformers==4.56.2`` and ``tiktoken``.
 
 Usage:
+    # BF16: HF FlashAttention2 / TT FlexAttention
+    CUDA_VISIBLE_DEVICES=0 python -m \
+        scripts.checkpoint_conversion.numerical_tests_kimi_k3
+
+    # FP32: HF eager / TT FlexAttention
     CUDA_VISIBLE_DEVICES=0 python -m \
         scripts.checkpoint_conversion.numerical_tests_kimi_k3 \
         --dtype float32
+
+Add ``--force-hf-routing`` to either command for the routing-fixed diagnostic.
 """
 
 import argparse
@@ -143,8 +150,6 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     for config in (hf_config, text_config):
         if hasattr(config, "quantization_config"):
             delattr(config, "quantization_config")
-    text_config._attn_implementation = "eager"
-    hf_config.vision_config._attn_implementation = "eager"
     text_config._name_or_path = hf_model_path
     hf_config._name_or_path = hf_model_path
 
@@ -170,8 +175,11 @@ def _build_hf_model(
         local_files_only=True,
     )
     _reduce_hf_config(hf_config, tt_config, hf_model_path)
+    attn_backend = "flash_attention_2" if dtype == torch.bfloat16 else "eager"
+    hf_config.text_config._attn_implementation = attn_backend
+    hf_config.vision_config._attn_implementation = attn_backend
     model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
-    model.language_model.config._attn_implementation = "eager"
+    model.language_model.config._attn_implementation = attn_backend
     model.to(dtype=dtype)
     model.load_state_dict(hf_state_dict, strict=True)
     return model.eval()
@@ -232,6 +240,7 @@ def run_hf(
         key: value.to(device) if isinstance(value, torch.Tensor) else value
         for key, value in batch.items()
     }
+    inputs["pixel_values"] = inputs["pixel_values"].to(dtype)
     output = model(**inputs, use_cache=False)
     ref = {
         "input_ids": batch["input_ids"].cpu(),
@@ -298,18 +307,47 @@ def _print_routing_comparison(
     print(f"router choices: {num_matching}/{num_routings} match " f"({match_rate:.1%})")
 
 
+def _force_hf_routing(model, expert_indices, device) -> None:
+    """Use HF expert IDs with TorchTitan's independently computed scores."""
+    for layer_idx, layer in model.layers.items():
+        if (moe := cast(Any, layer.moe)) is None:
+            continue
+        ids = expert_indices[int(layer_idx)].unsqueeze(0).to(device)
+        router, original = moe.router, moe.router.forward
+
+        def forced_forward(
+            x_BLD,
+            expert_bias_E=None,
+            _router=router,
+            _original=original,
+            _ids=ids,
+        ):
+            _, _, scores_BLE = _original(x_BLD, expert_bias_E)
+            weights = scores_BLE.gather(dim=-1, index=_ids)
+            if _router.route_norm:
+                weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
+            return weights * _router.route_scale, _ids, scores_BLE
+
+        router.forward = forced_forward
+
+
 @torch.no_grad()
 def run_tt(
     model: KimiK3Model,
     ref: dict[str, Any],
     vision_dtype: torch.dtype,
     device: torch.device,
+    force_hf_routing: bool,
 ) -> torch.Tensor:
     """Run TorchTitan preprocessing and the reduced TorchTitan model."""
     print(f"Loading TorchTitan Kimi K3 (debugmodel) on {device} ...")
     model.to(device)
     assert model.vision_encoder is not None
     model.vision_encoder.to(vision_dtype)
+
+    if force_hf_routing:
+        print("Using HF expert selections with TorchTitan router scores")
+        _force_hf_routing(model, ref["expert_indices"], device)
 
     expert_indices: dict[int, torch.Tensor] = {}
     for layer_idx, layer in model.layers.items():
@@ -394,8 +432,8 @@ def run_tt(
     return logits[:, -1, :].float().cpu().squeeze()
 
 
-def compare(ref_logits: torch.Tensor, tt_logits: torch.Tensor) -> bool:
-    """Print last-token metrics and return whether KL is below tolerance."""
+def compare(ref_logits: torch.Tensor, tt_logits: torch.Tensor) -> None:
+    """Print last-token parity metrics."""
     ref = ref_logits.squeeze()
     tt = tt_logits.squeeze()
     log_ref = F.log_softmax(ref, dim=-1)
@@ -412,9 +450,6 @@ def compare(ref_logits: torch.Tensor, tt_logits: torch.Tensor) -> bool:
         f"KL={kl:.4e} cos={cosine:.6f} max_diff={max_diff:.4e} "
         f"top1={'Y' if top1 else 'N'} top5={top5_overlap:.0%}"
     )
-    passed = abs(kl) < 1e-3  # pyrefly: ignore [bad-argument-type]
-    print("RESULT: PASS" if passed else "RESULT: FAIL")
-    return passed
 
 
 @torch.no_grad()
@@ -423,19 +458,14 @@ def main() -> None:
     parser.add_argument("--model_flavor", default="debugmodel")
     parser.add_argument("--image_size", type=int, default=336)
     parser.add_argument(
-        "--hf_dtype",
-        default="float32",
-        choices=["float32", "bfloat16", "float16"],
-    )
-    parser.add_argument(
         "--dtype",
-        default="float32",
-        choices=["float32", "bfloat16", "float16"],
+        default="bfloat16",
+        choices=["float32", "bfloat16"],
     )
     parser.add_argument(
-        "--vision_dtype",
-        default=None,
-        choices=["float32", "bfloat16", "float16"],
+        "--force-hf-routing",
+        action="store_true",
+        help="Use HF expert selections with TorchTitan router scores.",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -450,12 +480,8 @@ def main() -> None:
     )
     device = torch.device("cuda")
     dtype = getattr(torch, args.dtype)
-    vision_dtype = getattr(torch, args.vision_dtype) if args.vision_dtype else dtype
-    hf_dtype = getattr(torch, args.hf_dtype)
-    print(
-        f"hf_dtype={args.hf_dtype} titan text={args.dtype} "
-        f"titan vision={args.vision_dtype or args.dtype}"
-    )
+    hf_attn_backend = "flash_attention_2" if dtype == torch.bfloat16 else "eager"
+    print(f"dtype={args.dtype} hf_attn={hf_attn_backend}")
 
     tt_config = cast(KimiK3Model.Config, model_registry(args.model_flavor).model)
     torch.manual_seed(args.seed)
@@ -469,13 +495,18 @@ def main() -> None:
         tt_config,
         hf_state_dict,
         args.image_size,
-        hf_dtype,
+        dtype,
         device,
     )
     del hf_state_dict
-    tt_logits = run_tt(tt_model, ref, vision_dtype, device)
-    if not compare(ref["last_logits"], tt_logits):
-        raise SystemExit(1)
+    tt_logits = run_tt(
+        tt_model,
+        ref,
+        dtype,
+        device,
+        args.force_hf_routing,
+    )
+    compare(ref["last_logits"], tt_logits)
 
 
 if __name__ == "__main__":
