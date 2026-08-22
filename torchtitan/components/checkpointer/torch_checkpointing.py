@@ -221,11 +221,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             "TorchCheckpointingManager does not implement saving yet."
         )
 
-    def _parse_step(self, filename: str) -> int | None:
+    def _parse_step(self, filename: str) -> tuple[int, bool] | None:
         match = self._step_dir_pattern.fullmatch(filename)
-        if match is None or match.group("tmp"):
+        if match is None:
             return None
-        return int(match.group("step"))
+        return int(match.group("step")), bool(match.group("tmp"))
 
     def _is_valid_checkpoint(self, checkpoint_id: str) -> bool:
         return self._storage.isfile(
