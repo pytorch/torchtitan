@@ -75,6 +75,32 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         y = model(x)
         self.assertEqual(y.dtype, torch.bfloat16)
 
+    @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
+    def test_preserves_parameter_requires_grad(self):
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            spmd_backend="partial_dtensor",
+        )
+        model = nn.Linear(8, 8)
+        model.weight.requires_grad_(False)
+
+        model = apply_simple_fsdp(
+            model,
+            parallel_dims=parallel_dims,
+            training=TrainingConfig(),
+        )
+
+        self.assertFalse(model._parameters["weight"].requires_grad)
+        self.assertTrue(model._parameters["bias"].requires_grad)
+        self.assertFalse(model.weight.requires_grad)
+        self.assertTrue(model.bias.requires_grad)
+
 
 if __name__ == "__main__":
     unittest.main()
