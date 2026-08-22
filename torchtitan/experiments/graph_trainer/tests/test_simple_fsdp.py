@@ -95,5 +95,32 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
 
 
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_preserves_parameter_requires_grad(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            enable_sequence_parallel=False,
+        )
+        model = nn.Linear(8, 8)
+        model.weight.requires_grad_(False)
+
+        model = apply_simple_fsdp(
+            model,
+            parallelism_context=parallelism_context,
+            training=TrainingConfig(),
+        )
+
+        self.assertFalse(model._parameters["weight"].requires_grad)
+        self.assertTrue(model._parameters["bias"].requires_grad)
+        self.assertFalse(model.weight.requires_grad)
+        self.assertTrue(model.bias.requires_grad)
+
+
 if __name__ == "__main__":
     unittest.main()
