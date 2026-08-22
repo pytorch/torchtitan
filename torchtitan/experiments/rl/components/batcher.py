@@ -114,6 +114,19 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group0)  # -> None
             batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
         """
+        training_batch, _ = self.add_training_samples_with_status(
+            training_sample_group=training_sample_group
+        )
+        return training_batch
+
+    def add_training_samples_with_status(
+        self, *, training_sample_group: TrainingSampleGroup
+    ) -> tuple[TrainingBatch | None, bool]:
+        """Add one group and report whether any samples survive batcher filtering.
+
+        The controller uses the status to release the group's active slot when
+        oversized-sample filtering makes the group untrainable.
+        """
         # Drop samples longer than seq_len: can't fill a row
         samples = training_sample_group.training_samples
         kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
@@ -137,13 +150,14 @@ class Batcher(Configurable):
                 ],
             )
 
+        group_is_trainable = bool(training_sample_group.training_samples)
         self._groups_for_next_batch.append(training_sample_group)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
         if num_trainable_groups < self._num_prompts_per_train_step:
-            return None  # accumulate until one full batch is ready
-        return self._pack_one_training_batch()
+            return None, group_is_trainable  # accumulate until one full batch is ready
+        return self._pack_one_training_batch(), group_is_trainable
 
     def _pack_one_training_batch(self) -> TrainingBatch:
         """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
