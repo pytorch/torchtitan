@@ -329,6 +329,8 @@ class BaseCheckpointManager(Configurable, ABC):
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:
                 raise ValueError("Checkpoint interval needs to be at least 1 step.")
+            if self.load_step < -1:
+                raise ValueError("load_step must be -1 or non-negative.")
             if self.keep_latest_k < 0:
                 raise ValueError("keep_latest_k cannot be negative.")
             if self.keep_latest_k == 1:
