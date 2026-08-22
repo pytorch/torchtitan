@@ -33,6 +33,7 @@ from torchtitan.observability.structured_logger.step_state import (
     set_step,
 )
 from torchtitan.observability.structured_logger.structured_logging import (
+    _get_structured_logger_init_args,
     _structured_logger,
     event_extra,
     ExtraFields,
@@ -73,14 +74,41 @@ def structured_logger_fixture():
     import torchtitan.observability.structured_logger.structured_logging as sl_mod
 
     tl = _structured_logger
-    orig = (tl.handlers[:], tl.level, tl.propagate)
+    root_logger = logging.getLogger()
+    orig = (
+        tl.handlers[:],
+        tl.level,
+        tl.propagate,
+        sl_mod._disabled,
+        sl_mod._structured_logger_init_args,
+        root_logger.handlers[:],
+    )
     # Reset the module-level init sentinel so init_structured_logger re-runs
     # for each test (otherwise the second call short-circuits as "already
     # initialized").
     sl_mod._is_initialized = False
+    sl_mod._disabled = False
+    sl_mod._structured_logger_init_args = None
     yield tl
-    tl.handlers, tl.level, tl.propagate = orig
+    (
+        tl.handlers,
+        tl.level,
+        tl.propagate,
+        sl_mod._disabled,
+        init_args,
+        root_logger.handlers,
+    ) = orig
+    sl_mod._structured_logger_init_args = init_args
     sl_mod._is_initialized = False
+
+
+@pytest.fixture
+def external_logger():
+    source_logger = logging.getLogger("external_library")
+    orig = (source_logger.handlers[:], source_logger.level, source_logger.propagate)
+    source_logger.handlers = []
+    yield source_logger
+    source_logger.handlers, source_logger.level, source_logger.propagate = orig
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +534,45 @@ class TestTraceJsonlFormatter:
         assert "time_us" in parsed
         assert isinstance(parsed["time_us"], int)
 
+    def test_checkpoint_context_fields(self):
+        fmt = TraceJsonlFormatter(rank=0, source="test")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="test",
+            args=None,
+            exc_info=None,
+        )
+        for key, value in event_extra("log_metric").items():
+            setattr(record, key, value)
+        record.context = []
+        record.measured_from_start_time_ms = 123456
+
+        parsed = json.loads(fmt.format(record))
+
+        assert parsed["context"] == []
+        assert parsed["measured_from_start_time_ms"] == 123456
+
+    def test_omits_missing_context(self):
+        fmt = TraceJsonlFormatter(rank=0, source="test")
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="test.py",
+            lineno=1,
+            msg="test",
+            args=None,
+            exc_info=None,
+        )
+        for key, value in event_extra("log_metric").items():
+            setattr(record, key, value)
+
+        parsed = json.loads(fmt.format(record))
+
+        assert "context" not in parsed
+
 
 # ---------------------------------------------------------------------------
 # TraceEventsOnlyFilter
@@ -607,6 +674,15 @@ class TestInitStructuredLogger:
 
         assert len(structured_logger_fixture.handlers) == handler_count
 
+    def test_records_resolved_init_args(self, tmp_path, structured_logger_fixture):
+        init_structured_logger(rank=17, source="rl_trainer", output_dir=str(tmp_path))
+
+        assert _get_structured_logger_init_args() == (
+            "rl_trainer",
+            str(tmp_path),
+            17,
+        )
+
 
 class TestFactoryMechanism:
     def test_default_creates_jsonl(self, tmp_path, structured_logger_fixture):
@@ -644,6 +720,60 @@ class TestFactoryMechanism:
         assert not any(
             isinstance(h, TraceJsonlHandler) for h in structured_logger_fixture.handlers
         )
+
+
+# ---------------------------------------------------------------------------
+# External structured logging
+# ---------------------------------------------------------------------------
+
+
+class TestExternalStructuredLogging:
+    def test_init_forwards_only_structured_records_from_other_loggers(
+        self, tmp_path, structured_logger_fixture, external_logger
+    ):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        external_logger.setLevel(logging.INFO)
+
+        logging.getLogger("external_library.worker").info(
+            "external metric",
+            extra={
+                "log_type": "event",
+                "log_type_name": "log_metric",
+                "event_name": "train.step.e2e.latency_ms",
+                "step": 7,
+                "value": 12.5,
+                "context": ["source:test"],
+            },
+        )
+        logging.getLogger("external_library.worker").info("plain text")
+
+        for handler in structured_logger_fixture.handlers:
+            handler.flush()
+        trace_dir = os.path.join(str(tmp_path), "structured_logs")
+        jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
+        with open(os.path.join(trace_dir, jsonl_files[0])) as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+
+        assert len(lines) == 1
+        assert lines[0]["logger_name"] == "external_library.worker"
+        assert lines[0]["log_type_name"] == "log_metric"
+        assert lines[0]["event_name"] == "train.step.e2e.latency_ms"
+        assert lines[0]["step"] == 7
+        assert lines[0]["value"] == 12.5
+        assert lines[0]["context"] == ["source:test"]
+        assert structured_logger_fixture.propagate is False
+
+    def test_second_init_restores_a_removed_root_forwarder(
+        self, tmp_path, structured_logger_fixture
+    ):
+        root_logger = logging.getLogger()
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        forwarder = root_logger.handlers[-1]
+        root_logger.handlers = []
+
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+
+        assert root_logger.handlers == [forwarder]
 
 
 # ---------------------------------------------------------------------------
