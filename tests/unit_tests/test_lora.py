@@ -23,9 +23,7 @@ def test_lora_model_builds():
     model_spec = model_registry(
         "debugmodel",
         converters=[
-            LoRAConverter.Config(
-                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
-            ),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
         ],
     )
     model = model_spec.model.build()
@@ -38,6 +36,12 @@ def test_lora_model_builds():
 
     assert len(lora_params) > 0, "No LoRA parameters found"
     assert len(frozen_linears) > 0, "No frozen parameters found"
+    lora_modules = {name.rsplit(".", 2)[0] for name in lora_params}
+    assert lora_modules == {
+        f"layers.{layer}.attention.{projection}"
+        for layer in range(6)
+        for projection in ("qkv_linear.wqkv", "wo")
+    }
     for name in lora_params:
         assert model.get_parameter(
             name
@@ -59,9 +63,7 @@ def test_lora_forward():
     model_spec = model_registry(
         "debugmodel",
         converters=[
-            LoRAConverter.Config(
-                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
-            ),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
         ],
     )
     model = model_spec.model.build()
