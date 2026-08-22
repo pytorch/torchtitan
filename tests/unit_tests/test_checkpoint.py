@@ -653,6 +653,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Verify that `maybe_wait_for_staging` actually waits for staging future to complete
         staging_future = manager.staging_future
+        manager.save_future.add_done_callback.assert_called_once()
         manager.maybe_wait_for_staging()
         staging_future.result.assert_called_once()
 
@@ -701,6 +702,41 @@ class TestCheckpointManager(unittest.TestCase):
         # New future created
         new_future = manager.save_future
         new_future.result.assert_not_called()
+
+    def test_async_save_logs_duration_when_future_completes(self):
+        trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
+        checkpoint_config = trainer_config.checkpoint
+        checkpoint_config.async_mode = "async"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=checkpoint_config,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        save_future: Future[None] = Future()
+
+        with (
+            mock.patch.object(manager, "dcp_save", return_value=save_future),
+            mock.patch(
+                "torchtitan.components.checkpointer.dcp.GarbageCollection.collect"
+            ),
+            mock.patch.object(sl, "log_trace_scalar") as log_trace_scalar,
+            mock.patch(
+                "torchtitan.components.checkpointer.dcp.time.monotonic",
+                side_effect=[0.0, 10.0, 10.5, 12.0],
+            ),
+        ):
+            manager.save(curr_step=10, last_step=False)
+            save_future.set_exception(RuntimeError("save failed"))
+
+        log_trace_scalar.assert_called_once_with(
+            {"train.checkpoint_write.native_dcp.execute.async_total.latency_ms": 2000.0}
+        )
+        manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
