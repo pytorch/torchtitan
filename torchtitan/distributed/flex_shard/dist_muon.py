@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -20,6 +21,8 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
+
+from torchtitan.tools.logging import logger
 
 from ._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
@@ -39,6 +42,7 @@ from ._optimizer_reshard_schedule import (
     _RedistributionGroup,
     _RedistributionPlan,
     _require_valid_plan,
+    _resolve_buckets,
     _RouteEndpoint,
     _StorageRegionMapping,
     _TensorRegion,
@@ -169,6 +173,49 @@ def _matrix_batch_view_from_compute_layout(
         storage_shape,
         matrix_rows=block_size,
     )
+
+
+def _resolve_declared_batch_groups(
+    specs: Sequence[_BucketSpec],
+    layouts: Sequence[_ParameterComputeLayout],
+) -> dict[str, _BatchGroupId]:
+    """Resolve ``BucketConfig.batch_groups`` to a per-FQN batch group identity.
+
+    A group that selects nothing is a configuration error rather than a
+    silently unbatched parameter, so a stale pattern fails loudly here instead
+    of quietly costing performance at every step.
+    """
+    bucketed_layouts = _resolve_buckets(
+        layouts,
+        specs,
+        get_fqn=lambda layout: layout.fqn,
+    )
+    declared_batch_groups: dict[str, _BatchGroupId] = {}
+    for bucket_index, (spec, bucket_layouts) in enumerate(
+        zip(specs, bucketed_layouts, strict=True)
+    ):
+        for group_index, group_patterns in enumerate(spec.batch_groups):
+            members = tuple(
+                layout.fqn
+                for layout in bucket_layouts
+                if any(
+                    fnmatch.fnmatchcase(layout.fqn, pattern)
+                    for pattern in group_patterns
+                )
+            )
+            if not members:
+                raise ValueError(
+                    f"bucket {spec.name!r} declares batch group "
+                    f"{list(group_patterns)}, which selects none of its "
+                    f"parameters {[layout.fqn for layout in bucket_layouts]}"
+                )
+            for fqn in members:
+                declared_batch_groups[fqn] = _BatchGroupId(
+                    bucket_index=bucket_index,
+                    group_index=group_index,
+                    bucket_name=spec.name,
+                )
+    return declared_batch_groups
 
 
 def _initialize_dist_muon(
@@ -445,6 +492,9 @@ class DistMuon(
         )
         self._bucket_plans = result.plans
         self._parameter_compute_layouts = result.ordered_items
+        self._declared_batch_groups: dict[
+            str, _BatchGroupId
+        ] = _resolve_declared_batch_groups(self._specs, compute_layouts)
         self._local_execution_plans: dict[
             tuple[str, ...], tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]
         ] = {}
@@ -686,17 +736,9 @@ class DistMuon(
                 self._execute_local_item(local_execution, slot)
                 continue
 
-            ns_signature = self._ns_signature(local_execution.slices[0].layout)
-            if any(
-                self._ns_signature(batch_slice.layout) != ns_signature
-                for batch_slice in local_execution.slices[1:]
-            ):
-                # Optimizer group dictionaries remain mutable. Preserve
-                # per-group semantics if NS settings diverge after planning.
-                for batch_slice in local_execution.slices:
-                    self._execute_local_item(batch_slice.layout, slot)
-                continue
-
+            # Every slice shares one parameter group, so one Newton-Schulz call
+            # over the batch cannot mix Muon settings even if the group dict is
+            # mutated after construction.
             prepared = slot.compute_buffer(
                 local_execution.shape,
                 dtype=local_execution.dtype,
@@ -728,57 +770,109 @@ class DistMuon(
         self._compute_update(layout, prepared)
         self._apply_update(layout, prepared)
 
-    def _ns_signature(
-        self,
-        layout: _ParameterComputeLayout,
-    ) -> tuple[Any, ...]:
-        group = self._group(layout)
-        return (
-            tuple(group["ns_coefficients"]),
-            group["ns_steps"],
-            group["eps"],
-        )
-
     def _build_local_execution_plan(
         self,
         layouts: tuple[_ParameterComputeLayout, ...],
     ) -> tuple[_ParameterComputeLayout | _LocalMatrixBatch, ...]:
-        grouped: dict[tuple[Any, ...], list[_ParameterComputeLayout]] = {}
+        """Lower one bucket's local work onto its declared batch groups.
+
+        Grouping is never inferred: a parameter joins a batch only because a
+        ``BucketConfig.batch_groups`` entry named it. Splitting a declared
+        group into scratch-bounded runs is the one thing decided here, because
+        the bound is physical and the local shard shapes are not known until
+        construction.
+        """
+        grouped: dict[_BatchGroupId, list[_ParameterComputeLayout]] = {}
+        plan_order: list[_BatchGroupId | _ParameterComputeLayout] = []
         for layout in layouts:
-            shape, dtype, device = _local_matrix_batch_spec(layout)
-            if len(shape) != 3:
-                key = (layout.fqn,)
-            else:
-                # Communication buckets may span layers. Restrict batching to
-                # sibling tensors so their combined scratch stays layer-local.
-                parent_fqn, separator, _ = layout.fqn.rpartition(".")
-                key = (
-                    parent_fqn if separator else layout.fqn,
-                    tuple(shape[1:]),
-                    dtype,
-                    device,
-                    self._ns_signature(layout),
-                )
-            grouped.setdefault(key, []).append(layout)
+            batch_group = self._declared_batch_groups.get(layout.fqn)
+            if batch_group is None:
+                plan_order.append(layout)
+                continue
+            members = grouped.setdefault(batch_group, [])
+            if not members:
+                plan_order.append(batch_group)
+            members.append(layout)
 
         execution_plan: list[_ParameterComputeLayout | _LocalMatrixBatch] = []
-        for compatible_layouts in grouped.values():
-            batch_layouts = []
-            batch_bytes = 0
-            for layout in compatible_layouts:
-                shape, _dtype, _device = _local_matrix_batch_spec(layout)
-                tensor_bytes = math.prod(shape) * layout.param.element_size()
-                if (
-                    batch_layouts
-                    and batch_bytes + tensor_bytes > _MAX_LOCAL_MATRIX_BATCH_BYTES
-                ):
-                    execution_plan.append(_make_local_matrix_execution(batch_layouts))
-                    batch_layouts = []
-                    batch_bytes = 0
-                batch_layouts.append(layout)
-                batch_bytes += tensor_bytes
-            execution_plan.append(_make_local_matrix_execution(batch_layouts))
+        for entry in plan_order:
+            if isinstance(entry, _ParameterComputeLayout):
+                execution_plan.append(entry)
+                continue
+            execution_plan.extend(
+                self._lower_declared_batch_group(entry, tuple(grouped[entry]))
+            )
         return tuple(execution_plan)
+
+    def _lower_declared_batch_group(
+        self,
+        batch_group: _BatchGroupId,
+        members: tuple[_ParameterComputeLayout, ...],
+    ) -> list[_ParameterComputeLayout | _LocalMatrixBatch]:
+        self._validate_declared_batch_group(batch_group, members)
+
+        runs: list[_ParameterComputeLayout | _LocalMatrixBatch] = []
+        run_layouts: list[_ParameterComputeLayout] = []
+        run_bytes = 0
+        for layout in members:
+            shape, _dtype, _device = _local_matrix_batch_spec(layout)
+            layout_bytes = math.prod(shape) * layout.param.element_size()
+            if run_layouts and run_bytes + layout_bytes > _MAX_LOCAL_MATRIX_BATCH_BYTES:
+                runs.append(_make_local_matrix_execution(run_layouts))
+                run_layouts = []
+                run_bytes = 0
+            run_layouts.append(layout)
+            run_bytes += layout_bytes
+        runs.append(_make_local_matrix_execution(run_layouts))
+
+        if len(runs) > 1:
+            logger.warning(
+                "%s holds %d parameters that exceed the %d byte local batch "
+                "scratch bound, so it runs as %d batches instead of one; "
+                "declare smaller groups to control the split explicitly",
+                batch_group,
+                len(members),
+                _MAX_LOCAL_MATRIX_BATCH_BYTES,
+                len(runs),
+            )
+        return runs
+
+    def _validate_declared_batch_group(
+        self,
+        batch_group: _BatchGroupId,
+        members: tuple[_ParameterComputeLayout, ...],
+    ) -> None:
+        """Enforce the contract a declared batch group promises.
+
+        Muon settings need no check here: ``_validate_groups`` already requires
+        exactly one parameter group, so every member reads the same
+        ``ns_coefficients``, ``ns_steps``, and ``eps`` even if that group dict
+        is mutated after construction.
+        """
+        reference = members[0]
+        reference_shape, reference_dtype, reference_device = _local_matrix_batch_spec(
+            reference
+        )
+        if len(reference_shape) != 3:
+            raise ValueError(
+                f"{batch_group} selects {reference.fqn!r}, whose local compute "
+                f"shape {tuple(reference_shape)} is not a batch of matrices; "
+                "only batch-first 3D local compute can share one call"
+            )
+        for layout in members[1:]:
+            shape, dtype, device = _local_matrix_batch_spec(layout)
+            if len(shape) != 3 or shape[1:] != reference_shape[1:]:
+                raise ValueError(
+                    f"{batch_group} selects {reference.fqn!r} with local matrix "
+                    f"shape {tuple(reference_shape[1:])} and {layout.fqn!r} with "
+                    f"{tuple(shape[1:])}; members must share a matrix shape"
+                )
+            if dtype != reference_dtype or device != reference_device:
+                raise ValueError(
+                    f"{batch_group} selects {reference.fqn!r} on "
+                    f"{reference_device}/{reference_dtype} and {layout.fqn!r} on "
+                    f"{device}/{dtype}; members must share dtype and device"
+                )
 
     @staticmethod
     def _local_tensor_spec(
@@ -1952,6 +2046,19 @@ def _normalize_dim(dim: int, ndim: int) -> int:
     if normalized < 0 or normalized >= ndim:
         raise ValueError(f"dimension {dim} is invalid for a rank-{ndim} tensor")
     return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchGroupId:
+    """Identity of one declared local compute batch group."""
+
+    bucket_index: int
+    group_index: int
+    bucket_name: str
+
+    def __str__(self) -> str:
+        name = self.bucket_name or f"#{self.bucket_index}"
+        return f"batch group {self.group_index} of bucket {name!r}"
 
 
 @dataclass(frozen=True, slots=True)

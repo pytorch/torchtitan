@@ -415,10 +415,26 @@ def _dist_muon_optimizer(
             )
         )
         if routed_fqns:
+            # One communication bucket, but the projections split into two
+            # local compute batches: w1_EFD and w3_EFD share the [F, D] matrix
+            # shape while w2_EDF is its transpose. Both groups span the
+            # bucket's layers, so a layer pair costs two batched Newton-Schulz
+            # calls rather than one per projection per layer.
+            batch_groups = tuple(
+                group
+                for group in (
+                    tuple(
+                        fqn for fqn in routed_fqns if fqn.endswith(("w1_EFD", "w3_EFD"))
+                    ),
+                    tuple(fqn for fqn in routed_fqns if fqn.endswith("w2_EDF")),
+                )
+                if group
+            )
             bucket_configs_list.append(
                 BucketConfig(
                     name=f"{name}.routed-experts",
                     patterns=routed_fqns,
+                    batch_groups=batch_groups,
                 )
             )
     bucket_configs = tuple(bucket_configs_list)

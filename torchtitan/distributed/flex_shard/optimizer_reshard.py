@@ -255,19 +255,87 @@ class BucketConfig:
     Compute layouts determine communication topology. A bucket controls only
     scheduling order and overlap; all redistributed parameters it selects must
     currently resolve to one homogeneous transport group.
+
+    A bucket is sized for communication, so it is deliberately heterogeneous:
+    coarse buckets amortize collective launch overhead. Local compute wants the
+    opposite, so ``batch_groups`` declares -- separately from ``patterns`` --
+    which parameters inside the bucket share one batched local compute call.
+    Each entry is a tuple of ``fnmatch`` patterns resolved against the FQNs the
+    bucket already matched. The declaration is a contract, not a hint: the
+    optimizer validates it at construction and raises when the members are not
+    batchable. Parameters the groups do not select execute one at a time.
+
+    Example:
+        Batch the two expert projections that share a trailing matrix shape,
+        keeping the transposed third projection in its own group, while all
+        three stay in one communication bucket::
+
+            BucketConfig(
+                name="layers.1-2.routed-experts",
+                patterns=("layers.*.moe.routed_experts.inner_experts.*",),
+                batch_groups=(
+                    ("*.inner_experts.w1_EFD", "*.inner_experts.w3_EFD"),
+                    ("*.inner_experts.w2_EDF",),
+                ),
+            )
     """
 
     patterns: tuple[str, ...]
     name: str = ""
+    batch_groups: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "patterns", tuple(self.patterns))
+        object.__setattr__(
+            self, "batch_groups", self._validated_batch_groups(self.batch_groups)
+        )
+
+    def _validated_batch_groups(
+        self,
+        batch_groups: Sequence[Sequence[str]],
+    ) -> tuple[tuple[str, ...], ...]:
+        if isinstance(batch_groups, str):
+            raise ValueError(
+                "BucketConfig.batch_groups must be a sequence of pattern groups"
+            )
+        seen_patterns: dict[str, int] = {}
+        validated_batch_groups = []
+        for group_index, group_patterns in enumerate(batch_groups):
+            if isinstance(group_patterns, str) or not isinstance(
+                group_patterns, Sequence
+            ):
+                raise ValueError(
+                    "BucketConfig.batch_groups entries must be sequences of "
+                    f"FQN patterns; got {group_patterns!r}"
+                )
+            normalized_group_patterns = tuple(group_patterns)
+            if not normalized_group_patterns:
+                raise ValueError(
+                    "BucketConfig.batch_groups entries must declare at least "
+                    f"one pattern; entry {group_index} is empty"
+                )
+            for pattern in normalized_group_patterns:
+                if not isinstance(pattern, str):
+                    raise ValueError(
+                        "BucketConfig.batch_groups patterns must be strings; "
+                        f"got {pattern!r}"
+                    )
+                previous_group_index = seen_patterns.setdefault(pattern, group_index)
+                if previous_group_index != group_index:
+                    raise ValueError(
+                        f"BucketConfig.batch_groups pattern {pattern!r} appears "
+                        f"in entries {previous_group_index} and {group_index}; "
+                        "a parameter may join only one batch group"
+                    )
+            validated_batch_groups.append(normalized_group_patterns)
+        return tuple(validated_batch_groups)
 
     def _bind(self, mesh: DeviceMesh | None) -> _BucketSpec:
         return _BucketSpec(
             patterns=self.patterns,
             mesh=mesh,
             name=self.name,
+            batch_groups=self.batch_groups,
         )
 
 
@@ -279,12 +347,14 @@ class _BucketSpec:
     match exactly one bucket, and sequence order controls execution order.
     ``mesh`` is the bucket's exact one-dimensional communication mesh, or
     ``None`` when every matched parameter is already compute-ready. ``name`` is
-    diagnostic metadata only.
+    diagnostic metadata only. ``batch_groups`` carries the declared local
+    compute batching from ``BucketConfig`` unchanged.
     """
 
     patterns: tuple[str, ...]
     mesh: DeviceMesh | None
     name: str = ""
+    batch_groups: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if self.mesh is not None and self.mesh.ndim != 1:
