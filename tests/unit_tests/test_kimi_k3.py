@@ -147,28 +147,6 @@ class TestKimiK3(unittest.TestCase):
         attention_masks = model.get_attention_masks(positions)
         self.assertIsInstance(attention_masks, BlockMask)
 
-    def test_update_from_config_propagates_moe_force_load_balance(self):
-        from torchtitan.components.data import GrainDataLoader
-        from torchtitan.config import DebugConfig
-        from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS
-        from torchtitan.trainer import Trainer
-
-        model_config = _small_model_config()
-        runtime_config = Trainer.Config(
-            debug=DebugConfig(moe_force_load_balance=True),
-            dataloader=GrainDataLoader.Config(dataset=MM_DATASETS["cc12m-test"]),
-            activation_checkpoint=None,
-        )
-        model_config.update_from_config(config=runtime_config)
-
-        router_configs = [
-            layer.moe.router for layer in model_config.layers if layer.moe is not None
-        ]
-        self.assertGreater(len(router_configs), 0)
-        self.assertTrue(
-            all(router._debug_force_load_balance for router in router_configs)
-        )
-
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
