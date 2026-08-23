@@ -10,8 +10,11 @@ Handles image decoding, resizing, normalization, and patch extraction for the
 vision encoder.
 """
 
+import ipaddress
 import math
+import socket
 from collections.abc import Callable
+from urllib.parse import urlparse
 
 import einops as E
 import requests
@@ -26,6 +29,38 @@ from PIL import Image
 from torchtitan.tools.logging import logger
 
 
+_PRIVATE_IP_RANGES = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("224.0.0.0/4"),
+]
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check if URL is safe from SSRF by blocking private/loopback/metadata IPs."""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        addrinfo = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addrinfo:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            for network in _PRIVATE_IP_RANGES:
+                if ip in network:
+                    return False
+        return True
+    except (socket.gaierror, socket.herror, OSError, ValueError):
+        return False
+
+
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     """Decode an image to a (C, H, W) uint8 RGB tensor.
 
@@ -33,6 +68,8 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     falls back to TVF.pil_to_tensor for PIL Image inputs.
     """
     if isinstance(image, str) and image.startswith("http"):
+        if not _is_safe_url(image):
+            raise ValueError(f"URL not allowed (SSRF protection): {image}")
         response = requests.get(image, timeout=10)
         image = response.content
     if isinstance(image, bytes):
