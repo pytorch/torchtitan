@@ -7,11 +7,8 @@
 """MoonViT3d vision encoder used by Kimi K3.
 
 Shape suffixes:
-- N = number of visual items
 - T = total packed patches
 - D = vision hidden dimension
-- H = number of attention heads
-- K = attention head dimension
 - C = number of complex-valued head-dimension pairs
 - M = total merged tokens
 - F = merged feature dimension
@@ -22,218 +19,21 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
-    VisionAttention,
-    VisionMLP,
+    VisionTransformerBlock,
+)
+from torchtitan.models.kimi_k2_7.vision_encoder import (
+    _compute_2d_rope_cache,
+    _compute_learned_pos_embeds,
+    _tpool_patch_merger,
+    VisionRotaryEmbedding2D,
 )
 from torchtitan.protocols.module import Module, ModuleDict
-
-
-def _get_temporal_pos_embed(
-    num_frames: int,
-    embed_dim: int,
-    *,
-    device: torch.device,
-) -> torch.Tensor:
-    """Return fixed 1D sinusoidal embeddings for video frame positions."""
-    grid = torch.arange(num_frames, dtype=torch.float32, device=device)
-    omega = torch.arange(embed_dim // 2, dtype=torch.float32, device=device) / (
-        embed_dim / 2.0
-    )
-    omega = 1.0 / 10000.0**omega
-    angles = torch.outer(grid, omega)
-    return torch.cat((angles.sin(), angles.cos()), dim=-1)
-
-
-def _compute_learned_pos_embeds(
-    pos_embed: torch.Tensor,
-    grids: list[list[int]],
-    interpolation_mode: str,
-    max_num_frames: int,
-) -> torch.Tensor:
-    """Interpolate the learned 2D table and add fixed temporal embeddings."""
-    height, width, dim = pos_embed.shape
-    pos_grid = pos_embed.permute(2, 0, 1).unsqueeze(0).float()
-
-    cached_spatial: dict[tuple[int, int], torch.Tensor] = {}
-    positions = []
-    for num_frames, grid_h, grid_w in grids:
-        if num_frames > max_num_frames:
-            raise ValueError(
-                f"Vision grid has {num_frames} frames, exceeding "
-                f"max_num_frames={max_num_frames}."
-            )
-        spatial = cached_spatial.get((grid_h, grid_w))
-        if spatial is None:
-            if (grid_h, grid_w) == (height, width):
-                spatial = pos_embed.flatten(end_dim=1)
-            else:
-                spatial = (
-                    F.interpolate(
-                        pos_grid,
-                        size=(grid_h, grid_w),
-                        mode=interpolation_mode,
-                    )
-                    .squeeze(0)
-                    .permute(1, 2, 0)
-                    .reshape(grid_h * grid_w, dim)
-                    .to(pos_embed.dtype)
-                )
-            cached_spatial[(grid_h, grid_w)] = spatial
-
-        if num_frames == 1:
-            item_pos = spatial
-        else:
-            temporal = _get_temporal_pos_embed(num_frames, dim, device=pos_embed.device)
-            item_pos = spatial.unsqueeze(0) + temporal.unsqueeze(1).to(spatial.dtype)
-            item_pos = item_pos.reshape(num_frames * grid_h * grid_w, dim)
-        positions.append(item_pos)
-
-    return torch.cat(positions)
-
-
-def _compute_2d_rope_cache(
-    freq_table: torch.Tensor,
-    grids: list[list[int]],
-    head_dim: int,
-) -> torch.Tensor:
-    """Build the real-valued 2D RoPE cache in raster patch order."""
-    cached_spatial: dict[tuple[int, int], torch.Tensor] = {}
-    item_angles = []
-    for num_frames, grid_h, grid_w in grids:
-        spatial = cached_spatial.get((grid_h, grid_w))
-        if spatial is None:
-            flat = torch.arange(grid_h * grid_w, device=freq_table.device)
-            x_angles = freq_table[flat % grid_w]
-            y_angles = freq_table[flat // grid_w]
-            spatial = torch.stack((x_angles, y_angles), dim=-1).reshape(
-                grid_h * grid_w, head_dim // 2
-            )
-            cached_spatial[(grid_h, grid_w)] = spatial
-        item_angles.append(spatial.repeat(num_frames, 1))
-
-    angles = torch.cat(item_angles)
-    # ComplexRoPE.apply_rotary_emb multiplies in complex64; float() only widens
-    # the container, so cos/sin keep whatever precision angles were computed in.
-    cos_sin = torch.stack((angles.cos(), angles.sin()), dim=-1).float()
-    return torch.view_as_complex(cos_sin).unsqueeze(1)
-
-
-def _temporal_pool_and_merge(
-    hidden_TD: torch.Tensor,
-    grids: list[list[int]],
-    merge_kernel_size: tuple[int, int],
-) -> torch.Tensor:
-    """Temporally pool and concatenate neighboring spatial patch features."""
-    dim = hidden_TD.shape[-1]
-    kernel_h, kernel_w = merge_kernel_size
-    merged_dim = kernel_h * kernel_w * dim
-
-    merged_items = []
-    offset = 0
-    for num_frames, grid_h, grid_w in grids:
-        num_patches = num_frames * grid_h * grid_w
-        item = hidden_TD[offset : offset + num_patches]
-        offset += num_patches
-        merged_h = grid_h // kernel_h
-        merged_w = grid_w // kernel_w
-        item = item.view(
-            num_frames,
-            merged_h,
-            kernel_h,
-            merged_w,
-            kernel_w,
-            dim,
-        )
-        item = item.permute(0, 1, 3, 2, 4, 5).mean(dim=0)
-        merged_items.append(item.reshape(merged_h * merged_w, merged_dim))
-
-    return torch.cat(merged_items)
-
-
-class VisionRotaryEmbedding2D(Module):
-    """Per-axis frequency table for MoonViT's interleaved 2D RoPE."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-        theta: float = 10000.0
-
-    def __init__(self, config: Config):
-        super().__init__()
-        if config.head_dim % 4 != 0:
-            raise ValueError(
-                "Vision 2D RoPE head_dim must be divisible by 4, "
-                f"got {config.head_dim}."
-            )
-        self.head_dim = config.head_dim
-        self.theta = config.theta
-        self.register_buffer("inv_freq", self._compute_inv_freq(), persistent=False)
-
-    def _compute_inv_freq(self, *, device: torch.device | None = None) -> torch.Tensor:
-        return 1.0 / (
-            self.theta
-            ** (
-                torch.arange(
-                    0,
-                    self.head_dim,
-                    4,
-                    dtype=torch.float32,
-                    device=device,
-                )
-                / self.head_dim
-            )
-        )
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        device = buffer_device or self.inv_freq.device
-        self.inv_freq = self._compute_inv_freq(device=device)
-
-    def forward(self, seqlen: int) -> torch.Tensor:
-        positions = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
-        return torch.outer(positions, self.inv_freq)
-
-
-class KimiK3VisionBlock(Module):
-    """MoonViT pre-norm attention and MLP block."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        norm1: RMSNorm.Config
-        norm2: RMSNorm.Config
-        attn: VisionAttention.Config
-        mlp: VisionMLP.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.norm1 = config.norm1.build()
-        self.norm2 = config.norm2.build()
-        self.attn = config.attn.build()
-        self.mlp = config.mlp.build()
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        *,
-        rope_cache: torch.Tensor,
-        attention_mask: BlockMask,
-    ) -> torch.Tensor:
-        x_TD = x_TD + self.attn(
-            self.norm1(x_TD),
-            rope_cache=rope_cache,
-            rope_apply=ComplexRoPE.apply_rotary_emb,
-            attention_mask=attention_mask,
-        )
-        return x_TD + self.mlp(self.norm2(x_TD))
 
 
 class KimiK3VisionProjector(Module):
@@ -272,14 +72,13 @@ class KimiK3VisionEncoder(Module):
         interpolation_mode: str
         patch_embed_proj: Linear.Config
         rotary_pos_emb: VisionRotaryEmbedding2D.Config
-        block: KimiK3VisionBlock.Config
+        block: VisionTransformerBlock.Config
         final_norm: RMSNorm.Config
         projector: KimiK3VisionProjector.Config
 
     def __init__(self, config: Config):
         super().__init__()
         self.merge_kernel_size = config.merge_kernel_size
-        self.max_num_frames = config.max_num_frames
         self.interpolation_mode = config.interpolation_mode
         self.patch_embed = config.patch_embed_proj.build()
         self.pos_embed = torch.nn.Parameter(
@@ -313,7 +112,6 @@ class KimiK3VisionEncoder(Module):
             self.pos_embed,
             grids,
             self.interpolation_mode,
-            self.max_num_frames,
         )
         rope_cache = _compute_2d_rope_cache(
             self._cached_freq_table,
@@ -361,8 +159,9 @@ class KimiK3VisionEncoder(Module):
             hidden_TD = block(
                 hidden_TD,
                 rope_cache=rope_cache,
+                rope_apply=ComplexRoPE.apply_rotary_emb,
                 attention_mask=attention_mask,
             )
         hidden_TD = self.final_norm(hidden_TD)
-        merged_MF = _temporal_pool_and_merge(hidden_TD, grids, self.merge_kernel_size)
+        merged_MF = _tpool_patch_merger(hidden_TD, grids, self.merge_kernel_size)
         return self.projector(merged_MF)
