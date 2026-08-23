@@ -20,16 +20,10 @@ a pinned HuggingFace revision without downloading the released weight shards.
 The released code requires ``transformers==4.56.2`` and ``tiktoken``.
 
 Usage:
-    # BF16: HF FlashAttention2 / TT FlexAttention
     CUDA_VISIBLE_DEVICES=0 python -m \
         scripts.checkpoint_conversion.numerical_tests_kimi_k3
 
-    # FP32: HF eager / TT FlexAttention
-    CUDA_VISIBLE_DEVICES=0 python -m \
-        scripts.checkpoint_conversion.numerical_tests_kimi_k3 \
-        --dtype float32
-
-Add ``--force-hf-routing`` to either command for the routing-fixed diagnostic.
+Add ``--force-hf-routing`` for the routing-fixed diagnostic.
 """
 
 import argparse
@@ -53,6 +47,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 
 _HF_REPO_ID = "moonshotai/Kimi-K3"
 _HF_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
+_DTYPE = torch.bfloat16
+_HF_ATTN_BACKEND = "flash_attention_2"
 _MEDIA_TOKEN_ID = 163605
 _PATCH_SIZE = 14
 _MERGE_SIZE = 2
@@ -175,11 +171,10 @@ def _build_hf_model(
         local_files_only=True,
     )
     _reduce_hf_config(hf_config, tt_config, hf_model_path)
-    attn_backend = "flash_attention_2" if dtype == torch.bfloat16 else "eager"
-    hf_config.text_config._attn_implementation = attn_backend
-    hf_config.vision_config._attn_implementation = attn_backend
+    hf_config.text_config._attn_implementation = _HF_ATTN_BACKEND
+    hf_config.vision_config._attn_implementation = _HF_ATTN_BACKEND
     model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
-    model.language_model.config._attn_implementation = attn_backend
+    model.language_model.config._attn_implementation = _HF_ATTN_BACKEND
     model.to(dtype=dtype)
     model.load_state_dict(hf_state_dict, strict=True)
     return model.eval()
@@ -458,11 +453,6 @@ def main() -> None:
     parser.add_argument("--model_flavor", default="debugmodel")
     parser.add_argument("--image_size", type=int, default=336)
     parser.add_argument(
-        "--dtype",
-        default="bfloat16",
-        choices=["float32", "bfloat16"],
-    )
-    parser.add_argument(
         "--force-hf-routing",
         action="store_true",
         help="Use HF expert selections with TorchTitan router scores.",
@@ -479,9 +469,8 @@ def main() -> None:
         allow_patterns=["*.json", "*.py", "tiktoken.model"],
     )
     device = torch.device("cuda")
-    dtype = getattr(torch, args.dtype)
-    hf_attn_backend = "flash_attention_2" if dtype == torch.bfloat16 else "eager"
-    print(f"dtype={args.dtype} hf_attn={hf_attn_backend}")
+    dtype = _DTYPE
+    print(f"dtype={dtype} hf_attn={_HF_ATTN_BACKEND}")
 
     tt_config = cast(KimiK3Model.Config, model_registry(args.model_flavor).model)
     torch.manual_seed(args.seed)
