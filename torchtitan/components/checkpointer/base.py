@@ -263,6 +263,15 @@ class BaseCheckpointManager(Configurable, ABC):
     def _close(self) -> None:
         """Implement ``close``. Only called when checkpointing is enabled."""
 
+    @abstractmethod
+    def _parse_step(self, checkpoint_name: str) -> int | None:
+        """Return the step encoded in a complete checkpoint's name.
+
+        Callers must verify that the checkpoint's completion metadata has been
+        written before invoking this method. ``None`` means that the checkpoint
+        name does not belong to this manager's naming scheme.
+        """
+
     def _should_purge(self) -> bool:
         """Whether this rank should purge stale checkpoints."""
         return (
