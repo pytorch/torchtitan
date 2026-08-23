@@ -42,7 +42,7 @@ _batcher_loop
 +----------------------------------------------------------------------------------------+
 | training_sample_group = training_sample_builder.build_from_group(rollout_group=group)  |
 | if no trainable samples: group_buffer.release_active_groups(1, "untrainable_group")    |
-| maybe_training_batch = batcher.add_training_samples(training_sample_group)             |
+| batch, trainable = batcher.add_training_samples(training_sample_group)                  |
 | training_batch_queue.put(TrainingBatch)                                                |
 +-----------------------+------------------------------+---------------------------------+
                         |  ^                           |
@@ -1011,7 +1011,7 @@ class Controller(Configurable):
             # if there are enough accumulated trainable groups to return one.
             with sl.log_trace_span("batcher_pack"):
                 maybe_training_batch, group_is_trainable = await asyncio.to_thread(
-                    batcher.add_training_samples_with_status,
+                    batcher.add_training_samples,
                     training_sample_group=training_sample_group,
                 )
             if not group_is_trainable:

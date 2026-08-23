@@ -71,8 +71,8 @@ class Batcher(Configurable):
         batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
             num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
-        _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
-        batch = batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
+        _, _ = batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
+        batch, _ = batcher.add_training_samples(training_sample_group=group1)
         # batch.microbatches: [num_microbatches][2 ranks]; each TrainingMicrobatch.token_ids: [2 rows, 128 tokens]
     """
 
@@ -102,29 +102,16 @@ class Batcher(Configurable):
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
-    ) -> TrainingBatch | None:
-        """Add one rollout group and pack one train step once enough trainable groups are ready.
+    ) -> tuple[TrainingBatch | None, bool]:
+        """Add one group and report whether any samples survive batcher filtering.
 
         Args:
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
             batcher = Batcher.Config().build(num_prompts_per_train_step=2, dp_degree=1, pad_id=0)
-            batcher.add_training_samples(training_sample_group=group0)  # -> None
-            batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
-        """
-        training_batch, _ = self.add_training_samples_with_status(
-            training_sample_group=training_sample_group
-        )
-        return training_batch
-
-    def add_training_samples_with_status(
-        self, *, training_sample_group: TrainingSampleGroup
-    ) -> tuple[TrainingBatch | None, bool]:
-        """Add one group and report whether any samples survive batcher filtering.
-
-        The controller uses the status to release the group's active slot when
-        oversized-sample filtering makes the group untrainable.
+            batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
+            batcher.add_training_samples(training_sample_group=group1)  # -> (TrainingBatch, True)
         """
         # Drop samples longer than seq_len: can't fill a row
         samples = training_sample_group.training_samples
