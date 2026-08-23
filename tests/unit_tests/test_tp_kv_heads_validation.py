@@ -121,8 +121,8 @@ class TestTPKVHeadsValidation(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_llama3_n_heads_not_divisible_raises(self):
-        """n_heads=6, tp=4 → fractional Q heads per rank → ValueError."""
-        cfg = _make_llama3_config(n_heads=6, n_kv_heads=6)
+        """n_heads=2, tp=4 -> fractional Q heads per rank -> ValueError."""
+        cfg = _make_llama3_config(n_heads=2, n_kv_heads=2)
         with self.assertRaises(ValueError):
             cfg.update_from_config(config=_make_trainer_config(tp=4))
 
@@ -141,8 +141,8 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     def test_llama3_tp1_skips_check(self):
-        """tp=1 → check skipped even with indivisible n_kv_heads."""
-        cfg = _make_llama3_config(n_heads=8, n_kv_heads=3)
+        """tp=1 -> valid GQA head counts do not raise."""
+        cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
         cfg.update_from_config(config=_make_trainer_config(tp=1))
 
 

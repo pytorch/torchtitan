@@ -173,9 +173,7 @@ def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
                 emulate=True,
                 model_compile_enabled=False,
             ),
-            LoRAConverter.Config(
-                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
-            ),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
         ],
     )
     return config

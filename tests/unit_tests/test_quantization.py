@@ -53,6 +53,16 @@ def test_float8_applied_by_model_registry():
         if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0
+    lora_converted = {
+        fqn
+        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        if hasattr(lc, "rank") and hasattr(lc, "alpha")
+    }
+    assert lora_converted == {
+        f"layers.{layer}.attention.{projection}"
+        for layer in range(6)
+        for projection in ("qkv_linear.wqkv", "wo")
+    }
 
 
 @pytest.mark.parametrize(

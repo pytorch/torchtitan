@@ -60,8 +60,8 @@ class TestDistMuon(DTensorTestBase):
             # Two storage shards each own six rows, so their boundary splits
             # the middle matrix and exercises overshard redistribution.
             "layers.0.attention.oversharded": (3, 4, 3),
-            # These aligned siblings remain local and are declared as one batch
-            # group, so they share a single Newton-Schulz call.
+            # These aligned siblings remain local and share one batched NS
+            # call because their local matrices are compatible.
             "layers.0.attention.wq": (4, 5, 3),
             "layers.0.attention.wkv": (4, 5, 3),
         }
@@ -121,7 +121,6 @@ class TestDistMuon(DTensorTestBase):
                     BucketConfig(
                         patterns=("layers.0.*",),
                         name="layers.0",
-                        batch_groups=(aligned_fqns,),
                     )
                 ],
             )
@@ -320,8 +319,8 @@ class TestDistMuon(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
-class TestDistMuonDeclaredBatchGroups(DTensorTestBase):
-    """``BucketConfig.batch_groups`` is a contract, not a hint."""
+class TestDistMuonLocalMatrixBatching(DTensorTestBase):
+    """Batching follows local matrix compatibility, never FQN structure."""
 
     @property
     def world_size(self):
@@ -356,112 +355,104 @@ class TestDistMuonDeclaredBatchGroups(DTensorTestBase):
             }
         )
 
-    @with_comms
-    def test_declared_group_shares_one_call_and_leaves_others_alone(self):
-        mesh = self._mesh()
-        wq_fqn = "layers.0.attention.wq"
-        wkv_fqn = "layers.0.attention.wkv"
-        solo_fqn = "layers.0.attention.wo"
-        params = {
-            wq_fqn: self._stack(mesh, 4, 5, 3),
-            wkv_fqn: self._stack(mesh, 4, 5, 3),
-            solo_fqn: self._stack(mesh, 4, 5, 3),
-        }
-        optimizer = build_dist_muon(
+    def _executions(self, optimizer):
+        return [
+            execution
+            for plan in optimizer._local_execution_plans.values()
+            for execution in plan
+        ]
+
+    def _build(self, params, layouts):
+        return build_dist_muon(
             [{"params": list(params.values()), "param_names": list(params)}],
             lr=0.03,
             weight_decay=0.2,
             momentum=0.8,
             nesterov=True,
             ns_steps=2,
+            compute_sharding_by_fqn=layouts,
+            bucket_configs=[BucketConfig(name="layers", patterns=("layers.*",))],
+        )
+
+    @with_comms
+    def test_batches_compatible_matrices_across_layers(self):
+        # One bucket spanning two layers. Sibling FQNs differ in their parent,
+        # so an FQN-derived grouping would leave all four unbatched.
+        fqns = [
+            "layers.1.attention.wq",
+            "layers.2.attention.wq",
+            "layers.1.attention.wkv_b",
+            "layers.2.attention.wkv_b",
+        ]
+        mesh = self._mesh()
+        params = {fqn: self._stack(mesh, 4, 5, 3) for fqn in fqns}
+        optimizer = self._build(params, {fqn: self._block_layout(5) for fqn in fqns})
+
+        executions = self._executions(optimizer)
+        batches = [e for e in executions if isinstance(e, _LocalMatrixBatch)]
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(sorted(s.layout.fqn for s in batches[0].slices), sorted(fqns))
+        self.assertEqual(
+            [e.fqn for e in executions if not isinstance(e, _LocalMatrixBatch)], []
+        )
+
+    @with_comms
+    def test_separates_incompatible_matrix_shapes(self):
+        mesh = self._mesh()
+        wide = ("layers.1.attention.wq", "layers.2.attention.wq")
+        narrow = ("layers.1.attention.wkv_b", "layers.2.attention.wkv_b")
+        params = {
+            **{fqn: self._stack(mesh, 4, 5, 3) for fqn in wide},
+            **{fqn: self._stack(mesh, 4, 4, 3) for fqn in narrow},
+        }
+        optimizer = self._build(
+            params,
+            {
+                **{fqn: self._block_layout(5) for fqn in wide},
+                **{fqn: self._block_layout(4) for fqn in narrow},
+            },
+        )
+
+        batches = [
+            e for e in self._executions(optimizer) if isinstance(e, _LocalMatrixBatch)
+        ]
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(
+            sorted(
+                tuple(sorted(s.layout.fqn for s in batch.slices)) for batch in batches
+            ),
+            sorted((tuple(sorted(wide)), tuple(sorted(narrow)))),
+        )
+
+    @with_comms
+    def test_batches_do_not_span_buckets(self):
+        # Local work is executed one bucket at a time, so compatible tensors in
+        # different buckets are never resident together and cannot share a call.
+        mesh = self._mesh()
+        first = ("layers.1.attention.wq", "layers.1.attention.wkv_b")
+        second = ("layers.2.attention.wq", "layers.2.attention.wkv_b")
+        params = {fqn: self._stack(mesh, 4, 5, 3) for fqn in (*first, *second)}
+        optimizer = build_dist_muon(
+            [{"params": list(params.values()), "param_names": list(params)}],
+            lr=0.03,
+            ns_steps=2,
             compute_sharding_by_fqn={fqn: self._block_layout(5) for fqn in params},
             bucket_configs=[
-                BucketConfig(
-                    name="layers.0",
-                    patterns=("layers.0.*",),
-                    batch_groups=((wq_fqn, wkv_fqn),),
-                )
+                BucketConfig(name="layers.1", patterns=("layers.1.*",)),
+                BucketConfig(name="layers.2", patterns=("layers.2.*",)),
             ],
         )
 
-        executions = [
-            execution
-            for plan in optimizer._local_execution_plans.values()
-            for execution in plan
-        ]
         batches = [
-            execution
-            for execution in executions
-            if isinstance(execution, _LocalMatrixBatch)
+            e for e in self._executions(optimizer) if isinstance(e, _LocalMatrixBatch)
         ]
-        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches), 2)
         self.assertEqual(
-            sorted(batch_slice.layout.fqn for batch_slice in batches[0].slices),
-            sorted((wq_fqn, wkv_fqn)),
+            sorted(
+                tuple(sorted(s.layout.fqn for s in batch.slices)) for batch in batches
+            ),
+            sorted((tuple(sorted(first)), tuple(sorted(second)))),
         )
-        # The undeclared sibling has an identical shape, so an inferring
-        # planner would have swept it into the same batch.
-        self.assertEqual(
-            [
-                execution.fqn
-                for execution in executions
-                if not isinstance(execution, _LocalMatrixBatch)
-            ],
-            [solo_fqn],
-        )
-
-    @with_comms
-    def test_rejects_members_with_different_matrix_shapes(self):
-        mesh = self._mesh()
-        wide_fqn = "layers.0.attention.wq"
-        narrow_fqn = "layers.0.attention.wkv"
-        params = {
-            wide_fqn: self._stack(mesh, 4, 5, 3),
-            narrow_fqn: self._stack(mesh, 4, 4, 3),
-        }
-        with self.assertRaisesRegex(ValueError, "must share a matrix shape"):
-            build_dist_muon(
-                [{"params": list(params.values()), "param_names": list(params)}],
-                lr=0.03,
-                ns_steps=2,
-                compute_sharding_by_fqn={
-                    wide_fqn: self._block_layout(5),
-                    narrow_fqn: self._block_layout(4),
-                },
-                bucket_configs=[
-                    BucketConfig(
-                        name="layers.0",
-                        patterns=("layers.0.*",),
-                        batch_groups=((wide_fqn, narrow_fqn),),
-                    )
-                ],
-            )
-
-    @with_comms
-    def test_rejects_group_that_selects_nothing(self):
-        mesh = self._mesh()
-        fqn = "layers.0.attention.wq"
-        with self.assertRaisesRegex(ValueError, "selects none of its parameters"):
-            build_dist_muon(
-                [{"params": [self._stack(mesh, 4, 5, 3)], "param_names": [fqn]}],
-                lr=0.03,
-                ns_steps=2,
-                compute_sharding_by_fqn={fqn: self._block_layout(5)},
-                bucket_configs=[
-                    BucketConfig(
-                        name="layers.0",
-                        patterns=("layers.0.*",),
-                        batch_groups=(("layers.0.attention.typo",),),
-                    )
-                ],
-            )
-
-    def test_rejects_a_pattern_declared_in_two_groups(self):
-        with self.assertRaisesRegex(ValueError, "a parameter may join only one"):
-            BucketConfig(
-                patterns=("layers.0.*",),
-                batch_groups=(("layers.0.a", "layers.0.b"), ("layers.0.b",)),
-            )
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
