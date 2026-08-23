@@ -120,7 +120,6 @@ class GarbageCollection:
                 "Force GC to perform collection to obtain debug information",
                 generation=2,
             )
-            gc.collect()
             sl.add_step_tag("gc")
             return True
         if step_count > 1 and step_count % self.gc_freq == 0:
