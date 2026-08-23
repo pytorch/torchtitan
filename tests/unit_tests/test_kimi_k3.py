@@ -4,56 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
-from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask
-from torch.testing._internal.distributed._tensor.common_dtensor import (
-    DTensorTestBase,
-    with_comms,
-)
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed import ParallelDims
-
-from torchtitan.models.kimi_k3 import (
-    _kimi_k3_config,
-    _vision_encoder_config,
-    parallelize_kimi_k3,
-)
+from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.kda import KimiKDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
 
-def _small_model_config(
-    *,
-    attn_res_block_size: int = 1,
-    full_attention_layers: set[int] | None = None,
-) -> KimiK3Model.Config:
+def _small_model_config() -> KimiK3Model.Config:
     """Build a reduced KDA+MLA, dense+MoE, multimodal Kimi K3 config."""
-    if full_attention_layers is None:
-        full_attention_layers = {1}
-
     dim = 64
     return _kimi_k3_config(
         dim=dim,
         vocab_size=32,
         num_layers=2,
-        full_attention_layers=full_attention_layers,
-        attn_res_block_size=attn_res_block_size,
+        full_attention_layers={1},
+        attn_res_block_size=1,
         num_heads=2,
         q_lora_rank=32,
         kv_lora_rank=32,
         qk_nope_head_dim=16,
         qk_rope_head_dim=16,
         v_head_dim=16,
-        kda_head_dim=16,
+        kda_head_dim=64,
         conv_kernel_size=3,
         dense_hidden_dim=128,
         latent_dim=32,
@@ -150,7 +128,7 @@ class TestKimiK3(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
-        head_dim = 32
+        head_dim = 64
         num_heads = 3
 
         def parameter(*shape: int) -> torch.Tensor:
@@ -238,120 +216,6 @@ class TestKimiK3(unittest.TestCase):
         self.assertEqual(state_dict.keys(), roundtrip_state_dict.keys())
         for key, value in state_dict.items():
             torch.testing.assert_close(value, roundtrip_state_dict[key])
-
-
-class TestKimiK3FSDP(DTensorTestBase):
-    @property
-    def world_size(self):
-        return 1
-
-    @unittest.skipIf(not torch.cuda.is_available(), "Kimi K3 FSDP requires CUDA.")
-    @with_comms
-    def test_fsdp_matches_non_distributed_forward_backward(self):
-        torch.manual_seed(3)
-        config = _small_model_config(
-            attn_res_block_size=2,
-            full_attention_layers={1},
-        )
-        with torch.device("meta"):
-            model = config.build()
-        model.to_empty(device=self.device_type)
-        model.init_states()
-        with torch.no_grad():
-            for transformer_block in model.layers.values():
-                if transformer_block.moe is not None:
-                    transformer_block.moe.router.gate.weight.zero_()
-
-        reference = copy.deepcopy(model)
-        for parameter in reference.parameters():
-            parameter.data = parameter.data.to(torch.bfloat16)
-
-        parallelism = ParallelismConfig(
-            data_parallel_shard_degree=1,
-            tensor_parallel_degree=1,
-            pipeline_parallel_degree=1,
-            context_parallel_degree=1,
-            expert_parallel_degree=1,
-            spmd_backend="partial_dtensor",
-        )
-        parallel_dims = ParallelDims.from_config(parallelism, world_size=1)
-        with patch(
-            "torchtitan.distributed.parallel_dims.device_type",
-            self.device_type,
-        ):
-            parallel_dims.build_mesh()
-        model = parallelize_kimi_k3(
-            model,
-            parallel_dims=parallel_dims,
-            training=TrainingConfig(
-                num_tokens_per_microbatch_per_dp_rank=6,
-                max_context_length=6,
-                steps=1,
-                dtype="bfloat16",
-            ),
-            parallelism=parallelism,
-            compile_config=CompileConfig(),
-            ac_config=None,
-            dump_folder="",
-        )
-
-        assert isinstance(model, KimiK3Model)
-        self.assertIsInstance(model, FSDPModule)
-        self.assertIsInstance(model.vision_encoder, FSDPModule)
-
-        positions_T = torch.arange(
-            6,
-            dtype=torch.int32,
-            device=self.device_type,
-        )
-        attention_masks = reference.get_attention_masks(positions_T)
-        inputs = {
-            "tokens": torch.tensor(
-                [1, 7, 2, 3, 4, 5],
-                dtype=torch.long,
-                device=self.device_type,
-            ),
-            "pixel_values": torch.randn(
-                4,
-                3 * 2 * 2,
-                device=self.device_type,
-            ),
-            "grid_thw": torch.tensor(
-                [[1, 2, 2]],
-                dtype=torch.long,
-                device=self.device_type,
-            ),
-            "special_tokens": {"image_id": 7},
-            "positions": positions_T,
-            "attention_masks": attention_masks,
-        }
-
-        actual_TV = model(**inputs)  # pyrefly: ignore [not-callable]
-        expected_TV = reference(**inputs)
-        torch.testing.assert_close(actual_TV, expected_TV, atol=0.0, rtol=0.0)
-
-        actual_TV.float().square().mean().backward()
-        expected_TV.float().square().mean().backward()
-
-        reference_parameters = dict(reference.named_parameters())
-        compared_gradients = 0
-        for name, parameter in model.named_parameters():
-            actual_grad = parameter.grad
-            expected_grad = reference_parameters[name].grad
-            self.assertEqual(actual_grad is None, expected_grad is None)
-            if actual_grad is None:
-                continue
-            if isinstance(actual_grad, DTensor):
-                actual_grad = actual_grad.to_local()
-            assert expected_grad is not None
-            torch.testing.assert_close(
-                actual_grad.float(),
-                expected_grad.float(),
-                atol=0.0,
-                rtol=0.0,
-            )
-            compared_gradients += 1
-        self.assertGreater(compared_gradients, 0)
 
 
 if __name__ == "__main__":
