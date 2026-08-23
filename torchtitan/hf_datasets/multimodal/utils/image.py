@@ -26,22 +26,24 @@ import torchvision.transforms.v2.functional as TVF
 
 from PIL import Image
 
+from requests.adapters import HTTPAdapter
+
 from torchtitan.tools.logging import logger
 
 
-_PRIVATE_IP_RANGES = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("224.0.0.0/4"),
-]
+def _is_blocked_ip(ip: ipaddress.ip_address) -> bool:
+    """Return True if the IP is private, loopback, link-local, multicast, or unspecified."""
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
 
 
 def _is_safe_url(url: str) -> bool:
-    """Check if URL is safe from SSRF by blocking private/loopback/metadata IPs."""
+    """Check if URL is safe from SSRF by resolving and checking all IP addresses."""
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
@@ -49,16 +51,30 @@ def _is_safe_url(url: str) -> bool:
             return False
         if parsed.scheme not in ("http", "https"):
             return False
+        # Resolve hostname and check ALL resolved IPs
         addrinfo = socket.getaddrinfo(hostname, None)
+        resolved_ips: list[ipaddress.ip_address] = []
         for family, _, _, _, sockaddr in addrinfo:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-            for network in _PRIVATE_IP_RANGES:
-                if ip in network:
-                    return False
+            ip = ipaddress.ip_address(socket.inet_ntop(family, sockaddr[4]))
+            resolved_ips.append(ip)
+        if not resolved_ips:
+            return False
+        if any(_is_blocked_ip(ip) for ip in resolved_ips):
+            return False
         return True
     except (socket.gaierror, socket.herror, OSError, ValueError):
         return False
+
+
+class _SSRFProtectedAdapter(HTTPAdapter):
+    """HTTPAdapter that blocks redirects to private/loopback/metadata IPs."""
+
+    def resolve_redirects(self, resp, req, stream=False, timeout=None, **kwargs):
+        location = resp.headers.get("Location")
+        if location:
+            if not _is_safe_url(location):
+                raise requests.exceptions.InvalidURL(f"Blocked redirect to unsafe URL: {location}")
+        return super().resolve_redirects(resp, req, stream=stream, timeout=timeout, **kwargs)
 
 
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
@@ -70,7 +86,10 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     if isinstance(image, str) and image.startswith("http"):
         if not _is_safe_url(image):
             raise ValueError(f"URL not allowed (SSRF protection): {image}")
-        response = requests.get(image, timeout=10)
+        session = requests.Session()
+        session.mount("http://", _SSRFProtectedAdapter())
+        session.mount("https://", _SSRFProtectedAdapter())
+        response = session.get(image, timeout=10, allow_redirects=True)
         image = response.content
     if isinstance(image, bytes):
         raw = torch.frombuffer(bytearray(image), dtype=torch.uint8)
