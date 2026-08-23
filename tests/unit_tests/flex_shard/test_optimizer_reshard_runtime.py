@@ -55,9 +55,6 @@ class TestBatchedCopy(unittest.TestCase):
         torch.testing.assert_close(destination_base, source_base)
 
     def test_foreach_copy_casts_between_dtypes(self):
-        # torch._foreach_copy_ casts like Tensor.copy_ does, so differing dtypes
-        # need no special handling; only unequal shapes would be a problem, and
-        # the op rejects those itself.
         sources = (torch.arange(3), torch.arange(4))
         destinations = (
             torch.empty(3, dtype=torch.float32),

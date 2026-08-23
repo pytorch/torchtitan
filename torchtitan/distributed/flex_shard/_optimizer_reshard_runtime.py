@@ -785,21 +785,12 @@ def _batched_copy_(
     destinations: tuple[Tensor, ...],
     sources: tuple[Tensor, ...],
 ) -> None:
-    """Copy aligned region views with a single foreach launch.
-
-    Each destination is paired with a source built from the same
-    ``_TensorRegion``, so the two always have equal shape.
-    ``torch._foreach_copy_`` requires that -- unlike ``Tensor.copy_`` it does
-    not broadcast -- and raises if it is ever violated. Differing dtype or
-    device and non-contiguous views it handles correctly on its own, so none of
-    those need guarding here.
-    """
+    """Copy aligned region views with a single foreach launch."""
     if len(destinations) != len(sources):
         raise ValueError("destinations and sources must have equal length")
     if not destinations:
         return
     if len(destinations) == 1:
-        # Skip the foreach setup for the common single-span parameter.
         destinations[0].copy_(sources[0])
         return
     torch._foreach_copy_(destinations, sources)
