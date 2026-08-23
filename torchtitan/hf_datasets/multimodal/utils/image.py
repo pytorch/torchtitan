@@ -14,7 +14,7 @@ import ipaddress
 import math
 import socket
 from collections.abc import Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import einops as E
 import requests
@@ -25,8 +25,6 @@ import torchvision.io
 import torchvision.transforms.v2.functional as TVF
 
 from PIL import Image
-
-from requests.adapters import HTTPAdapter
 
 from torchtitan.tools.logging import logger
 
@@ -51,7 +49,6 @@ def _is_safe_url(url: str) -> bool:
             return False
         if parsed.scheme not in ("http", "https"):
             return False
-        # Resolve hostname and check ALL resolved IPs
         addrinfo = socket.getaddrinfo(hostname, None)
         resolved_ips: list[ipaddress.ip_address] = []
         for family, _, _, _, sockaddr in addrinfo:
@@ -66,15 +63,16 @@ def _is_safe_url(url: str) -> bool:
         return False
 
 
-class _SSRFProtectedAdapter(HTTPAdapter):
-    """HTTPAdapter that blocks redirects to private/loopback/metadata IPs."""
+class _SSRFProtectedSession(requests.Session):
+    """Session that blocks redirects to private/loopback/metadata IPs."""
 
-    def resolve_redirects(self, resp, req, stream=False, timeout=None, **kwargs):
+    def resolve_redirects(self, resp, req, **kwargs):
         location = resp.headers.get("Location")
         if location:
-            if not _is_safe_url(location):
-                raise requests.exceptions.InvalidURL(f"Blocked redirect to unsafe URL: {location}")
-        return super().resolve_redirects(resp, req, stream=stream, timeout=timeout, **kwargs)
+            full_url = urljoin(resp.url, location)
+            if not _is_safe_url(full_url):
+                raise requests.exceptions.InvalidURL(f"Blocked redirect to unsafe URL: {full_url}")
+        return super().resolve_redirects(resp, req, **kwargs)
 
 
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
@@ -86,9 +84,7 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     if isinstance(image, str) and image.startswith("http"):
         if not _is_safe_url(image):
             raise ValueError(f"URL not allowed (SSRF protection): {image}")
-        session = requests.Session()
-        session.mount("http://", _SSRFProtectedAdapter())
-        session.mount("https://", _SSRFProtectedAdapter())
+        session = _SSRFProtectedSession()
         response = session.get(image, timeout=10, allow_redirects=True)
         image = response.content
     if isinstance(image, bytes):
