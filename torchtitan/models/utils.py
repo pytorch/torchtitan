@@ -6,6 +6,9 @@
 
 import torch
 import torch.nn as nn
+from collections.abc import Iterable
+from typing import Any
+
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import (
@@ -409,6 +412,37 @@ class MoEStateDictAdapter(StateDictAdapter):
         return stacked_tensor
 
 
+def attention_flops_per_token(
+    layers: Iterable[Any],
+    n_heads: int,
+    head_dims: int,
+    seq_len: int,
+) -> int:
+    """Per-token self-attention FLOPs, accounting for per-layer sliding windows.
+
+    Each attention layer attends to at most ``min(seq_len, window)`` keys per
+    query, where ``window`` is the layer's ``sliding_window_size`` (``None`` =>
+    full attention over ``seq_len``). Layers whose config leaves
+    ``attention=None`` (e.g. linear-attention / hybrid blocks) contribute
+    nothing.
+
+    Follows the same convention as the matmul term: the factor of 6 counts the
+    two attention matmuls (scores + value aggregation, combined via
+    ``head_dims``) across forward + backward, and causal sparsity is ignored, so
+    ``min(seq_len, window)`` is an upper bound (the ramp-up at the start of the
+    sequence and document packing are not modeled).
+    """
+    total = 0
+    for layer in layers:
+        attn = getattr(layer, "attention", None)
+        if attn is None:
+            continue
+        window = getattr(attn, "sliding_window_size", None)
+        eff_len = seq_len if window is None else min(seq_len, window)
+        total += 6 * n_heads * head_dims * eff_len
+    return total
+
+
 def get_dense_model_nparams_and_flops(
     model: nn.Module,
     n_layers: int,
@@ -416,6 +450,7 @@ def get_dense_model_nparams_and_flops(
     head_dims: int,
     seq_len: int,
     enable_weight_tying: bool = False,
+    layers: Iterable[Any] | None = None,
 ) -> tuple[int, int]:
     """
     Args:
@@ -425,6 +460,11 @@ def get_dense_model_nparams_and_flops(
         head_dims: The sum of qk and v head dimensions.
         seq_len: The sequence length in training configs.
         enable_weight_tying: Whether weight tying is enabled.
+        layers: Optional per-layer config objects (each exposing ``.attention``
+            with an optional ``sliding_window_size``). When provided, the
+            attention FLOPs term accounts for per-layer sliding windows; when
+            ``None``, every layer is counted at the full ``seq_len`` (previous
+            behavior).
 
     Returns:
         Tuple of (nparams, num_flops_per_token):
@@ -452,9 +492,11 @@ def get_dense_model_nparams_and_flops(
     # shared input/output parameter once. That parameter still participates in
     # the lm_head matmul, so do not subtract it for either size or FLOPs.
     nparams_for_matmul = nparams if enable_weight_tying else nparams - nparams_embedding
-    num_flops_per_token = (
-        6 * nparams_for_matmul + 6 * n_layers * n_heads * head_dims * seq_len
-    )
+    if layers is None:
+        attn_flops = 6 * n_layers * n_heads * head_dims * seq_len
+    else:
+        attn_flops = attention_flops_per_token(layers, n_heads, head_dims, seq_len)
+    num_flops_per_token = 6 * nparams_for_matmul + attn_flops
 
     return nparams, num_flops_per_token
 
@@ -531,15 +573,12 @@ def get_moe_model_nparams_and_flops(
         nparams_for_matmul = nparams_dense + nparams_sparse_active
     else:
         nparams_for_matmul = nparams_dense - nparams_embedding + nparams_sparse_active
-    # Only full attention layers contribute the quadratic O(L²) FLOPs
-    # term. Hybrid models mix full attention with linear attention
-    # layers whose block leaves ``attention=None``; standard decoders carry
-    # full attention on every layer, so this counts all of them.
-    num_full_attn = sum(
-        1 for l in model_config.layers if getattr(l, "attention", None) is not None
-    )
-    num_flops_per_token = (
-        6 * nparams_for_matmul + 6 * num_full_attn * n_heads * head_dims * seq_len
+    # Attention FLOPs account for per-layer sliding windows: each attention
+    # layer attends to min(seq_len, window) keys (window=None => full seq_len),
+    # and layers with attention=None (linear-attention / hybrid) contribute
+    # nothing.
+    num_flops_per_token = 6 * nparams_for_matmul + attention_flops_per_token(
+        model_config.layers, n_heads, head_dims, seq_len
     )
 
     return nparams, num_flops_per_token

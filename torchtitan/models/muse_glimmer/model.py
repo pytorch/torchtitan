@@ -320,18 +320,30 @@ class MuseGlimmerModel(Decoder):
                 head_dims=2 * self.layers[0].attention.head_dim,
                 seq_len=seq_len,
                 enable_weight_tying=False,
+                layers=self.layers,
             )
-            # get_dense_model_nparams_and_flops excludes embedding params from
-            # the matmul FLOP count by scanning the model's *immediate* children
-            # for nn.Embedding. Muse Glimmer nests its nn.Embedding inside
-            # EmbeddingWithNorm, so that scan finds nothing and the embedding
-            # FLOPs (6 * params) are not subtracted. Correct for it here (Muse Glimmer
-            # does not tie embeddings). tok_embeddings is None on non-embedding
-            # pipeline stages, where there is nothing to subtract.
+            # The dense helper's embedding exclusion only scans the model's
+            # immediate nn.Embedding children; Muse Glimmer nests tok_embeddings
+            # in EmbeddingWithNorm, so subtract its per-token FLOPs here (no
+            # weight tying). None on non-embedding pipeline stages.
             tok_embeddings = getattr(model, "tok_embeddings", None)
             if tok_embeddings is not None:
                 nparams_embedding = sum(p.numel() for p in tok_embeddings.parameters())
                 num_flops_per_token -= 6 * nparams_embedding
+            # The vision stack runs per-batch on image patches, not per text
+            # token, so drop it from the per-token term (mirrors the MoE helper
+            # bucketing vision out). None for text-only flavors.
+            # TODO: add a per-batch vision encoder FLOP term for accurate VLM MFU.
+            for vision_module_name in (
+                "vision_encoder",
+                "vision_adapter",
+                "vision_projection",
+                "perception_emb_norm",
+            ):
+                vision_module = getattr(model, vision_module_name, None)
+                if vision_module is not None:
+                    nparams_vision = sum(p.numel() for p in vision_module.parameters())
+                    num_flops_per_token -= 6 * nparams_vision
             return nparams, num_flops_per_token
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
