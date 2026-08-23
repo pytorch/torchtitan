@@ -133,8 +133,8 @@ def muse_glimmer_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         parallelism=ParallelismConfig(spmd_backend="spmd_types"),
@@ -151,7 +151,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
 
     Trains the ``debugmodel_mm`` flavor (debug text decoder that owns a
     scaled-down vision encoder + adapter) end-to-end on the ``cc12m-test`` local
-    tar fixture. The shared Grain data pipeline emits padded ``pixel_values`` +
+    tar fixture. The shared Grain data pipeline emits packed ``pixel_values`` +
     ``grid_thw`` + ``special_tokens``; the model derives the vision-placeholder
     mask from ``special_tokens``. Vision-placeholder positions are already
     ``IGNORE_INDEX`` in the labels, so a standard ``CrossEntropyLoss`` (wrapped in
@@ -180,8 +180,8 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=512,
+            num_tokens_per_microbatch_per_dp_rank=4 * 512,
+            max_context_length=512,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -197,7 +197,7 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
 def muse_glimmer_30b() -> Trainer.Config:
     model_spec = model_registry("30B", attn_backend="flex")
     return Trainer.Config(
-        # ChunkedLossWrapper avoids materializing the full [B, L, vocab] logits;
+        # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
         # per-chunk.
         loss=ChunkedLossWrapper.Config(
@@ -213,8 +213,8 @@ def muse_glimmer_30b() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -235,7 +235,7 @@ def muse_glimmer_30b() -> Trainer.Config:
 def muse_glimmer_30b_mm() -> Trainer.Config:
     model_spec = model_registry("30B_mm", attn_backend="flex")
     return Trainer.Config(
-        # ChunkedLossWrapper avoids materializing the full [B, L, vocab] logits;
+        # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
         # per-chunk.
         loss=ChunkedLossWrapper.Config(
@@ -250,8 +250,8 @@ def muse_glimmer_30b_mm() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
             steps=1000,
             disable_cuda_graphs=True,
         ),

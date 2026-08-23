@@ -43,7 +43,9 @@ def deepseek_v3_debugmodel_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
@@ -125,6 +127,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config = qwen35_debugmodel_moe()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
     _use_spmd_types(config, typechecking=False)
@@ -166,7 +169,9 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = "ptrr"
     config.parallelism.context_parallel_ptrr_mask_key = "basic_mask"
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
     config.parallelism.expert_parallel_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
     config.training.disable_cuda_graphs = True
@@ -176,9 +181,11 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
 def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     config = gpt_oss_debugmodel()
     _use_spmd_types(config, typechecking=False)
-    config.training.global_batch_size = 64
+    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
+    config.training.num_tokens_per_train_step = 131072
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.expert_parallel_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
@@ -186,14 +193,23 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     return config
 
 
-def kimi_k2_5_debugmodel_muon_fsdp4_ep2() -> Trainer.Config:
-    """DistMuon rejects tensor parallel: it produces _StridedShard storage."""
+def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
+    """One four-GPU smoke path covering PP=2, FSDP=2, and EP=2.
+
+    Each PP stage consumes its local subset of the global DistMuon
+    compute-sharding map. DistMuon rejects tensor parallel: it produces
+    _StridedShard storage.
+    """
     from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
 
     config = kimi_k2_5_debugmodel()
-    _use_spmd_types(config, typechecking=True)
-    config.parallelism.data_parallel_shard_degree = 4
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
+    # Four microbatches match the four virtual pipeline stages.
+    config.parallelism.num_pp_microbatches = 4
     config.training.steps = 1
     config.training.disable_cuda_graphs = True
     return config

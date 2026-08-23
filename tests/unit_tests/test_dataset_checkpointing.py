@@ -92,8 +92,8 @@ class TestDatasetCheckpointing(unittest.TestCase):
             dp_world_size=2,
             dp_rank=rank,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
-            seq_len=128,
-            local_batch_size=1,
+            max_context_length=128,
+            num_tokens_per_batch=128,
         )
 
 

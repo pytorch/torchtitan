@@ -203,7 +203,18 @@ class FluxCollator(Collator):
         pass
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
-        del config, context
+        del config
+        self._num_rows_per_batch, remainder = divmod(
+            context.num_tokens_per_batch, context.max_context_length
+        )
+        if remainder or self._num_rows_per_batch == 0:
+            raise ValueError(
+                "Flux token batches must be a positive multiple of "
+                "max_context_length"
+            )
+
+    def num_rows_per_batch(self) -> int:
+        return self._num_rows_per_batch
 
     def __call__(self, rows: Sequence[FluxSample]) -> TrainerBatch:
         batch = default_collate(list(rows))

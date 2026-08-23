@@ -110,7 +110,7 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     cells = [microbatch for ranks in batch.microbatches for microbatch in ranks]
     assert len(cells) == 4  # 2 microbatches x 2 ranks
     for cell in cells:
-        assert cell.loss_mask.any(dim=1).any()  # at least one real (non-pad) row
+        assert cell.loss_mask.any()
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:

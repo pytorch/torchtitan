@@ -117,7 +117,7 @@ class Validator(BaseValidator):
         validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
-        local_batch_size: int,
+        num_tokens_per_batch: int,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -133,7 +133,7 @@ class Validator(BaseValidator):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
-        self.local_batch_size = local_batch_size
+        self.num_tokens_per_batch = num_tokens_per_batch
         self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
@@ -228,22 +228,16 @@ class Validator(BaseValidator):
             (), dtype=torch.int64, device=device_type
         )
         num_steps = 0
-        num_microbatches = (
-            self.local_batch_size // self.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
+        num_pp_microbatches = (
+            self.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
 
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            seq_len=self.seq_len,
-            local_batch_size=(
-                self.parallelism.pipeline_parallel_microbatch_size
-                if parallel_dims.pp_enabled
-                else self.local_batch_size
-            ),
+            max_context_length=self.seq_len,
+            num_tokens_per_batch=self.num_tokens_per_batch,
         )
 
         validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
@@ -257,7 +251,7 @@ class Validator(BaseValidator):
                 local_valid_tokens = torch.tensor(
                     0, dtype=torch.int64, device=device_type
                 )
-                for _ in range(num_microbatches):
+                for _ in range(num_pp_microbatches):
                     input_dict, labels = next(validation_iterator)
                     self.metrics_processor.ntokens_since_last_log += labels.numel()
                     for k, v in input_dict.items():

@@ -355,7 +355,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -425,7 +425,7 @@ def _16b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -499,7 +499,7 @@ def _236b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -574,7 +574,7 @@ def _671b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,

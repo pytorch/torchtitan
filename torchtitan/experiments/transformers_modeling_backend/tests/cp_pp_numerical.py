@@ -40,7 +40,8 @@ _MODULE = "transformers_modeling_backend"
 # fp32 so CP/PP reduction-order noise isn't masked by bf16. Small on purpose.
 _COMMON = (
     "--parallelism.context_parallel_degree 2 "
-    "--training.local_batch_size 4 --training.seq_len 256 --training.steps 1 "
+    "--training.num_tokens_per_microbatch_per_dp_rank 1024 "
+    "--training.max_context_length 256 --training.steps 1 "
     "--training.mixed_precision_param float32 --debug.seed 42 --debug.deterministic"
 )
 # The flex BlockMask requires the ptrr CP load balancer.
@@ -159,6 +160,8 @@ def _run_case(work: str) -> None:
             4,
             config,
             f"{_COMMON} {load} {bal} --parallelism.pipeline_parallel_degree 2 "
+            f"--parallelism.num_pp_microbatches 4 "
+            f"--training.num_tokens_per_microbatch_per_dp_rank 256 "
             f"--parallelism.pipeline_parallel_schedule 1F1B "
             f"--dump_folder {os.path.join(work, 'out_pp')}",
         ),

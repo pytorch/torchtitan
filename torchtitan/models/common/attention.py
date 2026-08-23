@@ -6,11 +6,10 @@
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
-#   B = batch, L = sequence length, D = model dimension,
+#   B = singleton kernel batch, T = packed tokens, D = model dimension,
 #   N = num heads (N is used for both query and kv heads in GQA;
 #       the variable name xq/xk/xv disambiguates),
-#   H = head dimension (per-head dim),
-#   T = packed tokens (B*L, used by VarlenAttention)
+#   H = head dimension (per-head dim)
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -96,13 +95,14 @@ def local_head_split(
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
     use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
-    tensor_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(2)}
+    input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     with spmd.local():
         if use_spmd:
-            spmd.assert_type(t, tensor_type)
-        out = t.view(t.shape[0], t.shape[1], -1, head_dim)
+            spmd.assert_type(t, input_type)
+        out = t.view(*t.shape[:-1], -1, head_dim)
         if use_spmd:
-            spmd.assert_type(out, tensor_type)
+            spmd.assert_type(out, output_type)
     return out
 
 
@@ -136,9 +136,9 @@ class VarlenAttention(Module):
 
     def forward(
         self,
-        q_BLNH: torch.Tensor,
-        k_BLNH: torch.Tensor,
-        v_BLNH: torch.Tensor,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
         *,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
@@ -155,23 +155,6 @@ class VarlenAttention(Module):
         cu_seq_k = attention_masks.cu_seq_k
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
-
-        B, L, _, qk_head_dim = q_BLNH.shape
-        value_head_dim = v_BLNH.shape[-1]
-        T = B * L
-
-        # varlen attention expects (T, N, H). The value head dimension may
-        # differ from the query/key head dimension, as in MLA.
-        q_TNH = q_BLNH.reshape(T, -1, qk_head_dim)
-        k_TNH = k_BLNH.reshape(T, -1, qk_head_dim)
-        v_TNH = v_BLNH.reshape(T, -1, value_head_dim)
-
-        # Some operators can upcast under AMP, but varlen attention currently only
-        # supports bf16/fp16 inputs. If this changes, or fp16 training support
-        # is added, this may need to be revisited.
-        q_TNH = q_TNH.to(torch.bfloat16)
-        k_TNH = k_TNH.to(torch.bfloat16)
-        v_TNH = v_TNH.to(torch.bfloat16)
 
         varlen_kwargs: dict[str, Any] = {}
 
@@ -198,10 +181,13 @@ class VarlenAttention(Module):
         # FA3 varlen attention takes rank-local metadata tensors.
         # TODO(pianpwk): Move this op contract into pytorch/spmd_types.
         with spmd.no_typecheck():
+            # Some operators can upcast under AMP, but varlen attention currently only
+            # supports bf16/fp16 inputs. If this changes, or fp16 training support
+            # is added, this may need to be revisited.
             result = varlen_attn(
-                q_TNH,
-                k_TNH,
-                v_TNH,
+                q_TNH.to(torch.bfloat16),
+                k_TNH.to(torch.bfloat16),
+                v_TNH.to(torch.bfloat16),
                 cu_seq_q,
                 cu_seq_k,
                 max_q,
@@ -217,12 +203,9 @@ class VarlenAttention(Module):
             assert isinstance(result, torch.Tensor)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 q_local = spmd.get_local_type(q_TNH)
-                # Varlen + CP is unsupported; packing a CP-sharded L into T is
-                # rejected during q_TNH reshape propagation.
                 q_ps = get_partition_spec(q_TNH)
                 spmd.assert_type(result, q_local, q_ps)
-            out_BLNH = result.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
-            return out_BLNH
+            return result.to(q_TNH.dtype)
 
         out_TNH, lse_NT = result
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
@@ -233,19 +216,17 @@ class VarlenAttention(Module):
             lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
             spmd.assert_type(lse_NT, q_local, lse_ps)
 
-        out_BLNH = out_TNH.view(B, L, -1, value_head_dim).to(q_BLNH.dtype)
-        # FA varlen returns the LSE as (N, T); reorder to (B, L, N) so
-        # out_transform can broadcast per (token, head).
-        lse_BLN = lse_NT.transpose(0, 1).reshape(B, L, -1)
-        return out_transform(out_BLNH, lse_BLN)
+        out_TNH = out_TNH.to(q_TNH.dtype)
+        lse_TN = lse_NT.transpose(0, 1)
+        return out_transform(out_TNH, lse_TN)
 
 
 class FlexAttention(Module):
     """Inner attention using ``flex_attention`` with torch.compile and CP support.
 
-    Each backend handles its own layout transpose: ``forward()`` transposes from
-    ``(B, L, N, H)`` to ``(B, N, L, H)`` before calling
-    ``flex_attention``, and transposes back before returning.
+    Inputs use ``[T, N, H]``. The FlexAttention kernel requires a batch
+    dimension, so inputs are adapted to ``[1, N, T, H]`` only at the kernel
+    boundary.
 
     Note:
         The forward function must have q, k, v as the first three arguments
@@ -301,7 +282,8 @@ class FlexAttention(Module):
         Compiled regions are not currently compatible with SPMD typechecking, so
         the opaque kernel output is re-typed at the boundary instead of
         typechecking into Flex. Attention preserves the query's sharding (output
-        is (B, N, L, H) with the same batch/head/seq layout as ``q``), so ``out``
+        is (B, N, T, H) with the same kernel-batch/head/token layout as ``q``),
+        so ``out``
         takes ``q``'s full SPMD type (local type + shard-dim PartitionSpec), and
         ``lse`` takes the same minus the trailing (unsharded) head dim.
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
@@ -330,9 +312,9 @@ class FlexAttention(Module):
 
     def forward(
         self,
-        q_BLNH: torch.Tensor,
-        k_BLNH: torch.Tensor,
-        v_BLNH: torch.Tensor,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
         *,
         attention_masks: BlockMask,
         score_mod: _score_mod_signature | None = None,
@@ -348,10 +330,9 @@ class FlexAttention(Module):
             attention_masks, BlockMask
         ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
 
-        # Transpose to (B, N, L, H) for flex_attention
-        q_BNLH = q_BLNH.transpose(1, 2)
-        k_BNLH = k_BLNH.transpose(1, 2)
-        v_BNLH = v_BLNH.transpose(1, 2)
+        q_BNTH = q_TNH.transpose(0, 1).unsqueeze(0)
+        k_BNTH = k_TNH.transpose(0, 1).unsqueeze(0)
+        v_BNTH = v_TNH.transpose(0, 1).unsqueeze(0)
 
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
@@ -363,10 +344,10 @@ class FlexAttention(Module):
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
         with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out_BNLH, aux = FlexAttention.compiled_flex_attn(
-                q_BNLH,
-                k_BNLH,
-                v_BNLH,
+            out_BNTH, aux = FlexAttention.compiled_flex_attn(
+                q_BNTH,
+                k_BNTH,
+                v_BNTH,
                 score_mod=score_mod,
                 block_mask=attention_masks,
                 scale=scale,
@@ -374,20 +355,20 @@ class FlexAttention(Module):
                 return_aux=AuxRequest(lse=out_transform is not None),
                 kernel_options=self.kernel_options,
             )
-        # Transpose back to (B, L, N, H)
-        out_BLNH = out_BNLH.transpose(1, 2)
+        out_TNH = out_BNTH.squeeze(0).transpose(0, 1)
         if out_transform is None:
-            return out_BLNH
-        lse_BLN = aux.lse.transpose(1, 2)
-        return out_transform(out_BLNH, lse_BLN)
+            return out_TNH
+        lse_TN = aux.lse.squeeze(0).transpose(0, 1)
+        return out_transform(out_TNH, lse_TN)
 
 
+# TODO: Verify whether SDPA support can be removed without losing performance
+# after folding: https://github.com/pytorch/torchtitan/pull/4218#pullrequestreview-4977638012
 class ScaledDotProductAttention(Module):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
-    Each backend handles its own layout transpose: ``forward()`` transposes from
-    ``(B, L, N, H)`` to ``(B, N, L, H)`` before calling
-    ``scaled_dot_product_attention``, and transposes back before returning.
+    ``forward()`` adapts ``(B, L, N, H)`` to the kernel's ``(B, N, L, H)``
+    layout and converts the result back to ``(B, L, N, H)``.
 
     Note:
         The forward function must have q, k, v as the first three arguments to be
@@ -428,7 +409,6 @@ class ScaledDotProductAttention(Module):
                 "ScaledDotProductAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
-        # Transpose to (B, N, L, H) for SDPA
         q_BNLH, k_BNLH, v_BNLH = (
             q_BLNH.transpose(1, 2),
             k_BLNH.transpose(1, 2),
@@ -443,7 +423,6 @@ class ScaledDotProductAttention(Module):
                 is_causal=is_causal,
                 enable_gqa=enable_gqa,
             )
-        # Transpose back to (B, L, N, H)
         return out_BNLH.transpose(1, 2)
 
 
@@ -470,18 +449,18 @@ def get_document_mask_mod(positions: torch.Tensor) -> _mask_mod_signature:
     marks the start of a new packed document.
 
     Args:
-        positions: Per-token position tensor with shape ``[b, s]``. Positions
+        positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
 
     Returns:
         A mask modifier function that implements document-level masking.
     """
-    doc_ids = torch.cumsum((positions == 0).int(), dim=1) - 1
+    doc_ids = torch.cumsum((positions == 0).int(), dim=0) - 1
 
     def document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        return doc_ids[b, q_idx] == doc_ids[b, kv_idx]
+        return doc_ids[q_idx] == doc_ids[kv_idx]
 
     return document_mask
 
@@ -497,67 +476,34 @@ def get_efficient_causal_mask_mod_for_packed_document(
     causal packed-document masking, which is why it coexists with the generic
     document-id mask.
 
-    For ``batch_size == 1``, the causal mask supplies the upper bound,
-    ``kv_idx <= q_idx``, and this mask supplies the lower bound,
-    ``doc_start[q_idx] <= kv_idx``. For ``batch_size > 1``, the causal mask
-    supplies the lower bound, ``kv_idx <= q_idx``, and this mask supplies the
-    upper bound, ``q_idx <= doc_end[kv_idx]``. A query in the next document
-    cannot attend to a key in the previous document because that key's
-    ``doc_end`` is before the query.
+    The causal mask supplies the upper bound, ``kv_idx <= q_idx``, and this
+    mask supplies the lower bound, ``doc_start[q_idx] <= kv_idx``.
 
     The result is same-document causal masking. This mask is not intended for
     non-causal use.
     """
-    batch_size, seq_len = positions.shape
-    if batch_size == 1:
-        document_starts = positions[0] == 0
-        document_id = torch.cumsum(document_starts.int(), dim=0).to(torch.int32) - 1
-        token_idx = torch.arange(seq_len, device=positions.device, dtype=torch.int32)
-        offsets = torch.full(
-            (round_up(seq_len + 1, 128),),
-            seq_len,
-            device=positions.device,
-            dtype=torch.int32,
-        )
-        offsets.scatter_(
-            0,
-            torch.where(
-                document_starts, document_id, torch.full_like(document_id, seq_len)
-            ).to(torch.int64),
-            torch.where(
-                document_starts, token_idx, torch.full_like(token_idx, seq_len)
-            ),
-        )
-
-        def packed_document_mask(
-            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-        ) -> torch.Tensor:
-            return kv_idx >= offsets[document_id[q_idx]]
-
-        return packed_document_mask
-
+    seq_len = positions.shape[0]
     document_starts = positions == 0
-    document_id = torch.cumsum(document_starts.int(), dim=1).to(torch.int32) - 1
-    token_idx = torch.arange(
-        seq_len, device=positions.device, dtype=torch.int32
-    ).expand_as(positions)
-    next_doc_start = torch.full(
-        (batch_size, seq_len), seq_len, device=positions.device, dtype=torch.int32
+    document_id = torch.cumsum(document_starts.int(), dim=0).to(torch.int32) - 1
+    token_idx = torch.arange(seq_len, device=positions.device, dtype=torch.int32)
+    offsets = torch.full(
+        (round_up(seq_len + 1, 128),),
+        seq_len,
+        device=positions.device,
+        dtype=torch.int32,
     )
-    next_doc = document_starts & (document_id > 0)
-    next_doc_start.scatter_(
-        1,
+    offsets.scatter_(
+        0,
         torch.where(
-            next_doc, document_id - 1, torch.full_like(document_id, seq_len - 1)
+            document_starts, document_id, torch.full_like(document_id, seq_len)
         ).to(torch.int64),
-        torch.where(next_doc, token_idx, torch.full_like(token_idx, seq_len)),
+        torch.where(document_starts, token_idx, torch.full_like(token_idx, seq_len)),
     )
-    doc_end_by_token = next_doc_start.gather(1, document_id.to(torch.int64)) - 1
 
     def packed_document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        return q_idx <= doc_end_by_token[b, kv_idx]
+        return kv_idx >= offsets[document_id[q_idx]]
 
     return packed_document_mask
 
@@ -638,7 +584,7 @@ def create_varlen_metadata_for_document(
     convention as :func:`get_document_mask_mod`).
 
     Args:
-        positions: Per-token position tensor with shape ``[b, s]``. Positions
+        positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
         include_host_offsets: Also materialize cumulative sequence offsets as
             host metadata for kernels that need it.
@@ -647,32 +593,20 @@ def create_varlen_metadata_for_document(
         VarlenMetadata containing cumulative sequence length indices for q, k,
         and max_seq_len.
     """
-    batch_size, seq_len = positions.shape
+    num_tokens = positions.shape[0]
     device = positions.device
-    cu_seqlens_list, all_seq_lengths = [], []
-    offset = 0
-
-    for b in range(batch_size):
-        doc_starts = (positions[b] == 0).nonzero(as_tuple=True)[0].to(torch.int32)
-        sample_cu_seqlens = torch.cat(
-            [doc_starts, torch.tensor([seq_len], dtype=torch.int32, device=device)]
-        )
-
-        seq_lengths = torch.diff(sample_cu_seqlens)
-        all_seq_lengths.append(seq_lengths)
-
-        cu_seqlens_adjusted = sample_cu_seqlens[:-1] + offset
-        cu_seqlens_list.append(cu_seqlens_adjusted)
-
-        offset += seq_len
-
+    doc_starts = (positions == 0).nonzero(as_tuple=True)[0].to(torch.int32)
     packed_cu_seqlens = torch.cat(
-        cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
+        [
+            doc_starts,
+            torch.tensor([num_tokens], dtype=torch.int32, device=device),
+        ]
     )
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
+    seq_lengths = torch.diff(packed_cu_seqlens)
 
     max_seqlen: int
     packed_cu_seqlens_host = None
@@ -691,10 +625,9 @@ def create_varlen_metadata_for_document(
             ),
             default=0,
         )
-    elif len(all_seq_lengths) > 0:
-        all_seq_lengths = torch.cat(all_seq_lengths)
+    elif seq_lengths.numel() > 0:
         # device to host sync but only done once per model forward
-        max_seqlen = int(all_seq_lengths.max().item())
+        max_seqlen = int(seq_lengths.max().item())
     else:
         max_seqlen = 0
 
@@ -738,7 +671,7 @@ class BaseQKVLinear(Module):
         """Project input into Q, K, V tensors.
 
         Returns:
-            (xq, xk, xv) each with shape [B, L, local_heads, head_dim].
+            (xq, xk, xv) each with shape ``[T, N, H]``.
         """
         raise NotImplementedError
 
@@ -760,21 +693,23 @@ class QKVLinear(BaseQKVLinear):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bs, seqlen, _ = x.shape
+        num_tokens = x.shape[0]
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         # Use -1 instead of n_heads (or n_kv_heads) to infer the
         # actual local heads from sizes as TP may have sharded them.
 
         def local_qkv_head_split(x):
-            # Drop into local region, we can't propagate S(2) -> qkv head unflatten.
+            # Drop into local region, we can't propagate S(1) -> qkv head unflatten.
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
-                x_ = x.view(bs, seqlen, -1, self.head_dim)
-                if spmd.is_type_checking():
+                x_TNH = x.view(num_tokens, -1, self.head_dim)
+                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                     spmd.assert_type(
-                        x_, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None)
+                        x_TNH,
+                        spmd.V,
+                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
-            return x_
+            return x_TNH
 
         xq, xk, xv = (
             local_qkv_head_split(xq),
@@ -818,38 +753,43 @@ class FusedQKVLinear(BaseQKVLinear):
         self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
     @spmd.local_map(
-        out_types=({"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},) * 3
+        out_types=(
+            (
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                spmd.PartitionSpec(("dp", "cp"), "tp", None),
+            ),
+        )
+        * 3
     )
     def forward(  # pyrefly: ignore[bad-override]
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bs, seqlen, _ = x.shape
+        num_tokens = x.shape[0]
         # Fused QKV: single matmul, then reshape and split along R dim.
-        # [B, L, n_kv_heads * R * head_dim] -> [B, L, n_kv_heads, R, head_dim]
+        # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
-        with spmd.local():  # TODO(pianpwk): same QKV:S(2) unflatten case handled by even sharding
-            qkv = qkv.view(bs, seqlen, -1, self.r_dim, self.head_dim)
-            if spmd.is_type_checking():
+        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+            qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 spmd.assert_type(
-                    qkv, spmd.V, spmd.PartitionSpec("dp", "cp", "tp", None, None)
+                    qkv,
+                    spmd.V,
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
                 )
 
         hpk, hd = self.heads_per_kv, self.head_dim
 
         def _split(t):
-            # Use the (possibly local) tensor's own B/L so this is correct both
-            # for a plain tensor and inside local_map, where ``t`` is the local
-            # (e.g. CP-sharded) shard rather than the global tensor.
-            b, s = t.shape[0], t.shape[1]
+            local_num_tokens = t.shape[0]
             xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
             # split leaves xk/xv as strided views into the fused buffer; vLLM
             # attention/KV-cache kernels read raw memory assuming a contiguous
             # head-major layout, so materialize all three contiguously here.
             return (
-                xq.reshape(b, s, -1, hd).contiguous(),
-                xk.reshape(b, s, -1, hd).contiguous(),
-                xv.reshape(b, s, -1, hd).contiguous(),
+                xq.reshape(local_num_tokens, -1, hd).contiguous(),
+                xk.reshape(local_num_tokens, -1, hd).contiguous(),
+                xv.reshape(local_num_tokens, -1, hd).contiguous(),
             )
 
         if isinstance(qkv, DTensor):
@@ -858,7 +798,7 @@ class FusedQKVLinear(BaseQKVLinear):
             # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
             # cat() inconsistent grad types in PP's backward metadata inference.
             # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards seq). TODO: remove once the partial_dtensor
+            # head axis, CP shards tokens). TODO: remove once the partial_dtensor
             # backend is gone.
             _split = local_map(
                 _split,
@@ -947,6 +887,21 @@ class GQAttention(BaseAttention):
         inner_attention: Module.Config
         rope: RoPE.Config
 
+        def __post_init__(self) -> None:
+            BaseAttention.Config.__post_init__(self)
+            if self.head_dim is None and self.dim % self.n_heads != 0:
+                raise ValueError(
+                    f"dim ({self.dim}) must be divisible by n_heads "
+                    f"({self.n_heads}) when head_dim is not specified"
+                )
+
+            n_kv_heads = self.n_heads if self.n_kv_heads is None else self.n_kv_heads
+            if self.n_heads % n_kv_heads != 0:
+                raise ValueError(
+                    f"n_heads ({self.n_heads}) must be divisible by "
+                    f"n_kv_heads ({n_kv_heads})"
+                )
+
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
@@ -978,34 +933,28 @@ class GQAttention(BaseAttention):
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_BLNH, xk_BLNH, xv_BLNH = self.qkv_linear(x_BLD)
+        xq_TNH, xk_TNH, xv_TNH = self.qkv_linear(x_TD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq_BLNH = self.q_norm(xq_BLNH)
-            xk_BLNH = self.k_norm(xk_BLNH)
+            xq_TNH = self.q_norm(xq_TNH)
+            xk_TNH = self.k_norm(xk_TNH)
 
         # Apply rotary embeddings
-        xq_BLNH, xk_BLNH = self.rope(xq_BLNH, xk_BLNH, positions)
+        xq_TNH, xk_TNH = self.rope(xq_TNH, xk_TNH, positions)
 
-        # inner_attention returns (B, L, N, H)
-        out_BLNH = self.inner_attention(
-            xq_BLNH,
-            xk_BLNH,
-            xv_BLNH,
+        out_TNH = self.inner_attention(
+            xq_TNH,
+            xk_TNH,
+            xv_TNH,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        # Fold from out_BLNH's own shape. The stock block declares an input
-        # all-gather, so x_BLD's L is already the full sequence; a qkv_linear that
-        # gathers the sequence itself declares none, leaving x_BLD SP-sharded while
-        # out_BLNH is full-length. A view(B, L, -1) would not raise there -- the
-        # element counts still match -- it would fold sequence into features.
-        out_BLD = out_BLNH.flatten(2)
-        return self.wo(out_BLD)
+        out_TD = out_TNH.view(out_TNH.shape[0], -1)
+        return self.wo(out_TD)

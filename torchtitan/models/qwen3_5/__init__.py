@@ -504,7 +504,7 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=4096,
+                max_context_length=4096,
                 theta=10_000_000.0,
                 mrope_section=[3, 3, 2],
             ),
@@ -564,7 +564,7 @@ def _debugmodel_moe(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=4096,
+                max_context_length=4096,
                 theta=10_000_000.0,
                 mrope_section=[3, 3, 2],
             ),
@@ -630,7 +630,7 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -691,7 +691,7 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -751,7 +751,7 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -807,7 +807,7 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -863,7 +863,7 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -922,7 +922,7 @@ def _35b_a3b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -985,7 +985,7 @@ def _122b_a10b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -1048,7 +1048,7 @@ def _397b_a17b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),

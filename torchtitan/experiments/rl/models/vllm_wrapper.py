@@ -14,11 +14,13 @@ TorchTitan models for vLLM.
 import dataclasses
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
@@ -30,11 +32,18 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.spmd_types import (
+    current_spmd_mesh,
+    dtensor_to_plain_tensor_state_dict,
+    plain_tensor_to_dtensor_state_dict,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import SpmdLayout
+from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -108,6 +117,41 @@ def _replace_vllm_layer_configs(model_config):
         new_layers.append(new_layer_cfg)
 
     return dataclasses.replace(model_config, layers=new_layers)
+
+
+class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
+    """Add plain local tensor handling to a model-format state-dict adapter."""
+
+    def __init__(
+        self,
+        adapter: BaseStateDictAdapter,
+        state_dict_layouts: dict[str, SpmdLayout],
+        parallel_dims: ParallelDims,
+    ) -> None:
+        self.adapter = adapter
+        self.state_dict_layouts = state_dict_layouts
+        self.parallel_dims = parallel_dims
+        self.fqn_to_index_mapping = adapter.fqn_to_index_mapping
+        self.hf_assets_path = adapter.hf_assets_path
+
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return self.adapter.to_hf(
+            plain_tensor_to_dtensor_state_dict(
+                state_dict,
+                state_dict_layouts=self.state_dict_layouts,
+                parallel_dims=self.parallel_dims,
+            )
+        )
+
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        return dtensor_to_plain_tensor_state_dict(self.adapter.from_hf(hf_state_dict))
+
+    def get_hf_storage_reader(
+        self,
+        path: str,
+        from_quantized: bool = False,
+    ) -> HuggingFaceStorageReader:
+        return self.adapter.get_hf_storage_reader(path, from_quantized)
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
@@ -302,10 +346,12 @@ class VLLMModelWrapper(Module):
             config=_InferenceConfig(
                 parallelism=training_parallelism,
                 training=TrainingConfig(
-                    local_batch_size=1,
+                    num_tokens_per_microbatch_per_dp_rank=(
+                        vllm_config.scheduler_config.max_num_batched_tokens
+                    ),
                     # Use the scheduler bound as a synthetic sequence length solely
                     # to derive the per-rank EP buffer capacity.
-                    seq_len=vllm_config.scheduler_config.max_num_batched_tokens,
+                    max_context_length=vllm_config.scheduler_config.max_num_batched_tokens,
                 ),
             )
         )
@@ -420,14 +466,8 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.spmd_context():
-            # Convert vLLM interface to TorchTitan interface
-            # vLLM: [total_tokens] -> TorchTitan: [batch_size, seq_len]
-            tokens_2d = input_ids.unsqueeze(0)
-
             # Get embeddings
-            h = self.model.tok_embeddings(tokens_2d)
-
-            positions = positions.unsqueeze(0)
+            h = self.model.tok_embeddings(input_ids)
 
             # Pass through transformer layers
             for layer in self.model.layers.values():
@@ -439,11 +479,6 @@ class VLLMModelWrapper(Module):
         if isinstance(h, DTensor):
             assert all(isinstance(p, Replicate) for p in h.placements)
             h = h._local_tensor
-
-        # Convert to vLLM format: [total_tokens, hidden_size]
-        if h.dim() == 3:
-            hidden_size = h.size(-1)
-            h = h.view(-1, hidden_size)
         return h
 
     def compute_logits(
@@ -514,6 +549,12 @@ class VLLMModelWrapper(Module):
                 model_config=self.config,
                 hf_assets_path=cfg.initial_load_path,
             )
+            if self.parallel_dims.spmd_backend == "spmd_types":
+                sd_adapter = PlainToDTensorStateDictAdapter(
+                    sd_adapter,
+                    self.get_state_dict_layouts(),
+                    self.parallel_dims,
+                )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)
         # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
@@ -532,6 +573,56 @@ class VLLMModelWrapper(Module):
         # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
         # the live weights fit.
         torch.cuda.empty_cache()
+
+    def get_state_dict_layouts(self) -> dict[str, SpmdLayout]:
+        """Return SPMD layouts keyed by the model's exposed state-dict names.
+
+        TODO(pianpwk): Remove the fused QKV state-dict glue code.
+        """
+        layouts: dict[str, SpmdLayout] = {}
+
+        for module_fqn, module in self.model.named_modules():
+            module_prefix = f"{module_fqn}." if module_fqn else ""
+            sharding_config = getattr(module, "_sharding_config", None)
+            if sharding_config is not None:
+                for state_name, layout in sharding_config.state_shardings.items():
+                    layouts[f"{module_prefix}{state_name}"] = layout
+
+                # FusedSwiGLU exposes split w1/w3 state-dict keys while the
+                # layout is declared on the fused w13 parameter.
+                w13_layout = sharding_config.state_shardings.get("w13")
+                if w13_layout is not None:
+                    for proj_name in ("w1", "w3"):
+                        layouts[f"{module_prefix}{proj_name}.weight"] = w13_layout
+
+            if isinstance(module, FusedQKVLinear):
+                # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+                # the layout is declared on the fused wqkv parameter.
+                wqkv_sharding_config = getattr(
+                    module.wqkv,
+                    "_sharding_config",
+                    None,
+                )
+                if wqkv_sharding_config is None:
+                    continue
+                for (
+                    state_name,
+                    layout,
+                ) in wqkv_sharding_config.state_shardings.items():
+                    for proj_name in ("wq", "wk", "wv"):
+                        layouts[f"{module_prefix}{proj_name}.{state_name}"] = layout
+
+            if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
+                for buffer_name, _ in module.named_buffers(recurse=False):
+                    if buffer_name in {
+                        "_k_scale",
+                        "_prob_scale",
+                        "_q_scale",
+                        "_v_scale",
+                    }:
+                        layouts[f"{module_prefix}{buffer_name}"] = SpmdLayout({})
+
+        return layouts
 
     def load_weights(self, weights_iter):
         """
