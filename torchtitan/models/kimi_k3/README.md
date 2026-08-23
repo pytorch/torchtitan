@@ -44,6 +44,9 @@ describe the released model.
 
 ## Numerical Parity
 
+The parity script reduces the released Hugging Face configuration to match
+TorchTitan's local `debugmodel` configuration before initializing both models.
+
 End-to-end KL divergence against the Hugging Face implementation (multimodal
 inputs): **6.7634e-7**, with **100% top-1 and top-5 match**.
 
