@@ -133,6 +133,14 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
                 "_LossParallelCrossEntropy does not support empty vocab shards."
             )
 
+        torch._assert_async(
+            torch.all(
+                (labels == IGNORE_INDEX)
+                | ((labels >= 0) & (labels < global_vocab_size))
+            ),
+            f"labels must be {IGNORE_INDEX} or in [0, {global_vocab_size})",
+        )
+
         # All-reduce max for numerically stable distributed log-softmax.
         local_max = torch.amax(logits, dim=-1, keepdim=True)
         local_max = funcol.all_reduce(

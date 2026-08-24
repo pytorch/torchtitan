@@ -28,7 +28,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import LocalMapConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -135,7 +135,7 @@ try:
                         sc,
                         state_shardings={
                             **sc.state_shardings,
-                            "_sr_seed": SpmdLayout(
+                            "_sr_seed": spmd.SpmdType(
                                 {
                                     MeshAxisName.DP: spmd.V,
                                     MeshAxisName.CP: spmd.V,

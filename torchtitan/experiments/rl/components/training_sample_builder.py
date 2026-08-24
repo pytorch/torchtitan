@@ -6,9 +6,10 @@
 
 """Converts one generated rollout group into trainable training_samples.
 
-RolloutGroup -> data-validity filters -> rollout_to_training_samples -> TrainingSampleGroup
+RolloutGroup -> group filters -> rollout_to_training_samples -> sample filters -> TrainingSampleGroup
 """
 
+import math
 import statistics
 from dataclasses import dataclass
 
@@ -20,6 +21,18 @@ from torchtitan.experiments.rl.types import (
     TrainingSample,
     TrainingSampleGroup,
 )
+
+
+def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
+    """Return whether the shifted sample has a token usable by the RL loss."""
+    return any(
+        include_in_loss and math.isfinite(generator_logprob)
+        for include_in_loss, generator_logprob in zip(
+            training_sample.loss_mask[1:],
+            training_sample.logprobs[1:],
+            strict=True,
+        )
+    )
 
 
 class TrainingSampleBuilder(Configurable):
@@ -41,7 +54,7 @@ class TrainingSampleBuilder(Configurable):
         self.config = config
 
     def build_from_group(self, *, rollout_group: RolloutGroup) -> TrainingSampleGroup:
-        """Apply group-level filters and convert surviving rollouts to training_samples.
+        """Apply data-validity filters and convert surviving rollouts to training_samples.
 
         Example:
             # rollouts=[] from a failed generation
@@ -97,17 +110,38 @@ class TrainingSampleBuilder(Configurable):
 
         # One rollout may branch into multiple trainable training_samples.
         training_samples: list[TrainingSample] = []
+        unfiltered_training_samples: list[TrainingSample] = []
         branches_per_rollout: list[float] = []
+        num_samples_dropped_no_valid_tokens = 0
         for rollout in rollout_group.rollouts:
             rollout_training_samples = self.rollout_to_training_samples(rollout)
-            training_samples.extend(rollout_training_samples)
+            unfiltered_training_samples.extend(rollout_training_samples)
+            kept = [
+                training_sample
+                for training_sample in rollout_training_samples
+                if _has_valid_loss_token(training_sample)
+            ]
+            num_samples_dropped_no_valid_tokens += len(rollout_training_samples) - len(
+                kept
+            )
+            training_samples.extend(kept)
             branches_per_rollout.append(float(len(rollout_training_samples)))
 
+        if num_samples_dropped_no_valid_tokens:
+            metrics.append(
+                m.Metric(
+                    "training_sample_builder/num_samples_dropped_no_valid_tokens",
+                    m.Sum(float(num_samples_dropped_no_valid_tokens)),
+                )
+            )
+
         min_policy_versions = [
-            training_sample.min_policy_version for training_sample in training_samples
+            training_sample.min_policy_version
+            for training_sample in unfiltered_training_samples
         ]
         max_policy_versions = [
-            training_sample.max_policy_version for training_sample in training_samples
+            training_sample.max_policy_version
+            for training_sample in unfiltered_training_samples
         ]
         advantages = [rollout.advantage for rollout in rollout_group.rollouts]
         metrics += [

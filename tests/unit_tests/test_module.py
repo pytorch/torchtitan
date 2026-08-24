@@ -18,7 +18,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.protocols.sharding import ShardingConfig
@@ -388,9 +388,9 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
         module = self.Identity()
         module._sharding_config = ShardingConfig()
         module._sharding_config.in_src_shardings = {
-            "x": SpmdLayout({MeshAxisName.TP: spmd.R})
+            "x": spmd.SpmdType({MeshAxisName.TP: spmd.R})
         }
-        module._sharding_config.out_src_shardings = SpmdLayout(
+        module._sharding_config.out_src_shardings = spmd.SpmdType(
             {MeshAxisName.TP: spmd.R}
         )
         module._cache_pos_arg_names()

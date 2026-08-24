@@ -21,7 +21,7 @@ from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import layout_axes, ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import layout_axes, ParallelDims
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
     set_current_spmd_mesh,
@@ -136,7 +136,7 @@ class Module(nn.Module, Configurable):
             return
 
         saved = {
-            fqn: SpmdLayout(
+            fqn: spmd.SpmdType(
                 dict(spmd.get_local_type(buf)),
                 spmd.get_partition_spec(buf),
             )
@@ -291,7 +291,7 @@ class Module(nn.Module, Configurable):
         parallel_dims: ParallelDims,
         name: str,
         tensor: torch.Tensor,
-        layout: SpmdLayout,
+        layout: spmd.SpmdType,
         *,
         is_param: bool,
     ) -> None:
@@ -304,9 +304,12 @@ class Module(nn.Module, Configurable):
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
+        requires_grad = tensor.requires_grad
         tensor = spmd_distribute_tensor(tensor, mesh, layout)
         if is_param:
-            self.register_parameter(name, nn.Parameter(tensor))
+            self.register_parameter(
+                name, nn.Parameter(tensor, requires_grad=requires_grad)
+            )
             registered = self._parameters[name]
         else:
             persistent = name not in self._non_persistent_buffers_set
@@ -433,7 +436,7 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}: local_map is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[SpmdLayout] = [in_dst[name] for name in pos_args]
+        in_named: list[spmd.SpmdType] = [in_dst[name] for name in pos_args]
 
         if parallel_dims.spmd_backend == "spmd_types":
             return self._spmd_apply_local_map(fn, in_named, out_src)
@@ -443,8 +446,8 @@ class Module(nn.Module, Configurable):
         self,
         fn: Callable,
         parallel_dims: ParallelDims,
-        in_named: list[SpmdLayout],
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        in_named: list[spmd.SpmdType],
+        out_src: spmd.SpmdType | tuple[spmd.SpmdType | None, ...],
     ) -> Callable:
         """Apply DTensor local_map for a local-tensor compute region."""
         sharding_config = self._sharding_config
@@ -453,7 +456,7 @@ class Module(nn.Module, Configurable):
         assert lm is not None
 
         if isinstance(out_src, tuple):
-            out_named: list[SpmdLayout] = [p for p in out_src if p is not None]
+            out_named: list[spmd.SpmdType] = [p for p in out_src if p is not None]
         else:
             out_named = [out_src]
         # in_grad_placements may contain None for non-tensor args; filter
@@ -488,8 +491,8 @@ class Module(nn.Module, Configurable):
     def _spmd_apply_local_map(
         self,
         fn: Callable,
-        in_named: list[SpmdLayout],
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        in_named: list[spmd.SpmdType],
+        out_src: spmd.SpmdType | tuple[spmd.SpmdType | None, ...],
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         in_types = tuple(

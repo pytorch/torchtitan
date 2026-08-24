@@ -884,6 +884,21 @@ class GQAttention(BaseAttention):
         inner_attention: Module.Config
         rope: RoPE.Config
 
+        def __post_init__(self) -> None:
+            BaseAttention.Config.__post_init__(self)
+            if self.head_dim is None and self.dim % self.n_heads != 0:
+                raise ValueError(
+                    f"dim ({self.dim}) must be divisible by n_heads "
+                    f"({self.n_heads}) when head_dim is not specified"
+                )
+
+            n_kv_heads = self.n_heads if self.n_kv_heads is None else self.n_kv_heads
+            if self.n_heads % n_kv_heads != 0:
+                raise ValueError(
+                    f"n_heads ({self.n_heads}) must be divisible by "
+                    f"n_kv_heads ({n_kv_heads})"
+                )
+
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
