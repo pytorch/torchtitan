@@ -70,4 +70,11 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             # symmetric memory is CUDA-only.
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.qwen3_moe_deepep_fsdp4_ep4],
+            test_descr="Qwen3 FSDP+DeepEP",
+            test_name="qwen3_fsdp+deepep",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
     ]

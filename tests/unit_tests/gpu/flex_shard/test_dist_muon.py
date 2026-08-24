@@ -9,6 +9,7 @@
 import unittest
 from unittest import mock
 
+import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
@@ -34,6 +35,9 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _LocalMatrixBatch,
     DistMuon,
 )
+
+
+pytestmark = pytest.mark.multi_gpu
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")

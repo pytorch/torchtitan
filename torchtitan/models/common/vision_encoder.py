@@ -28,7 +28,7 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention, local_head_split
-from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
@@ -150,8 +150,9 @@ class VisionTransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        norm1: LayerNorm.Config
-        norm2: LayerNorm.Config
+        # MoonViT normalizes with RMSNorm; Qwen3.5 and Muse Glimmer use LayerNorm.
+        norm1: LayerNorm.Config | RMSNorm.Config
+        norm2: LayerNorm.Config | RMSNorm.Config
         attn: VisionAttention.Config
         mlp: VisionMLP.Config
 
