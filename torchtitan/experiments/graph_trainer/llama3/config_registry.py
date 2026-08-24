@@ -34,6 +34,16 @@ def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.disable_cuda_graphs = True
+    config.training.steps = 2
+    config.sdc_replay.enabled = True
+    return config
+
+
 def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     """Debug model with the attention and FFN TP collectives folded into the GEMMs.
 
@@ -80,8 +90,8 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
     """SDPA debug model run eagerly (no graph tracing).
 
     Serves as the eager reference for the AutoParallel SDPA loss-compare test:
-    with ``mode=None`` GraphTrainer.forward_backward_step delegates to the core
-    (eager) Trainer path, so this is a plain eager FSDP+TP run of the same SDPA
+    with ``mode=None`` GraphTrainer delegates to the core eager forward/backward
+    path, so this is a plain eager FSDP+TP run of the same SDPA
     model the AutoParallel test traces. The default FlexAttention backend can't
     fill this role — flex + AutoParallel is unsupported (BlockMask flattening).
     """

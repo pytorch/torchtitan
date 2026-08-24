@@ -82,3 +82,13 @@ def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
     config.compile.enable = True
     config.compile.components = ["model", "loss"]
     return config
+
+
+def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8_sdc_replay() -> (
+    Trainer.Config
+):
+    config = deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.sdc_replay.enabled = True
+    return config

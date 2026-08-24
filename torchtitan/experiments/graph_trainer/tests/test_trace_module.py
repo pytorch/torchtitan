@@ -30,6 +30,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
+from torchtitan.trainer import ForwardBackwardStepContext
 
 
 def get_loss(logits, labels):
@@ -2093,11 +2094,13 @@ class TestTraceContextParallel(FSDPTest):
                     .expand(config.training.local_batch_size, config.training.seq_len)
                 )
                 trainer.forward_backward_step(
-                    input_dict={"input": tokens, "positions": positions},
-                    labels=labels,
-                    global_valid_tokens=torch.tensor(
-                        labels.numel(), device=trainer.device
-                    ),
+                    ForwardBackwardStepContext(
+                        input_dict={"input": tokens, "positions": positions},
+                        labels=labels,
+                        global_valid_tokens=torch.tensor(
+                            labels.numel(), device=trainer.device
+                        ),
+                    )
                 )
                 assert trainer._traced_step is not None
                 code_lines = trainer._traced_step.gm.graph.python_code(

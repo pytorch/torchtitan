@@ -17,7 +17,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import ForwardBackwardStep, Trainer
 
 
 def build_minimal_trainer(
@@ -45,7 +45,6 @@ def build_minimal_trainer(
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
     trainer.train_context = get_spmd_context()
-    trainer.fwd_bwd_fn = trainer._forward_backward_body
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
@@ -93,5 +92,16 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             parallelism=SimpleNamespace(spmd_backend="partial_dtensor"),
         )
+
+    trainer.forward_backward_step = ForwardBackwardStep(
+        use_cudagraph=False,
+        use_sdc=False,
+        pp_enabled=False,
+        postprocess_fn=trainer.post_dataloading_process,
+        pipeline_step_fn=trainer.pp_forward_backward_step,
+        body_fn=trainer._forward_backward_body,
+        replay_state=trainer,
+        step_wrappers=(trainer._graph_forward_backward_step,),
+    )
 
     return trainer

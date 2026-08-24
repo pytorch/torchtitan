@@ -7,8 +7,15 @@
 """Configurations for the ``features`` integration test suite."""
 
 import os
+from collections.abc import Iterator
+from dataclasses import dataclass, fields
+
+import torch
+import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.sdc_replay import SDCReplayMismatch
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel,
@@ -17,9 +24,104 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
-from torchtitan.trainer import Trainer
+from torchtitan.tools.logging import logger
+from torchtitan.trainer import (
+    ForwardBackwardStepContext,
+    ForwardBackwardStepFn,
+    ForwardBackwardStepWrapper,
+    Trainer,
+)
 
 from . import _use_spmd_types
+
+
+class SDCReplayMismatchTrainer(Trainer):
+    """Inject a replay-only gradient mismatch and verify it is fatal."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self._num_forward_backward_calls = 0
+
+    def make_forward_backward_step(
+        self,
+        *,
+        step_wrappers: tuple[ForwardBackwardStepWrapper, ...] = (),
+    ) -> ForwardBackwardStepFn:
+        return super().make_forward_backward_step(
+            step_wrappers=(self._inject_sdc_mismatch, *step_wrappers)
+        )
+
+    def _inject_sdc_mismatch(
+        self,
+        next_step_fn: ForwardBackwardStepFn,
+        context: ForwardBackwardStepContext,
+    ) -> torch.Tensor:
+        loss = next_step_fn(context)
+        self._num_forward_backward_calls += 1
+        if self._num_forward_backward_calls != 2 or dist.get_rank() != 0:
+            return loss
+
+        with torch.no_grad():
+            for model_part in self.model_parts:
+                for parameter in model_part.parameters():
+                    if parameter.grad is None:
+                        continue
+                    grad = parameter.grad
+                    local_grad = grad.to_local() if isinstance(grad, DTensor) else grad
+                    if local_grad.numel() > 0:
+                        local_grad[(0,) * local_grad.ndim].add_(1)
+                        return loss
+        raise AssertionError("Could not find a local gradient to corrupt.")
+
+    def train_step(
+        self,
+        data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]],
+    ) -> None:
+        try:
+            super().train_step(data_iterator)
+        except SDCReplayMismatch as error:
+            assert error.step == 1
+            assert error.attempt == 1
+            assert error.replay == 1
+            assert error.rank == 0
+            assert error.signature_mismatch is not None
+            assert error.signature_mismatch.startswith("gradient:0:")
+            assert self.sdc_attempt_step == 0
+            logger.info("Detected expected %s", error)
+            return
+        raise AssertionError("Expected SDC replay to detect the injected mismatch.")
+
+
+def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
+    base_config = deepseek_v3_debugmodel()
+    config = SDCReplayMismatchTrainer.Config(
+        **{
+            config_field.name: getattr(base_config, config_field.name)
+            for config_field in fields(base_config)
+            if config_field.init
+        }
+    )
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.disable_cuda_graphs = True
+    config.training.steps = 1
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.sdc_replay.enabled = True
+    return config
+
+
+def llama3_debugmodel_sdc_replay_cudagraph() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.steps = 3
+    config.sdc_replay.enabled = True
+    return config
 
 
 def llama3_debugmodel_default() -> Trainer.Config:

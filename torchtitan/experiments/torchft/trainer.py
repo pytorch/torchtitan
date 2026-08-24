@@ -19,7 +19,6 @@ from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
@@ -29,7 +28,7 @@ from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import ForwardBackwardStepContext, Trainer
 
 
 class FaultTolerantTrainer(Trainer):
@@ -44,6 +43,7 @@ class FaultTolerantTrainer(Trainer):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
+        config._validate_sdc_replay()
         assert (
             config.model_spec is not None
         ), "model_spec must be set before creating Trainer"
@@ -292,6 +292,10 @@ class FaultTolerantTrainer(Trainer):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+        # Initialize process-local SDC replay state. This state is not checkpointed.
+        self.sdc_attempt_step = 0
+        self._sdc_replay_unit_index = 0
+        self._sdc_replay = None
 
         # FT addition: pass ft_manager to CheckpointManager
         self.checkpointer = config.checkpoint.build(
@@ -312,9 +316,7 @@ class FaultTolerantTrainer(Trainer):
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
         )
-        self.fwd_bwd_fn = self._forward_backward_body
-        if not config.training.disable_cuda_graphs:
-            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
+        self.forward_backward_step = self.make_forward_backward_step()
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -386,7 +388,8 @@ class FaultTolerantTrainer(Trainer):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=not self.config.should_use_cudagraph())
+        self._sdc_replay_unit_index = 0
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(self.step)
@@ -434,9 +437,11 @@ class FaultTolerantTrainer(Trainer):
                 fwd_bwd_labels = label_mbs[0]
 
             loss = self.forward_backward_step(
-                input_dict=fwd_bwd_input_dict,
-                labels=fwd_bwd_labels,
-                global_valid_tokens=global_valid_tokens,
+                ForwardBackwardStepContext(
+                    input_dict=fwd_bwd_input_dict,
+                    labels=fwd_bwd_labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
             )
             if should_log:
                 loss = loss.detach()
@@ -456,6 +461,7 @@ class FaultTolerantTrainer(Trainer):
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
+        self.sdc_attempt_step += 1
         self.lr_schedulers.step()
 
         # log metrics

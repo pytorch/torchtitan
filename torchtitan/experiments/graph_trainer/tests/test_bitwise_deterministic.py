@@ -59,7 +59,7 @@ from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.tools.utils import has_cuda_capability
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import ForwardBackwardStepContext, Trainer
 
 SEED = 42
 NUM_STEPS = 5
@@ -225,9 +225,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
             loss = trainer.forward_backward_step(
-                input_dict={"input": self.inputs, "positions": self.positions},
-                labels=self.labels,
-                global_valid_tokens=global_valid_tokens,
+                ForwardBackwardStepContext(
+                    input_dict={"input": self.inputs, "positions": self.positions},
+                    labels=self.labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
             )
             optimizer.step()
 

@@ -8,10 +8,10 @@ import dataclasses
 import json
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, cast, Protocol, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -47,8 +47,10 @@ from torchtitan.distributed.context_parallel import prepare_context_parallel_inp
 from torchtitan.distributed.cudagraph import (
     cudagraph_teardown,
     ForwardBackwardFn,
+    is_cudagraph_available,
     wrap_with_cuda_graph,
 )
+from torchtitan.distributed.sdc_replay import SDCReplay
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -63,6 +65,129 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiler import Profiler
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardBackwardStepContext:
+    input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]
+    labels: torch.Tensor | list[torch.Tensor]
+    global_valid_tokens: torch.Tensor | None = None
+
+
+ForwardBackwardStepFn: TypeAlias = Callable[[ForwardBackwardStepContext], torch.Tensor]
+PostDataloadingProcessFn: TypeAlias = Callable[
+    [dict[str, torch.Tensor], torch.Tensor],
+    tuple[torch.Tensor, torch.Tensor, dict[str, Any]],
+]
+PipelineForwardBackwardStepFn: TypeAlias = Callable[..., torch.Tensor]
+ForwardBackwardStepWrapper: TypeAlias = Callable[
+    [ForwardBackwardStepFn, ForwardBackwardStepContext], torch.Tensor
+]
+
+
+class SDCReplayState(Protocol):
+    step: int
+    sdc_attempt_step: int
+    _sdc_replay_unit_index: int
+
+    def _get_sdc_replay(self) -> SDCReplay:
+        ...
+
+
+def _run_forward_backward_step(
+    context: ForwardBackwardStepContext,
+    *,
+    pp_enabled: bool,
+    postprocess_fn: PostDataloadingProcessFn,
+    pipeline_step_fn: PipelineForwardBackwardStepFn,
+    body_fn: ForwardBackwardFn,
+) -> torch.Tensor:
+    input_dict = context.input_dict
+    labels = context.labels
+    global_valid_tokens = context.global_valid_tokens
+
+    if pp_enabled:
+        assert isinstance(input_dict, list)
+        assert isinstance(labels, list)
+        assert global_valid_tokens is not None
+        return pipeline_step_fn(
+            input_dict_mbs=input_dict,
+            label_mbs=labels,
+            global_valid_tokens=global_valid_tokens,
+        )
+
+    assert isinstance(input_dict, dict)
+    assert isinstance(labels, torch.Tensor)
+    inputs, labels, extra_kwargs = postprocess_fn(input_dict, labels)
+    assert global_valid_tokens is not None
+    return body_fn(inputs, labels, global_valid_tokens, extra_kwargs)
+
+
+def _wrap_forward_backward_step(
+    step_fn: ForwardBackwardStepFn,
+    wrapper: ForwardBackwardStepWrapper,
+) -> ForwardBackwardStepFn:
+    def wrapped_step_fn(context: ForwardBackwardStepContext) -> torch.Tensor:
+        return wrapper(step_fn, context)
+
+    return wrapped_step_fn
+
+
+class ForwardBackwardStep:
+    """Compose and execute a trainer forward/backward step."""
+
+    def __init__(
+        self,
+        *,
+        use_cudagraph: bool,
+        use_sdc: bool,
+        pp_enabled: bool,
+        postprocess_fn: PostDataloadingProcessFn,
+        pipeline_step_fn: PipelineForwardBackwardStepFn,
+        body_fn: ForwardBackwardFn,
+        replay_state: SDCReplayState,
+        step_wrappers: tuple[ForwardBackwardStepWrapper, ...] = (),
+    ) -> None:
+        if use_cudagraph:
+            body_fn = wrap_with_cuda_graph(body_fn)
+
+        def step_fn(context: ForwardBackwardStepContext) -> torch.Tensor:
+            return _run_forward_backward_step(
+                context,
+                pp_enabled=pp_enabled,
+                postprocess_fn=postprocess_fn,
+                pipeline_step_fn=pipeline_step_fn,
+                body_fn=body_fn,
+            )
+
+        for step_wrapper in step_wrappers:
+            step_fn = _wrap_forward_backward_step(step_fn, step_wrapper)
+
+        if use_sdc:
+            wrapped_step_fn = step_fn
+
+            def sdc_step_fn(context: ForwardBackwardStepContext) -> torch.Tensor:
+                def execute() -> torch.Tensor:
+                    return wrapped_step_fn(context)
+
+                replay_unit = replay_state._sdc_replay_unit_index
+                replay_state._sdc_replay_unit_index = replay_unit + 1
+                if replay_unit == 0:
+                    sdc_replay = replay_state._get_sdc_replay()
+                    if sdc_replay.should_run(replay_state.sdc_attempt_step):
+                        return sdc_replay.run(
+                            execute,
+                            step=replay_state.step,
+                            attempt=replay_state.sdc_attempt_step + 1,
+                        )
+                return execute()
+
+            step_fn = sdc_step_fn
+
+        self._step_fn = sl.log_trace_span("fwd_bwd")(step_fn)
+
+    def __call__(self, context: ForwardBackwardStepContext) -> torch.Tensor:
+        return self._step_fn(context)
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -112,14 +237,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        sdc_replay: SDCReplay.Config = field(default_factory=SDCReplay.Config)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+
+        def should_use_cudagraph(self) -> bool:
+            return not self.training.disable_cuda_graphs
 
         def __post_init__(self):
             if self.debug.batch_invariant:
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
+
+            self._validate_sdc_replay()
 
             pp_microbatch_size = self.parallelism.pipeline_parallel_microbatch_size
             if pp_microbatch_size <= 0:
@@ -177,7 +308,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
         def _validate_cuda_graphs(self) -> None:
-            if self.training.disable_cuda_graphs:
+            if not self.should_use_cudagraph():
                 return
 
             if self.parallelism.pipeline_parallel_degree > 1:
@@ -207,6 +338,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "MinimalAsyncEP, or set --training.disable_cuda_graphs. "
                     "Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
+                )
+
+        def _validate_sdc_replay(self) -> None:
+            self.sdc_replay.validate()
+            if not self.sdc_replay.enabled:
+                return
+            if not self.debug.deterministic:
+                raise ValueError("SDC replay requires debug.deterministic=True.")
+            if self.debug.deterministic_warn_only:
+                raise ValueError(
+                    "SDC replay requires debug.deterministic_warn_only=False."
+                )
+            if (
+                self.should_use_cudagraph()
+                and is_cudagraph_available()
+                and self.sdc_replay.num_replays > 1
+            ):
+                raise ValueError(
+                    "SDC replay with CUDA graphs requires "
+                    "sdc_replay.num_replays=1. Set --sdc-replay.num-replays 1 "
+                    "or --training.disable_cuda_graphs."
                 )
 
         def to_dict(self) -> dict[str, Any]:
@@ -273,7 +425,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     device: torch.device
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
-    fwd_bwd_fn: ForwardBackwardFn
+    forward_backward_step: ForwardBackwardStepFn
     gradient_accumulation_steps: int
     num_pipeline_parallel_microbatches: int
     pp_has_first_stage: bool
@@ -282,6 +434,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # additional training states
     step: int
     ntokens_seen: int
+    sdc_attempt_step: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -357,6 +510,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         config._validate_cuda_graphs()
+        config._validate_sdc_replay()
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
@@ -562,6 +716,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+        # Initialize process-local SDC replay state. This state is not checkpointed.
+        self.sdc_attempt_step = 0
+        self._sdc_replay_unit_index = 0
+        self._sdc_replay: SDCReplay | None = None
 
         # build tokenizer
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
@@ -602,9 +760,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and config.debug.spmd_typechecking
             ),
         )
-        self.fwd_bwd_fn = self._forward_backward_body
-        if not config.training.disable_cuda_graphs:
-            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
+        self.forward_backward_step = self.make_forward_backward_step()
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -763,32 +919,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         return inputs, labels, extra_kwargs
 
-    @sl.log_trace_span("fwd_bwd")
-    def forward_backward_step(
+    def make_forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
-        global_valid_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        model_parts = self.model_parts
-        parallel_dims = self.parallel_dims
+        step_wrappers: tuple[ForwardBackwardStepWrapper, ...] = (),
+    ) -> ForwardBackwardStepFn:
+        return ForwardBackwardStep(
+            use_cudagraph=self.config.should_use_cudagraph(),
+            use_sdc=self.config.sdc_replay.enabled,
+            pp_enabled=self.parallel_dims.pp_enabled,
+            postprocess_fn=self.post_dataloading_process,
+            pipeline_step_fn=self.pp_forward_backward_step,
+            body_fn=self._forward_backward_body,
+            replay_state=self,
+            step_wrappers=step_wrappers,
+        )
 
-        if parallel_dims.pp_enabled:
-            assert isinstance(input_dict, list)
-            assert isinstance(labels, list)
-            return self.pp_forward_backward_step(
-                input_dict_mbs=input_dict,
-                label_mbs=labels,
-                global_valid_tokens=global_valid_tokens,
+    def _get_sdc_replay_modules(self) -> Iterable[torch.nn.Module]:
+        return self.model_parts
+
+    def _get_sdc_replay(self) -> SDCReplay:
+        if self._sdc_replay is None:
+            self._sdc_replay = SDCReplay(
+                config=self.config.sdc_replay,
+                trainer=self,
+                modules=self._get_sdc_replay_modules(),
             )
-
-        assert isinstance(input_dict, dict)
-        assert isinstance(labels, torch.Tensor)
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
-
-        assert len(model_parts) == 1
-        return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
+        return self._sdc_replay
 
     def _forward_backward_body(
         self,
@@ -797,6 +954,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         global_valid_tokens: torch.Tensor,
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        assert len(self.model_parts) == 1
         with self.train_context():
             pred = self.model_parts[0](inputs, **extra_kwargs)
             loss_kwargs = {}
@@ -858,7 +1016,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=not self.config.should_use_cudagraph())
+        self._sdc_replay_unit_index = 0
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
         should_log = self.metrics_processor.should_log(self.step)
@@ -912,9 +1071,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 fwd_bwd_labels = label_mbs[0]
 
             loss = self.forward_backward_step(
-                input_dict=fwd_bwd_input_dict,
-                labels=fwd_bwd_labels,
-                global_valid_tokens=global_valid_tokens,
+                ForwardBackwardStepContext(
+                    input_dict=fwd_bwd_input_dict,
+                    labels=fwd_bwd_labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
             )
             detached_loss = loss.detach()
             local_loss = (
@@ -970,6 +1131,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
+            self.sdc_attempt_step += 1
             self.lr_schedulers.step()
 
         # log metrics
@@ -979,7 +1141,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert accumulated_loss is not None
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
@@ -1095,11 +1256,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
+        self.sdc_attempt_step = 0
 
     def close(self) -> None:
         if hasattr(self, "dataloader") and self.dataloader:
             self.dataloader.close()
-        if not self.config.training.disable_cuda_graphs:
+        if self.config.should_use_cudagraph():
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
