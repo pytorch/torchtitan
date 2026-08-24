@@ -347,12 +347,7 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
 
 
 def _run_deepseek_v3_ep_overlap_deferred_dw_loss_compare() -> bool:
-    """Run the deferred-dW schedule against the default EP overlap schedule.
-
-    Both sides use identical graph chunking (MoE batch scope, bitwise mode);
-    the test side only swaps the schedule pass via the pass pipeline, so
-    losses must be bitwise identical.
-    """
+    """Run the deferred-dW schedule against the default EP overlap schedule."""
     common = (
         DSV3_EP_OVERLAP_GRAPH_PARALLELISM
         + " "
