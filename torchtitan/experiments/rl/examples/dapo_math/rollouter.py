@@ -16,25 +16,18 @@ from torchtitan.experiments.rl.examples.dapo_math.data import (
 from torchtitan.experiments.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.experiments.rl.examples.dapo_math.rubric import RewardMathVerify
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
-from torchtitan.experiments.rl.rollout.rollouter import Rollouter
+from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.experiments.rl.rubrics import Rubric
 
 
-class DapoMathRollouter(Rollouter):
-    """Single-turn math reasoning with a binary Math-Verify reward.
+class DapoMathWorker(RolloutWorker):
+    """DAPO-Math's env and Math-Verify reward.
 
-    Each sample produces one assistant solution; training uses DAPO-Math and
-    validation uses AIME 2025.
+    Pure config; all methods inherited.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Rollouter.Config):
-        train_dataset: DapoMathDataset.Config = field(
-            default_factory=DapoMathDataset.Config
-        )
-        validation_dataset: AIME2025Dataset.Config = field(
-            default_factory=AIME2025Dataset.Config
-        )
+    class Config(RolloutWorker.Config):
         rubric: Rubric.Config = field(
             default_factory=lambda: Rubric.Config(
                 reward_fns=[RewardMathVerify.Config(weight=1.0)],
@@ -53,3 +46,21 @@ class DapoMathRollouter(Rollouter):
                 should_std_normalize=False
             )
         )
+
+
+class DapoMathRollouter(Rollouter):
+    """Single-turn math reasoning with a binary Math-Verify reward.
+
+    Each sample produces one assistant solution; training uses DAPO-Math and
+    validation uses AIME 2025.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Rollouter.Config):
+        train_dataset: DapoMathDataset.Config = field(
+            default_factory=DapoMathDataset.Config
+        )
+        validation_dataset: AIME2025Dataset.Config = field(
+            default_factory=AIME2025Dataset.Config
+        )
+        worker: DapoMathWorker.Config = field(default_factory=DapoMathWorker.Config)

@@ -90,10 +90,8 @@ _trainer_loop
 import asyncio
 import logging
 import math
-import os
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Annotated
 
@@ -446,6 +444,8 @@ class Controller(Configurable):
             dump_dir=config.dump_folder
         )
 
+    # TODO: if possible, consider closing components concurrently to speed up
+    # the shutdown.
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
@@ -455,6 +455,11 @@ class Controller(Configurable):
                 await self.trainer.close.call()
             except Exception:
                 logger.exception("trainer.close failed")
+
+        try:
+            await self._rollouter.close()
+        except Exception:
+            logger.exception("rollouter.close failed")
 
         if self.generator_router is not None:
             try:
@@ -538,9 +543,10 @@ class Controller(Configurable):
         that cannot run in a synchronous constructor.
 
         The trainer and generator meshes are provisioned by the caller (see
-        ``spawn_proc_mesh``). The router mesh is created on the controller host.
-        This method spawns the actors and synchronizes initial weights from
-        trainer to generator. Must be called before :meth:`run`.
+        ``spawn_proc_mesh``). The router and rollout worker meshes are created
+        on the controller host. This method spawns the actors and synchronizes
+        initial weights from trainer to generator. Must be called before
+        :meth:`run`.
 
         Args:
             trainer_mesh: ProcMesh the trainer actor is spawned on.
@@ -553,11 +559,6 @@ class Controller(Configurable):
             max_active_rollout_groups * async_loop.num_samples_per_prompt,
             async_loop.validation.num_samples,
         )
-        # Renderer thread pool: render work is CPU-bound, so size to CPU count (decoupled from rollout concurrency).
-        asyncio.get_running_loop().set_default_executor(
-            ThreadPoolExecutor(max_workers=os.cpu_count())
-        )
-
         config = self.config
         if not generator_meshes:
             raise ValueError("setup_async requires at least one generator mesh")
@@ -636,6 +637,8 @@ class Controller(Configurable):
                 config.generator_router,
                 generators=generators,
             )
+
+            await self._rollouter.setup_async()
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -935,7 +938,10 @@ class Controller(Configurable):
         logger.info("Buffer closed; data input loop stopping")
 
     async def _rollout_loop(
-        self, *, group_buffer: RolloutGroupWorkBuffer, generate_fn: GenerateFn
+        self,
+        *,
+        group_buffer: RolloutGroupWorkBuffer,
+        generate_fn: GenerateFn,
     ) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
@@ -1055,6 +1061,7 @@ class Controller(Configurable):
             with sl.log_trace_span("sync_log_step"):
                 await self.trainer.sync_log_step.call(step)
                 await self.generator_router.sync_log_step.call_one(step)
+                await self._rollouter.sync_log_step(step)
             step_timer = MetricsTimer()
 
             with sl.log_trace_span("train_step"), step_timer.record(
