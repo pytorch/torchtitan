@@ -294,7 +294,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         dst_types = _per_axis_types(dst)
         if set(src_types) != set(dst_types):
             raise ValueError(
-                "spmd.SpmdType-based redistribute axis keys do not match for "
+                "SpmdType-based redistribute axis keys do not match for "
                 f"src: {src_types} -> dst: {dst_types}."
             )
 
@@ -305,7 +305,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         ]
         if len(changed_axes) > 1:
             raise ValueError(
-                f"{name}: spmd.SpmdType-based redistribution changes multiple mesh "
+                f"{name}: SpmdType-based redistribution changes multiple mesh "
                 f"axes ({sorted(str(axis) for axis in changed_axes)}). "
                 "spmd_redistribute_per_axis only supports one single-axis "
                 "redistribution."
@@ -315,7 +315,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         ):
             axis = changed_axes[0]
             raise ValueError(
-                f"{name}: spmd.SpmdType-based redistribution changes mesh axis "
+                f"{name}: SpmdType-based redistribution changes mesh axis "
                 f"{str(axis)!r} with spmd.V as the source or destination type. "
                 "Config-based redistribution requires non-V types; write an "
                 "explicit collective when the value semantics are unclear."
@@ -365,7 +365,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
             if changed_axis is not None and src_axes == dst_axes + (changed_axis,):
                 continue
             raise ValueError(
-                "spmd.SpmdType-based redistribution changes shard order for "
+                "SpmdType-based redistribution changes shard order for "
                 f"tensor {name} dim {dim}, which is currently unsupported "
                 "by spmd_redistribute_per_axis. Please write this as an "
                 "explicit collective instead."

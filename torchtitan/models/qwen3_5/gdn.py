@@ -51,7 +51,7 @@ def _causal_conv1d_varlen(
     """FLA depthwise causal conv with per-document resets (CUDA-only).
 
     A pure-torch per-document reference lives in
-    ``tests/unit_tests/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
     """
     if cu_seqlens_cpu is None:
         raise ValueError(
@@ -238,7 +238,7 @@ class GatedDeltaKernel(Module):
     DTensor-to-local conversion -- same pattern as FlexAttention. Handles Q/K
     head expansion for grouped linear attention internally so that
     repeat_interleave runs on local tensors under TP. A pure-torch reference
-    implementation lives in ``tests/unit_tests/test_qwen3_5_deltanet.py``;
+    implementation lives in ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``;
     it is far too slow for training use.
     """
 
