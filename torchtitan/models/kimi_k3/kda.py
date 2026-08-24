@@ -6,7 +6,7 @@
 
 """Kimi K3 aliases for the shared KDA implementation."""
 
-from torchtitan.models.common.attention import KDA, KDAKernel
+from torchtitan.models.common.kda import KDA, KDAKernel
 
 KimiDeltaAttention = KDA
 KimiKDAKernel = KDAKernel
