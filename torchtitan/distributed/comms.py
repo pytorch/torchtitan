@@ -65,8 +65,10 @@ class _Algo(Enum):
 _MULTIMEM_ONE_SHOT_MAX_BYTES = 64 * 1024
 _ONE_SHOT_MAX_BYTES = 128 * 1024
 _TWO_SHOT_MAX_BYTES = 16 * 1024 * 1024
-_MULTIMEM_MAX_BYTES = 32 * 1024 * 1024
-_SYMM_BUFFER_MAX_BYTES = max(_TWO_SHOT_MAX_BYTES, _MULTIMEM_MAX_BYTES)
+_MULTIMEM_TWO_SHOT_MAX_BYTES = 32 * 1024 * 1024
+_SYMM_BUFFER_MAX_BYTES = max(
+    _TWO_SHOT_MAX_BYTES, _MULTIMEM_TWO_SHOT_MAX_BYTES
+)
 
 _SUPPORTED_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 # Intra-node group sizes we support for symmetric memory.
@@ -180,7 +182,7 @@ def _select_algo(input: torch.Tensor, reduce_op: str, group_name: str) -> _Algo:
 
     nbytes = numel * input.element_size()
     if _has_multicast(input.device.index):
-        if nbytes > _MULTIMEM_MAX_BYTES:
+        if nbytes > _MULTIMEM_TWO_SHOT_MAX_BYTES:
             return _Algo.NCCL
         if nbytes <= _MULTIMEM_ONE_SHOT_MAX_BYTES:
             return _Algo.MULTIMEM_ONE_SHOT
