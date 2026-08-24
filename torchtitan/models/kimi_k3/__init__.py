@@ -11,7 +11,8 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Conv1d, Embedding, InnerKDA, KDAKernel, Linear
+from torchtitan.models.common import Conv1d, Embedding, Linear
+from torchtitan.models.common.attention import InnerKDA, KDAKernel
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
