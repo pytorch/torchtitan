@@ -163,6 +163,16 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     return config
 
 
+def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8_no_router_recompute() -> (
+    Trainer.Config
+):
+    config = qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8()
+    config.activation_checkpoint = SelectiveAC.Config(
+        force_recompute_mm_shapes_by_fqns=[]
+    )
+    return config
+
+
 def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config = qwen3_debugmodel()
     _use_spmd_types(config, typechecking=True)
@@ -225,6 +235,14 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     )
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    return config
+
+
+def qwen35_debugmodel_moe_fsdp4_tp2_ep4_no_router_recompute() -> Trainer.Config:
+    config = qwen35_debugmodel_moe_fsdp4_tp2_ep4()
+    config.activation_checkpoint = SelectiveAC.Config(
+        force_recompute_mm_shapes_by_fqns=[]
+    )
     return config
 
 
