@@ -173,7 +173,7 @@ class _FakeParallelDims:
     """Minimal ParallelDims stub for tests that don't use full distributed setup."""
 
     full_dtensor = False
-    spmd_backend = "partial_dtensor"
+    spmd_backend = "spmd_types"
     tp_enabled = False
     ep_enabled = False
     tp = 1
@@ -490,7 +490,7 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         x = torch.randn(2, 8, 64, device="cuda")
         native_moe(x)
 
-        # 2*8 tokens, top_k=2 → 32 total expert assignments
+        # 2 * 8 tokens, top_k=2 -> 32 total expert assignments.
         self.assertEqual(
             _moe_buffer(native_moe, "tokens_per_expert").sum().item(), 2 * 8 * 2
         )

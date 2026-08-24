@@ -47,7 +47,6 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -81,7 +80,6 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -113,7 +111,6 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=10),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=500,
@@ -147,7 +144,6 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -195,7 +191,6 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             enable=True,
@@ -250,7 +245,6 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
