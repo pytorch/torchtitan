@@ -36,11 +36,11 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 
 
 def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(2))
+    input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     out_dst = (
         dense_sequence_parallel_placement()
         if output_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     return ShardingConfig(
         state_shardings={
@@ -49,7 +49,7 @@ def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
         },
         in_src_shardings={"input": input_layout},
         in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=out_dst,
         local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
     )
@@ -95,7 +95,7 @@ def _set_gpt_oss_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
     # Attention: input x gathered to Replicate.
@@ -106,7 +106,7 @@ def _set_gpt_oss_layer_sharding(
             "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         },
     )
     attention.rope.sharding_config = ShardingConfig(

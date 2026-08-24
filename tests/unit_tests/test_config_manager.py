@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 import pytest
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
 
 
 class TestConfigManager(unittest.TestCase):
@@ -59,6 +59,21 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args([])
 
+    def test_torchtitan_recipes_package_resolves(self):
+        """torchtitan_recipes is importable and its configs load."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "torchtitan_recipes.tests.features",
+                "--config",
+                "llama3_debugmodel_fsdp2_cp2",
+            ]
+        )
+        assert config.model_spec.name == "llama3"
+        assert config.model_spec.flavor == "debugmodel"
+        assert config.parallelism.context_parallel_degree == 2
+
     def test_invalid_model_errors(self):
         """--module with unknown module name raises ImportError."""
         config_manager = ConfigManager()
@@ -94,27 +109,56 @@ class TestConfigManager(unittest.TestCase):
                 "llama3_debugmodel",
                 "--training.steps",
                 "5",
+                "--training.num_tokens_per_microbatch_per_dp_rank",
+                "4096",
+                "--training.num_tokens_per_train_step",
+                "8192",
+                "--training.max_context_length",
+                "1024",
             ]
         )
         assert config.training.steps == 5
+        assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
+        assert config.training.num_tokens_per_train_step == 8192
+        assert config.training.max_context_length == 1024
 
-    def test_pipeline_microbatch_size_must_divide_local_batch_size(self):
+    def test_num_tokens_per_microbatch_must_be_positive(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="must be evenly divisible"):
+        with pytest.raises(SystemExit):
             config_manager.parse_args(
                 [
                     "--module",
                     "llama3",
                     "--config",
                     "llama3_debugmodel",
-                    "--training.local_batch_size",
-                    "8",
-                    "--parallelism.pipeline_parallel_degree",
-                    "2",
-                    "--parallelism.pipeline_parallel_microbatch_size",
-                    "3",
+                    "--training.num_tokens_per_microbatch_per_dp_rank",
+                    "0",
                 ]
             )
+
+    def test_num_tokens_per_train_step_must_be_positive_or_unset(self):
+        with pytest.raises(ValueError, match="must be -1 or greater than 0"):
+            TrainingConfig(num_tokens_per_train_step=0)
+
+    def test_max_context_length_must_be_positive(self):
+        for max_context_length in (0, -1):
+            with pytest.raises(ValueError, match="must be greater than 0"):
+                TrainingConfig(max_context_length=max_context_length)
+
+    def test_num_pp_microbatches_does_not_constrain_non_pp_training(self):
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--parallelism.num_pp_microbatches",
+                "3",
+            ]
+        )
+        assert config.parallelism.pipeline_parallel_degree == 1
+        assert config.parallelism.num_pp_microbatches == 3
 
     def test_cuda_graphs_reject_pipeline_parallelism(self):
         config_manager = ConfigManager()
@@ -244,6 +288,23 @@ class TestConfigManager(unittest.TestCase):
             "lr_scheduler",
         ]
 
+    def test_concrete_checkpoint_fields_remain_overridable(self):
+        from torchtitan.components.checkpointer import CheckpointManager
+
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--checkpoint.async_mode",
+                "async",
+            ]
+        )
+
+        assert isinstance(config.checkpoint, CheckpointManager.Config)
+        assert config.checkpoint.async_mode == "async"
+
     def test_trainer_config_quantization_default(self):
         from torchtitan.components.quantization.utils import has_quantization
 
@@ -289,6 +350,10 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "flux"
         assert hasattr(config, "encoder")
+        assert config.parallelism.context_parallel_load_balancer == "headtail"
+
+    def test_default_context_parallel_load_balancer(self):
+        assert ParallelismConfig().context_parallel_load_balancer == "headtail"
 
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""

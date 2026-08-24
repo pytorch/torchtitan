@@ -8,7 +8,7 @@
 Unified approach for running TorchTitan models with vLLM inference.
 
 To register TorchTitan models with vLLM:
-    from torchtitan.components.checkpoint import CheckpointManager
+    from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.experiments.rl.models.vllm_registry import register_to_vllm
 
     # Standalone inference (loads HF weights):

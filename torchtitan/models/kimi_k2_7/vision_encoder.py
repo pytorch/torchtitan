@@ -11,7 +11,7 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 
 Shape suffixes:
 - N = num visual items
-- P = max num of patches per visual item (padded)
+- T = total num of packed patches across visual items
 - D = vision dim
 - M = merged tokens
 - K = merged feature dim (kh*kw*D)
@@ -27,11 +27,10 @@ import torch.nn.functional as F
 
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import _maybe_wrap_positions, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
-    compiled_create_block_mask,
-    get_vision_block_mask_mod,
+    create_block_diagonal_mask,
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -67,7 +66,6 @@ def _get_temporal_pos_embed(
 def _compute_learned_pos_embeds(
     pos_embed: torch.Tensor,
     grids: list[list[int]],
-    max_num_patch: int,
     interpolation_mode: str,
 ) -> torch.Tensor:
     """Interpolated learnable 2D spatial pos-emb + fixed sinusoidal temporal.
@@ -81,16 +79,13 @@ def _compute_learned_pos_embeds(
         pos_embed: (height, width, dim) learnable spatial position table.
         grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
             read to CPU once by the caller, so the per-item loop adds no syncs).
-        max_num_patch: Padded sequence length.
         interpolation_mode: ``F.interpolate`` mode (e.g. ``"bicubic"``).
 
     Returns:
-        (N, max_num_patch, dim) padded position embeddings to add to the patches.
+        ``(total_num_patches, dim)`` packed position embeddings.
     """
     height, width, dim = pos_embed.shape
-    pos = pos_embed.new_zeros(len(grids), max_num_patch, dim)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        pos = spmd.mutate_type(pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
+    pos: dict[int, torch.Tensor] = {}
 
     # (dim, height, width) for F.interpolate; .float() for bicubic.
     grid_table = pos_embed.permute(2, 0, 1).unsqueeze(0).float()
@@ -112,28 +107,31 @@ def _compute_learned_pos_embeds(
             )
         for i in indices:
             t = grids[i][0]
-            seq_len = t * h * w
             if t == 1:
-                pos[i, :seq_len] = pos_hw
+                pos[i] = pos_hw
             else:
                 # (t, 1, dim) to broadcast the per-frame term over h*w patches.
                 time_weight = _get_temporal_pos_embed(
-                    t, dim, device=pos.device
+                    t, dim, device=pos_embed.device
                 ).unsqueeze(1)
                 frames = pos_hw.unsqueeze(0).repeat(t, 1, 1)
                 frames = frames + time_weight.to(frames.dtype)
-                pos[i, :seq_len] = frames.reshape(seq_len, dim)
+                pos[i] = frames.reshape(t * h * w, dim)
 
-    return pos
+    packed_pos = torch.cat([pos[i] for i in range(len(grids))], dim=0)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        packed_pos = spmd.mutate_type(
+            packed_pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    return packed_pos
 
 
 def _compute_2d_rope_cache(
     freq_table: torch.Tensor,
     grids: list[list[int]],
-    max_num_patch: int,
     head_dim: int,
 ) -> torch.Tensor:
-    """Compute the padded 2D-RoPE complex ``freqs_cis`` cache in raster order.
+    """Compute the packed 2D-RoPE complex ``freqs_cis`` cache in raster order.
 
     For head-dim pair index ``k`` (``k`` in ``[0, head_dim/4)``), even output
     pairs are rotated by the *column* (x) position and odd pairs by the *row*
@@ -151,18 +149,15 @@ def _compute_2d_rope_cache(
             ``freq_table[p, k] = p * inv_freq[k]``.
         grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
             read to CPU once by the caller, so the per-item loop adds no syncs).
-        max_num_patch: Padded sequence length.
         head_dim: Attention head dim (must be divisible by 4).
 
     Returns:
-        ``(N, max_num_patch, 1, head_dim/2)`` complex64 (head axis = 1 to
-        broadcast over the heads).
+        ``(total_num_patches, 1, head_dim/2)`` complex64. The singleton head
+        axis broadcasts over attention heads.
     """
     device = freq_table.device
 
-    angles = freq_table.new_zeros(len(grids), max_num_patch, head_dim // 2)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        angles = spmd.mutate_type(angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
+    angles: dict[int, torch.Tensor] = {}
 
     # Group by (h, w) so the per-resolution angle grid is built once.
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
@@ -182,19 +177,23 @@ def _compute_2d_rope_cache(
         ang = torch.stack([x_ang, y_ang], dim=-1).reshape(h * w, head_dim // 2)
         for i in indices:
             t = grids[i][0]
-            seq_len = t * h * w
-            angles[i, :seq_len] = ang.repeat(t, 1)
+            angles[i] = ang.repeat(t, 1)
 
     # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
-    return torch.polar(torch.ones_like(angles), angles).unsqueeze(2)
+    packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        packed_angles = spmd.mutate_type(
+            packed_angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    return torch.polar(torch.ones_like(packed_angles), packed_angles).unsqueeze(1)
 
 
 def _tpool_patch_merger(
-    hidden_NPD: torch.Tensor,
+    hidden_TD: torch.Tensor,
     grids: list[list[int]],
     merge_kernel_size: tuple[int, int],
 ) -> torch.Tensor:
-    """Temporal mean pooling + spatial merge over the padded batch.
+    """Temporal mean pooling + spatial merge over packed visual items.
 
     For each item ``(t, h, w)``: reshape its valid patches to
     ``(t, h, w, D)``, mean over the temporal axis, then group spatial
@@ -202,36 +201,34 @@ def _tpool_patch_merger(
     ``(h/kh * w/kw)`` merged tokens of dim ``kh*kw*D``.
 
     Args:
-        hidden_NPD: (N, P, D) padded patch features.
+        hidden_TD: ``(total_num_patches, D)`` packed patch features.
         grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
             read to CPU once by the caller, so the per-item loop adds no syncs).
         merge_kernel_size: ``(kh, kw)`` spatial merge factors.
 
     Returns:
-        merged: ``(N, max_merged, kh*kw*D)`` padded merged tokens, where
-        ``max_merged = max_i (h_i/kh) * (w_i/kw)``. The valid token count per
-        item is ``(h/kh) * (w/kw)`` (recomputed by the caller from ``grids``
-        for the scatter).
+        Packed merged tokens with shape
+        ``(sum_i((h_i/kh)*(w_i/kw)), kh*kw*D)``. Each item's token count is
+        ``(h/kh) * (w/kw)``.
     """
-    num_vision, _, d_model = hidden_NPD.shape
+    d_model = hidden_TD.shape[-1]
     kh, kw = merge_kernel_size
     merged_dim = kh * kw * d_model
 
-    max_merged = max((h // kh) * (w // kw) for _, h, w in grids)
-    merged = hidden_NPD.new_zeros(num_vision, max_merged, merged_dim)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        merged = spmd.mutate_type(merged, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
-
-    for i, (t, h, w) in enumerate(grids):
-        seq = hidden_NPD[i, : t * h * w]
+    merged: list[torch.Tensor] = []
+    offset = 0
+    for t, h, w in grids:
+        num_patches = t * h * w
+        seq = hidden_TD[offset : offset + num_patches]
+        offset += num_patches
         new_h, new_w = h // kh, w // kw
         # (t, new_h, kh, new_w, kw, D) -> mean over t -> group spatial kernel.
         seq = seq.view(t, new_h, kh, new_w, kw, d_model)
         seq = seq.permute(0, 1, 3, 2, 4, 5).mean(dim=0)
-        seq = seq.reshape(new_h * new_w, merged_dim)
-        merged[i, : new_h * new_w] = seq
+        merged.append(seq.reshape(new_h * new_w, merged_dim))
 
-    return merged
+    packed_merged = torch.cat(merged, dim=0)
+    return packed_merged
 
 
 class VisionRotaryEmbedding2D(Module):
@@ -314,46 +311,40 @@ class VisionProjector(Module):
         self.linear_2 = config.linear_2.build()
         self.act_fn = config.act_fn.build()
 
-    def forward(self, merged_NMK: torch.Tensor) -> torch.Tensor:
-        """Args: ``(N, M, kh*kw*vt_hidden_size)`` padded merged tokens.
+    def forward(self, merged_MK: torch.Tensor) -> torch.Tensor:
+        """Project packed merged tokens ``(M, kh*kw*vt_hidden_size)``.
 
         The pre-norm runs per-patch on ``vt_hidden_size``; the merged kernel
         features are then flattened for the projection MLP.
         """
-        n, m, _ = merged_NMK.shape
-        x = merged_NMK.view(n, m, -1, self.vt_hidden_size)
-        x = self.pre_norm(x).view(n, m, self.merged_dim)
+        num_merged_tokens = merged_MK.shape[0]
+        x = merged_MK.view(num_merged_tokens, -1, self.vt_hidden_size)
+        x = self.pre_norm(x).view(num_merged_tokens, self.merged_dim)
         x = self.linear_1(x)
         x = self.act_fn(x)
-        x = self.linear_2(x)
-        return x
+        return self.linear_2(x)
 
 
-class KimiK25VisionEncoder(Module):
-    """MoonViT3d vision tower + multimodal projector for Kimi K2.5."""
+class MoonViTEncoder(Module):
+    """MoonViT3d vision tower + multimodal projector."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = 1152
-        num_layers: int = 27
-        num_heads: int = 16
-
-        patch_size: int = 14
-        in_channels: int = 3
-        merge_kernel_size: list[int] = field(default_factory=lambda: [2, 2])
-        text_hidden_size: int = 7168
+        dim: int
+        num_layers: int
+        merge_kernel_size: list[int]
 
         # Learnable 2D spatial position table, shape (height, width, dim).
-        init_pos_emb_height: int = 64
-        init_pos_emb_width: int = 64
-        interpolation_mode: str = "bicubic"
+        init_pos_emb_height: int
+        init_pos_emb_width: int
+        interpolation_mode: str
 
         # Sub-modules.
         patch_embed_proj: Linear.Config
         rotary_pos_emb: VisionRotaryEmbedding2D.Config
         block: VisionTransformerBlock.Config
-        final_norm: LayerNorm.Config
-        projector: VisionProjector.Config
+        final_norm: LayerNorm.Config | RMSNorm.Config
+        projector: Module.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -377,9 +368,9 @@ class KimiK25VisionEncoder(Module):
         self.projector = config.projector.build()
 
     def compute_position_embeddings(
-        self, grids: list[list[int]], max_num_patch: int
+        self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute both position embeddings for the padded batch.
+        """Compute both position embeddings for packed visual patches.
 
         Delegates to two standalone helpers:
         - ``_compute_learned_pos_embeds``: interpolated learnable spatial table
@@ -391,24 +382,21 @@ class KimiK25VisionEncoder(Module):
         Args:
             grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
                 read to CPU once by ``forward``).
-            max_num_patch: Padded sequence length.
-
         Returns:
-            learned_pos: ``(N, max_num_patch, dim)`` additive position embeddings.
-            rope_cache: ``(N, max_num_patch, 1, head_dim/2)`` complex RoPE cache
-                for ``ComplexRoPE.apply_rotary_emb``.
+            learned_pos: ``(total_num_patches, dim)`` additive positions.
+            rope_cache: ``(total_num_patches, 1, head_dim/2)`` complex RoPE
+                cache for ``ComplexRoPE.apply_rotary_emb``.
         """
         max_hw = max(max(h, w) for _, h, w in grids)
         if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
             self._cached_freq_table = self.rotary_pos_emb(max_hw)
 
         learned_pos = _compute_learned_pos_embeds(
-            self.pos_embed, grids, max_num_patch, self.interpolation_mode
+            self.pos_embed, grids, self.interpolation_mode
         )
         rope_cache = _compute_2d_rope_cache(
             self._cached_freq_table,
             grids,
-            max_num_patch,
             self.rotary_pos_emb.head_dim,
         )
         return learned_pos, rope_cache
@@ -419,22 +407,20 @@ class KimiK25VisionEncoder(Module):
         *,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
-        """Encode a padded batch of visual items.
+        """Encode packed image or video patches.
 
         Args:
-            pixel_values: ``(N, P, patch_dim)`` padded flattened patches.
+            pixel_values: ``(total_num_patches, patch_dim)`` packed patches.
             grid_thw: ``(N, 3)`` patch counts ``[t, h, w]`` per item.
 
         Returns:
-            ``(N, max_merged, text_hidden_size)`` padded projected features.
+            ``(total_num_merged, text_hidden_size)`` packed projected features.
 
         Each item's ``(h, w)`` must be divisible by ``merge_kernel_size`` and its
-        ``t*h*w`` must fit in ``P`` (both dataloader-guaranteed; asserted below).
-        Patches must arrive in raster order ``(t, h, w)`` (the dataloader's
-        ``patch_order="raster"``); the 2D RoPE / position embeddings index
-        ``row = p // w, col = p % w``.
+        patches must arrive in raster order ``(t, h, w)`` (both contracts are
+        dataloader-guaranteed and checked below). The 2D RoPE / position
+        embeddings index ``row = p // w, col = p % w``.
         """
-        num_vision, max_num_patch, _ = pixel_values.shape
         # One host sync for the whole forward: read the (N, 3) grid to CPU ints.
         grids = grid_thw.tolist()  # [[t, h, w], ...]
 
@@ -445,24 +431,26 @@ class KimiK25VisionEncoder(Module):
             assert (
                 h % kh == 0 and w % kw == 0
             ), f"grid {h}x{w} indivisible by {(kh, kw)}"
-            assert t * h * w <= max_num_patch, f"t*h*w={t * h * w} > P={max_num_patch}"
 
-        num_patch = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).to(
-            torch.long
-        )  # (N,)
+        segment_lengths = grid_thw.prod(dim=-1)
+        total_tokens = pixel_values.shape[0]
+        expected_tokens = sum(t * h * w for t, h, w in grids)
+        if total_tokens != expected_tokens:
+            raise ValueError(
+                f"pixel_values contains {total_tokens} patches but grid_thw "
+                f"describes {expected_tokens}."
+            )
 
-        learned_pos, rope_cache = self.compute_position_embeddings(grids, max_num_patch)
+        learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = self.patch_embed(pixel_values) + learned_pos
 
-        mask_mod = get_vision_block_mask_mod(num_patch)
+        # BlockMask creation and use in FlexAttention are blackboxed from
+        # typechecking.
         with spmd.no_typecheck():
-            attention_mask = compiled_create_block_mask(
-                mask_mod,
-                num_vision,
-                None,
-                max_num_patch,
-                max_num_patch,
-                device=x.device,
+            attention_mask = create_block_diagonal_mask(
+                segment_lengths,
+                total_tokens,
+                x.device,
             )
 
         for block in self.layers.values():
@@ -479,3 +467,25 @@ class KimiK25VisionEncoder(Module):
         # pyrefly: ignore [bad-argument-type]
         merged = _tpool_patch_merger(x, grids, self.merge_kernel_size)
         return self.projector(merged)
+
+
+class KimiK25VisionEncoder(MoonViTEncoder):
+    """MoonViT3d vision tower + multimodal projector for Kimi K2.5."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MoonViTEncoder.Config):
+        dim: int = 1152
+        num_layers: int = 27
+        num_heads: int = 16
+
+        patch_size: int = 14
+        in_channels: int = 3
+        merge_kernel_size: list[int] = field(default_factory=lambda: [2, 2])
+        text_hidden_size: int = 7168
+
+        init_pos_emb_height: int = 64
+        init_pos_emb_width: int = 64
+        interpolation_mode: str = "bicubic"
+
+        final_norm: LayerNorm.Config  # pyrefly: ignore [bad-override]
+        projector: VisionProjector.Config  # pyrefly: ignore [bad-override]

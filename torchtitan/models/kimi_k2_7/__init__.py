@@ -234,7 +234,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -276,14 +276,14 @@ def _moonlight_16b_a3b_config(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
     rope_theta: float,
-    max_seq_len: int,
+    max_context_length: int,
     vision_encoder: "KimiK25VisionEncoder.Config | None" = None,
 ) -> KimiK25Model.Config:
     """Shared Moonshot 16B-A3B DeepSeekV3 text tower (MLA + sigmoid-routed MoE).
 
     Used by both Moonlight (text-only) and Kimi-VL (with a vision encoder): they
     share the architecture (no q-LoRA, no RoPE scaling, 64 experts top-6); only
-    the RoPE ``theta`` / ``max_seq_len`` and the vision tower differ.
+    the RoPE ``theta`` / ``max_context_length`` and the vision tower differ.
     """
     dim = 2048
     vocab_size = 163840
@@ -311,7 +311,11 @@ def _moonlight_16b_a3b_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=ComplexRoPE.Config(dim=64, max_seq_len=max_seq_len, theta=rope_theta),
+        rope=ComplexRoPE.Config(
+            dim=64,
+            max_context_length=max_context_length,
+            theta=rope_theta,
+        ),
     )
     return KimiK25Model.Config(
         vocab_size=vocab_size,
@@ -341,7 +345,7 @@ def _moonlight_16b_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=50000.0,
-        max_seq_len=8192,
+        max_context_length=8192,
         vision_encoder=None,
     )
 
@@ -362,7 +366,7 @@ def _kimi_vl_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=800000.0,
-        max_seq_len=131072,
+        max_context_length=131072,
         vision_encoder=_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
@@ -428,7 +432,7 @@ def _kimi_k2_5(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=262144,
+            max_context_length=262144,
             theta=50000.0,
             scaling="yarn",
             rope_factor=64.0,
