@@ -6,7 +6,7 @@
 
 """Shared model-agnostic ViT building blocks for VLM vision encoders: a
 block-diagonal FlexAttention mask helper and the pre-norm transformer block
-(attention + MLP) over a padded ``(N, P, D)`` batch.
+(attention + MLP) over token-major visual patches.
 
 RoPE differs per model, so each encoder passes it through the block to the
 attention as two per-forward args: ``rope_cache`` (a tensor, so config-based
@@ -14,8 +14,7 @@ sharding can DTensor-wrap it before it meets the head-sharded q/k) and
 ``rope_apply`` (a pass-through callable ``(q, k, rope_cache) -> (q, k)``).
 
 Shape suffixes:
-- N = num visual items
-- P = max patches per item (padded)
+- T = packed visual tokens
 - D = vision dim
 - H = num heads
 - Dh = head dim
@@ -29,7 +28,7 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention, local_head_split
-from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
@@ -40,20 +39,31 @@ RopeApply = Callable[
 ]
 
 
-def get_vision_block_mask_mod(num_patches: torch.Tensor) -> Callable:
-    """Block-diagonal mask: each visual item attends only to its own patches.
-
-    Args:
-        num_patches: (N,) real (non-padding) patch count per visual item (N is
-            the number of visual items, i.e. images/videos in the batch).
-    """
+def create_block_diagonal_mask(
+    segment_lengths: torch.Tensor,
+    total_tokens: int,
+    device: torch.device,
+) -> BlockMask:
+    """Create a FlexAttention mask over contiguous packed segments."""
+    segment_ids = torch.repeat_interleave(
+        torch.arange(segment_lengths.shape[0], device=device, dtype=torch.int32),
+        segment_lengths.to(device=device, dtype=torch.int32),
+        # Avoid reading segment_lengths.sum() back to the host to size the
+        # output; the packed token count is already available from its shape.
+        output_size=total_tokens,
+    )
 
     def mask_mod(b, h, q_idx, kv_idx):
-        valid_q = q_idx < num_patches[b]
-        valid_kv = kv_idx < num_patches[b]
-        return valid_q & valid_kv
+        return segment_ids[q_idx] == segment_ids[kv_idx]
 
-    return mask_mod
+    return compiled_create_block_mask(
+        mask_mod,
+        1,
+        None,
+        total_tokens,
+        total_tokens,
+        device=device,
+    )
 
 
 class VisionMLP(Module):
@@ -78,7 +88,7 @@ class VisionMLP(Module):
 
 
 class VisionAttention(Module):
-    """Multi-head self-attention with FlexAttention over a padded batch.
+    """Multi-head self-attention with FlexAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
     applied via the injected ``rope_apply`` callable so this class is reused
@@ -118,21 +128,21 @@ class VisionAttention(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        N, P, _ = x.shape
+        num_tokens = x.shape[0]
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_NPHDh = local_head_split(self.wq(x), self.head_dim)
-        k_NPHDh = local_head_split(self.wk(x), self.head_dim)
-        v_NPHDh = local_head_split(self.wv(x), self.head_dim)
+        q_THDh = local_head_split(self.wq(x), self.head_dim)
+        k_THDh = local_head_split(self.wk(x), self.head_dim)
+        v_THDh = local_head_split(self.wv(x), self.head_dim)
 
-        q_NPHDh, k_NPHDh = rope_apply(q_NPHDh, k_NPHDh, rope_cache)
+        q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
-        out_NPHDh = self.flex_attention(
-            q_NPHDh, k_NPHDh, v_NPHDh, attention_masks=attention_mask
+        out_THDh = self.flex_attention(
+            q_THDh, k_THDh, v_THDh, attention_masks=attention_mask
         )
-        out_NPD = out_NPHDh.reshape(N, P, -1)
-        return self.proj(out_NPD)
+        out_TD = out_THDh.reshape(num_tokens, -1)
+        return self.proj(out_TD)
 
 
 class VisionTransformerBlock(Module):
@@ -140,8 +150,9 @@ class VisionTransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        norm1: LayerNorm.Config
-        norm2: LayerNorm.Config
+        # MoonViT normalizes with RMSNorm; Qwen3.5 and Muse Glimmer use LayerNorm.
+        norm1: LayerNorm.Config | RMSNorm.Config
+        norm2: LayerNorm.Config | RMSNorm.Config
         attn: VisionAttention.Config
         mlp: VisionMLP.Config
 

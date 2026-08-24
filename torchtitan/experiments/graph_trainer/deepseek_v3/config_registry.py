@@ -104,6 +104,7 @@ def graph_trainer_deepseek_v3_16b_minimal_async_ep() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config = graph_trainer_deepseek_v3_16b()
+    config.parallelism.context_parallel_load_balancer = "headtail"
     config.model_spec = model_registry("16B", attn_backend="sdpa")
     return config
 

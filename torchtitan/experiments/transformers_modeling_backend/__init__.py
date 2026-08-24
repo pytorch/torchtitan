@@ -43,7 +43,7 @@ class TitanModelConfig:
     # TorchTitan-only fields with no HF equivalent: they don't override anything
     # from the HF config, so they keep concrete defaults. (multiple_of and
     # ffn_dim_multiplier are only used when deriving FFN size from an explicitly
-    # overridden dim; max_seq_len is set from training.seq_len.)
+    # overridden dim; max_seq_len is set from training.max_context_length.)
     multiple_of: int = 256
     ffn_dim_multiplier: float | None = None
     max_seq_len: int = 2048

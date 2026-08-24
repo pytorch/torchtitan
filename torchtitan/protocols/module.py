@@ -310,9 +310,12 @@ class Module(nn.Module, Configurable):
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
 
+        requires_grad = tensor.requires_grad
         tensor = spmd_distribute_tensor(tensor, mesh, layout)
         if is_param:
-            self.register_parameter(name, nn.Parameter(tensor))
+            self.register_parameter(
+                name, nn.Parameter(tensor, requires_grad=requires_grad)
+            )
             registered = self._parameters[name]
         else:
             persistent = name not in self._non_persistent_buffers_set
@@ -589,12 +592,6 @@ class Module(nn.Module, Configurable):
             mesh = parallel_dims.resolve_shared_mesh([src_spmd_layout, dst_spmd_layout])
             if mesh is None:
                 continue
-
-            if (
-                not isinstance(value, DTensor)
-                and parallel_dims.spmd_backend == "full_dtensor"
-            ):
-                raise ValueError("Got a plain Tensor under the full_dtensor mode.")
 
             if not isinstance(value, DTensor) and src_spmd_layout is not None:
                 layout = resolve_placements(src_spmd_layout, mesh)
