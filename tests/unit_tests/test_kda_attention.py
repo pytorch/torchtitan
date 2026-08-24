@@ -26,7 +26,6 @@ _HAS_BLACKWELL = (
     and torch.cuda.is_available()
     and torch.cuda.get_device_capability() in {(10, 0), (10, 3)}
 )
-_HAS_FLA = importlib.util.find_spec("fla") is not None
 
 
 def _kda_config(*, backend: KDABackend) -> KDA.Config:
@@ -179,7 +178,10 @@ class TestKDA(unittest.TestCase):
                 atol=5e-2,
             )
 
-    @unittest.skipUnless(_HAS_FLA, "FLA is required for fallback parity")
+    @unittest.skipUnless(
+        importlib.util.find_spec("fla") is not None,
+        "FLA is required for fallback parity",
+    )
     def test_attention_gym_and_fla_backends_agree(self):
         attention_gym = self._make_kda(backend=KDABackend.ATTN_GYM)
         fla = self._make_kda(backend=KDABackend.FLA)
@@ -231,7 +233,7 @@ class TestKDA(unittest.TestCase):
         self.assertEqual(masks.cu_seq_q_host, (0, 37, 101, 192))
 
         backends = [KDABackend.ATTN_GYM, KDABackend.NAIVE]
-        if _HAS_FLA:
+        if importlib.util.find_spec("fla") is not None:
             backends.append(KDABackend.FLA)
         for backend in backends:
             model = self._make_kda(backend=backend)
