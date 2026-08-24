@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.common.attention.attention import (
+from torchtitan.models.common.attention import (
     AttentionMasksType,
     VarlenMetadata,
 )
