@@ -77,7 +77,7 @@ def _kda_config(*, backend: KDABackend) -> KDA.Config:
 
 class TestKDASharding(unittest.TestCase):
     def test_folded_token_tp_contracts(self):
-        config = _kda_config(backend="reference")
+        config = _kda_config(backend=KDABackend.NAIVE)
         input_layout = dense_sequence_parallel_placement()
         set_kda_sharding(
             config,
@@ -126,6 +126,7 @@ class TestKDASharding(unittest.TestCase):
             11,
         )
 
+
 @unittest.skipUnless(
     _HAS_BLACKWELL, "KDA requires Attention Gym and CUDA capability 10.0 or newer"
 )
@@ -147,8 +148,8 @@ class TestKDA(unittest.TestCase):
         return torch.randn(tokens, 32, device="cuda", dtype=torch.bfloat16)
 
     def test_fused_and_reference_backends_agree(self):
-        fused = self._make_kda(backend="fused")
-        reference = self._make_kda(backend="reference")
+        fused = self._make_kda(backend=KDABackend.ATTN_GYM)
+        reference = self._make_kda(backend=KDABackend.NAIVE)
         reference.load_state_dict(fused.state_dict())
 
         x_fused_TD = self._inputs(seed=0).requires_grad_()
@@ -184,8 +185,8 @@ class TestKDA(unittest.TestCase):
 
     @unittest.skipUnless(_HAS_FLA, "FLA is required for fallback parity")
     def test_fused_and_fla_backends_agree(self):
-        fused = self._make_kda(backend="fused")
-        fla = self._make_kda(backend="fla")
+        fused = self._make_kda(backend=KDABackend.ATTN_GYM)
+        fla = self._make_kda(backend=KDABackend.FLA)
         fla.load_state_dict(fused.state_dict())
 
         x_fused_TD = self._inputs(seed=4).requires_grad_()
@@ -233,9 +234,9 @@ class TestKDA(unittest.TestCase):
         )
         self.assertEqual(masks.cu_seq_q_host, (0, 37, 101, 192))
 
-        backends: list[KDABackend] = ["fused", "reference"]
+        backends = [KDABackend.ATTN_GYM, KDABackend.NAIVE]
         if _HAS_FLA:
-            backends.append("fla")
+            backends.append(KDABackend.FLA)
         for backend in backends:
             model = self._make_kda(backend=backend)
             packed_TD = model(x_TD, masks)
