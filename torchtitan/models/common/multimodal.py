@@ -76,11 +76,15 @@ def get_vision_positions(
             f"exactly one placeholder run."
         )
 
+    # Convert each metadata tensor once. Per-item ``.item()`` calls would
+    # synchronize CUDA once per scalar.
+    region_starts_list = region_starts.tolist()
     run_lengths = (region_ends - region_starts + 1).tolist()
+    num_vision_tokens_per_item_list = num_vision_tokens_per_item.tolist()
     positions: list[tuple[int, int, int]] = []
     for i in range(num_items):
-        start = int(region_starts[i].item())
-        n_tokens = int(num_vision_tokens_per_item[i].item())
+        start = int(region_starts_list[i])
+        n_tokens = int(num_vision_tokens_per_item_list[i])
         if run_lengths[i] != n_tokens:
             raise ValueError(
                 f"Multimodal misalignment: placeholder run {i} spans "

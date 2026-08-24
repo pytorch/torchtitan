@@ -6,6 +6,7 @@
 import pytest
 import spmd_types as spmd
 import torch
+import torch.distributed.checkpoint as dcp
 
 from torchtitan.components.data import (
     FirstFitPackingConfig,
@@ -52,6 +53,16 @@ def test_float8_applied_by_model_registry():
         if isinstance(lc, Float8Linear.Config)
     ]
     assert len(converted) > 0
+    lora_converted = {
+        fqn
+        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        if hasattr(lc, "rank") and hasattr(lc, "alpha")
+    }
+    assert lora_converted == {
+        f"layers.{layer}.attention.{projection}"
+        for layer in range(6)
+        for projection in ("qkv_linear.wqkv", "wo")
+    }
 
 
 @pytest.mark.parametrize(
@@ -365,3 +376,49 @@ def test_quantized_grouped_experts():
     assert issubclass(float8_cls, GptOssGroupedExperts)
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
+
+
+@pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
+def test_float8_grouped_experts_checkpoint_state_uses_plain_tensors(parent_cls):
+    pytest.importorskip("torchao")
+    stock = parent_cls.Config(dim=16, hidden_dim=32, num_experts=2).build()
+    float8_cls = _get_float8_grouped_experts_cls(parent_cls)
+    module = float8_cls.Config(dim=16, hidden_dim=32, num_experts=2).build()
+
+    assert all(type(param) is torch.nn.Parameter for param in module.parameters())
+    stock_state = stock.state_dict()
+    float8_state = module.state_dict()
+    assert float8_state.keys() == stock_state.keys()
+    for key, value in float8_state.items():
+        assert type(value) is torch.Tensor
+        assert value.shape == stock_state[key].shape
+        assert value.dtype == stock_state[key].dtype
+
+
+@pytest.mark.filterwarnings("ignore:torch.distributed is disabled")
+def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
+    pytest.importorskip("torchao")
+    float8_cls = _get_float8_grouped_experts_cls(GroupedExperts)
+    config = float8_cls.Config(dim=16, hidden_dim=32, num_experts=2)
+    source = config.build()
+    target = config.build()
+
+    with torch.no_grad():
+        for value, parameter in enumerate(source.parameters(), start=1):
+            parameter.fill_(value)
+        for parameter in target.parameters():
+            parameter.zero_()
+
+    saved_safe_globals = torch.serialization.get_safe_globals()
+    try:
+        torch.serialization.clear_safe_globals()
+        dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+    finally:
+        torch.serialization.clear_safe_globals()
+        torch.serialization.add_safe_globals(saved_safe_globals)
+
+    for source_parameter, target_parameter in zip(
+        source.parameters(), target.parameters(), strict=True
+    ):
+        torch.testing.assert_close(target_parameter, source_parameter)

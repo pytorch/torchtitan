@@ -175,6 +175,34 @@ class TestRoPEPositionBoundsCosSin(unittest.TestCase):
 
 
 class TestMRoPECache(unittest.TestCase):
+    def test_rejects_invalid_sections(self):
+        for sections, error in (
+            ([2, 1], "must have 3 entries"),
+            ([4, 3, -1], "must be non-negative"),
+            ([1, 1, 1], "must sum to dim // 2"),
+        ):
+            with self.subTest(sections=sections):
+                with self.assertRaisesRegex(ValueError, error):
+                    MRoPE.Config(
+                        dim=12,
+                        max_context_length=8,
+                        mrope_section=sections,
+                    ).build()
+
+    def test_rejects_invalid_position_width(self):
+        num_tokens, head_dim = 2, 12
+        rope = MRoPE.Config(
+            dim=head_dim,
+            max_context_length=8,
+            mrope_section=[2, 2, 2],
+        ).build()
+        x = torch.randn(num_tokens, 1, head_dim)
+
+        for width in (2, 4):
+            with self.subTest(width=width):
+                with self.assertRaisesRegex(ValueError, "must have shape"):
+                    rope(x, x, torch.zeros(num_tokens, width, dtype=torch.long))
+
     def test_forward_accepts_three_axis_positions(self):
         torch.manual_seed(42)
         num_tokens, n_heads = 6, 4
@@ -182,7 +210,7 @@ class TestMRoPECache(unittest.TestCase):
         rope = MRoPE.Config(
             dim=head_dim,
             max_context_length=8,
-            mrope_section=[2, 1, 1],
+            mrope_section=[2, 2, 2],
         ).build()
         # (tokens, 3): per-token [temporal, height, width] positions.
         position_ids = torch.tensor(

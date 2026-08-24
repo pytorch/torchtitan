@@ -27,7 +27,7 @@ import torch.nn.functional as F
 
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import _maybe_wrap_positions, ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
@@ -325,31 +325,26 @@ class VisionProjector(Module):
         return self.linear_2(x)
 
 
-class KimiK25VisionEncoder(Module):
-    """MoonViT3d vision tower + multimodal projector for Kimi K2.5."""
+class MoonViTEncoder(Module):
+    """MoonViT3d vision tower + multimodal projector."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        dim: int = 1152
-        num_layers: int = 27
-        num_heads: int = 16
-
-        patch_size: int = 14
-        in_channels: int = 3
-        merge_kernel_size: list[int] = field(default_factory=lambda: [2, 2])
-        text_hidden_size: int = 7168
+        dim: int
+        num_layers: int
+        merge_kernel_size: list[int]
 
         # Learnable 2D spatial position table, shape (height, width, dim).
-        init_pos_emb_height: int = 64
-        init_pos_emb_width: int = 64
-        interpolation_mode: str = "bicubic"
+        init_pos_emb_height: int
+        init_pos_emb_width: int
+        interpolation_mode: str
 
         # Sub-modules.
         patch_embed_proj: Linear.Config
         rotary_pos_emb: VisionRotaryEmbedding2D.Config
         block: VisionTransformerBlock.Config
-        final_norm: LayerNorm.Config
-        projector: VisionProjector.Config
+        final_norm: LayerNorm.Config | RMSNorm.Config
+        projector: Module.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -472,3 +467,25 @@ class KimiK25VisionEncoder(Module):
         # pyrefly: ignore [bad-argument-type]
         merged = _tpool_patch_merger(x, grids, self.merge_kernel_size)
         return self.projector(merged)
+
+
+class KimiK25VisionEncoder(MoonViTEncoder):
+    """MoonViT3d vision tower + multimodal projector for Kimi K2.5."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MoonViTEncoder.Config):
+        dim: int = 1152
+        num_layers: int = 27
+        num_heads: int = 16
+
+        patch_size: int = 14
+        in_channels: int = 3
+        merge_kernel_size: list[int] = field(default_factory=lambda: [2, 2])
+        text_hidden_size: int = 7168
+
+        init_pos_emb_height: int = 64
+        init_pos_emb_width: int = 64
+        interpolation_mode: str = "bicubic"
+
+        final_norm: LayerNorm.Config  # pyrefly: ignore [bad-override]
+        projector: VisionProjector.Config  # pyrefly: ignore [bad-override]
