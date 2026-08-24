@@ -29,7 +29,7 @@ import torch.distributed as dist
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.rl.actors.generator import (

@@ -19,11 +19,20 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
-from torch.distributed.tensor import DTensor
-from torchtitan.components.checkpoint import CheckpointManager
+from monarch.actor import (
+    Actor,
+    Channel,
+    concurrent_endpoint,
+    current_rank,
+    Port,
+    PortReceiver,
+)
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.parallel_dims import unfold_dp_axes
+from torchtitan.distributed.spmd_types import (
+    dtensor_to_plain_tensor_state_dict,
+    plain_tensor_to_dtensor_state_dict,
+)
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
@@ -40,14 +49,9 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import (
-    FlexAttention,
-    FusedQKVLinear,
-    VarlenAttention,
-)
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.sharding import resolve_placements, SpmdLayout
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -844,9 +848,9 @@ class VLLMGenerator(Actor, Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        inner_attn = model_spec.model.layers[0].attention.inner_attention
+        attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
-            inner_attn,
+            attention_backend,
             (VarlenAttention.Config, FlexAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
@@ -897,14 +901,14 @@ class VLLMGenerator(Actor, Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attn, FlexAttention.Config)
+                    if isinstance(attention_backend, FlexAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
+        engine_kwargs["max_model_len"] = model_spec.model.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
@@ -990,12 +994,12 @@ class VLLMGenerator(Actor, Configurable):
         """
         return self._engine.model_executor.driver_worker.get_model()
 
-    @endpoint
+    @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
-    @endpoint
+    @concurrent_endpoint
     async def start_engine_loop(self) -> None:
         """Start the background engine loop on every rank (one-time, idempotent)."""
         if self._engine_loop_task is None:
@@ -1010,7 +1014,7 @@ class VLLMGenerator(Actor, Configurable):
                 f"before {endpoint_name}"
             )
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("generate")
     async def generate(
         self,
@@ -1242,7 +1246,7 @@ class VLLMGenerator(Actor, Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-    @endpoint
+    @concurrent_endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
@@ -1326,82 +1330,11 @@ class VLLMGenerator(Actor, Configurable):
         state-dict path, then put the local tensors back before load_state_dict.
         """
 
-        def _fqn_to_spmd_layout(model: torch.nn.Module) -> dict[str, SpmdLayout]:
-            layouts: dict[str, SpmdLayout] = {}
-
-            for module_fqn, module in model.named_modules():
-                sharding_config = getattr(module, "_sharding_config", None)
-                if sharding_config is not None:
-                    for state_name, layout in sharding_config.state_shardings.items():
-                        fqn = f"{module_fqn}.{state_name}" if module_fqn else state_name
-                        layouts[fqn] = layout
-
-                    # FusedSwiGLU keeps its sharding on the fused w13 parameter,
-                    # but its state dict exposes split w1.weight/w3.weight
-                    # (_split_w13_on_save). Mirror w13's layout onto the split
-                    # keys -- slicing the gate/up dim of an S(0) w13 yields S(0)
-                    # w1/w3, which is what the DTensor path gets implicitly.
-                    w13_layout = sharding_config.state_shardings.get("w13")
-                    if w13_layout is not None:
-                        for proj_name in ("w1", "w3"):
-                            layouts[f"{module_fqn}.{proj_name}.weight"] = w13_layout
-
-                if isinstance(module, FusedQKVLinear):
-                    # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
-                    # the sharding layout lives on the fused wqkv parameter.
-                    # TODO: This assumes fused and split QKV layouts stay
-                    # equivalent. The load hook all-gathers anyway, so replace
-                    # this with a less fragile fused-QKV state-dict path.
-                    wqkv_sharding_config = getattr(
-                        module.wqkv, "_sharding_config", None
-                    )
-                    if wqkv_sharding_config is None:
-                        continue
-                    for (
-                        state_name,
-                        layout,
-                    ) in wqkv_sharding_config.state_shardings.items():
-                        for proj_name in ("wq", "wk", "wv"):
-                            layouts[f"{module_fqn}.{proj_name}.{state_name}"] = layout
-
-            return layouts
-
-        layouts = _fqn_to_spmd_layout(model.model)
-
-        dtensor_model_sd = dict(model_sd)
-        with torch.no_grad():
-            for name, target in model_sd.items():
-                if not isinstance(target, torch.Tensor):
-                    continue
-
-                layout = layouts.get(name)
-                if layout is None:
-                    if name.endswith(
-                        (
-                            ".vllm_attn._k_scale",
-                            ".vllm_attn._prob_scale",
-                            ".vllm_attn._q_scale",
-                            ".vllm_attn._v_scale",
-                        )
-                    ):
-                        # vLLM attention scale buffers are backend-owned plain
-                        # replicated state with no TorchTitan ShardingConfig.
-                        continue
-                    raise KeyError(f"{name} is missing SPMD layout metadata")
-
-                if (
-                    mesh := model.parallel_dims.get_activated_mesh(
-                        unfold_dp_axes(layout.axes())
-                    )
-                ) is None:
-                    continue
-
-                dtensor_model_sd[name] = DTensor.from_local(
-                    target,
-                    mesh,
-                    resolve_placements(layout, mesh),
-                    run_check=False,
-                )
+        dtensor_model_sd = plain_tensor_to_dtensor_state_dict(
+            model_sd,
+            state_dict_layouts=model.get_state_dict_layouts(),
+            parallel_dims=model.parallel_dims,
+        )
 
         await ts.get_state_dict(
             "model_state_dict",
@@ -1410,12 +1343,9 @@ class VLLMGenerator(Actor, Configurable):
             direct_rdma=False,
         )
 
-        with torch.no_grad():
-            for name, value in dtensor_model_sd.items():
-                if isinstance(value, DTensor):
-                    model_sd[name] = value.to_local()
+        model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 
-    @endpoint
+    @concurrent_endpoint
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.
 

@@ -63,7 +63,7 @@ class BatchConfig:
 
 class Batcher(Configurable):
     """Accumulate `num_prompts_per_train_step` groups and packs
-    `[num_microbatches][dp_degree]` `TrainingMicrobatch`es of `[local_batch_size, seq_len]`.
+    `[num_microbatches][dp_degree]` flat `TrainingMicrobatch`es.
 
     Example:
         # num_prompts_per_train_step=2, dp_degree=2, local_batch_size=2
@@ -71,9 +71,10 @@ class Batcher(Configurable):
         batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
             num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
-        _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
-        batch = batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
-        # batch.microbatches: [num_microbatches][2 ranks]; each TrainingMicrobatch.token_ids: [2 rows, 128 tokens]
+        pending, _ = batcher.add_training_samples(training_sample_group=group0)
+        batch, _ = batcher.add_training_samples(training_sample_group=group1)
+        # pending is None; batch.microbatches: [num_microbatches][2 ranks]; each
+        # TrainingMicrobatch.token_ids: [2 * 128 tokens]
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -102,16 +103,16 @@ class Batcher(Configurable):
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
-    ) -> TrainingBatch | None:
-        """Add one rollout group and pack one train step once enough trainable groups are ready.
+    ) -> tuple[TrainingBatch | None, bool]:
+        """Add one group and report whether any samples survive batcher filtering.
 
         Args:
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
             batcher = Batcher.Config().build(num_prompts_per_train_step=2, dp_degree=1, pad_id=0)
-            batcher.add_training_samples(training_sample_group=group0)  # -> None
-            batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
+            batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
+            batcher.add_training_samples(training_sample_group=group1)  # -> (TrainingBatch, True)
         """
         # Drop samples longer than seq_len: can't fill a row
         samples = training_sample_group.training_samples
@@ -136,13 +137,14 @@ class Batcher(Configurable):
                 ],
             )
 
+        group_is_trainable = bool(training_sample_group.training_samples)
         self._groups_for_next_batch.append(training_sample_group)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
         if num_trainable_groups < self._num_prompts_per_train_step:
-            return None  # accumulate until one full batch is ready
-        return self._pack_one_training_batch()
+            return None, group_is_trainable  # accumulate until one full batch is ready
+        return self._pack_one_training_batch(), group_is_trainable
 
     def _pack_one_training_batch(self) -> TrainingBatch:
         """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""
@@ -155,13 +157,31 @@ class Batcher(Configurable):
         # Next-fit all taken training_samples into rows.
         rows = self._assign_training_samples_to_rows(training_samples)
         packed_rows = [self._pack_training_sample_row(row) for row in rows]
+        num_global_valid_tokens = sum(
+            int(
+                (row["loss_mask"] & torch.isfinite(row["generator_logprobs"]))
+                .sum()
+                .item()
+            )
+            for row in packed_rows
+        )
+        num_response_tokens = sum(
+            int(row["loss_mask"].sum().item()) for row in packed_rows
+        )
         return TrainingBatch(
             microbatches=self._build_microbatch_grid(packed_rows),
-            num_global_valid_tokens=sum(
-                int(row["loss_mask"].sum().item()) for row in packed_rows
-            ),
+            num_global_valid_tokens=num_global_valid_tokens,
             metrics=[
                 *metrics,
+                # Keep this response-level metric exact without adding a second
+                # token-count field to TrainingBatch.
+                m.Metric(
+                    "loss/generator_logprob_nan_frac",
+                    m.NoReduce(
+                        (num_response_tokens - num_global_valid_tokens)
+                        / max(num_response_tokens, 1)
+                    ),
+                ),
                 *self._packing_metrics(
                     packed_rows,
                     training_samples,
@@ -291,7 +311,7 @@ class Batcher(Configurable):
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality (images, ...).
     def _pack_training_sample_row(self, training_samples: list[TrainingSample]) -> dict:
-        """Concatenate one row's samples into a `[1, seq_len]` padded row.
+        """Concatenate one row's samples into a `[seq_len]` padded token chunk.
         - Labels and logits are shifted
         -`positions` restart at 0 per sample
         -`seq_lens` keeps per-sample lengths
@@ -345,11 +365,8 @@ class Batcher(Configurable):
                 row[key].extend([pad_values[key]] * pad_len)
             positions.extend(range(pad_len))
 
-        # Stack lists into [1, L] tensors.
-        packed = {
-            key: torch.tensor(row[key], dtype=_DTYPES[key]).unsqueeze(0) for key in keys
-        }
-        packed["positions"] = torch.tensor(positions, dtype=torch.long).unsqueeze(0)
+        packed = {key: torch.tensor(row[key], dtype=_DTYPES[key]) for key in keys}
+        packed["positions"] = torch.tensor(positions, dtype=torch.long)
         packed["seq_lens"] = seq_lens
         return packed
 
@@ -358,7 +375,7 @@ class Batcher(Configurable):
     # needs one.
     @staticmethod
     def collate(rows: list[dict]) -> TrainingMicrobatch:
-        """Concatenate packed rows into a single ``[B, L]`` TrainingMicrobatch."""
+        """Concatenate packed rows into a single flat microbatch."""
         return TrainingMicrobatch(
             token_ids=torch.cat([row["input_ids"] for row in rows]),
             labels=torch.cat([row["labels"] for row in rows]),

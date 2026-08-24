@@ -34,7 +34,7 @@ from torchtitan.tools.logging import logger
 
 def _chunk_dim_index(mode: EpOverlapChunkDim) -> int:
     """Map logical EP chunk mode to the tensor dimension used by eager wrappers."""
-    return 0 if mode == "batch" else 1
+    return 0
 
 
 def _cat_chunked_outputs(outputs: list[Any], dim: int, root_fqn: str) -> Any:
@@ -98,11 +98,11 @@ def _describe_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
 
 def _expected_contract(root_kind: str) -> str:
     if root_kind == "moe":
-        return "MoE.forward(x_BLD: Tensor[B, L, D])"
+        return "MoE.forward(x: Tensor[num_tokens, D])"
     return (
-        "TransformerBlock.forward(x: Tensor[B, L, D], "
+        "TransformerBlock.forward(x: Tensor[num_tokens, D], "
         "attention_masks: BlockMask|dict[BlockMask]|None, "
-        "positions: Tensor[B, L]|None)"
+        "positions: Tensor[num_tokens]|None)"
     )
 
 
@@ -193,8 +193,7 @@ class _EagerChunkedForward:
                     "chunked_region_role": "split_boundary",
                 }
             )(torch.split)
-            # MoE blocks flatten activations with view(); seq chunks are
-            # non-contiguous views, so materialize the chunk boundary.
+            # Materialize the chunk boundary for consumers that flatten with view().
             return [
                 chunk.contiguous()
                 for chunk in split(value, [chunk_extent, chunk_extent], dim=self.dim)
@@ -210,7 +209,7 @@ class _EagerChunkedForward:
                     kwargs=kwargs,
                     reason="expected exactly one positional activation tensor",
                 )
-            return [split_tensor(args[0], logical_name="x_BLD")], {}
+            return [split_tensor(args[0], logical_name="x")], {}
 
         def split_transformer_block_inputs() -> tuple[
             list[list[Any]], dict[str, list[Any]]
