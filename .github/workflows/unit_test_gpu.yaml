@@ -1,0 +1,95 @@
+name: GPU Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  pull_request:
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  workflow_dispatch:
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix-1gpu:
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: mt-l-x86aavx2-29-113-a10g
+      gpu-arch: cuda
+
+  gpu-unit-tests:
+    name: 1 GPU Unit Tests
+    needs: set-matrix-1gpu
+    if: ${{ needs.set-matrix-1gpu.outputs.matrix != '' && fromJSON(needs.set-matrix-1gpu.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-1gpu.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix-1gpu.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      timeout: 30
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install --force-reinstall --pre \
+          torch torchvision --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+
+        pytest tests/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv
+
+  set-matrix-multi-gpu:
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: cuda
+
+  multi-gpu-unit-tests:
+    name: Multi-GPU Unit Tests
+    needs: set-matrix-multi-gpu
+    if: ${{ needs.set-matrix-multi-gpu.outputs.matrix != '' && fromJSON(needs.set-matrix-multi-gpu.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-multi-gpu.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      timeout: 30
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install --force-reinstall --pre \
+          torch torchvision --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+
+        pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv

@@ -35,7 +35,7 @@ from torchtitan.models.common.decoder import Decoder
 
 
 # Path to the test tokenizer and fixture data
-_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "assets")
 _TOKENIZER_PATH = os.path.join(_ASSETS_DIR, "tokenizer")
 _DATA_PATH = os.path.join(_ASSETS_DIR, "sft_test", "data.json")
 

@@ -518,7 +518,7 @@ RoPE is an ordinary component override.
 | `torchtitan/protocols/model_spec.py` | `ModelSpec.traverse` exposes the nested model config to the traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
 | `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
-| `tests/unit_tests/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
+| `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to any model's `config_registry.py`
 or `__init__.py` — that is the point of the design.
