@@ -24,13 +24,8 @@ python3 -m torchtitan.experiments.rl.train \
 
 import asyncio
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
-
-# must run before torch import. Set it as early as possible to avoid other
-# imports transitively importing torch.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 

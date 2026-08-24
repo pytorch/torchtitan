@@ -125,12 +125,12 @@ class _VisionPosEmbed(Module):
         ys = torch.linspace(-1 + inv_h, 1 - inv_h, grid_h, device=device, dtype=dtype)
         xs = torch.linspace(-1 + inv_w, 1 - inv_w, grid_w, device=device, dtype=dtype)
         yy, xx = torch.meshgrid(ys, xs, indexing="ij")
-        pos_xy = torch.stack((xx, yy), dim=-1).reshape(
-            1, 1, grid_h * grid_w, 2
-        )
+        pos_xy = torch.stack((xx, yy), dim=-1).reshape(1, 1, grid_h * grid_w, 2)
         pos_xy = _annotate_vision_activation_type(pos_xy)
         sampled = F.grid_sample(pos_emb, pos_xy, mode="bilinear", align_corners=False)
         return sampled[0, :, 0, :].T  # [grid_h*grid_w, latent_dim]
+
+
 class _VisionTokenPermute(Module):
     """Advanced-index a token sequence by a permutation: ``x[index]``.
 
