@@ -8,13 +8,14 @@
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
 and read by ``Module.parallelize(parallel_dims)``. All placements use
-``spmd.SpmdType`` so they are self-documenting and support multi-dimensional
+``SpmdType`` so they are self-documenting and support multi-dimensional
 meshes.
 """
 
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
@@ -52,7 +53,7 @@ class LocalMapConfig:
             input-gradient placements or for non-tensor args.
     """
 
-    in_grad_placements: tuple[spmd.SpmdType | None, ...] | None
+    in_grad_placements: tuple[SpmdType | None, ...] | None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -62,7 +63,7 @@ class LocalMapConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``spmd.SpmdType`` keyed by mesh axis names. At
+    All placements use ``SpmdType`` keyed by mesh axis names. At
     ``parallelize()`` time, SPMD types are resolved to
     ``tuple[Placement, ...]`` in mesh axis order.
 
@@ -93,7 +94,7 @@ class ShardingConfig:
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
-            ``spmd.SpmdType`` (single-output case) or a tuple (multi-
+            ``SpmdType`` (single-output case) or a tuple (multi-
             output case). ``None``
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
@@ -107,11 +108,11 @@ class ShardingConfig:
             ``in_grad_placements``.
     """
 
-    state_shardings: dict[str, spmd.SpmdType] = field(default_factory=dict)
-    in_src_shardings: dict[str, spmd.SpmdType] | None = None
-    in_dst_shardings: dict[str, spmd.SpmdType] | None = None
-    out_src_shardings: spmd.SpmdType | tuple[spmd.SpmdType, ...] | None = None
-    out_dst_shardings: spmd.SpmdType | None = None
+    state_shardings: dict[str, SpmdType] = field(default_factory=dict)
+    in_src_shardings: dict[str, SpmdType] | None = None
+    in_dst_shardings: dict[str, SpmdType] | None = None
+    out_src_shardings: SpmdType | tuple[SpmdType, ...] | None = None
+    out_dst_shardings: SpmdType | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
@@ -120,7 +121,7 @@ class ShardingConfig:
 
 
 def resolve_placements(
-    layout: spmd.SpmdType,
+    layout: SpmdType,
     mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
     """Resolve an SPMD type against a mesh in axis order.

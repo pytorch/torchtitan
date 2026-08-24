@@ -628,7 +628,7 @@ class TestFactoryMechanism:
         with mock.patch.dict(
             os.environ,
             {
-                "TITAN_STRUCT_LOGGER_HANDLERS": "tests.unit_tests.observability.test_structured_logging.fake_factory"
+                "TITAN_STRUCT_LOGGER_HANDLERS": "tests.unit_tests.cpu.observability.test_structured_logging.fake_factory"
             },
         ):
             # Patch importlib to load our fake factory
