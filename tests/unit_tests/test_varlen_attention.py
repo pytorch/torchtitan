@@ -14,6 +14,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
@@ -91,11 +92,11 @@ class TestPackedVarlenAttention(unittest.TestCase):
         )
         q_layout = (sharding.in_src_shardings or {})["q_TNH"]
         k_dst_layout = (sharding.in_dst_shardings or {})["k_TNH"]
-        axis_types = q_layout.per_axis_spmd_types()
+        axis_types = _per_axis_types(q_layout)
         self.assertEqual(axis_types[MeshAxisName.DP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.CP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.TP], spmd.S(1))
-        self.assertEqual(k_dst_layout.per_axis_spmd_types()[MeshAxisName.CP], spmd.R)
+        self.assertEqual(_per_axis_types(k_dst_layout)[MeshAxisName.CP], spmd.R)
 
     def test_out_transform_receives_tn_lse(self):
         num_tokens, num_heads, head_dim = 5, 2, 4

@@ -14,7 +14,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.flux.model.model import FluxModel
@@ -27,8 +27,8 @@ CP = MeshAxisName.CP
 def flux_activation_placement(
     *,
     cp: spmd.PerMeshAxisSpmdType,
-) -> SpmdLayout:
-    return SpmdLayout(
+) -> spmd.SpmdType:
+    return spmd.SpmdType(
         {
             DP: spmd.S(0),
             CP: cp,

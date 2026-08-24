@@ -21,7 +21,6 @@ from torchtitan.tools.utils import device_type
 __all__ = [
     "MeshAxisName",
     "ParallelDims",
-    "SpmdLayout",
     "layout_axes",
     "unfold_dp_axis",
     "unfold_dp_axes",
@@ -52,15 +51,16 @@ class MeshAxisName(StrEnum):
     EFSDP = "efsdp"
 
 
-SpmdLayout = spmd.SpmdType
-
-
-def layout_axes(layout: SpmdLayout) -> tuple[MeshAxisName, ...]:
+def layout_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
     """Return and validate the named mesh axes used by a sharding config."""
-    return tuple(
-        MeshAxisName(axis)  # pyrefly: ignore [bad-argument-type]
-        for axis in layout.local_type
-    )
+    axes = []
+    for axis in layout.local_type:
+        if not isinstance(axis, str):
+            raise TypeError(
+                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
+            )
+        axes.append(MeshAxisName(axis))
+    return tuple(axes)
 
 
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
@@ -525,7 +525,7 @@ class ParallelDims:
         return self.get_activated_mesh([axis for axis in axes_list if axis in in_band])
 
     def resolve_shared_mesh(
-        self, placements: Iterable["SpmdLayout | None"]
+        self, placements: Iterable[spmd.SpmdType | None]
     ) -> DeviceMesh | None:
         """Resolve the mesh shared by a list of SpmdLayouts.
 
@@ -578,12 +578,13 @@ class ParallelDims:
             ... )
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
-            dict_keys(['batch', 'loss', 'dp_replicate', 'tp', 'dp', 'dp_shard'])
+            dict_keys(['batch', 'loss', 'dp_replicate', 'tp', 'dp', 'dp_shard', 'fsdp'])
 
         Note:
             Under ``spmd_backend="partial_dtensor"`` the dense shard axis
-            appears as the pre-flattened ``'fsdp'`` instead of ``'dp'`` and
-            ``'dp_shard'``.
+            appears only as the pre-flattened ``'fsdp'``. The ``spmd_types``
+            backend exposes ``'dp'`` and ``'dp_shard'`` as well as ``'fsdp'``
+            for parameter storage.
         """
         if not self._single_axis_meshes:
             self.build_mesh()

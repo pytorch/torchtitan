@@ -65,6 +65,27 @@ class SaveDone:
     pass
 
 
+class _FilesystemCheckpointStorage:
+    """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
+
+    Local paths go through ``os``/``shutil`` and remote fsspec URIs through
+    fsspec, so DCP keeps reading and writing remote checkpoint folders exactly
+    as it did before.
+    """
+
+    def isdir(self, path: str) -> bool:
+        return filesystem.isdir(path)
+
+    def isfile(self, path: str) -> bool:
+        return filesystem.isfile(path)
+
+    def listdir(self, path: str) -> list[str]:
+        return filesystem.listdir(path)
+
+    def remove(self, path: str) -> None:
+        filesystem.rmtree(path)
+
+
 class CheckpointManager(BaseCheckpointManager):
     """This class manages the checkpointing logic for the TorchTitan trainer.
 
@@ -147,6 +168,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
+        self._storage = _FilesystemCheckpointStorage()
         self.state_dict_adapter = state_dict_adapter
 
         self.states = states
@@ -201,7 +223,7 @@ class CheckpointManager(BaseCheckpointManager):
             self.purge_queue: queue.Queue[str | None] = queue.Queue()
             self.purge_thread = threading.Thread(
                 target=purge_thread,
-                args=(self.purge_queue, filesystem.rmtree),
+                args=(self.purge_queue, self._storage.remove),
                 daemon=True,
             )
             self.purge_thread.start()
@@ -508,7 +530,7 @@ class CheckpointManager(BaseCheckpointManager):
         from_hf = False
         from_quantized = False
 
-        has_checkpoint_folder = filesystem.exists(self.folder)
+        has_checkpoint_folder = self._storage.isdir(self.folder)
         load_step = -1
         if has_checkpoint_folder:
             load_step = self._find_load_step() if step == -1 else step
@@ -534,7 +556,7 @@ class CheckpointManager(BaseCheckpointManager):
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
-                if not filesystem.isdir(checkpoint_id):
+                if not self._storage.isdir(checkpoint_id):
                     raise ValueError(
                         f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
                     )
@@ -549,7 +571,7 @@ class CheckpointManager(BaseCheckpointManager):
                     self.sd_adapter and self.sd_adapter.hf_assets_path
                 ), "from_hf=True requires sd_adapter and hf_assets_path."
                 checkpoint_id = self.sd_adapter.hf_assets_path
-                if not filesystem.isdir(checkpoint_id):
+                if not self._storage.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights "
                         "but the path is not valid. Either make sure hf_assets_path is "
@@ -574,7 +596,7 @@ class CheckpointManager(BaseCheckpointManager):
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
 
-            if not filesystem.isdir(checkpoint_id):
+            if not self._storage.isdir(checkpoint_id):
                 raise FileNotFoundError(
                     f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
@@ -676,21 +698,21 @@ class CheckpointManager(BaseCheckpointManager):
         """
 
         folder = folder or self.folder
-        if not filesystem.isdir(folder):
+        if not self._storage.isdir(folder):
             return -1
 
         pattern = r"step-(\d+)"
         valid_steps = []
 
-        for filename in filesystem.listdir(folder):
+        for filename in self._storage.listdir(folder):
             match = re.search(pattern, filename)
             if not match:
                 continue
 
             # A checkpoint is valid only if it contains core metadata
             checkpoint_path = filesystem.join(folder, filename)
-            is_dcp = filesystem.isfile(filesystem.join(checkpoint_path, ".metadata"))
-            is_hf = filesystem.isfile(
+            is_dcp = self._storage.isfile(filesystem.join(checkpoint_path, ".metadata"))
+            is_hf = self._storage.isfile(
                 filesystem.join(checkpoint_path, "model.safetensors.index.json")
             )
 
@@ -825,25 +847,12 @@ class CheckpointManager(BaseCheckpointManager):
 
         return False
 
-    def _should_purge(self) -> bool:
-        """Whether this rank should purge stale checkpoints.
-
-        Extracted so subclasses (e.g. TorchFTCheckpointManager) can add
-        additional guards (like participating_rank) without duplicating
-        the purge loop in _purge_stale_checkpoints.
-        """
-        return (
-            self.keep_latest_k > 0
-            and dist.get_rank() == 0
-            and filesystem.isdir(self.folder)
-        )
-
     def _purge_stale_checkpoints(self):
         """Remove older checkpoint directories from storage to maintain
         only the most recent 'k' copies."""
         if self._should_purge():
             discovered_checkpoints = []
-            for filename in filesystem.listdir(self.folder):
+            for filename in self._storage.listdir(self.folder):
                 match = re.search(r"step-(\d+)", filename)
                 if match:
                     path = filesystem.join(self.folder, filename)

@@ -10,6 +10,7 @@ _supported_models = frozenset(
         "flux",
         "gpt_oss",
         "kimi_k2_7",
+        "kimi_k3",
         "llama3",
         "muse_glimmer",
         "qwen3",
