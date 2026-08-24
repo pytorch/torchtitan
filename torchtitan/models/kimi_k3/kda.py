@@ -43,7 +43,7 @@ def _naive_l2norm(x_BLNK: torch.Tensor) -> torch.Tensor:
     ).to(input_dtype)
 
 
-def _pytorch_causal_conv1d(
+def _naive_causal_conv1d(
     x_BTC: torch.Tensor,
     weight_C1W: torch.Tensor,
 ) -> torch.Tensor:
@@ -329,7 +329,7 @@ class InnerKDA(Module):
                 cu_seqlens=kernel_cu_seqlens,
             )
         elif kernel_cu_seqlens is None:
-            conv_output_BTC = _pytorch_causal_conv1d(
+            conv_output_BTC = _naive_causal_conv1d(
                 mixed_qkv_BTC,
                 conv_weight_C1W,
             )
@@ -340,7 +340,7 @@ class InnerKDA(Module):
                 )
             conv_output_BTC = torch.cat(
                 [
-                    _pytorch_causal_conv1d(
+                    _naive_causal_conv1d(
                         mixed_qkv_BTC[:, start:end],
                         conv_weight_C1W,
                     )
