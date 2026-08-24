@@ -10,7 +10,6 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
-from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -26,17 +25,9 @@ from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger, warn_once
 
 try:
-    from attn_gym.linear.kda import (
-        bounded_gate_cumsum,
-        causal_conv1d,
-        chunk_kda,
-        l2norm,
-    )
+    import attn_gym.linear.kda as _attn_gym_kda
 except ImportError:
-    bounded_gate_cumsum: Any = None
-    causal_conv1d: Any = None
-    chunk_kda: Any = None
-    l2norm: Any = None
+    _attn_gym_kda = None
 
 __all__ = [
     "KDA",
@@ -77,16 +68,22 @@ def _naive_gate_cumsum(
         A_log_N.float().exp().view(1, 1, -1, 1)
         * (raw_gate_BLNK.float() + dt_bias_NK.float())
     )
-    if cu_seqlens_host is None:
-        spans = gate_BLNK.unbind(0)
-    else:
-        spans = [gate_BLNK[0, start:end] for start, end in pairwise(cu_seqlens_host)]
+    spans = (
+        gate_BLNK.unbind(0)
+        if cu_seqlens_host is None
+        else (
+            gate_BLNK[0, start:end]
+            for start, end in pairwise(cu_seqlens_host)
+        )
+    )
 
     chunks = [chunk for span in spans for chunk in span.split(chunk_size, dim=0)]
     cumulative_TNK = torch.cat([chunk.cumsum(dim=0) for chunk in chunks], dim=0)
-    if cu_seqlens_host is None:
-        return cumulative_TNK.reshape_as(gate_BLNK) * math.log2(math.e)
-    return cumulative_TNK.unsqueeze(0) * math.log2(math.e)
+    return (
+        cumulative_TNK.reshape_as(gate_BLNK)
+        if cu_seqlens_host is None
+        else cumulative_TNK.unsqueeze(0)
+    ) * math.log2(math.e)
 
 
 class KDAKernel(Module):
@@ -120,7 +117,7 @@ class KDAKernel(Module):
         super().__init__()
         if (
             config.backend in (KDABackend.ATTN_GYM, KDABackend.NAIVE)
-            and chunk_kda is None
+            and _attn_gym_kda is None
         ):
             raise ImportError(
                 "KDA requires Attention Gym: pip install 'attn-gym[linear]'"
@@ -134,15 +131,18 @@ class KDAKernel(Module):
         if self.backend is KDABackend.NAIVE:
             return KDABackend.NAIVE
 
-        is_cuda = q_BLNK.device.type == "cuda"
         capability = (
-            torch.cuda.get_device_capability(q_BLNK.device) if is_cuda else None
+            torch.cuda.get_device_capability(q_BLNK.device)
+            if q_BLNK.is_cuda
+            else None
         )
         fused_supported = (
-            is_cuda and q_BLNK.shape[-1] == 128 and capability in {(10, 0), (10, 3)}
+            q_BLNK.is_cuda
+            and q_BLNK.shape[-1] == 128
+            and capability in {(10, 0), (10, 3)}
         )
 
-        if self.backend is KDABackend.AUTO and not is_cuda:
+        if self.backend is KDABackend.AUTO and not q_BLNK.is_cuda:
             raise RuntimeError(
                 "KDA backend AUTO requires CUDA. Use KDABackend.NAIVE for "
                 "correctness testing on CPU."
@@ -160,7 +160,7 @@ class KDAKernel(Module):
         elif (
             self.backend is KDABackend.AUTO
             and fused_supported
-            and chunk_kda is not None
+            and _attn_gym_kda is not None
         ):
             return KDABackend.ATTN_GYM
         else:
@@ -175,7 +175,7 @@ class KDAKernel(Module):
         if self.backend is KDABackend.AUTO:
             reason = (
                 "is unavailable"
-                if chunk_kda is None
+                if _attn_gym_kda is None
                 else "does not support "
                 f"head_dim={q_BLNK.shape[-1]} on CUDA capability {capability}"
             )
@@ -238,10 +238,11 @@ class KDAKernel(Module):
             )
             return output_BLNK
 
+        assert _attn_gym_kda is not None
         if backend is KDABackend.ATTN_GYM:
-            q_BLNK = l2norm(q_BLNK)
-            k_BLNK = l2norm(k_BLNK)
-            cumulative_gate_BLNK = bounded_gate_cumsum(
+            q_BLNK = _attn_gym_kda.l2norm(q_BLNK)
+            k_BLNK = _attn_gym_kda.l2norm(k_BLNK)
+            cumulative_gate_BLNK = _attn_gym_kda.bounded_gate_cumsum(
                 raw_gate_BLNK.to(torch.bfloat16),
                 A_log_N.float(),
                 dt_bias_NK.float(),
@@ -261,7 +262,7 @@ class KDAKernel(Module):
                 cu_seqlens_host=cu_seqlens_host,
             )
 
-        output_BLNK, _ = chunk_kda(
+        output_BLNK, _ = _attn_gym_kda.chunk_kda(
             q_BLNK,
             k_BLNK,
             v_BLNK,
@@ -327,7 +328,8 @@ class InnerKDA(Module):
         )
         backend = self.kernel.resolve_backend(raw_gate_BLNK)
         if backend is KDABackend.ATTN_GYM:
-            conv_output_BTC = causal_conv1d(
+            assert _attn_gym_kda is not None
+            conv_output_BTC = _attn_gym_kda.causal_conv1d(
                 mixed_qkv_BTC,
                 conv_weight_C1W[:, 0],
                 activation="silu",
