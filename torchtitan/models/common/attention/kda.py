@@ -89,10 +89,9 @@ def _reference_gate_cumsum(
 
     chunks = [chunk for span in spans for chunk in span.split(chunk_size, dim=0)]
     cumulative_TNK = torch.cat([chunk.cumsum(dim=0) for chunk in chunks], dim=0)
-    log2_e = 1.4426950408889634
     if cu_seqlens is None:
-        return cumulative_TNK.reshape_as(gate_BLNK) * log2_e
-    return cumulative_TNK.unsqueeze(0) * log2_e
+        return cumulative_TNK.reshape_as(gate_BLNK) * 1.4426950408889634
+    return cumulative_TNK.unsqueeze(0) * 1.4426950408889634
 
 
 class KDAInnerAttention(Module):
