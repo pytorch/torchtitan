@@ -27,7 +27,7 @@ dependencies = [
     "wandb",
     "einops",
     "pillow",
-    "spmd_types==0.2.4",
+    "spmd_types==0.2.5",
 ]
 dynamic = ["version"]
 
