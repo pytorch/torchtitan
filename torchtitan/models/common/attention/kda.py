@@ -13,7 +13,7 @@
 from dataclasses import dataclass
 from functools import cache
 from itertools import pairwise
-from typing import Any, get_args, Literal
+from typing import Any, Literal, get_args
 
 import torch
 import torch.nn.functional as F
@@ -42,7 +42,7 @@ except ImportError:
     l2norm: Any = None
 
 
-__all__ = ["KDA", "KDAAttention", "KDABackend", "KDAInnerAttention"]
+__all__ = ["KDA", "InnerKDA", "KDABackend", "KDAKernel"]
 
 KDABackend = Literal["auto", "fused", "fla", "reference"]
 
@@ -94,8 +94,8 @@ def _reference_gate_cumsum(
     return cumulative_TNK.unsqueeze(0) * 1.4426950408889634
 
 
-class KDAInnerAttention(Module):
-    """Apply KDA preprocessing and dispatch to an Attention Gym core."""
+class KDAKernel(Module):
+    """Apply KDA preprocessing and dispatch to the configured kernel backend."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -117,8 +117,7 @@ class KDAInnerAttention(Module):
                 )
             if self.chunk_size != 64:
                 raise ValueError(
-                    "Attention Gym KDA requires chunk_size=64, "
-                    f"got {self.chunk_size}."
+                    f"Attention Gym KDA requires chunk_size=64, got {self.chunk_size}."
                 )
 
     def __init__(self, config: Config):
@@ -257,18 +256,18 @@ class KDAInnerAttention(Module):
         return output_BLNK
 
 
-class KDAAttention(Module):
-    """Run the short convolution and the rank-local KDA kernel."""
+class InnerKDA(Module):
+    """Run short convolution and KDA behind the vLLM replacement boundary."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         head_dim: int
-        inner_attention: KDAInnerAttention.Config
+        kernel: KDAKernel.Config
 
         def __post_init__(self):
             if self.head_dim < 1:
                 raise ValueError(f"head_dim must be positive, got {self.head_dim}")
-            if self.inner_attention.backend == "fused" and self.head_dim != 128:
+            if self.kernel.backend == "fused" and self.head_dim != 128:
                 raise ValueError(
                     "Attention Gym's fused KDA backend requires head_dim=128, "
                     f"got {self.head_dim}."
@@ -277,7 +276,7 @@ class KDAAttention(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.head_dim = config.head_dim
-        self.inner_attention = config.inner_attention.build()
+        self.kernel = config.kernel.build()
 
     def forward(
         self,
@@ -302,7 +301,7 @@ class KDAAttention(Module):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
-        backend = self.inner_attention.resolve_backend(raw_gate_TNK.unsqueeze(0))
+        backend = self.kernel.resolve_backend(raw_gate_TNK.unsqueeze(0))
         if backend == "fused":
             conv_output_BTC = causal_conv1d(
                 mixed_qkv_BTC,
@@ -344,7 +343,7 @@ class KDAAttention(Module):
             tensor.unflatten(-1, (-1, self.head_dim))
             for tensor in (q_BTC, k_BTC, v_BTC)
         )
-        output_BTNK = self.inner_attention(
+        output_BTNK = self.kernel(
             q_BTNK,
             k_BTNK,
             v_BTNK,
@@ -375,7 +374,7 @@ class KDA(Module):
         forget_b: Linear.Config
         beta: Linear.Config
         output_gate: Linear.Config
-        attention: Module.Config
+        inner_kda: Module.Config
         output_norm: RMSNorm.Config
         output_proj: Linear.Config
 
@@ -386,7 +385,7 @@ class KDA(Module):
                 raise ValueError(f"head_dim must be positive, got {self.head_dim}")
             if self.conv_kernel_size < 1:
                 raise ValueError(
-                    "conv_kernel_size must be positive, " f"got {self.conv_kernel_size}"
+                    f"conv_kernel_size must be positive, got {self.conv_kernel_size}"
                 )
 
     def __init__(self, config: Config):
@@ -405,7 +404,7 @@ class KDA(Module):
         self.forget_b = config.forget_b.build()
         self.beta = config.beta.build()
         self.output_gate = config.output_gate.build()
-        self.attention = config.attention.build()
+        self.inner_kda = config.inner_kda.build()
         self.output_norm = config.output_norm.build()
         self.output_proj = config.output_proj.build()
 
@@ -421,7 +420,7 @@ class KDA(Module):
         del positions
         if x_TD.ndim != 2:
             raise ValueError(
-                "KDA input must have shape [T, D], " f"got {tuple(x_TD.shape)}."
+                f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."
             )
 
         if attention_masks is not None and not isinstance(
@@ -445,7 +444,7 @@ class KDA(Module):
             num_tokens, self.num_heads, self.head_dim
         )
         raw_beta_TN = self.beta(x_TD).reshape(num_tokens, self.num_heads)
-        out_TNK = self.attention(
+        out_TNK = self.inner_kda(
             self.q_proj(x_TD),
             self.k_proj(x_TD),
             self.v_proj(x_TD),

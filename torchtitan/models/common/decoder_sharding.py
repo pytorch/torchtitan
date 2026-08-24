@@ -8,9 +8,9 @@ import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import (
+    KDA,
     FusedQKVLinear,
     GQAttention,
-    KDA,
     QKVLinear,
 )
 from torchtitan.models.common.dist_gemm import (
@@ -319,9 +319,9 @@ def set_kda_sharding(
     ``(T, N, K)``. The Attention Gym boundary converts head-sharded DTensors
     to rank-local tensors before adding the singleton kernel batch dimension.
     """
-    assert isinstance(
-        kda_cfg, KDA.Config
-    ), f"set_kda_sharding requires KDA.Config, got {type(kda_cfg).__name__}"
+    assert isinstance(kda_cfg, KDA.Config), (
+        f"set_kda_sharding requires KDA.Config, got {type(kda_cfg).__name__}"
+    )
     if cp_enabled:
         raise NotImplementedError("Context parallel is not yet supported for KDA")
 
@@ -359,7 +359,7 @@ def set_kda_sharding(
             TP: spmd.R,
         }
     )
-    kda_cfg.attention.sharding_config = ShardingConfig(
+    kda_cfg.inner_kda.sharding_config = ShardingConfig(
         in_src_shardings={
             "query_TC": projected_placement,
             "key_TC": projected_placement,
