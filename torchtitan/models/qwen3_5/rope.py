@@ -17,8 +17,9 @@ class MRoPE(CosSinRoPE):
 
     Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
     applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.
-    The only override is ``_reshape_cache``: for 3D ``(batch, seq, 3)`` MRoPE
-    positions it builds an interleaved cos/sin cache; for 2D ``(batch, seq)`` text
+    The only override is ``_reshape_cache``: for 2D ``(num_tokens, 3)`` MRoPE
+    positions it builds an interleaved cos/sin cache; for 1D
+    ``(num_tokens,)`` text
     positions it falls back to the plain ``CosSinRoPE`` per-token lookup.
     """
 
@@ -31,6 +32,15 @@ class MRoPE(CosSinRoPE):
             raise ValueError(
                 f"mrope_section must have 3 entries, got {config.mrope_section}."
             )
+        if any(section < 0 for section in config.mrope_section):
+            raise ValueError(
+                f"mrope_section entries must be non-negative, got {config.mrope_section}."
+            )
+        if sum(config.mrope_section) != config.dim // 2:
+            raise ValueError(
+                f"mrope_section must sum to dim // 2 ({config.dim // 2}), "
+                f"got {config.mrope_section}."
+            )
         super().__init__(config)
 
     def _reshape_cache(
@@ -40,11 +50,16 @@ class MRoPE(CosSinRoPE):
     ) -> torch.Tensor:
         """Build a query-broadcastable cos/sin cache.
 
-        Dispatches on position rank: 3D ``(batch, seq, 3)`` MRoPE positions take
-        the interleaved scatter; everything else (2D text positions or ``None``)
-        falls back to the plain ``CosSinRoPE`` lookup.
+        Dispatches on position rank: 2D ``(num_tokens, 3)`` MRoPE positions
+        take the interleaved scatter; everything else (1D text positions or
+        ``None``) falls back to the plain ``CosSinRoPE`` lookup.
         """
-        if positions is not None and positions.ndim == 3:
+        if positions is not None and positions.ndim == 2:
+            if positions.shape[-1] != 3:
+                raise ValueError(
+                    "2D MRoPE positions must have shape (num_tokens, 3), "
+                    f"got {tuple(positions.shape)}."
+                )
             return self._compute_mrope_cache(positions)
         return super()._reshape_cache(query, positions)
 
@@ -52,12 +67,14 @@ class MRoPE(CosSinRoPE):
         """Build the interleaved cos/sin cache for 3D MRoPE positions.
 
         Args:
-            position_ids: ``(batch, seq, 3)`` T/H/W positions. Plain, or a DTensor
-                under TP matching the rope ``cache`` buffer's Replicate placement.
+            position_ids: ``(num_tokens, 3)`` temporal/height/width positions.
+                Plain, or a DTensor under TP matching the rope ``cache``
+                buffer's Replicate placement.
 
         Returns:
-            ``(batch, seq, 1, dim * 2)`` cache, broadcastable to the
-            ``(batch, seq, n_heads, rotary_dim)`` query/key in ``apply_rotary_emb``.
+            ``(num_tokens, 1, dim * 2)`` cache, broadcastable to the
+            ``(num_tokens, n_heads, rotary_dim)`` query/key in
+            ``apply_rotary_emb``.
 
         The scatter runs on plain local tensors. Under TP the ``cache`` buffer is a
         Replicate DTensor, so it is unwrapped to local here and the result is
@@ -77,7 +94,6 @@ class MRoPE(CosSinRoPE):
             if isinstance(position_ids, DTensor)
             else position_ids
         )
-        pos = pos.to(device=rope_cache.device)
 
         _maybe_check_max_pos(pos, max_valid_pos=rope_cache.shape[0] - 1)
         head_dim = rope_cache.shape[-1] // 2
@@ -86,7 +102,8 @@ class MRoPE(CosSinRoPE):
 
         # Start from temporal positions for all dimensions, then overwrite the
         # height/width interleaved sections with their own position IDs.
-        # ``pos`` is (batch, seq, 3); the last axis selects T/H/W.
+        # ``pos`` is (num_tokens, 3); the last axis selects
+        # temporal/height/width.
         t_pos = pos[..., 0].long()
         mrope_cos = cos_cache[t_pos]
         mrope_sin = sin_cache[t_pos]
@@ -100,7 +117,7 @@ class MRoPE(CosSinRoPE):
             mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
             mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
-        mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
+        mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(1)
         if cache_dtensor is not None:
             return distribute_tensor(
                 mrope_cache,

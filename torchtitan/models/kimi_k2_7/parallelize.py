@@ -11,7 +11,7 @@ TP/SP/EP is applied by ``model.parallelize(parallel_dims)`` from the
 sub-config (see ``sharding.py``). FSDP is then applied in two parts: the vision
 encoder as a single unit (its compute is small, so one all-gather beats many
 per-layer ones), then the decoder with MoE-aware per-layer wrapping. Context
-Parallel and ``full_dtensor`` are not supported.
+Parallel is not supported.
 """
 
 import torch.nn as nn
@@ -28,8 +28,6 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
-)
-from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
@@ -54,9 +52,6 @@ def parallelize_kimi_k2_5(
     NOTE: the passed-in model should preferably be on meta device; otherwise it
     must fit in GPU or CPU memory.
     """
-    if parallelism.spmd_backend == "full_dtensor":
-        raise NotImplementedError("full_dtensor is not supported yet.")
-
     if parallel_dims.cp_enabled:
         raise NotImplementedError(
             "Context Parallel is not yet supported for Kimi K2.5: vision scatter "
