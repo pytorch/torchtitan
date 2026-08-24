@@ -282,7 +282,9 @@ class MultiModalCollator(Collator):
         for sample in batch:
             num_images = len(sample.get("pixel_values", []))
             for vid in sample.get("pixel_values_videos", []):
-                num_images += vid.shape[0] // self.temporal_patch_size
+                num_images += (
+                    vid.shape[0] + self.temporal_patch_size - 1
+                ) // self.temporal_patch_size
             images_per_sample.append(num_images)
 
         total_images = sum(images_per_sample)

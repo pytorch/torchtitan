@@ -12,9 +12,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
@@ -143,6 +144,46 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
 
+@runtime_checkable
+class CheckpointStorage(Protocol):
+    """The path operations a checkpoint manager needs from its storage.
+
+    Managers differ in how they read and write checkpoint bytes, but they ask
+    the same handful of questions about paths: is this a checkpoint directory,
+    did this metadata file land, which steps are on disk, delete this one. This
+    protocol is the whole of that surface, so policies like retention and
+    latest-step discovery can live on ``BaseCheckpointManager`` without knowing
+    which backend answers them.
+
+    Paths are ``str`` rather than ``Path`` because a checkpoint id may be a
+    remote URI (``gs://...``) that ``Path`` would mangle -- it collapses the
+    double slash. Carrying ``str`` keeps the vocabulary lossless; whether a
+    given implementation can actually reach a remote URI is up to that
+    implementation, which should reject what it cannot address rather than
+    silently rewrite it.
+
+    ``runtime_checkable`` so implementations can assert conformance in their
+    tests. It only checks that the method names exist, which is enough to catch
+    a rename that would otherwise surface as an ``AttributeError`` mid-save.
+    """
+
+    def isdir(self, path: str) -> bool:
+        """Whether ``path`` is an existing directory."""
+        ...
+
+    def isfile(self, path: str) -> bool:
+        """Whether ``path`` is an existing entry that is not a directory."""
+        ...
+
+    def listdir(self, path: str) -> list[str]:
+        """The entry names directly under the directory ``path``."""
+        ...
+
+    def remove(self, path: str) -> None:
+        """Recursively delete the directory ``path``."""
+        ...
+
+
 class BaseCheckpointManager(Configurable, ABC):
     """Contract every TorchTitan checkpoint manager implements.
 
@@ -154,6 +195,9 @@ class BaseCheckpointManager(Configurable, ABC):
 
     enable: bool
     save_future: Future | None
+    folder: str
+    keep_latest_k: int
+    _storage: CheckpointStorage
 
     # A disabled manager returns early from ``__init__`` without setting up any
     # state, so none of its attributes exist. The public entry points below own
@@ -219,6 +263,14 @@ class BaseCheckpointManager(Configurable, ABC):
     def _close(self) -> None:
         """Implement ``close``. Only called when checkpointing is enabled."""
 
+    def _should_purge(self) -> bool:
+        """Whether this rank should purge stale checkpoints."""
+        return (
+            self.keep_latest_k > 0
+            and dist.get_rank() == 0
+            and self._storage.isdir(self.folder)
+        )
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         """Checkpoint policies shared by concrete TorchTitan checkpoint managers."""
@@ -277,6 +329,8 @@ class BaseCheckpointManager(Configurable, ABC):
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:
                 raise ValueError("Checkpoint interval needs to be at least 1 step.")
+            if self.load_step < -1:
+                raise ValueError("load_step must be -1 or non-negative.")
             if self.keep_latest_k < 0:
                 raise ValueError("keep_latest_k cannot be negative.")
             if self.keep_latest_k == 1:
