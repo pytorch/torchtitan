@@ -13,10 +13,6 @@ Example spec files:
      "buckets": [{"min_len": 1, "max_len": 128, "weight": 3},
                  {"min_len": 2048, "max_len": 4096, "weight": 1}]}
 
-  parametric.json:
-    {"type": "parametric", "kind": "lognormal",
-     "min_len": 1, "max_len": 8192, "mean": 6.0, "std": 1.0}
-
 Usage:
   python -m scripts.preview_synthetic_lengths --spec buckets.json \\
       --seed 0 --samples 100000 --dp 8 --per-rank-batch 4
@@ -31,7 +27,6 @@ from torchtitan.components.data.synthetic import (
     BucketLengthSpec,
     LengthBucket,
     LengthSpec,
-    ParametricLengthSpec,
 )
 
 
@@ -41,9 +36,6 @@ def build_spec(obj: dict[str, Any]) -> LengthSpec:
         return BucketLengthSpec(
             buckets=tuple(LengthBucket(**b) for b in obj["buckets"])
         )
-    if spec_type == "parametric":
-        params = {k: v for k, v in obj.items() if k != "type"}
-        return ParametricLengthSpec(**params)
     raise ValueError(f"unknown spec type {spec_type!r}")
 
 

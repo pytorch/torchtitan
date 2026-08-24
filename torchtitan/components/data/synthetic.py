@@ -12,12 +12,14 @@ is irrelevant and only the sequence-length distribution matters.
 
 import math
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import grain.python as grain
 import numpy as np
-from torchtitan.components.data.dataset import SampleProcessor, TextSequence
-from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
+from torchtitan.components.data.dataset import SingleDatasetConfig, TextSequence
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.packing import FirstFitPackingConfig
+from torchtitan.components.data.types import DatasetIterationPolicy
 from torchtitan.config import Configurable
 
 
@@ -67,76 +69,39 @@ class BucketLengthSpec:
         return lengths.astype(np.int64)
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class ParametricLengthSpec:
-    """Named distribution, rounded to int and clamped to [min_len, max_len].
+class SyntheticSource(Configurable, grain.IterDataset):
+    """Infinite stream of random-token ``TextSequence`` records.
 
-    - uniform: integer uniform on [min_len, max_len]
-    - normal: Gaussian(mean, std)
-    - lognormal: exp(Normal(mean, std)); mean/std are the underlying normal's
-    - zipf: Zipf(alpha) with alpha > 1
-    """
+    Lengths are drawn from ``length_spec`` and filled with random token ids, so
+    only the length distribution is meaningful. Being a source, it has no access
+    to the tokenizer or context, so ``vocab_size`` is explicit and oversize
+    sequences are not dropped here -- rely on ``FirstFitPackingConfig`` (which
+    drops ``len(input_ids) > max_context_length``) and on sizing the length spec
+    to the context window.
 
-    kind: Literal["uniform", "normal", "lognormal", "zipf"]
-    min_len: int
-    max_len: int
-    mean: float | None = None
-    std: float | None = None
-    alpha: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.min_len < 1 or self.max_len < self.min_len:
-            raise ValueError("require 1 <= min_len <= max_len")
-        if self.kind in ("normal", "lognormal"):
-            if self.mean is None or self.std is None:
-                raise ValueError(f"{self.kind} requires mean and std")
-            if self.std <= 0:
-                raise ValueError("std must be positive")
-        elif self.kind == "zipf":
-            if self.alpha is None or self.alpha <= 1.0:
-                raise ValueError("zipf requires alpha > 1.0")
-        elif self.kind != "uniform":
-            raise ValueError(f"unknown kind {self.kind!r}")
-
-    def sample(self, rng: np.random.Generator, size: int) -> np.ndarray:
-        if self.kind == "uniform":
-            raw = rng.integers(self.min_len, self.max_len + 1, size=size)
-        elif self.kind == "normal":
-            mean, std = self.mean, self.std
-            assert mean is not None and std is not None
-            raw = rng.normal(mean, std, size=size)
-        elif self.kind == "lognormal":
-            mean, std = self.mean, self.std
-            assert mean is not None and std is not None
-            raw = rng.lognormal(mean, std, size=size)
-        else:  # zipf
-            alpha = self.alpha
-            assert alpha is not None
-            raw = rng.zipf(alpha, size=size)
-        lengths = np.rint(np.asarray(raw, dtype=np.float64)).astype(np.int64)
-        return np.clip(lengths, self.min_len, self.max_len)
-
-
-class SyntheticLengthSource(Configurable, grain.IterDataset):
-    """Infinite stream of ``{"length": L}`` records drawn from a length spec.
-
-    Each DP rank derives an independent, reproducible stream from
-    ``config.seed + policy.seed + policy.dp_rank``.
+    Each DP rank derives an independent, reproducible, checkpoint-resumable
+    stream from ``config.seed + policy.seed + policy.dp_rank``.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         length_spec: LengthSpec
+        vocab_size: int
         seed: int = 0
+
+        def __post_init__(self) -> None:
+            if self.vocab_size < 1:
+                raise ValueError("vocab_size must be >= 1")
 
     def __init__(
         self,
-        config: "SyntheticLengthSource.Config",
+        config: "SyntheticSource.Config",
         *,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> None:
         super().__init__()
         self._length_spec = config.length_spec
+        self._vocab_size = config.vocab_size
         self._seed = (
             config.seed
             + dataset_iteration_policy.seed
@@ -144,32 +109,38 @@ class SyntheticLengthSource(Configurable, grain.IterDataset):
         )
 
     def __iter__(self) -> grain.DatasetIterator:
-        return _SyntheticLengthIterator(self._length_spec, self._seed)
+        return _SyntheticIterator(self._length_spec, self._seed, self._vocab_size)
 
 
-class _SyntheticLengthIterator(grain.DatasetIterator):
-    """Exposes the length-sampling RNG to Grain checkpoint recursion.
+class _SyntheticIterator(grain.DatasetIterator):
+    """Exposes the sampling RNG to Grain checkpoint recursion.
 
     Lengths are drawn in chunks so per-record NumPy dispatch does not distort
-    throughput/DP-balance measurements.
+    throughput/DP-balance measurements. One RNG stream feeds both length and
+    token draws, so the bit generator state plus the undrawn length buffer fully
+    describe the stream position.
     """
 
-    _CHUNK = 1024
+    _buffer_size = 1024
 
-    def __init__(self, length_spec: LengthSpec, seed: int) -> None:
+    def __init__(
+        self, length_spec: LengthSpec, seed: int, vocab_size: int
+    ) -> None:
         super().__init__()
         self._length_spec = length_spec
+        self._vocab_size = vocab_size
         self._rng = np.random.Generator(np.random.PCG64(seed))
         self._buffer = np.empty(0, dtype=np.int64)
         self._offset = 0
 
-    def __next__(self) -> dict[str, int]:
+    def __next__(self) -> TextSequence:
         if self._offset >= self._buffer.size:
-            self._buffer = self._length_spec.sample(self._rng, self._CHUNK)
+            self._buffer = self._length_spec.sample(self._rng, self._buffer_size)
             self._offset = 0
         length = int(self._buffer[self._offset])
         self._offset += 1
-        return {"length": length}
+        ids = self._rng.integers(0, self._vocab_size, size=length + 1, dtype=np.int64)
+        return TextSequence(input_ids=ids[:-1], labels=ids[1:])
 
     def get_state(self) -> dict:
         return {
@@ -183,68 +154,29 @@ class _SyntheticLengthIterator(grain.DatasetIterator):
         self._offset = 0
 
 
-def _should_drop(length: int, max_context_length: int) -> bool:
-    return length < 1 or length + 1 > max_context_length
+def synthetic_dataloader_builder(
+    *,
+    length_spec: LengthSpec,
+    vocab_size: int,
+    seed: int = 0,
+    num_packing_bins: int = 8,
+) -> GrainDataLoader.Config:
+    """Wire a synthetic source into a FirstFit-packed dataloader config.
 
-
-def _split_next_token(ids: np.ndarray) -> TextSequence:
-    return TextSequence(input_ids=ids[:-1], labels=ids[1:])
-
-
-class RandomTokenProcessor(SampleProcessor):
-    """Realizes ``{"length": L}`` into random-token next-token pairs."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(SampleProcessor.Config):
-        vocab_size: int | None = None
-        """Explicit vocab; falls back to context.tokenizer.get_vocab_size()."""
-
-    def __init__(
-        self, config: "RandomTokenProcessor.Config", *, context: DatasetBuildContext
-    ) -> None:
-        self._max_context_length = context.max_context_length
-        self._vocab_size = (
-            config.vocab_size
-            if config.vocab_size is not None
-            else context.tokenizer.get_vocab_size()
-        )
-        if self._vocab_size < 1:
-            raise ValueError("vocab_size must be >= 1")
-
-    def __call__(self, sample: dict, rng: np.random.Generator) -> TextSequence | None:
-        length = int(sample["length"])
-        if _should_drop(length, self._max_context_length):
-            return None
-        ids = rng.integers(0, self._vocab_size, size=length + 1, dtype=np.int64)
-        return _split_next_token(ids)
-
-
-class ConstantTokenProcessor(SampleProcessor):
-    """Fills each sequence with a constant token id (no RNG). Dense-only.
-
-    Constant tokens make MoE routing degenerate (all tokens hit one expert);
-    use RandomTokenProcessor for MoE. Pick a non-special id (avoid pad/eos) so
-    downstream masking doesn't blank the batch.
+    Returns a ready ``GrainDataLoader.Config`` for the common experiment case:
+    ``SyntheticSource`` -> ``SingleDatasetConfig`` -> ``FirstFitPackingConfig``.
+    FirstFit preserves each sampled length and drops sequences longer than the
+    context window, so size ``length_spec`` to your ``max_context_length``.
     """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(SampleProcessor.Config):
-        constant_token_id: int = 0
-
-    def __init__(
-        self,
-        config: "ConstantTokenProcessor.Config",
-        *,
-        context: DatasetBuildContext,
-    ) -> None:
-        if config.constant_token_id < 0:
-            raise ValueError("constant_token_id must be >= 0")
-        self._max_context_length = context.max_context_length
-        self._token_id = config.constant_token_id
-
-    def __call__(self, sample: dict, rng: np.random.Generator) -> TextSequence | None:
-        length = int(sample["length"])
-        if _should_drop(length, self._max_context_length):
-            return None
-        ids = np.full(length + 1, self._token_id, dtype=np.int64)
-        return _split_next_token(ids)
+    synthetic_ds = SingleDatasetConfig(
+        source=SyntheticSource.Config(
+            length_spec=length_spec,
+            vocab_size=vocab_size,
+            seed=seed,
+        ),
+    )
+    synthetic_packed_ds = FirstFitPackingConfig(
+        dataset=synthetic_ds,
+        num_packing_bins=num_packing_bins,
+    )
+    return GrainDataLoader.Config(dataset=synthetic_packed_ds, shuffle=False)

@@ -32,7 +32,6 @@ from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
-
 __all__ = ["Decoder", "TransformerBlock"]
 
 
@@ -147,10 +146,10 @@ class Decoder(BaseModel):
 
             When *config* is a ``Trainer.Config``, validates
             ``training.max_context_length`` against each attention layer's intrinsic
-            RoPE max sequence length, resizes RoPE caches, and propagates
-            debug flags. Non-trainer callers may pass any config-like
-            object with a ``ParallelismConfig`` in its ``parallelism``
-            field; in that case the training/debug setup is skipped.
+            RoPE max context length, resizes RoPE caches when present, and
+            propagates debug flags. Non-trainer callers may pass any config-like
+            object with a ``ParallelismConfig`` in its ``parallelism`` field; in
+            that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
             from torchtitan.distributed.context_parallel import validate_cp_backend
@@ -199,6 +198,15 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            ep = parallelism.expert_parallel_degree
+            for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
+                assert isinstance(moe, MoE.Config)
+                if moe.num_experts % ep != 0:
+                    raise ValueError(
+                        f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
+                        f"divisible by expert_parallel_degree ({ep})."
+                    )
+
             update_ep_token_dispatcher_config(self, config)
 
             # NOTE: Inference-only callers such as the RL generator skip
@@ -208,20 +216,24 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.max_context_length
-                max_context_length = self.max_context_length
-                if seq_len > max_context_length:
-                    raise ValueError(
-                        f"Training sequence length {seq_len} exceeds "
-                        f"attention RoPE maximum supported sequence "
-                        f"length {max_context_length}."
-                    )
+                rope_cfg = getattr(attention, "rope", None)
+                if rope_cfg is not None:
+                    max_context_length = self.max_context_length
+                    if seq_len > max_context_length:
+                        raise ValueError(
+                            f"Training sequence length {seq_len} exceeds "
+                            f"attention RoPE maximum supported sequence "
+                            f"length {max_context_length}."
+                        )
 
                 for layer_cfg in self.layers:
                     attention_cfg = getattr(layer_cfg, "attention", None)
                     if attention_cfg is not None:
-                        attention_cfg.rope = dataclasses.replace(
-                            attention_cfg.rope, max_context_length=seq_len
-                        )
+                        rope_cfg = getattr(attention_cfg, "rope", None)
+                        if rope_cfg is not None:
+                            attention_cfg.rope = dataclasses.replace(
+                                rope_cfg, max_context_length=seq_len
+                            )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance

@@ -28,12 +28,10 @@ from torchtitan.components.data.sources import (
 )
 from torchtitan.components.data.synthetic import (
     BucketLengthSpec,
-    ConstantTokenProcessor,
     LengthBucket,
     LengthSpec,
-    ParametricLengthSpec,
-    RandomTokenProcessor,
-    SyntheticLengthSource,
+    synthetic_dataloader_builder,
+    SyntheticSource,
 )
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 
@@ -41,7 +39,6 @@ __all__ = [
     "BucketLengthSpec",
     "Collator",
     "ConcatThenSplitPackingConfig",
-    "ConstantTokenProcessor",
     "DatasetBuildContext",
     "DatasetConcatConfig",
     "DatasetConfig",
@@ -54,15 +51,14 @@ __all__ = [
     "IndexedJsonlSource",
     "LengthBucket",
     "LengthSpec",
-    "ParametricLengthSpec",
     "RandomAccessDataSource",
-    "RandomTokenProcessor",
     "SampleProcessor",
     "SingleDatasetConfig",
     "SourceConfig",
-    "SyntheticLengthSource",
+    "SyntheticSource",
     "TextCollator",
     "TextSequence",
     "TrainerBatch",
     "WeightedDataset",
+    "synthetic_dataloader_builder",
 ]

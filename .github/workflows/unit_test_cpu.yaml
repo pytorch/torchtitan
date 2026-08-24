@@ -38,4 +38,4 @@ jobs:
         # Write coverage data/report to /tmp (world-writable): the mounted workspace and
         # RUNNER_TEMP are owned by the host uid, which the container user (ci-user) can't write.
         export COVERAGE_FILE=/tmp/.coverage
-        pytest tests/unit_tests --cov=. --cov-report=xml:/tmp/coverage.xml --durations=20 -vv
+        pytest tests/unit_tests/cpu --cov=. --cov-report=xml:/tmp/coverage.xml --durations=20 -vv

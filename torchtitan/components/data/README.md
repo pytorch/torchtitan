@@ -179,9 +179,37 @@ packed_tokens_ds = ConcatThenSplitPackingConfig(
 
 For DP load-balancing and throughput experiments you often want sequences whose
 token *content* is irrelevant but whose *lengths* follow a chosen distribution.
-`SyntheticLengthSource` is an infinite stream that emits `{"length": L}` records
-drawn from a `LengthSpec`, and `RandomTokenProcessor` fills each with random
-token ids. No dataset is written to disk.
+`SyntheticSource` is an infinite `grain.IterDataset` that draws sequence lengths
+from a `LengthSpec` and fills each with random token ids, emitting `TextSequence`
+records directly (no processor). As a source it has no access to the tokenizer,
+so `vocab_size` is explicit. No dataset is written to disk.
+
+For the common case, `synthetic_dataloader_builder` wires the source into a
+FirstFit-packed dataloader config:
+
+```python
+from torchtitan.components.data import (
+    BucketLengthSpec,
+    LengthBucket,
+    synthetic_dataloader_builder,
+)
+
+config.dataloader = synthetic_dataloader_builder(
+    length_spec=BucketLengthSpec(
+        buckets=(
+            # keep max_len < training.max_context_length; longer draws are dropped
+            LengthBucket(min_len=1, max_len=128, weight=3.0),
+            LengthBucket(min_len=1024, max_len=2000, weight=1.0),
+        ),
+    ),
+    vocab_size=128_256,
+    seed=0,
+)
+```
+
+To customize the pipeline, wire the source yourself. FirstFit preserves each
+sampled length; `ConcatThenSplit` would re-chunk into uniform blocks and erase
+the distribution you configured:
 
 ```python
 from torchtitan.components.data import (
@@ -189,29 +217,19 @@ from torchtitan.components.data import (
     FirstFitPackingConfig,
     GrainDataLoader,
     LengthBucket,
-    RandomTokenProcessor,
     SingleDatasetConfig,
-    SyntheticLengthSource,
+    SyntheticSource,
 )
 
 synthetic_ds = SingleDatasetConfig(
-    source=SyntheticLengthSource.Config(
+    source=SyntheticSource.Config(
         length_spec=BucketLengthSpec(
-            buckets=(
-                # keep max_len < training.max_context_length; longer draws are dropped
-                LengthBucket(min_len=1, max_len=128, weight=3.0),
-                LengthBucket(min_len=1024, max_len=2000, weight=1.0),
-            ),
+            buckets=(LengthBucket(min_len=1, max_len=128),),
         ),
+        vocab_size=128_256,
         seed=0,
     ),
-    processor=RandomTokenProcessor.Config(),  # vocab from tokenizer
-    post_filters=(lambda sample: sample is not None,),
 )
-
-# Pack whole sequences into rows, as SFT does. FirstFit preserves each sampled
-# length; ConcatThenSplit would re-chunk into uniform blocks and erase the
-# distribution you configured.
 synthetic_packed_ds = FirstFitPackingConfig(dataset=synthetic_ds)
 
 config.dataloader = GrainDataLoader.Config(dataset=synthetic_packed_ds, shuffle=False)
@@ -225,16 +243,12 @@ Notes:
 - Each DP rank derives an independent, reproducible stream from the source
   `seed` + loader policy seed + `dp_rank`, and the source is
   checkpoint-resumable.
-- Sequences longer than `max_context_length` are dropped (by the processor, and
-  again by FirstFit), so keep `post_filters=(lambda s: s is not None,)` and size
-  buckets to your `max_context_length` — otherwise long draws are silently
-  dropped and the realized distribution is biased.
-- Use `BucketLengthSpec` (default) for weighted ranges or `ParametricLengthSpec`
-  (`uniform`/`normal`/`lognormal`/`zipf`) for a parametric shape.
-- Token content: `RandomTokenProcessor` (random ids) for MoE-representative
-  routing; `ConstantTokenProcessor(constant_token_id=...)` (no RNG) for the
-  cheapest **dense-only** runs — constant tokens collapse MoE routing to one
-  expert, so use random ids for MoE.
+- The source does not drop oversize sequences; `FirstFitPackingConfig` drops
+  `len(input_ids) > max_context_length`, so size buckets to your
+  `max_context_length` — otherwise long draws are silently dropped and the
+  realized distribution is biased.
+- `vocab_size` is required and independent of the tokenizer; set it to your
+  model's vocab size.
 - Inspect a spec without training via
   `python -m scripts.preview_synthetic_lengths --spec spec.json --dp 8`.
 

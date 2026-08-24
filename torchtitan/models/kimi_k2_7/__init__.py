@@ -9,8 +9,11 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
-
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    register_moe_load_balancing_hook,
+)
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_vlm
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -34,6 +37,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model
 from .parallelize import parallelize_kimi_k2_5
+from .qk_clip import QKClipFlexAttention, register_qk_clip_hook
 from .state_dict_adapter import KimiK25StateDictAdapter
 
 from .vision_encoder import (
@@ -185,6 +189,21 @@ def _vision_encoder_config(
     )
 
 
+def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexAttention.Config:
+    if attn_backend != "flex":
+        raise ValueError("Kimi QK clipping requires the FlexAttention backend.")
+    return QKClipFlexAttention.Config()
+
+
+def _register_optimizer_hooks(
+    optimizers: OptimizersContainer,
+    model_parts: list[nn.Module],
+    parallel_dims: ParallelDims,
+) -> None:
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_qk_clip_hook(optimizers, model_parts, parallel_dims)
+
+
 def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
     """Build MLA/MoE layers with the Kimi-family parameter initializers."""
     return build_mla_moe_layers(
@@ -193,6 +212,7 @@ def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
         norm_init=_NORM_INIT,
         depth_init=_depth_init,
         depth_experts_init=_depth_experts_init,
+        attention_config_factory=_qk_clip_attention_config,
     )
 
 
@@ -497,6 +517,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_kimi_k2_5,
         pipelining_fn=pipeline_vlm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_register_optimizer_hooks,
         state_dict_adapter=KimiK25StateDictAdapter,
     )

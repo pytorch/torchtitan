@@ -16,14 +16,6 @@ def test_build_spec_buckets():
     assert lengths.min() >= 1 and lengths.max() <= 4
 
 
-def test_build_spec_parametric():
-    spec = build_spec(
-        {"type": "parametric", "kind": "uniform", "min_len": 3, "max_len": 9}
-    )
-    lengths = spec.sample(np.random.default_rng(0), 100)
-    assert lengths.min() >= 3 and lengths.max() <= 9
-
-
 def test_summarize_reports_percentiles():
     stats = summarize(np.arange(1, 101))
     assert stats["p50"] == 50.5  # np.percentile linear interpolation over 100 elems
