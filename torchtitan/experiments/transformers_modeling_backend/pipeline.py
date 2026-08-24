@@ -402,7 +402,7 @@ def pipeline_hf_transformers(
 
     pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        num_microbatches=parallelism.num_pp_microbatches,
         stages=stages,
         loss_fn=loss_fn,
     )

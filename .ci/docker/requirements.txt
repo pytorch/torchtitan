@@ -1,4 +1,4 @@
-torchdata >= 0.8.0
+grain == 0.2.18
 datasets >= 3.6.0, < 4.8.0
 tensorboard
 wandb

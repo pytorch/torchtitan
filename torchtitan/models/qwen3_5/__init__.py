@@ -38,16 +38,14 @@ from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import (
+from .gdn import (
     GatedDeltaBackend,
     GatedDeltaKernel,
     GatedDeltaNet,
-    OffsetRMSNorm,
-    Qwen35Attention,
-    Qwen35Model,
-    Qwen35TransformerBlock,
+    InnerGatedDeltaNet,
     RMSNormGated,
 )
+from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 
 from .parallelize import parallelize_qwen3_5
 from .rope import MRoPE
@@ -106,7 +104,9 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
 
 
 def _a_log_init(param: nn.Parameter) -> None:
-    param.data.uniform_(1e-6, 16.0).log_()
+    # Match https://github.com/huggingface/transformers/pull/47944 to avoid
+    # near-zero decay heads under bf16 initialization.
+    param.data.uniform_(0.01, 16.0).log_()
 
 
 def _linear(in_features: int, out_features: int) -> Linear.Config:
@@ -301,7 +301,9 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        kernel=GatedDeltaKernel.Config(backend=fla_backend),
+        inner_gated_delta_net=InnerGatedDeltaNet.Config(
+            kernel=GatedDeltaKernel.Config(backend=fla_backend),
+        ),
         norm=RMSNormGated.Config(
             dim=value_head_dim,
             eps=1e-6,
@@ -502,7 +504,7 @@ def _debugmodel(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=4096,
+                max_context_length=4096,
                 theta=10_000_000.0,
                 mrope_section=[3, 3, 2],
             ),
@@ -562,7 +564,7 @@ def _debugmodel_moe(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=4096,
+                max_context_length=4096,
                 theta=10_000_000.0,
                 mrope_section=[3, 3, 2],
             ),
@@ -628,7 +630,7 @@ def _0_8b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -689,7 +691,7 @@ def _2b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -749,7 +751,7 @@ def _4b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -805,7 +807,7 @@ def _9b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -861,7 +863,7 @@ def _27b(attn_backend: str) -> Qwen35Model.Config:
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -920,7 +922,7 @@ def _35b_a3b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -983,7 +985,7 @@ def _122b_a10b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -1046,7 +1048,7 @@ def _397b_a17b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_seq_len=262144,
+                max_context_length=262144,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),

@@ -4,32 +4,65 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from dataclasses import replace
+
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
-from torchtitan.models.flux.flux_datasets import FluxDataLoader
+from torchtitan.models.flux.flux_datasets import (
+    DATASETS,
+    FluxCollator,
+    FluxSampleProcessor,
+    FluxValidationDatasetConfig,
+)
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan.models.flux.utils import (
+    IMAGE_LATENT_SIZE_RATIO,
+    PATCH_HEIGHT,
+    PATCH_WIDTH,
+)
 from torchtitan.models.flux.validate import FluxValidator
 
 from . import model_registry
 
+# NOTE: Flux needs `img_size` in both `dataset.processor` and to define the `seq_len` of the model
+# There two utils are created to take the img_size defined once in the config.
+def _flux_dataset(dataset_name: str, *, img_size: int) -> SingleDatasetConfig:
+    dataset = DATASETS[dataset_name]
+    processor = dataset.processor
+    if not isinstance(processor, FluxSampleProcessor.Config):
+        raise ValueError(
+            f"Flux dataset {dataset_name!r} must use FluxSampleProcessor.Config"
+        )
+    return replace(dataset, processor=replace(processor, img_size=img_size))
+
+
+def _flux_seq_len(img_size: int, max_t5_encoding_len: int) -> int:
+    latent_width = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_WIDTH
+    latent_height = img_size // IMAGE_LATENT_SIZE_RATIO // PATCH_HEIGHT
+    return latent_width * latent_height + max_t5_encoding_len
+
 
 def flux_debugmodel() -> FluxTrainer.Config:
     hf_assets_path = "tests/assets/tokenizer"
+    img_size = 256
+    max_t5_encoding_len = 256
+    training_dataset = _flux_dataset("cc12m-test", img_size=img_size)
+    validation_dataset = _flux_dataset("cc12m-test-validation", img_size=img_size)
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
-            max_t5_encoding_len=256,
+            max_t5_encoding_len=max_t5_encoding_len,
         ),
         encoder=FluxEncoderConfig(
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
@@ -42,14 +75,16 @@ def flux_debugmodel() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
+            num_tokens_per_microbatch_per_dp_rank=2048,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             max_norm=2.0,
             steps=10,
             disable_cuda_graphs=True,
         ),
-        dataloader=FluxDataLoader.Config(
-            prompt_dropout_prob=0.447,
-            img_size=256,
+        dataloader=GrainDataLoader.Config(
+            dataset=training_dataset,
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
         activation_checkpoint=FullAC.Config(),
@@ -65,14 +100,15 @@ def flux_debugmodel() -> FluxTrainer.Config:
                 classifier_free_guidance_scale=5.0,
                 denoising_steps=4,
             ),
-            dataloader=FluxDataLoader.Config(
-                # Validate on the local cc12m-test asset (no HF download) so CI
-                # does not flake on the network. Production flux_dev/flux_schnell
-                # still validate on the real coco-validation set.
-                dataset="cc12m-test",
-                prompt_dropout_prob=0.0,
-                img_size=256,
-                generate_timesteps=True,
+            # Validate on the local cc12m-test asset (no HF download) so CI
+            # does not flake on the network. Production flux_dev/flux_schnell
+            # still validate on the real coco-validation set.
+            dataloader=GrainDataLoader.Config(
+                dataset=FluxValidationDatasetConfig(
+                    dataset=validation_dataset,
+                ),
+                collator=FluxCollator.Config(),
+                streaming_shuffle_buffer_size=128,
             ),
             save_img_count=1,
             save_img_folder="img",
@@ -87,12 +123,16 @@ def flux_debugmodel() -> FluxTrainer.Config:
 
 
 def flux_dev() -> FluxTrainer.Config:
+    img_size = 256
+    max_t5_encoding_len = 512
+    training_dataset = _flux_dataset("cc12m-wds", img_size=img_size)
+    validation_dataset = _flux_dataset("coco-validation", img_size=img_size)
     return FluxTrainer.Config(
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
-            max_t5_encoding_len=512,
+            max_t5_encoding_len=max_t5_encoding_len,
         ),
         encoder=FluxEncoderConfig(
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
@@ -105,14 +145,15 @@ def flux_dev() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=32,
+            num_tokens_per_microbatch_per_dp_rank=24576,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
             disable_cuda_graphs=True,
         ),
-        dataloader=FluxDataLoader.Config(
-            dataset="cc12m-wds",
-            prompt_dropout_prob=0.447,
-            img_size=256,
+        dataloader=GrainDataLoader.Config(
+            dataset=training_dataset,
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -124,11 +165,12 @@ def flux_dev() -> FluxTrainer.Config:
                 classifier_free_guidance_scale=5.0,
                 denoising_steps=50,
             ),
-            dataloader=FluxDataLoader.Config(
-                dataset="coco-validation",
-                prompt_dropout_prob=0,
-                img_size=256,
-                generate_timesteps=True,
+            dataloader=GrainDataLoader.Config(
+                dataset=FluxValidationDatasetConfig(
+                    dataset=validation_dataset,
+                ),
+                collator=FluxCollator.Config(),
+                streaming_shuffle_buffer_size=128,
             ),
             save_img_count=50,
             save_img_folder="img",
@@ -138,12 +180,16 @@ def flux_dev() -> FluxTrainer.Config:
 
 
 def flux_schnell() -> FluxTrainer.Config:
+    img_size = 256
+    max_t5_encoding_len = 256
+    training_dataset = _flux_dataset("cc12m-wds", img_size=img_size)
+    validation_dataset = _flux_dataset("coco-validation", img_size=img_size)
     return FluxTrainer.Config(
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
             t5_tokenizer_path="google/t5-v1_1-xxl",
             clip_tokenizer_path="openai/clip-vit-large-patch14",
-            max_t5_encoding_len=256,
+            max_t5_encoding_len=max_t5_encoding_len,
         ),
         encoder=FluxEncoderConfig(
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
@@ -156,14 +202,15 @@ def flux_schnell() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=64,
+            num_tokens_per_microbatch_per_dp_rank=32768,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
             disable_cuda_graphs=True,
         ),
-        dataloader=FluxDataLoader.Config(
-            dataset="cc12m-wds",
-            prompt_dropout_prob=0.447,
-            img_size=256,
+        dataloader=GrainDataLoader.Config(
+            dataset=training_dataset,
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
         ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(interval=1000),
@@ -175,11 +222,12 @@ def flux_schnell() -> FluxTrainer.Config:
                 classifier_free_guidance_scale=5.0,
                 denoising_steps=50,
             ),
-            dataloader=FluxDataLoader.Config(
-                dataset="coco-validation",
-                prompt_dropout_prob=0,
-                img_size=256,
-                generate_timesteps=True,
+            dataloader=GrainDataLoader.Config(
+                dataset=FluxValidationDatasetConfig(
+                    dataset=validation_dataset,
+                ),
+                collator=FluxCollator.Config(),
+                streaming_shuffle_buffer_size=128,
             ),
             save_img_count=50,
             save_img_folder="img",

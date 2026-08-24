@@ -16,6 +16,7 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
+from dataclasses import replace
 from functools import partial
 
 import spmd_types as spmd
@@ -23,6 +24,10 @@ import torch
 import torch.nn as nn
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
+    _hf_activation_placement,
+    _hf_sequence_parallel_placement,
+)
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
@@ -39,6 +44,13 @@ from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
+
+
+class _HFBatchedMoE(MoE):
+    """Adapt HF's singleton batch to Titan MoE's flat token interface."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().forward(hidden_states.squeeze(0)).unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +120,30 @@ def build_and_swap_native_moe(
             enable_sp=enable_sp,
             expert_param_layout=expert_layout,
         )
+        root_sharding = moe_config.sharding_config
+        assert root_sharding is not None
+        # Only the MoE root sees HF's singleton batch. Its children retain the
+        # standard Titan ``(tokens, hidden)`` layouts used inside MoE.forward.
+        hf_sp_layout = (
+            _hf_sequence_parallel_placement()
+            if enable_sp
+            else _hf_activation_placement(tp=spmd.I)
+        )
+        desired_input_layout = (
+            hf_sp_layout if enable_ep else _hf_activation_placement(tp=spmd.R)
+        )
+        output_layout = (
+            _hf_sequence_parallel_placement()
+            if enable_sp
+            else _hf_activation_placement(tp=spmd.P)
+        )
+        moe_config.sharding_config = replace(
+            root_sharding,
+            in_src_shardings={"hidden_states": hf_sp_layout},
+            in_dst_shardings={"hidden_states": desired_input_layout},
+            out_src_shardings=output_layout,
+            out_dst_shardings=hf_sp_layout,
+        )
 
         # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but leaves the
         # SigmoidGatedFeedForward gate to model-specific code. Replicate it (weight
@@ -119,11 +155,14 @@ def build_and_swap_native_moe(
                     "weight": dense_param_placement(tp=spmd.R),
                     "bias": dense_param_placement(tp=spmd.R),
                 },
-                out_dst_shardings=dense_activation_placement(tp=spmd.R),
+                out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             )
 
         with torch.device("meta"):
             native_moe = moe_config.build()
+        # Preserve the Titan MoE state-dict paths while adapting its root
+        # forward boundary; an nn.Module wrapper would add another name level.
+        native_moe.__class__ = _HFBatchedMoE
 
         # Materialize meta params to real tensors, then initialize values.
         # This mirrors the trainer's flow: to_empty → init_states.

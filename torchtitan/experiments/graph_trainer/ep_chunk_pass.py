@@ -591,9 +591,11 @@ def mark_chunk_dynamic_dims(tensor: torch.Tensor, *, mode: ChunkMode) -> None:
     """Step 1: mark the user-selected tensor dimension unbacked with a hint."""
     from torch._dynamo.decorators import mark_unbacked
 
-    dim = {"batch": 0, "seq": 1}.get(mode)
-    if dim is None:
+    if mode not in ("batch", "seq"):
         raise ValueError(f"Unknown chunk mode: {mode!r}")
+    # Batch and sequence chunking are logical policies. After folding the batch
+    # dimension, both are represented by the leading token dimension.
+    dim = 0
     if tensor.dim() <= dim:
         raise ValueError(
             f"Cannot mark {mode} dim {dim} for shape {tuple(tensor.shape)}."
@@ -633,7 +635,7 @@ def prepare_ep_overlap_trace_inputs(
     mode, chunk_strategy, _ = validate_ep_overlap_config(compile_config.ep_overlap)
     if chunk_strategy == "eager":
         return
-    dim = {"batch": 0, "seq": 1}[mode]
+    dim = 0
     if not args or not isinstance(args[0], torch.Tensor):
         raise ValueError("ep_overlap tracing expects first user input to be a Tensor")
     hint = int(args[0].shape[dim])
@@ -682,12 +684,12 @@ def prepare_ep_overlap_trace_call_inputs(
     attention_masks = extra_kwargs.get("attention_masks")
     if not isinstance(positions, torch.Tensor) or attention_masks is None:
         return None
-    if positions.dim() < 2:
+    if positions.dim() < 1:
         return None
 
     from torch.nn.attention.flex_attention import BlockMask
 
-    seq_len = positions.shape[1]
+    seq_len = positions.shape[0]
 
     def rebind(mask: object) -> object:
         if not isinstance(mask, BlockMask):
