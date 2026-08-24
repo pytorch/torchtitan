@@ -6,50 +6,36 @@
 
 # pyrefly: ignore-errors
 
-"""Composite MXFP8 SwiGLU MLP for a fused w13 projection.
+"""Composite MXFP8 MLP overrides with a fused w13 projection.
 
-One autograd function covers the full dense MLP
+One autograd function covers the full SwiGLU MLP
 
     x -> MXFP8 w13 GEMM -> [gate | up] -> silu(gate) * up -> MXFP8 w2 GEMM
 
 with both directions of every quantization done by the CuTeDSL kernels. The
 ``fuse_activation`` flag selects how the activation boundary is quantized:
+``True`` runs the unified SwiGLU+MXFP8 kernel (the BF16 activation never
+reaches global memory); ``False`` materializes it in BF16 and quantizes with
+the standalone 1x32 / 32x1 kernels. Everything outside that boundary is
+identical between the two modes, so an A/B comparison isolates the fused
+kernel. Configurations the kernels cannot execute (missing CuTeDSL runtime,
+DTensor operands, non-BF16 dtypes, dimensions violating the 128-alignment
+contract) raise an actionable error; there is no silent fallback.
 
-* ``True``: the unified SwiGLU+MXFP8 kernel produces the rowwise and colwise
-  MXFP8 copies directly; the BF16 activation ``h`` is never written to global
-  memory.
-* ``False``: ``h`` (forward) and ``[dGate | dUp]`` (backward) are materialized
-  in BF16 and quantized by the standalone 1x32 / 32x1 CuTeDSL kernels.
-
-Everything outside that boundary -- the w13/w2 GEMMs, their input, weight and
-gradient casts -- is byte-for-byte identical between the two modes, so an A/B
-comparison isolates the activation+quantization implementation.
-
-There is no silent fallback: configurations the kernels cannot execute
-(missing CuTeDSL runtime, DTensor operands, non-BF16 dtypes, or dimensions
-violating the kernels' 128-alignment contract) raise an actionable error so
-the caller can change the config -- e.g. narrow the override's ``fqns`` or
-drop it for the offending module -- rather than train silently on a
-different numerical path.
-
-Two self-contained overrides wire the composites into a model:
-
-* ``mxfp8_fused_swiglu`` (dense ``FeedForward``) builds
-  :class:`MXFP8FusedSwiGLU`, a :class:`FusedSwiGLU` whose forward runs the
-  dense composite.
-* ``mxfp8_fused_grouped_experts`` (``RoutedExperts``) builds
-  :class:`MXFP8FusedGroupedExperts` and swaps the token dispatcher for the
-  padded variant the grouped composite requires (``pad_multiple=128``).
-
-Activate by naming the factories, e.g. ``--override.imports
-torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_swiglu``; both accept a
-``fuse_activation`` kwarg via ``(target, kwargs)`` imports entries. The
-composites quantize every GEMM themselves, so these overrides must not be
-combined with the MXFP8 linear / grouped-experts converters on the same
-modules (the factories raise if they are).
+``mxfp8_fused_mlp`` (dense ``FeedForward``) builds :class:`MXFP8FusedMLP`;
+``mxfp8_fused_grouped_mlp`` (``RoutedExperts``) builds
+:class:`MXFP8FusedGroupedMLP` and swaps the token dispatcher for the padded
+variant the grouped composite requires. Activate by naming the factories in
+``--override.imports``; both accept a ``fuse_activation`` kwarg via
+``(target, kwargs)`` imports entries. The composites quantize every GEMM
+themselves, so do not combine these overrides with the MXFP8 linear /
+grouped-experts converters (the factories raise). Additional MXFP8 fusion
+paths (e.g. fully fused grouped MLPs) extend this module with their own
+composite and factory.
 """
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 
@@ -83,22 +69,16 @@ from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, RoutedExperts
-from torchtitan.overrides.fused_swiglu import (
-    _fuse_w13_grouped_experts_param_init,
-    _fuse_w13_grouped_experts_sharding,
-    _make_fused_gate_up_init,
-    FusedGroupedExperts,
-    FusedSwiGLU,
-)
+from torchtitan.overrides.fused_swiglu import FusedSwiGLU
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.utils import has_cuda_capability
 
 __all__ = [
-    "MXFP8FusedGroupedExperts",
-    "MXFP8FusedSwiGLU",
-    "mxfp8_fused_grouped_experts",
-    "mxfp8_fused_swiglu",
-    "mxfp8_swiglu_mlp_w13",
+    "MXFP8FusedGroupedMLP",
+    "MXFP8FusedMLP",
+    "mxfp8_fused_grouped_mlp",
+    "mxfp8_fused_mlp",
+    "mxfp8_mlp_w13",
 ]
 
 _BLOCK_SIZE = 32
@@ -208,7 +188,7 @@ def _swiglu_backward_casts(grad_h, gated, fuse_activation):
 
 
 @torch._dynamo.allow_in_graph
-class _MXFP8SwiGLUMLP(torch.autograd.Function):
+class _MXFP8MLP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w13, w2, fuse_activation):
         x2d = x.reshape(-1, x.shape[-1]).contiguous()
@@ -251,15 +231,15 @@ def _require_kernels(op_name):
 
 
 def _validate_dense_inputs(x, w13, w2):
-    _require_kernels("mxfp8_swiglu_mlp_w13")
+    _require_kernels("mxfp8_mlp_w13")
     if isinstance(x, DTensor) or isinstance(w13, DTensor) or isinstance(w2, DTensor):
         raise ValueError(
-            "mxfp8_swiglu_mlp_w13 takes plain local tensors, not DTensor; pass "
+            "mxfp8_mlp_w13 takes plain local tensors, not DTensor; pass "
             "local shards or exclude this module from the fused MXFP8 path."
         )
     if not x.is_cuda:
         raise ValueError(
-            f"mxfp8_swiglu_mlp_w13 requires CUDA tensors, got device {x.device}"
+            f"mxfp8_mlp_w13 requires CUDA tensors, got device {x.device}"
         )
     if (
         x.dtype != torch.bfloat16
@@ -267,7 +247,7 @@ def _validate_dense_inputs(x, w13, w2):
         or w2.dtype != torch.bfloat16
     ):
         raise ValueError(
-            "mxfp8_swiglu_mlp_w13 requires BF16 inputs and weights, got "
+            "mxfp8_mlp_w13 requires BF16 inputs and weights, got "
             f"x={x.dtype}, w13={w13.dtype}, down_weight={w2.dtype}"
         )
     if w13.ndim != 3 or w13.shape[1] != 2 or w2.ndim != 2:
@@ -290,11 +270,10 @@ def _validate_dense_inputs(x, w13, w2):
             "exclude this module from the fused MXFP8 path if its shapes cannot "
             "satisfy this."
         )
-    # 32-bit index-math limit over BOTH A/B arms: the unified kernel's input
-    # layout reaches element 2*hidden*m - hidden - 1, but the unfused arm's
-    # standalone casts of the (m, 2*hidden) backward tensor reach
-    # 2*hidden*m - 1, and those kernels do not validate. Gate on the max so
-    # the two arms accept identical shapes.
+    # 32-bit index-math limit over BOTH A/B arms: the unfused arm's standalone
+    # casts of the (m, 2*hidden) backward tensor reach element 2*hidden*m - 1,
+    # past the unified kernel's own bound, and those kernels do not validate;
+    # gating on the max keeps the two arms' accepted shapes identical.
     if 2 * hidden * m - 1 > _INT32_MAX:
         raise ValueError(
             "tokens*hidden exceeds the kernels' 32-bit index math: "
@@ -302,28 +281,17 @@ def _validate_dense_inputs(x, w13, w2):
         )
 
 
-def mxfp8_swiglu_mlp_w13(x, w13, down_weight, *, fuse_activation=True):
+def mxfp8_mlp_w13(x, w13, down_weight, *, fuse_activation=True):
     """Dense MXFP8 SwiGLU MLP with a fused (H, 2, D) w13 weight.
 
-    Args:
-        x: BF16 input of shape (..., D).
-        w13: BF16 fused gate/up weight of shape (H, 2, D); w13[:, 0] is the
-            gate (w1) and w13[:, 1] the up (w3) projection.
-        down_weight: BF16 down-projection weight of shape (D_out, H).
-        fuse_activation: quantize the SwiGLU boundary with the unified
-            SwiGLU+MXFP8 kernel instead of standalone BF16 + cast kernels.
-
-    Returns:
-        BF16 tensor of shape (..., D_out).
-
-    Raises:
-        NotImplementedError: the MXFP8 CuTeDSL kernels are unavailable.
-        ValueError: DTensor operands, non-BF16 dtypes, or dimensions the
-            kernels cannot execute (every dim must be a multiple of 128).
-            There is no silent fallback; change the config instead.
+    ``x`` is BF16 of shape (..., D); ``w13[:, 0]`` is the gate (w1) and
+    ``w13[:, 1]`` the up (w3) projection; ``down_weight`` is (D_out, H).
+    Returns a BF16 tensor of shape (..., D_out). Raises instead of falling
+    back when the kernels are unavailable or the inputs violate their
+    contract (every dimension must be a multiple of 128).
     """
     _validate_dense_inputs(x, w13, down_weight)
-    return _MXFP8SwiGLUMLP.apply(x, w13, down_weight, fuse_activation)
+    return _MXFP8MLP.apply(x, w13, down_weight, fuse_activation)
 
 
 def _pack_w13_grouped(w13):
@@ -385,7 +353,7 @@ def _wgrad_k_groups(a_qdata, a_scales, b, offs, out_dtype):
 
 
 @torch._dynamo.allow_in_graph
-class _MXFP8SwiGLUGroupedMLP(torch.autograd.Function):
+class _MXFP8GroupedMLP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w13, w2_t, offs, fuse_activation):
         x = x.contiguous()
@@ -432,11 +400,10 @@ class _MXFP8SwiGLUGroupedMLP(torch.autograd.Function):
 
 
 def _validate_grouped_inputs(x, w13, w2_t, offs):
-    # The only caller is MXFP8FusedGroupedExperts.forward, which guarantees
-    # plain local BF16 tensors in the module's own (M, D) / (E, F, 2, D) /
-    # (E, F, D_out) shapes; only environment, config dims, and the
-    # routing-dependent token count need checking.
-    _require_kernels("MXFP8FusedGroupedExperts")
+    # The only caller is MXFP8FusedGroupedMLP.forward, which guarantees plain
+    # local BF16 tensors in the module's own shapes; only environment, config
+    # dims, and the routing-dependent token count need checking.
+    _require_kernels("MXFP8FusedGroupedMLP")
     _, f, _, d = w13.shape
     m = x.shape[0]
     d_out = w2_t.shape[2]
@@ -447,20 +414,17 @@ def _validate_grouped_inputs(x, w13, w2_t, offs):
             "this module from the fused MXFP8 path if its shapes cannot "
             "satisfy this."
         )
-    # Group boundaries must additionally be 128-row aligned (the token
-    # dispatcher's pad_multiple guarantees it); checking offs here would sync.
-    # M is routing-dependent under compile (an unbacked SymInt, which type
-    # tests cannot tell apart from int inside traced code), so the M
+    # Group boundaries must additionally be 128-row aligned (the dispatcher's
+    # pad_multiple guarantees it); checking offs here would sync. M is
+    # routing-dependent under compile (an unbacked SymInt), so the M
     # conditions use identity tests: literal bools raise immediately,
     # symbolic ones become deferred runtime asserts. The m >= 128 and m % 32
-    # forms are redundant with m % 128 (plus non-emptiness) but must be
-    # recorded separately: downstream cast-kernel wrappers and GEMM metas
-    # check exactly those forms, and the symbolic engine resolves them by
-    # expression match / value range, not by deriving them from mod-128.
-    # The last condition is the 32-bit index-math limit over BOTH A/B arms
-    # (the unfused arm's standalone casts of the (m, 2f) backward tensor
-    # reach element 2*f*m - 1, slightly past the unified kernel's own input
-    # bound, and those kernels do not validate).
+    # forms are redundant with m % 128 but recorded separately: downstream
+    # kernel wrappers and GEMM metas check exactly those forms, and the
+    # symbolic engine matches expressions rather than deriving them from
+    # mod-128. The last condition is the 32-bit index-math limit over BOTH
+    # A/B arms (the unfused arm's standalone casts reach element 2*f*m - 1,
+    # and those kernels do not validate).
     for cond, requirement in (
         (m >= 128, "at least 128"),
         (
@@ -477,14 +441,60 @@ def _validate_grouped_inputs(x, w13, w2_t, offs):
     ):
         if cond is False:
             raise ValueError(
-                f"MXFP8FusedGroupedExperts: token count {m} (hidden={f}) "
+                f"MXFP8FusedGroupedMLP: token count {m} (hidden={f}) "
                 f"must be {requirement}; there is no silent fallback."
             )
         if cond is not True:
             torch._check(cond)
 
 
-class MXFP8FusedSwiGLU(FusedSwiGLU):
+def _make_fused_gate_up_init(
+    gate_init: Callable,
+    up_init: Callable,
+    *,
+    gate_up_axis: int,
+) -> Callable:
+    """Build an initializer for a fused gate/up weight from per-half
+    initializers (index 0 on ``gate_up_axis`` = gate / stock w1, index 1 = up
+    / stock w3). Each half keeps its own initializer because the gate and up
+    inits differ (e.g. up shares w2's depth-scaled init)."""
+
+    def _init(t: torch.Tensor) -> None:
+        gate_idx: list[int | slice] = [slice(None)] * t.ndim
+        up_idx: list[int | slice] = [slice(None)] * t.ndim
+        gate_idx[gate_up_axis] = 0
+        up_idx[gate_up_axis] = 1
+        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
+        up_init(t[tuple(up_idx)])  # up (stock w3)
+
+    return _init
+
+
+def _fuse_w13_grouped_param_init(param_init: dict | None) -> dict | None:
+    """Remap ``w1_EFD`` / ``w3_EFD`` initializers onto the fused ``w13``;
+    other entries (e.g. ``w2_EDF``) are kept as-is."""
+    if param_init is None:
+        return None
+    w1_init = param_init.get("w1_EFD")
+    w3_init = param_init.get("w3_EFD")
+    fused = {k: v for k, v in param_init.items() if k not in ("w1_EFD", "w3_EFD")}
+    if w1_init is not None and w3_init is not None:
+        fused["w13"] = _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=2)
+    return fused or None
+
+
+def _fuse_w13_grouped_sharding(base: ShardingConfig) -> ShardingConfig:
+    """Replace the ``w1_EFD`` / ``w3_EFD`` state shardings with one for
+    ``w13``: the same axes as ``w1_EFD`` (EP on dim 0, TP on dim 1), the ``2``
+    axis unsharded. Everything else is kept."""
+    state = dict(base.state_shardings)
+    w1_layout = state.pop("w1_EFD")
+    state.pop("w3_EFD")
+    state["w13"] = w1_layout
+    return replace(base, state_shardings=state)
+
+
+class MXFP8FusedMLP(FusedSwiGLU):
     """:class:`FusedSwiGLU` whose forward runs the composite MXFP8 SwiGLU MLP.
 
     Inherits the fused ``w13`` parameter, the stock-layout checkpoint hooks,
@@ -505,11 +515,11 @@ class MXFP8FusedSwiGLU(FusedSwiGLU):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if isinstance(x, DTensor):
             raise ValueError(
-                "MXFP8FusedSwiGLU does not support DTensor activations (dense "
-                "tensor parallelism); narrow the mxfp8_fused_swiglu override's "
+                "MXFP8FusedMLP does not support DTensor activations (dense "
+                "tensor parallelism); narrow the mxfp8_fused_mlp override's "
                 "fqns or drop it for this module."
             )
-        output = mxfp8_swiglu_mlp_w13(
+        output = mxfp8_mlp_w13(
             x,
             self.w13,
             self.w2.weight,
@@ -520,24 +530,34 @@ class MXFP8FusedSwiGLU(FusedSwiGLU):
         return output
 
 
-class MXFP8FusedGroupedExperts(FusedGroupedExperts):
-    """:class:`FusedGroupedExperts` whose forward runs the composite MXFP8
-    SwiGLU grouped MLP.
+class MXFP8FusedGroupedMLP(GroupedExperts):
+    """Routed experts whose forward runs the composite MXFP8 SwiGLU grouped
+    MLP.
 
+    The gate and up projections are fused into one ``w13`` parameter of shape
+    ``(num_experts, hidden_dim, 2, dim)`` (``w13[:, :, 0]`` = stock
+    ``w1_EFD``, ``w13[:, :, 1]`` = stock ``w3_EFD``); checkpoints save/load
+    the stock layout, staying interchangeable with the non-fused module.
     Requires token groups padded to multiples of 128 rows (zero-filled) --
-    the ``mxfp8_fused_grouped_experts`` factory swaps the token dispatcher
-    accordingly. Inherits ``w13``, checkpoint hooks, and sharding from
-    :class:`FusedGroupedExperts`.
+    the ``mxfp8_fused_grouped_mlp`` factory swaps the token dispatcher
+    accordingly.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FusedGroupedExperts.Config):
+    class Config(GroupedExperts.Config):
         fuse_activation: bool = True
         """Quantize the SwiGLU boundary with the unified SwiGLU+MXFP8 kernel
         (False: standalone BF16 + cast kernels; identical GEMMs either way)."""
 
     def __init__(self, config: Config):
         super().__init__(config)
+        del self.w1_EFD
+        del self.w3_EFD
+        self.w13 = torch.nn.Parameter(
+            torch.empty(config.num_experts, config.hidden_dim, 2, config.dim)
+        )
+        self.register_state_dict_post_hook(self._split_w13_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
         self.fuse_activation = config.fuse_activation
 
     def forward(
@@ -558,7 +578,7 @@ class MXFP8FusedGroupedExperts(FusedGroupedExperts):
         w13 = w13.bfloat16()
         w2_t = w2_EDF.bfloat16().transpose(-2, -1)
         _validate_grouped_inputs(x, w13, w2_t, offsets_E)
-        return _MXFP8SwiGLUGroupedMLP.apply(
+        return _MXFP8GroupedMLP.apply(
             x,
             w13,
             w2_t,
@@ -566,29 +586,43 @@ class MXFP8FusedGroupedExperts(FusedGroupedExperts):
             self.fuse_activation,
         ).type_as(x_RD)
 
+    @staticmethod
+    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Save the fused ``w13`` as stock ``w1_EFD`` / ``w3_EFD``."""
+        w13 = state_dict.pop(f"{prefix}w13")
+        state_dict[f"{prefix}w1_EFD"] = w13[:, :, 0, :].contiguous()
+        state_dict[f"{prefix}w3_EFD"] = w13[:, :, 1, :].contiguous()
+
+    @staticmethod
+    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
+        """Combine stock ``w1_EFD`` / ``w3_EFD`` back into the fused ``w13``."""
+        w1_key, w3_key = f"{prefix}w1_EFD", f"{prefix}w3_EFD"
+        if w1_key in state_dict and w3_key in state_dict:
+            state_dict[f"{prefix}w13"] = torch.stack(
+                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
+            )
+
 
 @override(
     target=FeedForward.Config,
-    description="Dense SwiGLU FFN via the composite MXFP8 SwiGLU MLP (fused w13).",
+    description="Dense SwiGLU FFN via the composite MXFP8 MLP (fused w13).",
 )
-def mxfp8_fused_swiglu(
+def mxfp8_fused_mlp(
     cfg: FeedForward.Config,
     *,
     fuse_activation: bool = True,
-) -> "MXFP8FusedSwiGLU.Config":
-    # Config-application-time gate, matching the MXFP8 converters' UX; the
-    # composite re-validates at runtime.
+) -> "MXFP8FusedMLP.Config":
+    # Config-application-time gate; the composite re-validates at runtime.
     if not has_cuda_capability(10, 0):
         raise ValueError(
-            "mxfp8_fused_swiglu requires SM100 or later; remove the override "
+            "mxfp8_fused_mlp requires SM100 or later; remove the override "
             "or run on supported hardware."
         )
-    # Fail loud on anything but the stock config: this override owns the whole
-    # MLP's quantization, so composing it with another FFN variant or a linear
-    # quantization converter is a config error, not a silent no-op.
+    # Composing with another FFN variant or a linear quantization converter
+    # is a config error, not a silent no-op.
     if type(cfg) is not FeedForward.Config:
         raise ValueError(
-            "mxfp8_fused_swiglu targets the stock FeedForward.Config, got "
+            "mxfp8_fused_mlp targets the stock FeedForward.Config, got "
             f"{type(cfg).__qualname__}; narrow this override's fqns or remove "
             "the conflicting override/converter."
         )
@@ -596,13 +630,12 @@ def mxfp8_fused_swiglu(
         sub = getattr(cfg, name)
         if type(sub) is not Linear.Config:
             raise ValueError(
-                "mxfp8_fused_swiglu requires stock Linear.Config projections, "
+                "mxfp8_fused_mlp requires stock Linear.Config projections, "
                 f"but {name} is {type(sub).__qualname__}. The composite "
                 "quantizes every GEMM itself -- do not combine it with a "
                 "linear quantization converter on the same module."
             )
 
-    # Same param-init and sharding remaps as the fused_swiglu factory.
     w1_init = (cfg.w1.param_init or {}).get("weight")
     w3_init = (cfg.w3.param_init or {}).get("weight")
     param_init = None
@@ -611,7 +644,7 @@ def mxfp8_fused_swiglu(
 
     fused = derive(
         cfg,
-        MXFP8FusedSwiGLU.Config,
+        MXFP8FusedMLP.Config,
         param_init=param_init,
         fuse_activation=fuse_activation,
     )
@@ -626,35 +659,34 @@ def mxfp8_fused_swiglu(
 
 @override(
     target=RoutedExperts.Config,
-    description="Routed experts via the composite MXFP8 SwiGLU grouped MLP "
+    description="Routed experts via the composite MXFP8 grouped MLP "
     "(fused w13, 128-row-padded token groups).",
 )
-def mxfp8_fused_grouped_experts(
+def mxfp8_fused_grouped_mlp(
     cfg: RoutedExperts.Config,
     *,
     fuse_activation: bool = True,
 ) -> RoutedExperts.Config:
-    # Config-application-time gate, matching the MXFP8 converters' UX; the
-    # composite re-validates at runtime.
+    # Config-application-time gate; the composite re-validates at runtime.
     if not has_cuda_capability(10, 0):
         raise ValueError(
-            "mxfp8_fused_grouped_experts requires SM100 or later; remove the "
+            "mxfp8_fused_grouped_mlp requires SM100 or later; remove the "
             "override or run on supported hardware."
         )
-    # Targets RoutedExperts.Config (not GroupedExperts.Config) because the
-    # grouped composite constrains BOTH the experts and the token dispatcher:
-    # its kernels require every per-expert token group padded to a multiple of
-    # 128 rows (zero-filled), which only the padded dispatch path produces.
+    # Targets RoutedExperts.Config because the composite constrains BOTH the
+    # experts and the token dispatcher: its kernels need every token group
+    # padded to a 128-row multiple (zero-filled), which only the padded
+    # dispatch path produces.
     if type(cfg) is not RoutedExperts.Config:
         raise ValueError(
-            "mxfp8_fused_grouped_experts targets the stock "
+            "mxfp8_fused_grouped_mlp targets the stock "
             f"RoutedExperts.Config, got {type(cfg).__qualname__}; narrow this "
             "override's fqns or remove the conflicting override."
         )
     inner = cfg.inner_experts
     if type(inner) is not GroupedExperts.Config:
         raise ValueError(
-            "mxfp8_fused_grouped_experts requires the stock "
+            "mxfp8_fused_grouped_mlp requires the stock "
             f"GroupedExperts.Config, but inner_experts is "
             f"{type(inner).__qualname__}. The composite quantizes every "
             "grouped GEMM itself -- do not combine it with the MXFP8 "
@@ -663,16 +695,15 @@ def mxfp8_fused_grouped_experts(
 
     swap_token_dispatcher(cfg, pad_multiple=128)
 
-    # Same param-init and sharding remaps as the fused_grouped_experts factory.
-    param_init = _fuse_w13_grouped_experts_param_init(inner.param_init)
+    param_init = _fuse_w13_grouped_param_init(inner.param_init)
     fused = derive(
         inner,
-        MXFP8FusedGroupedExperts.Config,
+        MXFP8FusedGroupedMLP.Config,
         param_init=param_init,
         fuse_activation=fuse_activation,
     )
     base = inner.sharding_config
     if base is not None:
-        fused.sharding_config = _fuse_w13_grouped_experts_sharding(base)
+        fused.sharding_config = _fuse_w13_grouped_sharding(base)
     cfg.inner_experts = fused
     return cfg

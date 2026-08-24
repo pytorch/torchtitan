@@ -264,15 +264,14 @@ def llama3_8b_mxfp8() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_mxfp8_fused_swiglu() -> Trainer.Config:
+def llama3_debugmodel_mxfp8_fused_mlp() -> Trainer.Config:
     config = llama3_debugmodel()
-    # Dense FFN via the self-contained MXFP8 fused-SwiGLU override: one
-    # composite runs the whole MLP (both GEMMs and the SwiGLU boundary) in
-    # MXFP8. No quantization converter is needed: the composite quantizes
-    # every GEMM itself; attention and lm_head stay BF16.
+    # Dense FFN via the self-contained MXFP8 fused-MLP override: one composite
+    # runs the whole MLP in MXFP8, no quantization converter needed; attention
+    # and lm_head stay BF16.
     config.compile = CompileConfig(enable=True, components=["model"])
     config.override.imports.append(
-        "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_swiglu"
+        "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_mlp"
     )
     return config
 

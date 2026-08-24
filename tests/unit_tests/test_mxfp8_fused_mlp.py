@@ -4,15 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Wiring tests for the self-contained MXFP8 fused-SwiGLU overrides.
+"""Wiring tests for the self-contained MXFP8 fused-MLP overrides.
 
-The overrides must produce the MXFP8 fused modules with the right config
-fields and (for the grouped path) the padded token dispatcher; the factories
-must fail loud on non-stock configs. Everything here is a config-tree
-transform plus a meta-device build, so it runs without a GPU: the factories'
-SM100 gate is patched out (hardware is irrelevant to the transforms under
-test). Numerics of the underlying composites are validated on SM100 hardware
-in NVIDIA-internal CI.
+Everything here is a config-tree transform plus a meta-device build, so it
+runs without a GPU: the factories' SM100 gate is patched out. Numerics of the
+underlying composites are validated on SM100 hardware in NVIDIA-internal CI.
 """
 
 import unittest
@@ -30,39 +26,35 @@ from torchtitan.models.llama3 import model_registry as llama3_model_registry
 from torchtitan.overrides.fused_swiglu import FusedSwiGLU
 
 try:
-    from torchtitan.overrides.mxfp8_fused_swiglu import (
-        mxfp8_fused_swiglu,
-        MXFP8FusedGroupedExperts,
-        MXFP8FusedSwiGLU,
+    from torchtitan.overrides.mxfp8_fused_mlp import (
+        mxfp8_fused_mlp,
+        MXFP8FusedGroupedMLP,
+        MXFP8FusedMLP,
     )
 except ImportError as e:  # torchao (or a transitive dep) not installed
     raise unittest.SkipTest(
-        f"torchao is required for the MXFP8 SwiGLU overrides: {e}"
+        f"torchao is required for the MXFP8 fused-MLP overrides: {e}"
     ) from e
 
-_DENSE_OVERRIDE = "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_swiglu"
-_GROUPED_OVERRIDE = (
-    "torchtitan.overrides.mxfp8_fused_swiglu.mxfp8_fused_grouped_experts"
-)
+_DENSE_OVERRIDE = "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_mlp"
+_GROUPED_OVERRIDE = "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_grouped_mlp"
 
 
-class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
+class TestMXFP8FusedMLPOverride(unittest.TestCase):
     def setUp(self):
-        # The factories gate on SM100 at config-application time; hardware is
-        # irrelevant to the config-tree transforms under test.
         patcher = mock.patch(
-            "torchtitan.overrides.mxfp8_fused_swiglu.has_cuda_capability",
+            "torchtitan.overrides.mxfp8_fused_mlp.has_cuda_capability",
             lambda *args: True,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_dense_override_builds_mxfp8_fused_swiglu(self):
+    def test_dense_override_builds_mxfp8_fused_mlp(self):
         model_config = llama3_model_registry("debugmodel").model
         apply_overrides(OverrideConfig(imports=[_DENSE_OVERRIDE]), model_config)
         with torch.device("meta"):
             model = model_config.build()
-        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedSwiGLU)]
+        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedMLP)]
         self.assertTrue(fused)
         self.assertTrue(all(m.fuse_activation for m in fused))
 
@@ -74,7 +66,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         )
         with torch.device("meta"):
             model = model_config.build()
-        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedSwiGLU)]
+        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedMLP)]
         self.assertTrue(fused)
         self.assertFalse(any(m.fuse_activation for m in fused))
 
@@ -84,7 +76,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         return model_config
 
     def _grouped_experts_config(self, model_config):
-        nodes = list(model_config.traverse(MXFP8FusedGroupedExperts.Config))
+        nodes = list(model_config.traverse(MXFP8FusedGroupedMLP.Config))
         self.assertTrue(nodes)
         return nodes[0][1]
 
@@ -100,9 +92,9 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         self.assertTrue(all(pad == 128 for pad in pads))
         with torch.device("meta"):
             model = model_config.build()
-        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedGroupedExperts)]
+        fused = [m for m in model.modules() if isinstance(m, MXFP8FusedGroupedMLP)]
         self.assertTrue(fused)
-        self.assertTrue(all(type(m) is MXFP8FusedGroupedExperts for m in fused))
+        self.assertTrue(all(type(m) is MXFP8FusedGroupedMLP for m in fused))
         self.assertTrue(all(m.fuse_activation for m in fused))
 
     def test_grouped_forward_validates_and_applies_the_function(self):
@@ -113,9 +105,9 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
         x = torch.randn(2, cfg.dim)
         sentinel = torch.zeros(2, cfg.dim, dtype=torch.bfloat16)
         with mock.patch(
-            "torchtitan.overrides.mxfp8_fused_swiglu._validate_grouped_inputs"
+            "torchtitan.overrides.mxfp8_fused_mlp._validate_grouped_inputs"
         ) as validate, mock.patch(
-            "torchtitan.overrides.mxfp8_fused_swiglu._MXFP8SwiGLUGroupedMLP.apply",
+            "torchtitan.overrides.mxfp8_fused_mlp._MXFP8GroupedMLP.apply",
             return_value=sentinel,
         ) as function:
             out = module(x, num_tokens)
@@ -160,11 +152,9 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
             w3=gate,
         )
         with self.assertRaisesRegex(ValueError, "stock FeedForward.Config"):
-            mxfp8_fused_swiglu(cfg)
+            mxfp8_fused_mlp(cfg)
 
     def test_dense_factory_raises_on_converted_projection(self):
-        # The composite quantizes every GEMM itself; combining with a linear
-        # quantization converter on the same module must raise.
         from torchtitan.components.quantization.mx import MXFP8Linear
 
         if MXFP8Linear is None:
@@ -176,7 +166,7 @@ class TestMXFP8FusedSwiGLUOverride(unittest.TestCase):
             w3=gate,
         )
         with self.assertRaisesRegex(ValueError, "quantization converter"):
-            mxfp8_fused_swiglu(cfg)
+            mxfp8_fused_mlp(cfg)
 
 
 if __name__ == "__main__":
