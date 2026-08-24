@@ -671,7 +671,7 @@ class TestDenseStorageAxes(DTensorTestBase):
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
             axes = self._build("partial_dtensor").get_all_one_dimensional_meshes()
-            self.assertNotIn("fsdp", axes)
+            self.assertIn("fsdp", axes)
             self.assertNotIn("dp_shard", axes)
 
     @with_comms
@@ -680,7 +680,7 @@ class TestDenseStorageAxes(DTensorTestBase):
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
             axes = self._build("spmd_types").get_all_one_dimensional_meshes()
-            self.assertIn("fsdp", axes)
+            self.assertNotIn("fsdp", axes)
             self.assertIn("dp", axes)
             self.assertIn("dp_shard", axes)
 
