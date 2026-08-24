@@ -17,17 +17,16 @@ import torch
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common import Conv1d, Linear, RMSNorm
 from torchtitan.models.common.attention import (
-    create_varlen_metadata_for_document,
     KDA,
-    KDAAttention,
+    InnerKDA,
     KDABackend,
-    KDAInnerAttention,
+    KDAKernel,
+    create_varlen_metadata_for_document,
 )
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_kda_sharding,
 )
-
 
 _HAS_BLACKWELL = (
     importlib.util.find_spec("attn_gym") is not None
@@ -72,9 +71,9 @@ def _kda_config(*, backend: KDABackend) -> KDA.Config:
         forget_b=linear(128, projection_dim),
         beta=linear(32, 2),
         output_gate=linear(32, projection_dim),
-        attention=KDAAttention.Config(
+        inner_kda=InnerKDA.Config(
             head_dim=128,
-            inner_attention=KDAInnerAttention.Config(backend=backend),
+            kernel=KDAKernel.Config(backend=backend),
         ),
         output_norm=RMSNorm.Config(normalized_shape=128),
         output_proj=linear(projection_dim, 32),
@@ -95,14 +94,14 @@ class TestKDASharding(unittest.TestCase):
         tp_axis = MeshAxisName.TP
         q_proj_sharding = config.q_proj.sharding_config
         output_proj_sharding = config.output_proj.sharding_config
-        attention_sharding = config.attention.sharding_config
+        inner_kda_sharding = config.inner_kda.sharding_config
         kda_sharding = config.sharding_config
         assert q_proj_sharding is not None
         assert output_proj_sharding is not None
-        assert attention_sharding is not None
-        assert attention_sharding.in_src_shardings is not None
-        assert attention_sharding.local_map is not None
-        assert attention_sharding.local_map.in_grad_placements is not None
+        assert inner_kda_sharding is not None
+        assert inner_kda_sharding.in_src_shardings is not None
+        assert inner_kda_sharding.local_map is not None
+        assert inner_kda_sharding.local_map.in_grad_placements is not None
         assert kda_sharding is not None
         self.assertEqual(
             q_proj_sharding.state_shardings["weight"].axis_types[tp_axis],
@@ -113,7 +112,7 @@ class TestKDASharding(unittest.TestCase):
             spmd.S(1),
         )
         self.assertEqual(
-            set(attention_sharding.in_src_shardings),
+            set(inner_kda_sharding.in_src_shardings),
             {
                 "query_TC",
                 "key_TC",
@@ -128,14 +127,14 @@ class TestKDASharding(unittest.TestCase):
                 "cu_seqlens",
             },
         )
-        head_layout = attention_sharding.in_src_shardings["raw_gate_TNK"]
+        head_layout = inner_kda_sharding.in_src_shardings["raw_gate_TNK"]
         self.assertEqual(head_layout.per_axis_spmd_types()[tp_axis], spmd.S(1))
         self.assertEqual(
             kda_sharding.in_src_shardings,
             {"x_TD": input_layout},
         )
         self.assertEqual(
-            len(attention_sharding.local_map.in_grad_placements),
+            len(inner_kda_sharding.local_map.in_grad_placements),
             11,
         )
 
@@ -286,15 +285,15 @@ class TestKDA(unittest.TestCase):
     _HAS_BLACKWELL and _HAS_VLLM,
     "paged KDA requires attention-gym, vLLM, and CUDA capability 10.0 or newer",
 )
-class TestVLLMKDA(unittest.TestCase):
+class TestVLLMInnerKDA(unittest.TestCase):
     def _wrapper(self):
-        from torchtitan.experiments.rl.models.kda_attention import VLLMKDAWrapper
+        from torchtitan.experiments.rl.models.kda_attention import VLLMInnerKDA
 
-        wrapper = object.__new__(VLLMKDAWrapper)
+        wrapper = object.__new__(VLLMInnerKDA)
         torch.nn.Module.__init__(wrapper)
         wrapper.local_num_heads = 2
         wrapper.head_dim = 128
-        wrapper.gate_lower_bound = -5.0
+        wrapper.lower_bound = -5.0
         return wrapper
 
     def test_prefill_advances_pool_without_gather_scatter(self):
@@ -335,7 +334,7 @@ class TestVLLMKDA(unittest.TestCase):
             A_log,
             dt_bias,
             chunk_size=64,
-            lower_bound=wrapper.gate_lower_bound,
+            lower_bound=wrapper.lower_bound,
             cu_seqlens=query_start_loc,
         )
         expected_initial = torch.stack(
@@ -420,7 +419,7 @@ class TestVLLMKDA(unittest.TestCase):
                 dt_bias,
                 expected_recurrent_state,
                 slots,
-                lower_bound=wrapper.gate_lower_bound,
+                lower_bound=wrapper.lower_bound,
             )
             actual = wrapper._kda_decode(
                 mixed_qkv_TC,

@@ -10,15 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.models.common.attention import KDAInnerAttention
+from torchtitan.models.common.attention import KDAKernel
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.config_registry import (
-    kimi_k3_debugmodel_c4,
-    kimi_k3_debugmodel_c4_fla,
-    kimi_k3_debugmodel_c4_fused,
-)
-from torchtitan.models.kimi_k3.kda import KimiKDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -125,30 +118,6 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_c4_recipes_select_kda_backend(self):
-        recipes = (
-            (kimi_k3_debugmodel_c4, "auto"),
-            (kimi_k3_debugmodel_c4_fused, "fused"),
-            (kimi_k3_debugmodel_c4_fla, "fla"),
-        )
-        for recipe, expected_backend in recipes:
-            with self.subTest(recipe=recipe.__name__):
-                config = recipe()
-                self.assertIsInstance(config.dataloader, GrainDataLoader.Config)
-                assert isinstance(config.dataloader, GrainDataLoader.Config)
-                self.assertIsInstance(
-                    config.dataloader.dataset,
-                    ConcatThenSplitPackingConfig,
-                )
-                assert config.model_spec is not None
-                backends = set()
-                for _, inner_attention, _, _ in config.model_spec.traverse(
-                    KDAInnerAttention.Config
-                ):
-                    assert isinstance(inner_attention, KDAInnerAttention.Config)
-                    backends.add(inner_attention.backend)
-                self.assertEqual(backends, {expected_backend})
-
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()
@@ -173,64 +142,63 @@ class TestKimiK3(unittest.TestCase):
                 requires_grad=True,
             )
 
-        for lower_bound in (-5.0,):
-            with self.subTest(lower_bound=lower_bound):
-                A_log_H = torch.rand(num_heads, device="cuda")
-                A_log_H = A_log_H.uniform_(1.0, 16.0).log().requires_grad_()
-                actual_inputs = (
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads),
-                    A_log_H,
-                    parameter(num_heads, head_dim),
-                )
-                expected_inputs = tuple(
-                    tensor.detach().clone().requires_grad_() for tensor in actual_inputs
-                )
+        lower_bound = -5.0
+        A_log_H = torch.rand(num_heads, device="cuda")
+        A_log_H = A_log_H.uniform_(1.0, 16.0).log().requires_grad_()
+        actual_inputs = (
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads),
+            A_log_H,
+            parameter(num_heads, head_dim),
+        )
+        expected_inputs = tuple(
+            tensor.detach().clone().requires_grad_() for tensor in actual_inputs
+        )
 
-                kernel = KimiKDAKernel.Config(
-                    backend="fused",
-                    lower_bound=lower_bound,
-                ).build()
-                actual_BLHV = kernel(*actual_inputs)
-                expected_BLHV = _kda_recurrent_reference(
-                    *expected_inputs,
-                    lower_bound=lower_bound,
-                )
+        kernel = KDAKernel.Config(
+            backend="fused",
+            lower_bound=lower_bound,
+        ).build()
+        actual_BLHV = kernel(*actual_inputs)
+        expected_BLHV = _kda_recurrent_reference(
+            *expected_inputs,
+            lower_bound=lower_bound,
+        )
 
-                # The chunked kernel accumulates over chunk boundaries and uses
-                # reduced-precision matmuls internally, so it does not reproduce
-                # the sequential FP32 recurrence bit for bit.
-                torch.testing.assert_close(
-                    actual_BLHV,
-                    expected_BLHV,
-                    atol=2e-3,
-                    rtol=2e-3,
-                )
-                output_grad_BLHV = torch.randn_like(actual_BLHV)
-                actual_grads = torch.autograd.grad(
-                    actual_BLHV,
-                    actual_inputs,
-                    grad_outputs=output_grad_BLHV,
-                )
-                expected_grads = torch.autograd.grad(
-                    expected_BLHV,
-                    expected_inputs,
-                    grad_outputs=output_grad_BLHV,
-                )
-                for actual_grad, expected_grad in zip(
-                    actual_grads,
-                    expected_grads,
-                    strict=True,
-                ):
-                    torch.testing.assert_close(
-                        actual_grad,
-                        expected_grad,
-                        atol=2e-2,
-                        rtol=2e-2,
-                    )
+        # The chunked kernel accumulates over chunk boundaries and uses
+        # reduced-precision matmuls internally, so it does not reproduce
+        # the sequential FP32 recurrence bit for bit.
+        torch.testing.assert_close(
+            actual_BLHV,
+            expected_BLHV,
+            atol=2e-3,
+            rtol=2e-3,
+        )
+        output_grad_BLHV = torch.randn_like(actual_BLHV)
+        actual_grads = torch.autograd.grad(
+            actual_BLHV,
+            actual_inputs,
+            grad_outputs=output_grad_BLHV,
+        )
+        expected_grads = torch.autograd.grad(
+            expected_BLHV,
+            expected_inputs,
+            grad_outputs=output_grad_BLHV,
+        )
+        for actual_grad, expected_grad in zip(
+            actual_grads,
+            expected_grads,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_grad,
+                expected_grad,
+                atol=2e-2,
+                rtol=2e-2,
+            )
 
     def test_state_dict_round_trips_through_hf_adapter(self):
         torch.manual_seed(2)

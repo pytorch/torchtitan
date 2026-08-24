@@ -31,8 +31,8 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from torchtitan.protocols.module import Module
 
 
-class VLLMKDAWrapper(Module, MambaBase):
-    """Adapter from the KDA layer to vLLM's paged recurrent state.
+class VLLMInnerKDA(Module, MambaBase):
+    """vLLM replacement for ``InnerKDA`` using paged recurrent state.
 
     vLLM owns allocation, routing, prefix copies, and the ``[slot, H, V, K]`` recurrent
     cache shape. KDA uses ``K == V``, so Attention Gym can advance the same dense slot
@@ -44,7 +44,7 @@ class VLLMKDAWrapper(Module, MambaBase):
         num_heads: int
         head_dim: int
         conv_kernel_size: int = 4
-        gate_lower_bound: float | None = -5.0
+        lower_bound: float = -5.0
         layer_index: int = 0
 
     def __init__(self, config: Config) -> None:
@@ -62,7 +62,7 @@ class VLLMKDAWrapper(Module, MambaBase):
         self.local_num_heads = config.num_heads // tp_degree
         self.head_dim = config.head_dim
         self.conv_kernel_size = config.conv_kernel_size
-        self.gate_lower_bound = config.gate_lower_bound
+        self.lower_bound = config.lower_bound
 
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -102,32 +102,43 @@ class VLLMKDAWrapper(Module, MambaBase):
 
     def forward(
         self,
-        mixed_qkv_BLC: torch.Tensor,
-        raw_gate_BLNK: torch.Tensor,
-        raw_beta_BLN: torch.Tensor,
-        conv_weight_C1W: torch.Tensor,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        raw_gate_TNK: torch.Tensor,
+        raw_beta_TN: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
         A_log_N: torch.Tensor,
         dt_bias_NK: torch.Tensor,
-        *,
-        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
-        """Run the flattened vLLM cache operation on rank-local tensors.
+        """Run the vLLM cache operation on rank-local tensors.
 
-        Signature matches :class:`~torchtitan.models.common.attention.KDAAttention`,
+        Signature matches :class:`~torchtitan.models.common.attention.InnerKDA`,
         the module this replaces. vLLM derives its own offsets from the per-layer
         metadata, so the caller's ``cu_seqlens`` is unused.
         """
         del cu_seqlens
 
+        num_tokens = query_TC.shape[0]
+        mixed_qkv_TC = torch.cat((query_TC, key_TC, value_TC), dim=-1)
+        raw_gate_BLNK = raw_gate_TNK.unsqueeze(0)
+        raw_beta_BLN = raw_beta_TN.unsqueeze(0)
+        conv_weight_C1W = torch.cat(
+            (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
+            dim=0,
+        )
         metadata = self._layer_metadata()
-        B, L, _ = mixed_qkv_BLC.shape
-        num_tokens = B * L
-        mixed_qkv_TC = mixed_qkv_BLC.reshape(num_tokens, -1)
-        output = mixed_qkv_TC.new_zeros(B, L, self.local_num_heads, self.head_dim)
+        output_TNK = mixed_qkv_TC.new_zeros(
+            num_tokens,
+            self.local_num_heads,
+            self.head_dim,
+        )
         if metadata is None:
             # Profiling or cudagraph dummy capture: no live metadata yet.
-            return output
-        output_TNK = output.view(num_tokens, self.local_num_heads, self.head_dim)
+            return output_TNK
 
         live = metadata.num_actual_tokens
         mixed_qkv_TC = mixed_qkv_TC[:live]
@@ -173,8 +184,8 @@ class VLLMKDAWrapper(Module, MambaBase):
                 conv_weight,
                 recurrent_state,
             )
-        output_TNK[:live] = result[0, :live].to(output.dtype)
-        return output
+        output_TNK[:live] = result[0, :live].to(output_TNK.dtype)
+        return output_TNK
 
     def _layer_metadata(self) -> GDNAttentionMetadata | None:
         raw = get_forward_context().attn_metadata
@@ -227,7 +238,7 @@ class VLLMKDAWrapper(Module, MambaBase):
             A_log.float(),
             dt_bias.float(),
             chunk_size=64,
-            lower_bound=self.gate_lower_bound,
+            lower_bound=self.lower_bound,
             cu_seqlens=query_start_loc,
         )
         core_out, _ = chunk_kda(
@@ -273,5 +284,5 @@ class VLLMKDAWrapper(Module, MambaBase):
             dt_bias,
             recurrent_state,
             slots,
-            lower_bound=self.gate_lower_bound,
+            lower_bound=self.lower_bound,
         )

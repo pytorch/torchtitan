@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Conv1d, Embedding, KDAAttention, Linear
+from torchtitan.models.common import Conv1d, Embedding, InnerKDA, KDAKernel, Linear
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
@@ -26,7 +26,7 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .kda import KimiDeltaAttention, KimiKDAKernel
+from .kda import KimiDeltaAttention
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
@@ -197,9 +197,9 @@ def _kda_config(
         forget_b=_linear(head_dim, projection_dim),
         beta=_linear(dim, num_heads),
         output_gate=_linear(dim, projection_dim),
-        attention=KDAAttention.Config(
+        inner_kda=InnerKDA.Config(
             head_dim=head_dim,
-            inner_attention=KimiKDAKernel.Config(
+            kernel=KDAKernel.Config(
                 backend="auto",
                 lower_bound=-5.0,
             ),

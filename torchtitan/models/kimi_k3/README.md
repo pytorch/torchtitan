@@ -8,24 +8,7 @@ Attention (MLA) decoder with LatentMoE and a MoonViT-V2 vision encoder.
 Install the additional dependencies:
 
 ```bash
-pip install av einops pillow torchvision flash-linear-attention 'attention-gym[linear]'
-```
-
-KDA selects its training backend automatically. Attention Gym's fused kernel
-is used for head dimension 128 on Blackwell SM100/SM103 GPUs; other CUDA
-architectures fall back to FLA. Selecting the fused backend explicitly reports
-the unsupported device, tensor shape, and compute capability instead.
-
-## C4 Training
-
-The C4 debug recipes use the streaming `allenai/c4` training split. The default
-recipe selects the KDA backend automatically; the other recipes pin a backend
-for numerical comparisons.
-
-```bash
-NGPU=8 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel_c4 ./run_train.sh
-NGPU=8 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel_c4_fused ./run_train.sh
-NGPU=8 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel_c4_fla ./run_train.sh
+pip install av einops pillow torchvision flash-linear-attention
 ```
 
 ## Architecture
