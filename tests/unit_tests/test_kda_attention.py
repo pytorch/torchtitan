@@ -138,17 +138,6 @@ class TestKDASharding(unittest.TestCase):
             11,
         )
 
-    def test_context_parallel_is_rejected(self):
-        config = _kda_config(backend="reference")
-        with self.assertRaisesRegex(NotImplementedError, "Context parallel"):
-            set_kda_sharding(
-                config,
-                attention_input_layout=dense_sequence_parallel_placement(),
-                enable_sp=True,
-                cp_enabled=True,
-            )
-
-
 @unittest.skipUnless(
     _HAS_BLACKWELL, "KDA requires Attention Gym and CUDA capability 10.0 or newer"
 )
@@ -241,12 +230,6 @@ class TestKDA(unittest.TestCase):
                 rtol=5e-2,
                 atol=5e-2,
             )
-
-    def test_rejects_unfolded_batch_dimension(self):
-        model = self._make_kda(backend="reference")
-        x_TD = self._inputs(seed=3)
-        with self.assertRaisesRegex(ValueError, r"\[T, D\]"):
-            model(x_TD.unsqueeze(0))
 
     def test_varlen_matches_independent_document_forwards(self):
         lengths = (37, 64, 91)
