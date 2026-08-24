@@ -24,7 +24,6 @@ Usage:
         scripts.checkpoint_conversion.numerical_tests_kimi_k3
 
 Add ``--force-hf-routing`` for the routing-fixed diagnostic.
-Use ``--hf-attn-backend eager`` when flash-attn is not installed.
 """
 
 import argparse
@@ -40,7 +39,6 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     resize_to_patch_budget,
     vision_to_patches,
 )
-from torchtitan.models.common.attention import KDAInnerAttention
 from torchtitan.models.kimi_k3 import model_registry
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
@@ -118,7 +116,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
             "head_dim": kda.head_dim,
             "num_heads": kda.num_heads,
             "short_conv_kernel_size": kda.conv_kernel_size,
-            "gate_lower_bound": kda.attention.inner_attention.lower_bound,
+            "gate_lower_bound": kda.kernel.lower_bound,
             "use_full_rank_gate": True,
         },
     }
@@ -166,7 +164,6 @@ def _build_hf_model(
     tt_config,
     hf_state_dict: dict[str, Any],
     dtype: torch.dtype,
-    hf_attn_backend: str,
 ):
     hf_config = AutoConfig.from_pretrained(
         hf_model_path,
@@ -174,10 +171,10 @@ def _build_hf_model(
         local_files_only=True,
     )
     _reduce_hf_config(hf_config, tt_config, hf_model_path)
-    hf_config.text_config._attn_implementation = hf_attn_backend
-    hf_config.vision_config._attn_implementation = hf_attn_backend
+    hf_config.text_config._attn_implementation = _HF_ATTN_BACKEND
+    hf_config.vision_config._attn_implementation = _HF_ATTN_BACKEND
     model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
-    model.language_model.config._attn_implementation = hf_attn_backend
+    model.language_model.config._attn_implementation = _HF_ATTN_BACKEND
     model.to(dtype=dtype)
     model.load_state_dict(hf_state_dict, strict=True)
     return model.eval()
@@ -191,7 +188,6 @@ def run_hf(
     image_size: int,
     dtype: torch.dtype,
     device: torch.device,
-    hf_attn_backend: str,
 ) -> dict[str, Any]:
     """Run HuggingFace preprocessing and the reduced HuggingFace model."""
     print(f"Loading released HuggingFace Kimi K3 code on {device} ...")
@@ -200,13 +196,7 @@ def run_hf(
         trust_remote_code=True,
         local_files_only=True,
     )
-    model = _build_hf_model(
-        hf_model_path,
-        tt_config,
-        hf_state_dict,
-        dtype,
-        hf_attn_backend,
-    ).to(device)
+    model = _build_hf_model(hf_model_path, tt_config, hf_state_dict, dtype).to(device)
 
     raw_image = (
         torch.linspace(0, 255, image_size * image_size * 3)
@@ -467,18 +457,6 @@ def main() -> None:
         help="Use HF expert selections with TorchTitan router scores.",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--hf-attn-backend",
-        choices=("eager", "flash_attention_2"),
-        default=_HF_ATTN_BACKEND,
-        help="Hugging Face full-attention backend.",
-    )
-    parser.add_argument(
-        "--tt-kda-backend",
-        choices=("auto", "fused", "fla", "reference"),
-        default="auto",
-        help="TorchTitan KDA backend.",
-    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -491,16 +469,9 @@ def main() -> None:
     )
     device = torch.device("cuda")
     dtype = _DTYPE
-    print(
-        f"dtype={dtype} hf_attn={args.hf_attn_backend} " f"tt_kda={args.tt_kda_backend}"
-    )
+    print(f"dtype={dtype} hf_attn={_HF_ATTN_BACKEND}")
 
     tt_config = cast(KimiK3Model.Config, model_registry(args.model_flavor).model)
-    for _fqn, inner_attention, _parent, _attr in tt_config.traverse(
-        KDAInnerAttention.Config
-    ):
-        assert isinstance(inner_attention, KDAInnerAttention.Config)
-        inner_attention.backend = args.tt_kda_backend
     torch.manual_seed(args.seed)
     tt_model = _build_tt_model(tt_config, dtype)
     hf_state_dict = KimiK3StateDictAdapter(tt_config, hf_assets_path=None).to_hf(
@@ -514,7 +485,6 @@ def main() -> None:
         args.image_size,
         dtype,
         device,
-        args.hf_attn_backend,
     )
     del hf_state_dict
     tt_logits = run_tt(
