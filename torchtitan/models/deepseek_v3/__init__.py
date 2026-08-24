@@ -33,6 +33,7 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.module import Module
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
@@ -96,6 +97,7 @@ def make_mla_attention_config(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
+    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
 ) -> Attention.Config:
     """Build a fully-specified DeepSeek V3 MLA ``Attention.Config``.
 
@@ -103,7 +105,7 @@ def make_mla_attention_config(
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
     ``q_lora_rank > 0``, sets ``wq_a``/``wq_b`` (not ``wq``).
     """
-    inner_attention = get_attention_config(attn_backend)
+    inner_attention = attention_config_factory(attn_backend)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
@@ -195,6 +197,7 @@ def build_mla_moe_layers(
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
+    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
 ) -> list[TransformerBlock.Config]:
     """Build the per-layer ``DeepSeekV3TransformerBlock`` configs (MLA + MoE).
 
@@ -221,6 +224,7 @@ def build_mla_moe_layers(
             norm_init=norm_init,
             depth_init=depth_init,
             rope=rope,
+            attention_config_factory=attention_config_factory,
         )
 
         if layer_id < n_dense_layers:
@@ -355,7 +359,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -425,7 +429,7 @@ def _16b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -499,7 +503,7 @@ def _236b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -574,7 +578,7 @@ def _671b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,

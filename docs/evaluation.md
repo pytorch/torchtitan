@@ -8,12 +8,26 @@ For users who want to perform validation directly during the training loop, we p
 Below is an example validation config:
 
 ```python
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+)
+from torchtitan.components.validate import Validator
+from torchtitan.hf_datasets.text_datasets import DATASETS
+
 validator=Validator.Config(
     freq=500,
-    dataset="c4_validation",
-    steps=-1,  # consumes the entire validation set
+    steps=-1,
+    dataloader=GrainDataLoader.Config(
+        dataset=ConcatThenSplitPackingConfig(
+            dataset=DATASETS["c4_validation"],
+        ),
+        repeat=False,
+    ),
 ),
 ```
+
+Omitting `dataloader` uses this configuration by default.
 
 ## Third-Party Evaluation
 With `./scripts/checkpoint_conversion/convert_to_hf.py`, `torchtitan` offers support for converting checkpoints from DCP to safetensors format. Using this script, users can perform efficient evaluation separate from their training using external libraries that support HuggingFace e.g. `lm_eval` with `vllm` backend.

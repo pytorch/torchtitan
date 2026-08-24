@@ -65,16 +65,16 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     # Target is 2 GROUPS. A single group with many rollouts is not a full batch; two groups are,
     # regardless of how many rollouts each contributes.
     batcher = _build_batcher(num_prompts_per_train_step=2)
-    assert (
-        batcher.add_training_samples(
-            training_sample_group=_trainable_group(0, num_samples=8)
-        )
-        is None
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_trainable_group(0, num_samples=8)
     )
-    batch = batcher.add_training_samples(
+    assert batch is None
+    assert group_is_trainable
+    batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
+    assert group_is_trainable
 
 
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
@@ -82,11 +82,15 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # they ride along until a trainable group completes the batch.
     batcher = _build_batcher(num_prompts_per_train_step=1)
     metric_only = TrainingSampleGroup(group_id=0, training_samples=[], metrics=[])
-    assert batcher.add_training_samples(training_sample_group=metric_only) is None
-    batch = batcher.add_training_samples(
+    assert batcher.add_training_samples(training_sample_group=metric_only) == (
+        None,
+        False,
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(1, num_samples=2)
     )
     assert batch is not None
+    assert group_is_trainable
     assert batch.num_global_valid_tokens > 0
 
 
@@ -98,14 +102,15 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
         dp_degree=2,
         pad_id=0,
     )
-    batch = batcher.add_training_samples(
+    batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
     )
     assert batch is not None
+    assert group_is_trainable
     cells = [microbatch for ranks in batch.microbatches for microbatch in ranks]
     assert len(cells) == 4  # 2 microbatches x 2 ranks
     for cell in cells:
-        assert cell.loss_mask.any(dim=1).any()  # at least one real (non-pad) row
+        assert cell.loss_mask.any()
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
@@ -193,9 +198,11 @@ def test_untrainable_group_releases_before_training() -> None:
             group_id=0, training_samples=[], metrics=[]
         )
         await buffer.release_active_groups(1, reason="untrainable_group")
-        assert (
-            batcher.add_training_samples(training_sample_group=training_sample_group)
-            is None
+        assert batcher.add_training_samples(
+            training_sample_group=training_sample_group
+        ) == (
+            None,
+            False,
         )
 
     asyncio.run(run())

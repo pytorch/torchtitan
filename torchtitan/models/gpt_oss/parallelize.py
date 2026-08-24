@@ -16,12 +16,10 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
-from torchtitan.distributed.full_dtensor import (
+from torchtitan.distributed.fsdp import (
+    apply_fsdp_to_decoder,
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
-    validate_config,
 )
 from torchtitan.models.gpt_oss.model import GptOssModel
 
@@ -71,20 +69,12 @@ def parallelize_gptoss(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
-        validate_config(parallel_dims, model)
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)
-    else:
-        # CP: wrap inner attention forward BEFORE parallelize() so CP logic
-        # runs inside the local_map boundary on local tensors.
-        if parallel_dims.cp_enabled:
-            apply_cp_to_forward(
-                # pyrefly: ignore [missing-attribute]
-                [block.attention.inner_attention for block in model.layers.values()],
-                parallel_dims.get_mesh("cp"),
-            )
-        if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-            model.parallelize(parallel_dims)
 
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
@@ -105,7 +95,7 @@ def parallelize_gptoss(
     if skip_dp:
         return model
 
-    if parallelism.spmd_backend in ("full_dtensor", "spmd_types"):
+    if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:

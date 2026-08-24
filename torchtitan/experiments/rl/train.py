@@ -24,13 +24,8 @@ python3 -m torchtitan.experiments.rl.train \
 
 import asyncio
 import logging
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
-
-# must run before torch import. Set it as early as possible to avoid other
-# imports transitively importing torch.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
@@ -276,15 +271,6 @@ def spawn_proc_mesh(
 
 
 async def main():
-    # Monarch is making breaking changes to its message dispatching mechanism.
-    # The recommended way to maintain the current behavior, which is what we want,
-    # is to use @concurrent_endpoint. But that decorator is not available in
-    # monarch's stable release yet. So we pin this env var for now, until the
-    # new release is cut. More details can be found in:
-    # https://github.com/meta-pytorch/monarch/pull/4243
-    # https://github.com/meta-pytorch/monarch/pull/4211
-    os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
-
     config = ConfigManager().parse_args()
     assert isinstance(config, Controller.Config)
     sl.init_structured_logger(

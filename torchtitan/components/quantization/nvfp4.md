@@ -60,8 +60,8 @@ torchrun --standalone --nproc_per_node 4 \
   --config llama3_8b_first_85_pct_layers_nvfp4 \
   --parallelism.tensor_parallel_degree 1 \
   --parallelism.data_parallel_shard_degree 4 \
-  --training.local_batch_size 32 \
-  --training.seq_len 2048 \
+  --training.num_tokens_per_microbatch_per_dp_rank 65536 \
+  --training.max_context_length 2048 \
   --training.steps 763 \
   --dataloader.dataset c4 \
   --metrics.log_freq 10 \

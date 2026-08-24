@@ -140,7 +140,8 @@ target's field set at the time it was written:
 # Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
-return TritonRoPE.Config(dim=cfg.dim, max_seq_len=cfg.max_seq_len,
+return TritonRoPE.Config(
+    dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
 # Robust: every RoPE.Config field (including ones added later, inherited by the
@@ -517,7 +518,7 @@ RoPE is an ordinary component override.
 | `torchtitan/protocols/model_spec.py` | `ModelSpec.traverse` exposes the nested model config to the traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
 | `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
-| `tests/unit_tests/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
+| `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to any model's `config_registry.py`
 or `__init__.py` — that is the point of the design.
