@@ -36,7 +36,6 @@ from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismC
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import SpmdLayout
 from torchtitan.protocols.state_dict_adapter import PlainToDTensorStateDictAdapter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -534,12 +533,12 @@ class VLLMModelWrapper(Module):
         # the live weights fit.
         torch.cuda.empty_cache()
 
-    def get_state_dict_layouts(self) -> dict[str, SpmdLayout]:
+    def get_state_dict_layouts(self) -> dict[str, spmd.SpmdType]:
         """Return SPMD layouts keyed by the model's exposed state-dict names.
 
         TODO(pianpwk): Remove the fused QKV state-dict glue code.
         """
-        layouts: dict[str, SpmdLayout] = {}
+        layouts: dict[str, spmd.SpmdType] = {}
 
         for module_fqn, module in self.model.named_modules():
             module_prefix = f"{module_fqn}." if module_fqn else ""
@@ -580,7 +579,7 @@ class VLLMModelWrapper(Module):
                         "_q_scale",
                         "_v_scale",
                     }:
-                        layouts[f"{module_prefix}{buffer_name}"] = SpmdLayout({})
+                        layouts[f"{module_prefix}{buffer_name}"] = spmd.SpmdType({})
 
         return layouts
 

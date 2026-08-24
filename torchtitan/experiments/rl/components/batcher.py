@@ -71,9 +71,9 @@ class Batcher(Configurable):
         batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
             num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
         )
-        _ = batcher.add_training_samples(training_sample_group=group0)  # -> None (only 1 trainable group)
-        batch = batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
-        # batch.microbatches: [num_microbatches][2 ranks]; each
+        pending, _ = batcher.add_training_samples(training_sample_group=group0)
+        batch, _ = batcher.add_training_samples(training_sample_group=group1)
+        # pending is None; batch.microbatches: [num_microbatches][2 ranks]; each
         # TrainingMicrobatch.token_ids: [2 * 128 tokens]
     """
 
@@ -103,16 +103,16 @@ class Batcher(Configurable):
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
-    ) -> TrainingBatch | None:
-        """Add one rollout group and pack one train step once enough trainable groups are ready.
+    ) -> tuple[TrainingBatch | None, bool]:
+        """Add one group and report whether any samples survive batcher filtering.
 
         Args:
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
             batcher = Batcher.Config().build(num_prompts_per_train_step=2, dp_degree=1, pad_id=0)
-            batcher.add_training_samples(training_sample_group=group0)  # -> None
-            batcher.add_training_samples(training_sample_group=group1)  # -> TrainingBatch
+            batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
+            batcher.add_training_samples(training_sample_group=group1)  # -> (TrainingBatch, True)
         """
         # Drop samples longer than seq_len: can't fill a row
         samples = training_sample_group.training_samples
@@ -137,13 +137,14 @@ class Batcher(Configurable):
                 ],
             )
 
+        group_is_trainable = bool(training_sample_group.training_samples)
         self._groups_for_next_batch.append(training_sample_group)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
         if num_trainable_groups < self._num_prompts_per_train_step:
-            return None  # accumulate until one full batch is ready
-        return self._pack_one_training_batch()
+            return None, group_is_trainable  # accumulate until one full batch is ready
+        return self._pack_one_training_batch(), group_is_trainable
 
     def _pack_one_training_batch(self) -> TrainingBatch:
         """Pack the oldest accumulated groups (up to `num_prompts_per_train_step` trainable groups) into one batch."""

@@ -23,10 +23,10 @@ from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
-    SpmdLayout,
     unfold_dp_axes,
 )
 from torchtitan.distributed.spmd_types import (
+    _per_axis_types,
     spmd_distribute_tensor,
     spmd_redistribute_per_axis,
     spmd_validate_redistributions,
@@ -239,13 +239,13 @@ class TestSpmdLayout(DTensorTestBase):
 
     def test_seq_parallel_activation_per_axis_spmd_types(self):
         """PartitionSpec can map multiple mesh axes to one tensor dim."""
-        layout = SpmdLayout(
+        layout = spmd.SpmdType(
             {
                 MeshAxisName.DP: spmd.V,
                 MeshAxisName.CP: spmd.V,
                 MeshAxisName.TP: spmd.V,
             },
-            partition_spec=(
+            partition_spec=spmd.PartitionSpec(
                 MeshAxisName.DP,
                 (MeshAxisName.CP, MeshAxisName.TP),
                 None,
@@ -253,7 +253,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
 
         self.assertEqual(
-            layout.per_axis_spmd_types(),
+            _per_axis_types(layout),
             {
                 MeshAxisName.DP: spmd.S(0),
                 MeshAxisName.CP: spmd.S(1),
@@ -288,7 +288,7 @@ class TestSpmdLayout(DTensorTestBase):
         mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("tp",)
         )
-        layout = SpmdLayout(
+        layout = spmd.SpmdType(
             {
                 MeshAxisName.DP: spmd.V,
                 MeshAxisName.TP: spmd.I,
@@ -302,7 +302,7 @@ class TestSpmdLayout(DTensorTestBase):
         with self.assertRaises(ValueError) as cm:
             spmd_validate_redistributions(
                 ShardingConfig(
-                    out_src_shardings=SpmdLayout(
+                    out_src_shardings=spmd.SpmdType(
                         {
                             MeshAxisName.DP: spmd.V,
                             MeshAxisName.CP: spmd.V,
@@ -311,7 +311,7 @@ class TestSpmdLayout(DTensorTestBase):
                             (MeshAxisName.DP, MeshAxisName.CP), None
                         ),
                     ),
-                    out_dst_shardings=SpmdLayout(
+                    out_dst_shardings=spmd.SpmdType(
                         {
                             MeshAxisName.DP: spmd.V,
                             MeshAxisName.CP: spmd.V,
@@ -329,7 +329,7 @@ class TestSpmdLayout(DTensorTestBase):
             spmd_validate_redistributions(
                 ShardingConfig(
                     in_src_shardings={
-                        "x": SpmdLayout(
+                        "x": spmd.SpmdType(
                             {
                                 MeshAxisName.DP: spmd.S(0),
                                 MeshAxisName.CP: spmd.S(1),
@@ -338,7 +338,7 @@ class TestSpmdLayout(DTensorTestBase):
                         )
                     },
                     in_dst_shardings={
-                        "x": SpmdLayout(
+                        "x": spmd.SpmdType(
                             {
                                 MeshAxisName.DP: spmd.R,
                                 MeshAxisName.CP: spmd.R,
@@ -354,18 +354,18 @@ class TestSpmdLayout(DTensorTestBase):
             with self.subTest(src_dp=src_dp, dst_dp=dst_dp):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "output: SpmdLayout-based redistribution changes mesh axis "
+                    "output: spmd.SpmdType-based redistribution changes mesh axis "
                     "'dp' with spmd.V as the source or destination type",
                 ):
                     spmd_validate_redistributions(
                         ShardingConfig(
-                            out_src_shardings=SpmdLayout(
+                            out_src_shardings=spmd.SpmdType(
                                 {
                                     MeshAxisName.DP: src_dp,
                                     MeshAxisName.TP: spmd.I,
                                 }
                             ),
-                            out_dst_shardings=SpmdLayout(
+                            out_dst_shardings=spmd.SpmdType(
                                 {
                                     MeshAxisName.DP: dst_dp,
                                     MeshAxisName.TP: spmd.I,
@@ -393,7 +393,7 @@ class TestSpmdLayout(DTensorTestBase):
             (MeshAxisName.CP, MeshAxisName.DP),
         ):
             with self.subTest(axis_order=axis_order):
-                layout = SpmdLayout(
+                layout = spmd.SpmdType(
                     {
                         MeshAxisName.DP: spmd.V,
                         MeshAxisName.CP: spmd.V,
@@ -670,7 +670,7 @@ class TestDenseStorageAxes(DTensorTestBase):
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
             axes = self._build("partial_dtensor").get_all_one_dimensional_meshes()
-            self.assertIn("fsdp", axes)
+            self.assertNotIn("fsdp", axes)
             self.assertNotIn("dp_shard", axes)
 
     @with_comms
@@ -679,7 +679,7 @@ class TestDenseStorageAxes(DTensorTestBase):
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
             axes = self._build("spmd_types").get_all_one_dimensional_meshes()
-            self.assertNotIn("fsdp", axes)
+            self.assertIn("fsdp", axes)
             self.assertIn("dp", axes)
             self.assertIn("dp_shard", axes)
 
