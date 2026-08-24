@@ -30,6 +30,7 @@ from .kda import KimiDeltaAttention, KimiKDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
+from .pipeline_adapter import pipeline_kimi_k3_with_cache_adapter
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -488,6 +489,54 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     )
 
 
+def _debugmodel_text(attn_backend: str) -> KimiK3Model.Config:
+    """The debug decoder with no vision tower.
+
+    The text arm of the parallelism matrix needs a flavor with no vision path,
+    so that a failure there is attributable to the decoder rather than to the
+    tower or to the image/text token interleaving.
+    """
+    config = _debugmodel(attn_backend)
+    config.vision_encoder = None
+    return config
+
+
+def _debugmodel_text_32l(attn_backend: str) -> KimiK3Model.Config:
+    """A 32-layer text debug decoder, for the pipeline x virtual-stage matrix.
+
+    The 24-layer flavor cannot express every pp x vp product: 24 is not
+    divisible by 16 (pp4 x vp4, pp8 x vp2) or 32 (pp8 x vp4), and virtual stages
+    are expressed as layers-per-stage. 32 divides all of them, so the same
+    3 KDA : 1 MLA pattern at 32 layers covers the whole cross product with an
+    integer split.
+    """
+    config = _debugmodel(attn_backend)
+    config.vision_encoder = None
+    return _kimi_k3_config(
+        dim=1024,
+        vocab_size=163840,
+        num_layers=32,
+        full_attention_layers={3, 7, 11, 15, 19, 23, 27, 31},
+        attn_res_block_size=16,
+        num_heads=16,
+        q_lora_rank=512,
+        kv_lora_rank=256,
+        qk_nope_head_dim=64,
+        qk_rope_head_dim=32,
+        v_head_dim=64,
+        kda_head_dim=64,
+        conv_kernel_size=4,
+        dense_hidden_dim=4096,
+        latent_dim=512,
+        expert_hidden_dim=384,
+        num_experts=32,
+        top_k=4,
+        num_shared_experts=2,
+        vision_encoder=None,
+        attn_backend=attn_backend,
+    )
+
+
 def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
@@ -526,6 +575,8 @@ def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
 
 kimi_k3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_text": _debugmodel_text,
+    "debugmodel_text_32l": _debugmodel_text_32l,
     "Kimi-K3": _kimi_k3,
 }
 
@@ -545,7 +596,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=parallelize_kimi_k3,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_kimi_k3_with_cache_adapter,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=KimiK3StateDictAdapter,
     )
