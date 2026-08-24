@@ -136,7 +136,7 @@ jobs:
           "$RUNNER_ARTIFACT_DIR/flux"
 
   integration-real-pg:
-    name: 8 GPU Integration (Real PG)
+    name: 8 GPU Integration (Real PG - ${{ github.event_name == 'pull_request' && 'required subset' || 'full suite' }})
     needs: set-matrix-real-pg
     if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
