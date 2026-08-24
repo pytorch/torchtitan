@@ -10,6 +10,7 @@ import unittest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -100,7 +101,7 @@ class PlainToDTensorStateDictAdapterTest(DTensorTestBase):
         )
         dp_axis = spmd.MeshAxis.of(mesh.get_group("dp_shard"))
         tp_axis = spmd.MeshAxis.of(mesh.get_group("tp"))
-        layout = spmd.SpmdType(
+        layout = SpmdType(
             {dp_axis: spmd.V, tp_axis: spmd.V},
             spmd.PartitionSpec((tp_axis, dp_axis), None),
         )

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 from torch import nn
 
 from torchtitan.distributed import ParallelDims
@@ -27,8 +28,8 @@ CP = MeshAxisName.CP
 def flux_activation_placement(
     *,
     cp: spmd.PerMeshAxisSpmdType,
-) -> spmd.SpmdType:
-    return spmd.SpmdType(
+) -> SpmdType:
+    return SpmdType(
         {
             DP: spmd.S(0),
             CP: cp,

@@ -11,6 +11,7 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.nn as nn
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -129,7 +130,7 @@ class TestSpmdLocalGradNorm(DTensorTestBase):
                         mesh_axes[1]: (spmd.S(0) if second_axis_sharded else spmd.R),
                     }
                     local_grad = spmd_distribute_tensor(
-                        global_grad.clone(), mesh, spmd.SpmdType(axis_types)
+                        global_grad.clone(), mesh, SpmdType(axis_types)
                     )
 
                     parameter = nn.Parameter(local_grad.clone())

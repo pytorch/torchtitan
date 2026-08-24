@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
-import spmd_types as spmd
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
@@ -51,7 +51,7 @@ class MeshAxisName(StrEnum):
     EFSDP = "efsdp"
 
 
-def layout_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
+def layout_axes(layout: SpmdType) -> tuple[MeshAxisName, ...]:
     """Return and validate the named mesh axes used by a sharding config."""
     axes = []
     for axis in layout.local_type:
@@ -525,7 +525,7 @@ class ParallelDims:
         return self.get_activated_mesh([axis for axis in axes_list if axis in in_band])
 
     def resolve_shared_mesh(
-        self, placements: Iterable[spmd.SpmdType | None]
+        self, placements: Iterable[SpmdType | None]
     ) -> DeviceMesh | None:
         """Resolve the mesh shared by a list of SpmdLayouts.
 

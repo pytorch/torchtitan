@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
@@ -126,16 +127,16 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     # The encoder's own ``pos_embed`` table is invariant across TP ranks.
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={
-            "pos_embed": spmd.SpmdType({DP: spmd.R, TP: spmd.I}),
+            "pos_embed": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
-        out_src_shardings=spmd.SpmdType({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=spmd.SpmdType({DP: spmd.V, TP: spmd.R}),
+        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
         state_shardings={
-            "inv_freq": spmd.SpmdType({DP: spmd.R, TP: spmd.I}),
+            "inv_freq": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
-        out_src_shardings=spmd.SpmdType({DP: spmd.R, TP: spmd.I}),
+        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()

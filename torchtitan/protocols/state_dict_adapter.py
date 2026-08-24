@@ -13,6 +13,7 @@ from typing import Any
 
 import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 from torch.utils._pytree import tree_map_only
@@ -162,7 +163,7 @@ class StateDictAdapter(BaseStateDictAdapter):
 class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
     def __init__(
         self,
-        state_dict_layouts: Mapping[str, spmd.SpmdType] | None = None,
+        state_dict_layouts: Mapping[str, SpmdType] | None = None,
         parallel_dims: ParallelDims | None = None,
     ) -> None:
         self.state_dict_layouts = state_dict_layouts
@@ -178,7 +179,7 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
             for fqn, param in zip(group["param_names"], group["params"], strict=True)
         }
         return {
-            key: spmd.SpmdType(
+            key: SpmdType(
                 dict(spmd.get_local_type(param)), spmd.get_partition_spec(param)
             )
             for key, value in state_dict.items()

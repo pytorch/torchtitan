@@ -11,6 +11,7 @@ from typing import Any
 import spmd_types as spmd
 import torch
 import torch.nn as nn
+from spmd_types import SpmdType
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -61,7 +62,7 @@ def _get_state_dict_layouts(model_parts: list[nn.Module]):
             if not spmd.has_local_type(tensor):
                 continue
             name = canonical_fqn(name)
-            layout = spmd.SpmdType(
+            layout = SpmdType(
                 dict(spmd.get_local_type(tensor)), spmd.get_partition_spec(tensor)
             )
             names = [name]
