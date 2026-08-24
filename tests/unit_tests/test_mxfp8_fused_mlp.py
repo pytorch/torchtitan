@@ -23,7 +23,6 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import TorchAOTokenDispatcher
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.llama3 import model_registry as llama3_model_registry
-from torchtitan.overrides.fused_swiglu import FusedSwiGLU
 
 try:
     from torchtitan.overrides.mxfp8_fused_mlp import (
@@ -126,7 +125,7 @@ class TestMXFP8FusedMLPOverride(unittest.TestCase):
         validate.assert_called_once_with(args[0], args[1], args[2], args[3])
         self.assertEqual(out.dtype, x.dtype)
 
-    def test_grouped_checkpoint_keys_and_param_shapes_unchanged(self):
+    def test_grouped_checkpoint_keys_unchanged(self):
         stock_nodes = list(
             deepseek_v3_model_registry("debugmodel").model.traverse(
                 GroupedExperts.Config
@@ -138,15 +137,43 @@ class TestMXFP8FusedMLPOverride(unittest.TestCase):
             stock = stock_nodes[0][1].build()
             fused = fused_cfg.build()
         self.assertEqual(set(fused.state_dict().keys()), set(stock.state_dict().keys()))
-        self.assertEqual(
-            tuple(fused.w13.shape),
-            (fused_cfg.num_experts, fused_cfg.hidden_dim, 2, fused_cfg.dim),
-        )
+
+    def test_fresh_init_matches_stock_bitwise(self):
+        # Stock parameters in stock registration order: fresh-init draws must
+        # be bitwise-identical to the corresponding stock module's.
+        def seeded_state_dict(cfg):
+            torch.manual_seed(42)
+            module = cfg.build()
+            module.init_states()
+            return module.state_dict()
+
+        dense_stock = list(
+            llama3_model_registry("debugmodel").model.traverse(FeedForward.Config)
+        )[0][1]
+        dense_model = llama3_model_registry("debugmodel").model
+        apply_overrides(OverrideConfig(imports=[_DENSE_OVERRIDE]), dense_model)
+        dense_fused = list(dense_model.traverse(MXFP8FusedMLP.Config))[0][1]
+        grouped_stock = list(
+            deepseek_v3_model_registry("debugmodel").model.traverse(
+                GroupedExperts.Config
+            )
+        )[0][1]
+        grouped_fused = self._grouped_experts_config(self._grouped_model_config())
+        for stock_cfg, fused_cfg in (
+            (dense_stock, dense_fused),
+            (grouped_stock, grouped_fused),
+        ):
+            stock_sd = seeded_state_dict(stock_cfg)
+            fused_sd = seeded_state_dict(fused_cfg)
+            self.assertEqual(set(fused_sd), set(stock_sd))
+            for key, stock_tensor in stock_sd.items():
+                self.assertTrue(torch.equal(fused_sd[key], stock_tensor), key)
 
     def test_dense_factory_raises_on_non_stock_ffn(self):
-        # A FeedForward.Config SUBCLASS (already fused) must raise, not no-op.
+        # A FeedForward.Config SUBCLASS (already overridden) must raise, not
+        # no-op.
         gate = Linear.Config(in_features=128, out_features=256)
-        cfg = FusedSwiGLU.Config(
+        cfg = MXFP8FusedMLP.Config(
             w1=gate,
             w2=Linear.Config(in_features=256, out_features=128),
             w3=gate,

@@ -6,13 +6,17 @@
 
 # pyrefly: ignore-errors
 
-"""Composite MXFP8 MLP overrides with a fused w13 projection.
+"""Composite MXFP8 MLP overrides.
 
 One autograd function covers the full SwiGLU MLP
 
     x -> MXFP8 w13 GEMM -> [gate | up] -> silu(gate) * up -> MXFP8 w2 GEMM
 
 with both directions of every quantization done by the CuTeDSL kernels. The
+modules keep the stock parameters (``w1``/``w2``/``w3`` submodules dense,
+``w1_EFD``/``w2_EDF``/``w3_EFD`` grouped) -- checkpoints, initialization, and
+sharding are exactly the stock modules' -- and stack the gate and up weights
+into the composite's fused ``w13`` operand at forward time. The
 ``fuse_activation`` flag selects how the activation boundary is quantized:
 ``True`` runs the unified SwiGLU+MXFP8 kernel (the BF16 activation never
 reaches global memory); ``False`` materializes it in BF16 and quantizes with
@@ -34,10 +38,7 @@ paths (e.g. fully fused grouped MLPs) extend this module with their own
 composite and factory.
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
-
-import spmd_types as spmd
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
@@ -65,12 +66,9 @@ from torchao.quantization.quantize_.common.kernel_preference import KernelPrefer
 
 from torchtitan.components.quantization.utils import swap_token_dispatcher
 from torchtitan.config import derive, override
-from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, RoutedExperts
-from torchtitan.overrides.fused_swiglu import FusedSwiGLU
-from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.utils import has_cuda_capability
 
 __all__ = [
@@ -448,62 +446,13 @@ def _validate_grouped_inputs(x, w13, w2_t, offs):
             torch._check(cond)
 
 
-def _make_fused_gate_up_init(
-    gate_init: Callable,
-    up_init: Callable,
-    *,
-    gate_up_axis: int,
-) -> Callable:
-    """Build an initializer for a fused gate/up weight from per-half
-    initializers (index 0 on ``gate_up_axis`` = gate / stock w1, index 1 = up
-    / stock w3). Each half keeps its own initializer because the gate and up
-    inits differ (e.g. up shares w2's depth-scaled init)."""
-
-    def _init(t: torch.Tensor) -> None:
-        gate_idx: list[int | slice] = [slice(None)] * t.ndim
-        up_idx: list[int | slice] = [slice(None)] * t.ndim
-        gate_idx[gate_up_axis] = 0
-        up_idx[gate_up_axis] = 1
-        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
-        up_init(t[tuple(up_idx)])  # up (stock w3)
-
-    return _init
-
-
-def _fuse_w13_grouped_param_init(param_init: dict | None) -> dict | None:
-    """Remap ``w1_EFD`` / ``w3_EFD`` initializers onto the fused ``w13``;
-    other entries (e.g. ``w2_EDF``) are kept as-is."""
-    if param_init is None:
-        return None
-    w1_init = param_init.get("w1_EFD")
-    w3_init = param_init.get("w3_EFD")
-    fused = {k: v for k, v in param_init.items() if k not in ("w1_EFD", "w3_EFD")}
-    if w1_init is not None and w3_init is not None:
-        fused["w13"] = _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=2)
-    return fused or None
-
-
-def _fuse_w13_grouped_sharding(base: ShardingConfig) -> ShardingConfig:
-    """Replace the ``w1_EFD`` / ``w3_EFD`` state shardings with one for
-    ``w13``: the same axes as ``w1_EFD`` (EP on dim 0, TP on dim 1), the ``2``
-    axis unsharded. Everything else is kept."""
-    state = dict(base.state_shardings)
-    w1_layout = state.pop("w1_EFD")
-    state.pop("w3_EFD")
-    state["w13"] = w1_layout
-    return replace(base, state_shardings=state)
-
-
-class MXFP8FusedMLP(FusedSwiGLU):
-    """:class:`FusedSwiGLU` whose forward runs the composite MXFP8 SwiGLU MLP.
-
-    Inherits the fused ``w13`` parameter, the stock-layout checkpoint hooks,
-    and the FSDP/TP sharding story from :class:`FusedSwiGLU`; only ``forward``
-    changes.
+class MXFP8FusedMLP(FeedForward):
+    """Stock :class:`FeedForward` whose forward runs the composite MXFP8
+    SwiGLU MLP, stacking ``w1``/``w3`` into the fused ``w13`` operand.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FusedSwiGLU.Config):
+    class Config(FeedForward.Config):
         fuse_activation: bool = True
         """Quantize the SwiGLU boundary with the unified SwiGLU+MXFP8 kernel
         (False: standalone BF16 + cast kernels; identical GEMMs either way)."""
@@ -519,9 +468,11 @@ class MXFP8FusedMLP(FusedSwiGLU):
                 "tensor parallelism); narrow the mxfp8_fused_mlp override's "
                 "fqns or drop it for this module."
             )
+        # (H, 2, D) with [:, 0] = gate (w1) and [:, 1] = up (w3).
+        w13 = torch.stack([self.w1.weight, self.w3.weight], dim=1)
         output = mxfp8_mlp_w13(
             x,
-            self.w13,
+            w13,
             self.w2.weight,
             fuse_activation=self.fuse_activation,
         )
@@ -534,13 +485,11 @@ class MXFP8FusedGroupedMLP(GroupedExperts):
     """Routed experts whose forward runs the composite MXFP8 SwiGLU grouped
     MLP.
 
-    The gate and up projections are fused into one ``w13`` parameter of shape
-    ``(num_experts, hidden_dim, 2, dim)`` (``w13[:, :, 0]`` = stock
-    ``w1_EFD``, ``w13[:, :, 1]`` = stock ``w3_EFD``); checkpoints save/load
-    the stock layout, staying interchangeable with the non-fused module.
-    Requires token groups padded to multiples of 128 rows (zero-filled) --
-    the ``mxfp8_fused_grouped_mlp`` factory swaps the token dispatcher
-    accordingly.
+    Keeps the stock ``w1_EFD``/``w2_EDF``/``w3_EFD`` parameters and stacks
+    the gate and up weights into the composite's ``(num_experts, hidden_dim,
+    2, dim)`` ``w13`` operand at forward time. Requires token groups padded
+    to multiples of 128 rows (zero-filled) -- the ``mxfp8_fused_grouped_mlp``
+    factory swaps the token dispatcher accordingly.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -551,13 +500,6 @@ class MXFP8FusedGroupedMLP(GroupedExperts):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        del self.w1_EFD
-        del self.w3_EFD
-        self.w13 = torch.nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, 2, config.dim)
-        )
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
         self.fuse_activation = config.fuse_activation
 
     def forward(
@@ -565,17 +507,22 @@ class MXFP8FusedGroupedMLP(GroupedExperts):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w13, DTensor):
-            w13 = self.w13.to_local()
+        if isinstance(self.w1_EFD, DTensor):
+            w1_EFD = self.w1_EFD.to_local()
             assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
+            assert isinstance(self.w3_EFD, DTensor)
+            w3_EFD = self.w3_EFD.to_local()
         else:
-            w13 = self.w13
+            w1_EFD = self.w1_EFD
             w2_EDF = self.w2_EDF
+            w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         x = x_RD.bfloat16()
-        w13 = w13.bfloat16()
+        # (E, F, 2, D) with [:, :, 0] = gate (w1_EFD) and [:, :, 1] = up
+        # (w3_EFD).
+        w13 = torch.stack([w1_EFD, w3_EFD], dim=2).bfloat16()
         w2_t = w2_EDF.bfloat16().transpose(-2, -1)
         _validate_grouped_inputs(x, w13, w2_t, offsets_E)
         return _MXFP8GroupedMLP.apply(
@@ -586,26 +533,10 @@ class MXFP8FusedGroupedMLP(GroupedExperts):
             self.fuse_activation,
         ).type_as(x_RD)
 
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Save the fused ``w13`` as stock ``w1_EFD`` / ``w3_EFD``."""
-        w13 = state_dict.pop(f"{prefix}w13")
-        state_dict[f"{prefix}w1_EFD"] = w13[:, :, 0, :].contiguous()
-        state_dict[f"{prefix}w3_EFD"] = w13[:, :, 1, :].contiguous()
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Combine stock ``w1_EFD`` / ``w3_EFD`` back into the fused ``w13``."""
-        w1_key, w3_key = f"{prefix}w1_EFD", f"{prefix}w3_EFD"
-        if w1_key in state_dict and w3_key in state_dict:
-            state_dict[f"{prefix}w13"] = torch.stack(
-                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
-            )
-
 
 @override(
     target=FeedForward.Config,
-    description="Dense SwiGLU FFN via the composite MXFP8 MLP (fused w13).",
+    description="Dense SwiGLU FFN via the composite MXFP8 MLP.",
 )
 def mxfp8_fused_mlp(
     cfg: FeedForward.Config,
@@ -635,32 +566,19 @@ def mxfp8_fused_mlp(
                 "quantizes every GEMM itself -- do not combine it with a "
                 "linear quantization converter on the same module."
             )
+    if cfg.w1.bias or cfg.w3.bias:
+        raise ValueError(
+            "mxfp8_fused_mlp supports a bias on w2 only; the composite has "
+            "no w1/w3 bias path."
+        )
 
-    w1_init = (cfg.w1.param_init or {}).get("weight")
-    w3_init = (cfg.w3.param_init or {}).get("weight")
-    param_init = None
-    if w1_init is not None and w3_init is not None:
-        param_init = {"w13": _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=1)}
-
-    fused = derive(
-        cfg,
-        MXFP8FusedMLP.Config,
-        param_init=param_init,
-        fuse_activation=fuse_activation,
-    )
-    base = cfg.sharding_config
-    fused.sharding_config = ShardingConfig(
-        state_shardings={"w13": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings=base.in_src_shardings if base is not None else None,
-        in_dst_shardings=base.in_dst_shardings if base is not None else None,
-    )
-    return fused
+    return derive(cfg, MXFP8FusedMLP.Config, fuse_activation=fuse_activation)
 
 
 @override(
     target=RoutedExperts.Config,
     description="Routed experts via the composite MXFP8 grouped MLP "
-    "(fused w13, 128-row-padded token groups).",
+    "(128-row-padded token groups).",
 )
 def mxfp8_fused_grouped_mlp(
     cfg: RoutedExperts.Config,
@@ -695,15 +613,7 @@ def mxfp8_fused_grouped_mlp(
 
     swap_token_dispatcher(cfg, pad_multiple=128)
 
-    param_init = _fuse_w13_grouped_param_init(inner.param_init)
-    fused = derive(
-        inner,
-        MXFP8FusedGroupedMLP.Config,
-        param_init=param_init,
-        fuse_activation=fuse_activation,
+    cfg.inner_experts = derive(
+        inner, MXFP8FusedGroupedMLP.Config, fuse_activation=fuse_activation
     )
-    base = inner.sharding_config
-    if base is not None:
-        fused.sharding_config = _fuse_w13_grouped_sharding(base)
-    cfg.inner_experts = fused
     return cfg
