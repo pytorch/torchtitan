@@ -6,10 +6,9 @@
 
 """Kimi K3 aliases for the shared KDA implementation."""
 
-from torchtitan.models.common.attention import KDA, KDAInnerAttention
-
+from torchtitan.models.common.attention import KDA, KDAKernel
 
 KimiDeltaAttention = KDA
-KimiKDAKernel = KDAInnerAttention
+KimiKDAKernel = KDAKernel
 
 __all__ = ["KimiDeltaAttention", "KimiKDAKernel"]
