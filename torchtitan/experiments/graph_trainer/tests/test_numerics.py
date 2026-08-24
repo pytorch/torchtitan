@@ -278,7 +278,7 @@ DSV3_EP_OVERLAP_GRAPH = " --compile.ep_overlap.strategy graph"
 DSV3_EP_OVERLAP_GRAPH_BITWISE = (
     DSV3_EP_OVERLAP_GRAPH + " --compile.ep_overlap.disable_early_grad_accumulation"
 )
-DSV3_EP_OVERLAP_DEFERRED_DW = " --compile.pass_pipeline ep_overlap_deferred_dw"
+DSV3_EP_OVERLAP_DEFERRED_DW = " --compile.ep_overlap.schedule deferred_dw"
 
 
 def _run_deepseek_v3_loss_compare(

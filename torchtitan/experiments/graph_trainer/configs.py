@@ -19,6 +19,7 @@ from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]
 EpOverlapChunkStrategy = Literal["eager", "graph"]
+EpOverlapSchedule = Literal["default", "deferred_dw"]
 
 TRANSFORMER_BLOCK_FQN = "layers.*"
 MOE_BLOCK_FQN = "layers.*.moe"
@@ -59,6 +60,14 @@ class EpOverlapConfig:
     parameter-gradient live-outs before distributed grad cast/communication
     when legal. This flag preserves eager chunking's cast/reduction order for
     strict bitwise tests.
+    """
+
+    schedule: EpOverlapSchedule = "default"
+    """Scheduling pass applied to chunked EP-overlap regions.
+
+    ``default`` interleaves each region's chunks around its token exchanges.
+    ``deferred_dw`` additionally defers dW-only backward work into the
+    region's backward all-to-all windows (see ``defer_param_grad_pass``).
     """
 
 

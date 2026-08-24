@@ -83,7 +83,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
 )
-from torchtitan.experiments.graph_trainer.registry import register_pass_pipeline
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -291,9 +290,14 @@ def compile_time_passes(
 
     if ep_overlap_enabled:
         assert ep_overlap_module_fqn is not None
+        schedule_pass = (
+            defer_param_grad_schedule_pass
+            if config.compile.ep_overlap.schedule == "deferred_dw"
+            else ep_overlap_schedule_pass
+        )
         passes.append(
             functools.partial(
-                ep_overlap_schedule_pass,
+                schedule_pass,
                 module_pattern=ep_overlap_module_fqn,
                 require_all_to_all=(
                     getattr(config.parallelism, "expert_parallel_degree", 1) > 1
@@ -450,36 +454,6 @@ def construct_default_graph_passes(
             )
         )
     return passes
-
-
-@register_pass_pipeline("ep_overlap_deferred_dw")
-def construct_ep_overlap_deferred_dw_graph_passes(
-    traced_result: "TracedResult",
-    config: "GraphTrainer.Config",
-    *,
-    parallel_dims=None,
-) -> list[Callable]:
-    """Default pipeline with EP scheduling swapped for deferred-dW scheduling.
-
-    ``defer_param_grad_schedule_pass`` reuses the schedule kwargs bound by the
-    default pipeline (see ``defer_param_grad_pass`` for the contract).
-    """
-    if not config.compile.ep_overlap.enabled:
-        raise ValueError(
-            "pass_pipeline 'ep_overlap_deferred_dw' requires "
-            "--compile.ep_overlap.enabled."
-        )
-    passes = construct_default_graph_passes(
-        traced_result, config, parallel_dims=parallel_dims
-    )
-    return [
-        (
-            functools.partial(defer_param_grad_schedule_pass, **pass_fn.keywords)
-            if _get_pass_name(pass_fn) == "ep_overlap_schedule_pass"
-            else pass_fn
-        )
-        for pass_fn in passes
-    ]
 
 
 def _get_pass_name(pass_fn: Callable) -> str:

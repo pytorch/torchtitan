@@ -104,7 +104,6 @@ from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
     selective_activation_remat_pass,
 )
-from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
@@ -3532,13 +3531,11 @@ class TestChunkPasses(TestCase):
             names.index("full_inductor_compilation_pass"),
         )
 
-    def test_ep_overlap_deferred_dw_pipeline_swaps_schedule_pass(self):
+    def test_ep_overlap_deferred_dw_schedule_swaps_schedule_pass(self):
         traced_result, config = self._compile_config_for_ep_overlap_test()
-        traced_result.tensor_input_indices = []
+        config.compile.ep_overlap.schedule = "deferred_dw"
 
-        pipeline = PASS_PIPELINE_REGISTRY["ep_overlap_deferred_dw"](
-            traced_result, config
-        )
+        pipeline = compile_time_passes(traced_result, config, use_cudagraph=False)
         names = [
             pass_fn.func.__name__ if hasattr(pass_fn, "func") else pass_fn.__name__
             for pass_fn in pipeline
@@ -3552,12 +3549,15 @@ class TestChunkPasses(TestCase):
         swapped = pipeline[names.index("defer_param_grad_schedule_pass")]
         self.assertEqual(swapped.keywords["module_pattern"], "layers.*")
 
-    def test_ep_overlap_deferred_dw_pipeline_requires_ep_overlap(self):
+    def test_ep_overlap_deferred_dw_schedule_ignored_when_disabled(self):
         traced_result, config = self._compile_config_for_ep_overlap_test()
         config.compile.ep_overlap.enabled = False
+        config.compile.ep_overlap.schedule = "deferred_dw"
 
-        with self.assertRaisesRegex(ValueError, "ep_overlap.enabled"):
-            PASS_PIPELINE_REGISTRY["ep_overlap_deferred_dw"](traced_result, config)
+        names = self._compile_pass_names(traced_result, config)
+
+        self.assertNotIn("defer_param_grad_schedule_pass", names)
+        self.assertNotIn("ep_overlap_schedule_pass", names)
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
