@@ -19,12 +19,12 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_kda_sharding,
 )
-from torchtitan.models.kimi_k3.kda import KDA, InnerKDA, KDABackend, KDAKernel
+from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDABackend, KDAKernel
 
 _HAS_BLACKWELL = (
     importlib.util.find_spec("attn_gym") is not None
     and torch.cuda.is_available()
-    and torch.cuda.get_device_capability() >= (10, 0)
+    and torch.cuda.get_device_capability() in {(10, 0), (10, 3)}
 )
 _HAS_FLA = importlib.util.find_spec("fla") is not None
 
@@ -37,7 +37,7 @@ def _kda_config(*, backend: KDABackend) -> KDA.Config:
             bias=False,
         )
 
-    projection_dim = 2 * 128
+    projection_dim = 256
 
     def conv() -> Conv1d.Config:
         return Conv1d.Config(
@@ -124,7 +124,7 @@ class TestKDASharding(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    _HAS_BLACKWELL, "KDA requires Attention Gym and CUDA capability 10.0 or newer"
+    _HAS_BLACKWELL, "KDA requires Attention Gym on CUDA capability 10.0 or 10.3"
 )
 class TestKDA(unittest.TestCase):
     def _make_kda(self, *, backend: KDABackend):
