@@ -67,12 +67,24 @@ class _SSRFProtectedSession(requests.Session):
     """Session that blocks redirects to private/loopback/metadata IPs."""
 
     def resolve_redirects(self, resp, req, **kwargs):
-        location = resp.headers.get("Location")
-        if location:
+        # Override to validate EVERY redirect hop, not just the first.
+        # requests.Session.resolve_redirects is a generator that internally
+        # loops the entire redirect chain via self.send + get_redirect_target.
+        # We bypass that loop and validate each hop ourselves.
+        while True:
+            location = resp.headers.get("Location")
+            if not location:
+                return
+            # Build fully-qualified redirect URL
             full_url = urljoin(resp.url, location)
             if not _is_safe_url(full_url):
-                raise requests.exceptions.InvalidURL(f"Blocked redirect to unsafe URL: {full_url}")
-        return super().resolve_redirects(resp, req, **kwargs)
+                raise requests.exceptions.InvalidURL(
+                    f"Blocked redirect to unsafe URL: {full_url}"
+                )
+            prepared_request = self.prepare_request(
+                requests.Request("GET", full_url).prepare()
+            )
+            resp = self.send(prepared_request, allow_redirects=False, timeout=10)
 
 
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
