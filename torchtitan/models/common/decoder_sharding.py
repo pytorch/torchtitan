@@ -17,7 +17,6 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
-from torchtitan.models.common.kda import KDA
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP
@@ -319,9 +318,6 @@ def set_kda_sharding(
     ``(T, N, K)``. The Attention Gym boundary converts head-sharded DTensors
     to rank-local tensors before adding the singleton kernel batch dimension.
     """
-    assert isinstance(kda_cfg, KDA.Config), (
-        f"set_kda_sharding requires KDA.Config, got {type(kda_cfg).__name__}"
-    )
     if cp_enabled:
         raise NotImplementedError("Context parallel is not yet supported for KDA")
 
