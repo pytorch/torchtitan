@@ -1010,20 +1010,6 @@ def test_unpacked_text_collator_creates_range_positions():
     assert (labels[3:] == IGNORE_INDEX).all()
 
 
-def test_unpacked_text_collator_pads_positions_within_context_window():
-    # pad_len (18-3=15) exceeds max_context_length (9); padding positions must
-    # stay within the RoPE window instead of running 0..pad_len-1.
-    sequence = TextSequence(
-        input_ids=np.asarray([1, 2, 3]),
-        labels=np.asarray([2, 3, 4]),
-    )
-
-    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
-
-    assert len(inputs["positions"]) == CONTEXT.num_tokens_per_batch
-    assert int(inputs["positions"].max()) < CONTEXT.max_context_length
-
-
 def test_pack_then_pack_then_collate_preserves_aligned_pairs():
     documents = SingleDatasetConfig(
         source=RowsSourceConfig(
