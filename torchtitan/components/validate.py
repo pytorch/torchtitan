@@ -20,7 +20,7 @@ from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import full_dtensor, ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -36,6 +36,12 @@ class BaseValidator(Configurable):
     class Config(Configurable.Config):
         freq: int = 10
         """Frequency of validation"""
+
+        def __post_init__(self) -> None:
+            if self.freq <= 0:
+                raise ValueError(
+                    f"validation frequency must be positive, got {self.freq}"
+                )
 
     def __init__(
         self,
@@ -92,6 +98,7 @@ class Validator(BaseValidator):
         """DataLoader configuration for validation"""
 
         def __post_init__(self):
+            BaseValidator.Config.__post_init__(self)
             assert (
                 self.steps > 0 or self.steps == -1
             ), "validation steps must be positive or -1"
@@ -110,7 +117,7 @@ class Validator(BaseValidator):
         validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
-        local_batch_size: int,
+        num_tokens_per_batch: int,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -126,7 +133,7 @@ class Validator(BaseValidator):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
-        self.local_batch_size = local_batch_size
+        self.num_tokens_per_batch = num_tokens_per_batch
         self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
@@ -179,11 +186,9 @@ class Validator(BaseValidator):
         # SDPA config used by the graph_trainer tests) still receives positions
         # for RoPE but no masks — it relies on is_causal instead.
         if isinstance(model_config, Decoder.Config) and positions is not None:
-            inner_attention = getattr(
-                model_config.first_attention, "inner_attention", None
-            )
+            attention_backend = model_config.first_full_attention_backend
             if isinstance(
-                inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
             ):
                 model = cast(Decoder, model_parts[0])
                 extra_kwargs["attention_masks"] = model.get_attention_masks(
@@ -199,11 +204,6 @@ class Validator(BaseValidator):
                 inputs.device,
                 self.parallelism.context_parallel_load_balancer,
                 self.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        if self.parallelism.spmd_backend == "full_dtensor":
-            inputs, labels, extra_kwargs = full_dtensor.parallelize_inputs(
-                self.parallel_dims, inputs, labels, extra_kwargs
             )
 
         return inputs, labels, extra_kwargs
@@ -228,22 +228,16 @@ class Validator(BaseValidator):
             (), dtype=torch.int64, device=device_type
         )
         num_steps = 0
-        num_microbatches = (
-            self.local_batch_size // self.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
+        num_pp_microbatches = (
+            self.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
 
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            seq_len=self.seq_len,
-            local_batch_size=(
-                self.parallelism.pipeline_parallel_microbatch_size
-                if parallel_dims.pp_enabled
-                else self.local_batch_size
-            ),
+            max_context_length=self.seq_len,
+            num_tokens_per_batch=self.num_tokens_per_batch,
         )
 
         validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
@@ -257,7 +251,7 @@ class Validator(BaseValidator):
                 local_valid_tokens = torch.tensor(
                     0, dtype=torch.int64, device=device_type
                 )
-                for _ in range(num_microbatches):
+                for _ in range(num_pp_microbatches):
                     input_dict, labels = next(validation_iterator)
                     self.metrics_processor.ntokens_since_last_log += labels.numel()
                     for k, v in input_dict.items():

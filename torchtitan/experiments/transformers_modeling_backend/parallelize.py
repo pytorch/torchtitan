@@ -30,8 +30,6 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
-)
-from torchtitan.distributed.full_dtensor import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
@@ -105,17 +103,10 @@ def parallelize_hf_transformers(
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
-    if parallel_dims.spmd_backend not in ("partial_dtensor", "spmd_types"):
-        raise NotImplementedError(
-            f"The HF transformers backend only supports "
-            f"spmd_backend='partial_dtensor' or 'spmd_types'; "
+    if parallel_dims.spmd_backend != "spmd_types":
+        raise ValueError(
+            "The Transformers modeling backend only supports "
+            "parallelism.spmd_backend='spmd_types'; "
             f"got '{parallel_dims.spmd_backend}'."
         )
 
@@ -160,40 +151,32 @@ def parallelize_hf_transformers(
         build_and_swap_native_moe(model, parallel_dims)
 
     # 2. Convert HF modules to Module protocol.
-    # TP/EP always need it. CP-only needs it too: the flex kernel's local_map is
-    # what all-gathers k/v across the CP axis, and it is only installed by the
-    # sharding pass below.
-    needs_module_protocol = (
-        parallel_dims.spmd_backend == "spmd_types"
-        or parallel_dims.tp_enabled
-        or parallel_dims.ep_enabled
-        or parallel_dims.cp_enabled
+    # The spmd_types backend uses the Module protocol for state distribution,
+    # activation checks, and any TP/EP/CP redistribution.
+    from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
+        set_hf_sharding_configs,
     )
-    if needs_module_protocol:
-        from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
-            set_hf_sharding_configs,
-        )
-        from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
-            convert_hf_to_module,
-        )
+    from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
+        convert_hf_to_module,
+    )
 
-        convert_hf_to_module(model)
+    convert_hf_to_module(model)
 
-        # 3. Set sharding configs on all non-MoE modules
-        set_hf_sharding_configs(
-            model,
-            enable_sp=parallel_dims.tp_enabled,
-        )
+    # 3. Set sharding configs on all non-MoE modules
+    set_hf_sharding_configs(
+        model,
+        enable_sp=parallel_dims.tp_enabled,
+    )
 
-        # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
-        # the CP axis (on the seq dim). Must run before model.parallelize so the
-        # wrap is captured inside the local_map region and operates on the local
-        # (already TP-head-sharded, CP-seq-sharded) tensors.
-        if parallel_dims.cp_enabled:
-            _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
+    # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
+    # the CP axis (on the seq dim). Must run before model.parallelize so the
+    # wrap is captured inside the local_map region and operates on the local
+    # (already TP-head-sharded, CP-seq-sharded) tensors.
+    if parallel_dims.cp_enabled:
+        _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
 
-        # 4. Single parallelize call -- handles TP, EP, MoE, everything
-        model.parallelize(parallel_dims)
+    # 4. Single parallelize call -- handles TP, EP, MoE, everything
+    model.parallelize(parallel_dims)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -213,23 +196,8 @@ def parallelize_hf_transformers(
             parallel_dims=parallel_dims,
         )
 
-    if parallel_dims.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh_dim_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
-        dp_mesh_dims = None
-
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
-        edp_mesh_dims = None
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
 
     apply_fsdp(
         model,

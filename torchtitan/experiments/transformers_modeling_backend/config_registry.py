@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     FirstFitPackingConfig,
@@ -43,8 +43,8 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -78,8 +78,8 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -111,8 +111,8 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+            max_context_length=2048,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -146,8 +146,8 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -188,8 +188,8 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=2,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -246,11 +246,11 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
         ),
         training=TrainingConfig(
             # Keep this small: this debug model uses the full Qwen3 vocab
-            # (~152k), so cross-entropy materializes a
-            # local_batch_size * seq_len * vocab logits tensor. batch=8,
-            # seq=2048 is ~9GB in fp32 and OOMs the 22GB CI GPUs.
-            local_batch_size=1,
-            seq_len=1024,
+            # (~152k), so cross-entropy materializes a num_tokens * vocab
+            # logits tensor. 16384 tokens is ~9GB in fp32 and OOMs the 22GB
+            # CI GPUs.
+            num_tokens_per_microbatch_per_dp_rank=1 * 1024,
+            max_context_length=1024,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(

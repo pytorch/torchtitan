@@ -50,6 +50,15 @@ class TextSequence:
     positions: np.ndarray | None = None
     """Per-token positions; `None` until packing or collation materializes them."""
 
+    def __post_init__(self) -> None:
+        lengths = [len(self.input_ids), len(self.labels)]
+        if self.positions is not None:
+            lengths.append(len(self.positions))
+        if len(set(lengths)) != 1:
+            raise ValueError(
+                f"TextSequence fields must have equal lengths, got {lengths}"
+            )
+
 
 class SampleProcessor(Configurable, ABC):
     """Configured row processor using Grain-provided deterministic randomness."""

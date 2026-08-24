@@ -474,7 +474,7 @@ def register_moe_load_balancing_hook(
         if parallel_dims.ep_enabled and parallel_dims.tp > 1:
             torch.distributed.all_reduce(
                 tokens_per_expert_E_by_layer,
-                group=parallel_dims.get_mesh("tp").get_group(),
+                group=parallel_dims.get_dense_tp_mesh().get_group(),
             )
         if loss_mesh is not None:
             torch.distributed.all_reduce(

@@ -13,8 +13,8 @@
 # permutation) and compares against the reference. Correct CP attention matches
 # to fp32 noise (rel < 1e-4); bf16 mixed precision masks this, so we force fp32.
 #
-# Run: torchrun --nproc_per_node=2 tests/test_flex_cp_numerical.py \
-#          [--backend partial_dtensor|spmd_types] \
+# Run: torchrun --nproc_per_node=2 \
+#          -m torchtitan.experiments.transformers_modeling_backend.tests.test_flex_cp_numerical \
 #          [--balancer none|headtail|ptrr]
 
 import argparse
@@ -35,11 +35,6 @@ from torchtitan.tools import utils
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--backend",
-        default="partial_dtensor",
-        choices=["partial_dtensor", "spmd_types"],
-    )
     parser.add_argument("--hf_model", default="Qwen/Qwen2.5-7B")
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--bs", type=int, default=1)
@@ -66,9 +61,9 @@ def main():
         pp=1,
         ep=1,
         world_size=world,
-        spmd_backend=args.backend,
+        spmd_backend="spmd_types",
     )
-    dist_utils.set_spmd_backend(args.backend)
+    dist_utils.set_spmd_backend("spmd_types")
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
@@ -77,12 +72,12 @@ def main():
         else transformers_modeling_backend_debugmodel()
     )
     cfg.hf_model = args.hf_model
-    cfg.training.seq_len = args.seq_len
-    cfg.training.local_batch_size = args.bs
+    cfg.training.max_context_length = args.seq_len
+    cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
-    cfg.parallelism.spmd_backend = args.backend
+    cfg.parallelism.spmd_backend = "spmd_types"
     cfg.debug.seed = 42
     cfg.debug.deterministic = True
 
@@ -111,13 +106,9 @@ def main():
     ref_model, _ = build_model(swap_moe=args.moe)
     ref_model.eval()
     torch.manual_seed(0)
-    input_ids = torch.randint(0, 100, (args.bs, args.seq_len), device=device)
-    positions = (
-        torch.arange(args.seq_len, device=device)
-        .unsqueeze(0)
-        .expand(args.bs, -1)
-        .contiguous()
-    )
+    num_tokens = args.bs * args.seq_len
+    input_ids = torch.randint(0, 100, (num_tokens,), device=device)
+    positions = torch.arange(args.seq_len, device=device).repeat(args.bs)
     full_mask = ref_model.get_attention_masks(positions)
     with torch.no_grad():
         ref_logits = ref_model(
@@ -149,28 +140,22 @@ def main():
     # permutation when reconstructing full logits for the comparison.
     cp_mesh = parallel_dims.get_mesh("cp")
     full_mask_cp = cp_model.get_attention_masks(positions)
-    gidx = (
-        torch.arange(args.seq_len, device=device)
-        .unsqueeze(0)
-        .expand(args.bs, -1)
-        .contiguous()
-    )
+    gidx = torch.arange(num_tokens, device=device)
     (loc_input, loc_pos, loc_gidx), loc_mask = cp_shard(
         cp_mesh,
         (input_ids, positions, gidx),
         full_mask_cp,
         load_balancer_type=balancer,
     )
-    if args.backend == "spmd_types":
-        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+    from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 
-        loc_input, _, extra_kwargs = annotate_input_spmd_types(
-            parallel_dims,
-            loc_input,
-            loc_input,
-            {"positions": loc_pos},
-        )
-        loc_pos = extra_kwargs["positions"]
+    loc_input, _, extra_kwargs = annotate_input_spmd_types(
+        parallel_dims,
+        loc_input,
+        loc_input,
+        {"positions": loc_pos},
+    )
+    loc_pos = extra_kwargs["positions"]
     _fm = tuple(full_mask_cp.shape) if full_mask_cp is not None else None
     _lm = tuple(loc_mask.shape) if loc_mask is not None else None
     print(
@@ -192,7 +177,7 @@ def main():
     dist.all_gather(gathered_gidx, loc_gidx.contiguous())
     full = torch.zeros_like(ref_logits)
     for lg, gi in zip(gathered_logits, gathered_gidx):
-        full[:, gi[0].long(), :] = lg.float()
+        full[gi.long(), :] = lg.float()
 
     max_abs = (full.float() - ref_logits.float()).abs().max().item()
     ref_scale = ref_logits.float().abs().max().item()
@@ -207,7 +192,7 @@ def main():
     if rank == 0:
         verdict = "PASS" if passed else "FAIL"
         print(
-            f"\n==== FLEX+CP {verdict} (backend={args.backend} balancer={args.balancer}): "
+            f"\n==== FLEX+CP {verdict} (balancer={args.balancer}): "
             f"max_abs_diff={max_abs:.3e} ref_scale={ref_scale:.3e} rel={rel:.3e} ===="
         )
     dist.destroy_process_group()

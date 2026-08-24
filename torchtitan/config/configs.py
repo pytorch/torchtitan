@@ -18,8 +18,8 @@ Configs without a clear single owner (or with circular-import constraints)
 live here.
 
 Most knobs belong to a component or to the model, not here. But some options
-have no suitable home, e.g. ``local_batch_size``, and those can be placed here.
-Discuss with the maintainers first if you intend to add one.
+have no suitable home, e.g. the training token-budget settings, and those can
+be placed here. Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
 ``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
@@ -34,23 +34,34 @@ import torch
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
-    local_batch_size: int = 8
+    num_tokens_per_microbatch_per_dp_rank: int = 16384
     """
-    Batch size processed per data-parallel rank in one gradient accumulation step.
-    With pipeline parallelism, this is split into pipeline microbatches.
-    """
-
-    global_batch_size: int = -1
-    """
-    Global batch size across data-parallel ranks and gradient accumulation steps.
-    Defaults to `training.local_batch_size * data-parallel degree`.
+    Number of input-token slots processed per data-parallel rank in one model
+    forward, before context or tensor parallel sharding.
     """
 
-    # TODO: Separate the packed model-input length from the per-document maximum.
-    # seq_len currently also controls document rejection, maximum position IDs,
-    # and the required RoPE cache length.
-    seq_len: int = 2048
-    """Sequence length"""
+    num_tokens_per_train_step: int = -1
+    """
+    Global number of input-token slots across data-parallel ranks, pipeline
+    microbatches, and gradient accumulation steps. Defaults to
+    `training.num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches *
+    data-parallel degree`.
+    """
+
+    max_context_length: int = 2048
+    """Maximum logical context length used for training."""
+
+    def __post_init__(self) -> None:
+        if self.num_tokens_per_microbatch_per_dp_rank <= 0:
+            raise ValueError(
+                "num_tokens_per_microbatch_per_dp_rank must be greater than 0."
+            )
+        if self.num_tokens_per_train_step != -1 and self.num_tokens_per_train_step <= 0:
+            raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
+        if self.max_context_length <= 0:
+            raise ValueError("max_context_length must be greater than 0.")
+        if self.max_norm < 0:
+            raise ValueError("max_norm must be greater than or equal to 0.")
 
     max_norm: float | int = 1.0
     """Max norm for gradient clipping"""
@@ -160,14 +171,11 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal[
-        "partial_dtensor", "full_dtensor", "spmd_types"
-    ] = "spmd_types"
+    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
     """
     SPMD backend selector.
 
     - "partial_dtensor": use DTensor for model-parallel axes only.
-    - "full_dtensor": use the existing full DTensor path.
     - "spmd_types": use the spmd_types path.
     """
 
@@ -223,10 +231,11 @@ class ParallelismConfig:
     PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
     """
 
-    pipeline_parallel_microbatch_size: int = 1
+    num_pp_microbatches: int = 1
     """
-    The size of each pipeline parallel microbatch (default 1).
-    `training.local_batch_size` must be evenly divisible by this value.
+    Number of pipeline microbatches per data-parallel rank and gradient
+    accumulation iteration. This setting is ignored when pipeline parallelism
+    is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
     context_parallel_degree: int = 1
@@ -250,14 +259,10 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.spmd_backend not in {
-            "partial_dtensor",
-            "full_dtensor",
-            "spmd_types",
-        }:
+        if self.spmd_backend not in {"partial_dtensor", "spmd_types"}:
             raise ValueError(
-                "parallelism.spmd_backend must be one of "
-                "'partial_dtensor', 'full_dtensor', or 'spmd_types'."
+                "parallelism.spmd_backend must be either 'partial_dtensor' "
+                "or 'spmd_types'."
             )
         if self.context_parallel_load_balancer == "":
             raise ValueError(

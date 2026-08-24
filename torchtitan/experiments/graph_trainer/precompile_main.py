@@ -33,6 +33,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_keys
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    validate_memory_policy_config,
+)
 from torchtitan.experiments.graph_trainer.precompile import _FX_TRACE_ARTIFACT_KEY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
@@ -204,41 +207,32 @@ def _precompile_aot_fx_trace(
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-    seq_len = config.training.seq_len
-    local_batch_size = config.training.local_batch_size
+    num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     vocab_size = model_config.vocab_size
 
-    dummy_inputs = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
-    dummy_labels = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
-    # Match the trainer's device scalar so the precompiled graph accepts the
-    # runtime token count as an input rather than baking it in as a constant.
-    global_batch_size = (
-        local_batch_size
+    dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
+    dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
+    # The trainer computes global_valid_tokens via dist_sum (an
+    # all-reduce + .item()), which returns a Python float. Use the
+    # same type here so make_fx bakes it as a graph constant — not a
+    # graph input — identical to the non-precompile runtime trace.
+    global_num_tokens = (
+        num_tokens
         * parallel_dims.dp_shard
         * parallel_dims.dp_replicate
         * parallel_dims.cp
     )
-    dummy_global_valid_tokens = torch.tensor(
-        global_batch_size * seq_len, dtype=torch.int64, device=device
-    )
+    dummy_global_valid_tokens = float(global_num_tokens)
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
 
-        # Match Trainer.post_dataloading_process: dataloader positions are
-        # torch.long contiguous [B, L], and full precompile bakes dtype/stride.
-        positions = torch.arange(
-            0, dummy_inputs.shape[1], dtype=torch.long, device=dummy_inputs.device
-        ).repeat(local_batch_size, 1)
-
-        # Match Trainer.post_dataloading_process insertion order:
-        # dataloader kwargs first, then attention_masks added below.
+        positions = (
+            torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
+            % config.training.max_context_length
+        )
         extra_kwargs["positions"] = positions
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
@@ -355,6 +349,7 @@ def main():
         device,
         tokenizer,
     ) = _common_setup(config)
+    validate_memory_policy_config(compile_config)
 
     _precompile_aot_fx_trace(
         config,

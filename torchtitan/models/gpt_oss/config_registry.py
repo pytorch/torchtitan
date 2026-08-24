@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
@@ -41,8 +41,8 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -89,8 +89,8 @@ def gpt_oss_20b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
@@ -122,8 +122,8 @@ def gpt_oss_120b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
