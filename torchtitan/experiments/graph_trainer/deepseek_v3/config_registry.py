@@ -6,6 +6,7 @@
 
 from dataclasses import replace
 
+from torchtitan.components.data import ConcatThenSplitPackingConfig
 from torchtitan.components.quantization import (
     MXFP8GroupedExpertsConverter,
     MXFP8LinearConverter,
@@ -16,9 +17,11 @@ from torchtitan.experiments.graph_trainer.configs import (
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
+    deepseek_v3_16b_dist_moe_bf16,
     deepseek_v3_16b_minimal_async_ep,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
@@ -99,6 +102,63 @@ def graph_trainer_deepseek_v3_16b_minimal_async_ep() -> GraphTrainer.Config:
         model_registry,
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_deepseek_v3_16b_dist_moe_bf16() -> GraphTrainer.Config:
+    """Build the DSV3 16B GraphTrainer config with BF16 DistMoE."""
+    base = deepseek_v3_16b_dist_moe_bf16()
+    base.hf_assets_path = "./tests/assets/tokenizer"
+    base.parallelism = replace(
+        base.parallelism,
+        data_parallel_shard_degree=2,
+        expert_parallel_degree=2,
+    )
+    base.dataloader.dataset = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+    config = to_graph_trainer_config(
+        base,
+        model_registry,
+    )
+    config.override.imports = [
+        "torchtitan.overrides.helion_rope.helion_complex_rope",
+    ]
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        components=[],
+        inductor_compilation="regional",
+        memory_policy="full",
+        require_cudagraph=True,
+        fsdp_contiguous_module_fqns=["layers.*.moe.routed_experts"],
+    )
+    return config
+
+
+def graph_trainer_deepseek_v3_16b_coda() -> GraphTrainer.Config:
+    base = deepseek_v3_16b_minimal_async_ep()
+    base.hf_assets_path = "./tests/assets/tokenizer"
+    base.parallelism = replace(
+        base.parallelism,
+        data_parallel_shard_degree=2,
+        expert_parallel_degree=2,
+    )
+    base.dataloader.dataset = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+    base.model_spec = deepseek_v3_model_registry(
+        "16B",
+        attn_backend="flex_flash",
+        moe_comm_backend="minimal_async_ep",
+    )
+    base.override.imports = [
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.helion_rope.helion_complex_rope",
+    ]
+    config = to_graph_trainer_config(base, model_registry)
+    config.compile = GraphTrainerCompileConfig(
+        enable=True,
+        enable_coda=True,
+        inductor_compilation="regional",
+        memory_policy="full",
+        numerics_changing_optim=True,
+    )
     return config
 
 

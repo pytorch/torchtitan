@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 import spmd_types as spmd
 
@@ -126,13 +126,22 @@ class RoutedExperts(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        supports_cuda_graphs: ClassVar[bool] = False
         inner_experts: GroupedExperts.Config
         token_dispatcher: LocalTokenDispatcher.Config
 
     def __init__(self, config: Config):
         super().__init__()
         self.inner_experts = config.inner_experts.build()
+        self.num_experts = self.inner_experts.num_experts
         self.token_dispatcher = config.token_dispatcher.build()
+
+    def expert_parameters_module(self) -> nn.Module:
+        """Return the module that directly owns all expert parameters."""
+        return self.inner_experts
+
+    def synchronize(self) -> None:
+        """Wait for deferred routed-expert work, when the backend has any."""
 
     def forward(
         self,
@@ -448,6 +457,9 @@ class MoE(Module):
             self.shared_experts(x_TD) if self.shared_experts is not None else None
         )
 
+        synchronize = getattr(self.routed_experts, "synchronize", None)
+        if synchronize is not None:
+            synchronize()
         if shared_out_TD is not None:
             out_TD = out_TD + shared_out_TD
         return out_TD
@@ -460,9 +472,28 @@ class MoE(Module):
 
         with torch.device(buffer_device):
             self.tokens_per_expert_E = torch.zeros(
-                self.routed_experts.inner_experts.num_experts, dtype=torch.float32
+                self.routed_experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
                 self.expert_bias_E = torch.zeros(
-                    self.routed_experts.inner_experts.num_experts, dtype=torch.float32
+                    self.routed_experts.num_experts, dtype=torch.float32
                 )
+
+
+def get_expert_parameter_owner(routed_experts: RoutedExperts) -> nn.Module:
+    """Return and validate the module owning routed-expert parameters."""
+    owner = routed_experts.expert_parameters_module()
+    if owner not in set(routed_experts.modules()):
+        raise ValueError(
+            "Expert parameter owner must be the routed experts module or one "
+            "of its descendants."
+        )
+    owner_params = set(owner.parameters())
+    if not owner_params:
+        raise ValueError("Expert parameter owner must contain parameters.")
+    if owner_params != set(routed_experts.parameters()):
+        raise ValueError(
+            "Expert parameter owner must own every parameter in the routed "
+            "experts subtree."
+        )
+    return owner

@@ -10,9 +10,11 @@ These helpers construct fully-specified sub-configs with all dimensional
 fields set at config creation time.
 """
 
+from __future__ import annotations
+
 import dataclasses
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -50,6 +52,12 @@ from torchtitan.models.common.token_dispatcher import (
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.dist_moe import DistMoeBackendConfig
+
+
+MoeBackend = Literal["standard", "dist_moe"]
 
 
 def decoder_vocab_size(model_spec: ModelSpec) -> int:
@@ -436,9 +444,11 @@ def make_routed_experts_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
+    moe_backend: MoeBackend = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
 ) -> RoutedExperts.Config:
-    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
-    return RoutedExperts.Config(
+    """Build routed experts for the selected compute backend."""
+    stock = RoutedExperts.Config(
         inner_experts=GroupedExperts.Config(
             dim=dim,
             hidden_dim=hidden_dim,
@@ -455,3 +465,18 @@ def make_routed_experts_config(
             cudagraphable=cudagraphable,
         ),
     )
+    if moe_backend == "standard":
+        if dist_moe is not None:
+            raise ValueError("dist_moe config requires moe_backend='dist_moe'")
+        return stock
+    if moe_backend != "dist_moe":
+        raise ValueError(f"Unknown MoE backend: {moe_backend!r}")
+    if comm_backend != "standard":
+        raise ValueError(
+            "moe_backend='dist_moe' owns token communication and requires "
+            "moe_comm_backend='standard'"
+        )
+
+    from torchtitan.models.common.dist_moe import dist_moe_config
+
+    return dist_moe_config(stock, backend=dist_moe)

@@ -25,6 +25,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 )
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.moe import get_expert_parameter_owner
 from torchtitan.tools.logging import logger
 
 
@@ -462,13 +463,17 @@ def apply_simple_fsdp(
             moe = getattr(transformer_block, "moe", None)
             if moe is None:
                 continue
-            inner_experts = moe.routed_experts.inner_experts
+            routed_experts = moe.routed_experts
+            expert_parameters = get_expert_parameter_owner(routed_experts)
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
+            if (
+                edp_mesh["efsdp"].size() * parallel_dims.ep
+                > routed_experts.num_experts
+            ):
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
-                inner_experts,
+            data_parallel(
+                expert_parameters,
                 edp_mesh,
                 dp_mode,
                 mp_policy=mp_policy,

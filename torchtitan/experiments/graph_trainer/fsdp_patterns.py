@@ -31,10 +31,32 @@ def is_wait_tensor(node: fx.Node) -> bool:
 
 
 def is_all_gather_into_tensor(node: fx.Node) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.all_gather_into_tensor.default
-    )
+    return node.op == "call_function" and node.target in {
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+    }
+
+
+_BUCKETED_ALL_GATHER_SPLITS = {
+    torch.ops.aten.split_with_sizes.default,
+    torch.ops.aten.split_with_sizes_copy.default,
+}
+
+
+def is_fsdp_all_gather_output_split(node: fx.Node) -> bool:
+    """Return whether a node splits one waited FSDP all-gather output."""
+    if node.op != "call_function" or node.target not in _BUCKETED_ALL_GATHER_SPLITS:
+        return False
+
+    current = node.args[0]
+    while isinstance(current, fx.Node):
+        if is_wait_tensor(current):
+            launch = current.args[0]
+            return isinstance(launch, fx.Node) and is_all_gather_into_tensor(launch)
+        if len(current.all_input_nodes) != 1:
+            return False
+        current = current.all_input_nodes[0]
+    return False
 
 
 def is_reduce_scatter_tensor(node: fx.Node) -> bool:

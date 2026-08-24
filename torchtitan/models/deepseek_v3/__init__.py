@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch.nn as nn
 
@@ -28,6 +30,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    MoeBackend,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
@@ -38,6 +41,9 @@ from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 from .parallelize import parallelize_deepseekv3
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.dist_moe import DistMoeBackendConfig
 
 __all__ = [
     "parallelize_deepseekv3",
@@ -189,6 +195,8 @@ def build_mla_moe_layers(
     router_route_norm: bool = False,
     attn_backend: str,
     moe_comm_backend: str,
+    moe_backend: MoeBackend = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
     non_blocking_capacity_factor: float | None,
     linear_init: dict[str, Callable],
     norm_init: dict[str, Callable],
@@ -253,6 +261,8 @@ def build_mla_moe_layers(
                     top_k=router_top_k,
                     param_init=depth_experts_init(layer_id),
                     comm_backend=moe_comm_backend,
+                    moe_backend=moe_backend,
+                    dist_moe=dist_moe,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
                 shared_experts=make_ffn_config(
@@ -319,6 +329,8 @@ def _build_mtp_layers(
 def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
+    moe_backend: MoeBackend = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
@@ -352,6 +364,8 @@ def _debugmodel(
         router_score_func="softmax",
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        moe_backend=moe_backend,
+        dist_moe=dist_moe,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
@@ -389,6 +403,8 @@ def _debugmodel(
 def _16b(
     attn_backend: str,
     moe_comm_backend: str,
+    moe_backend: MoeBackend = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
@@ -422,6 +438,8 @@ def _16b(
         router_score_func="softmax",
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        moe_backend=moe_backend,
+        dist_moe=dist_moe,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
@@ -459,6 +477,8 @@ def _16b(
 def _236b(
     attn_backend: str,
     moe_comm_backend: str,
+    moe_backend: MoeBackend = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
@@ -496,6 +516,8 @@ def _236b(
         router_route_scale=16.0,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        moe_backend=moe_backend,
+        dist_moe=dist_moe,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
@@ -533,6 +555,8 @@ def _236b(
 def _671b(
     attn_backend: str,
     moe_comm_backend: str,
+    moe_backend: MoeBackend = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
@@ -571,6 +595,8 @@ def _671b(
         router_route_norm=True,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
+        moe_backend=moe_backend,
+        dist_moe=dist_moe,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
@@ -616,14 +642,18 @@ deepseekv3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "flex",
+    moe_backend: MoeBackend = "standard",
     moe_comm_backend: str = "standard",
+    dist_moe: DistMoeBackendConfig | None = None,
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> ModelSpec:
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
+        moe_backend=moe_backend,
         moe_comm_backend=moe_comm_backend,
+        dist_moe=dist_moe,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
     )
@@ -631,6 +661,16 @@ def model_registry(
         validate_converter_order(converters)
         for c in converters:
             config = c.build().convert(config)
+    post_parallelize_fn = None
+    cleanup_fn = None
+    if moe_backend == "dist_moe":
+        from torchtitan.models.common.dist_moe import (
+            cleanup_dist_moe,
+            setup_dist_moe,
+        )
+
+        post_parallelize_fn = setup_dist_moe
+        cleanup_fn = cleanup_dist_moe
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,
@@ -639,4 +679,6 @@ def model_registry(
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
+        post_parallelize_fn=post_parallelize_fn,
+        cleanup_fn=cleanup_fn,
     )

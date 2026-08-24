@@ -206,6 +206,24 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_16b_dist_moe_bf16() -> Trainer.Config:
+    """Build DSV3 16B with BF16 DistMoE routed experts."""
+    from torchtitan.models.common.dist_moe import DistMoeBackendConfig
+
+    config = deepseek_v3_16b()
+    config.model_spec = model_registry(
+        "16B",
+        attn_backend="flex",
+        moe_backend="dist_moe",
+        dist_moe=DistMoeBackendConfig(
+            max_routing_imbalance_factor=1.25,
+            vmm_host_scratch_imbalance_factor=None,
+        ),
+    )
+    config.training.disable_cuda_graphs = False
+    return config
+
+
 def deepseek_v3_671b() -> Trainer.Config:
     model_spec = model_registry(
         "671B",

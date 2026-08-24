@@ -45,6 +45,8 @@ class ModelSpec:
     pipelining_fn: Callable | None
     post_optimizer_build_fn: Callable | None
     state_dict_adapter: type[BaseStateDictAdapter] | None
+    post_parallelize_fn: Callable | None = None
+    cleanup_fn: Callable | None = None
 
     def traverse(
         self, config_cls: type, *, recurse: bool = False, _prefix: str = ""
