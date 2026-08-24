@@ -68,7 +68,7 @@ jobs:
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
         python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
 
         # The torchcomms feature tests are currently disabled, so do not install
         # torchcomms in the main feature job. Its wheel pins torch exactly and
@@ -92,6 +92,12 @@ jobs:
         # Run the GPU-only DistMuon test that CPU unit CI skips.
         python -m pytest tests/unit_tests/flex_shard/test_dist_muon.py \
           --durations=20 -vv
+
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          CUDA_VISIBLE_DEVICES=0 python -m pytest \
+            tests/unit_tests/test_kimi_k3.py::TestKimiK3::test_fla_kda_kernel_matches_recurrent_reference \
+            -vv
+        fi
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
