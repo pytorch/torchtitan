@@ -181,6 +181,14 @@ class _CUDAGraphManager:
 _manager = _CUDAGraphManager()
 
 
+def is_cudagraph_available() -> bool:
+    return (
+        utils.device_type == "cuda"
+        and torch.cuda.is_available()
+        and torch.version.hip is None
+    )
+
+
 def cudagraph_teardown() -> None:
     """Destroy all CUDA graphs and release the shared memory pool."""
     _manager.teardown()
@@ -339,11 +347,7 @@ def wrap_with_cuda_graph(fwd_bwd_fn: ForwardBackwardFn) -> ForwardBackwardFn:
     overwritten by the next replay. Callers must preserve it when needed.
     """
 
-    if not (
-        utils.device_type == "cuda"
-        and torch.cuda.is_available()
-        and torch.version.hip is None
-    ):
+    if not is_cudagraph_available():
         logger.warning(
             "CUDA graph capture is only supported on NVIDIA CUDA; "
             "using eager execution."

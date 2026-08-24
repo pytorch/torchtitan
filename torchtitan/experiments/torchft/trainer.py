@@ -44,6 +44,7 @@ class FaultTolerantTrainer(Trainer):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
+        config._validate_sdc_replay()
         assert (
             config.model_spec is not None
         ), "model_spec must be set before creating Trainer"
@@ -285,6 +286,10 @@ class FaultTolerantTrainer(Trainer):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+        # Initialize process-local SDC replay state. This state is not checkpointed.
+        self.sdc_attempt_step = 0
+        self._sdc_replay_unit_index = 0
+        self._sdc_replay = None
 
         # FT addition: pass ft_manager to CheckpointManager
         self.checkpointer = config.checkpoint.build(
@@ -380,6 +385,8 @@ class FaultTolerantTrainer(Trainer):
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        if self.config.sdc_replay.enabled:
+            self._sdc_replay_unit_index = 0
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(self.step)
@@ -426,10 +433,12 @@ class FaultTolerantTrainer(Trainer):
                 fwd_bwd_input_dict = input_dict_mbs[0]
                 fwd_bwd_labels = label_mbs[0]
 
-            loss = self.forward_backward_step(
-                input_dict=fwd_bwd_input_dict,
-                labels=fwd_bwd_labels,
-                global_valid_tokens=global_valid_tokens,
+            loss = self.run_forward_backward(
+                lambda: self.forward_backward_step(
+                    input_dict=fwd_bwd_input_dict,
+                    labels=fwd_bwd_labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
             )
             if should_log:
                 loss = loss.detach()
@@ -449,6 +458,8 @@ class FaultTolerantTrainer(Trainer):
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
+        if self.config.sdc_replay.enabled:
+            self.sdc_attempt_step += 1
         self.lr_schedulers.step()
 
         # log metrics

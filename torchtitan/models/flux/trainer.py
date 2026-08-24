@@ -283,10 +283,18 @@ class FluxTrainer(Trainer):
 
         return loss
 
+    def _get_sdc_replay_modules(self) -> Iterable[torch.nn.Module]:
+        modules = [*self.model_parts, self.t5_encoder, self.clip_encoder]
+        if self.autoencoder is not None:
+            modules.append(self.autoencoder)
+        return modules
+
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
+        if self.config.sdc_replay.enabled:
+            self._sdc_replay_unit_index = 0
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
 
@@ -300,7 +308,12 @@ class FluxTrainer(Trainer):
         # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
+        loss = self.run_forward_backward(
+            lambda: self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+            )
+        )
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -311,6 +324,8 @@ class FluxTrainer(Trainer):
         )
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
+        if self.config.sdc_replay.enabled:
+            self.sdc_attempt_step += 1
         self.lr_schedulers.step()
 
         # log metrics

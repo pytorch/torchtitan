@@ -28,6 +28,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.model_parts = []
         trainer.config = MagicMock()
         trainer.config.training.max_norm = 1.0
+        trainer.config.sdc_replay.enabled = False
         trainer.device = torch.device("cpu")
         trainer.gradient_accumulation_steps = 1
         trainer.num_pp_microbatches = 1
