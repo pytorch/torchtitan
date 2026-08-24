@@ -155,6 +155,19 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
+def head_parallel_norm_config(*input_names: str) -> ShardingConfig:
+    """Sharding for a norm over head-sharded ``(T, N, H)`` activations."""
+    activation = attention_activation_placement()
+    input_shardings = {name: activation for name in input_names}
+    return ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        in_src_shardings=dict(input_shardings),
+        in_dst_shardings=dict(input_shardings),
+        out_src_shardings=activation,
+        out_dst_shardings=activation,
+    )
+
+
 def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
 
@@ -301,6 +314,28 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     )
 
 
+def set_linear_attention_inner_sharding(
+    inner_attention_cfg,
+    *,
+    input_shardings: dict[str, SpmdLayout],
+) -> None:
+    """Configure a head-sharded linear-attention local kernel boundary.
+
+    ``input_shardings`` must follow the inner module's positional argument order;
+    that order also defines the input-gradient placements for ``local_map``.
+    """
+    output_sharding = attention_activation_placement()
+    inner_attention_cfg.sharding_config = ShardingConfig(
+        in_src_shardings=dict(input_shardings),
+        in_dst_shardings=dict(input_shardings),
+        out_src_shardings=output_sharding,
+        out_dst_shardings=output_sharding,
+        local_map=LocalMapConfig(
+            in_grad_placements=tuple(input_shardings.values()),
+        ),
+    )
+
+
 def set_kda_sharding(
     kda_cfg,
     *,
@@ -336,9 +371,7 @@ def set_kda_sharding(
     kda_cfg.k_conv.sharding_config = conv_sharding
     kda_cfg.v_conv.sharding_config = conv_sharding
 
-    kda_cfg.output_norm.sharding_config = ShardingConfig(
-        state_shardings={"weight": replicated_placement},
-    )
+    kda_cfg.output_norm.sharding_config = head_parallel_norm_config("x", "gate")
     kda_cfg.output_proj.sharding_config = rowwise_config(output_sp=enable_sp)
 
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
@@ -351,8 +384,9 @@ def set_kda_sharding(
             TP: spmd.R,
         }
     )
-    kda_cfg.inner_kda.sharding_config = ShardingConfig(
-        in_src_shardings={
+    set_linear_attention_inner_sharding(
+        kda_cfg.inner_kda,
+        input_shardings={
             "query_TC": projected_placement,
             "key_TC": projected_placement,
             "value_TC": projected_placement,
@@ -365,36 +399,6 @@ def set_kda_sharding(
             "dt_bias_NK": parameter_placement,
             "cu_seqlens": cu_seqlens_placement,
         },
-        in_dst_shardings={
-            "query_TC": projected_placement,
-            "key_TC": projected_placement,
-            "value_TC": projected_placement,
-            "raw_gate_TNK": head_placement,
-            "raw_beta_TN": projected_placement,
-            "conv_q_weight_C1W": parameter_placement,
-            "conv_k_weight_C1W": parameter_placement,
-            "conv_v_weight_C1W": parameter_placement,
-            "A_log_N": parameter_placement,
-            "dt_bias_NK": parameter_placement,
-            "cu_seqlens": cu_seqlens_placement,
-        },
-        out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
-        local_map=LocalMapConfig(
-            in_grad_placements=(
-                projected_placement,
-                projected_placement,
-                projected_placement,
-                head_placement,
-                projected_placement,
-                parameter_placement,
-                parameter_placement,
-                parameter_placement,
-                parameter_placement,
-                parameter_placement,
-                cu_seqlens_placement,
-            ),
-        ),
     )
 
     output_placement = (
