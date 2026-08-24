@@ -11,10 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from monarch.actor import Actor, endpoint
+from torchtitan.experiments.rl.renderer import RendererConfig
 
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
-from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.observability import structured_logger as sl
 
 
