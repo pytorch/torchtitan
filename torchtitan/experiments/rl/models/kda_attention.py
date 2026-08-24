@@ -113,6 +113,8 @@ class VLLMInnerKDA(Module, MambaBase):
         A_log_N: torch.Tensor,
         dt_bias_NK: torch.Tensor,
         cu_seqlens: torch.Tensor,
+        *,
+        cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
         """Run the vLLM cache operation on rank-local tensors.
 
@@ -120,7 +122,7 @@ class VLLMInnerKDA(Module, MambaBase):
         the module this replaces. vLLM derives its own offsets from the per-layer
         metadata, so the caller's ``cu_seqlens`` is unused.
         """
-        del cu_seqlens
+        del cu_seqlens, cu_seqlens_host
 
         num_tokens = query_TC.shape[0]
         mixed_qkv_TC = torch.cat((query_TC, key_TC, value_TC), dim=-1)
