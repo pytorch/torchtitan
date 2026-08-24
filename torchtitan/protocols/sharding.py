@@ -7,20 +7,21 @@
 """Sharding types for config-based parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(parallel_dims)``.  All placements use
-``SpmdLayout`` so they are self-documenting and support multi-dimensional
+and read by ``Module.parallelize(parallel_dims)``. All placements use
+``SpmdType`` so they are self-documenting and support multi-dimensional
 meshes.
 """
 
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import (
+    layout_axes,
     MeshAxisName,
-    SpmdLayout,
     unfold_dp_axis,
 )
 
@@ -28,15 +29,8 @@ from torchtitan.distributed.parallel_dims import (
 __all__ = [
     "LocalMapConfig",
     "ShardingConfig",
-    "SpmdLayout",
     "resolve_placements",
 ]
-
-# Shard order: we implicitly assume the trivial outer -> inner order matching
-# the mesh axis order. The only non-trivial case is FSDP + TP both sharding on
-# tensor dim 0, but it doesn't need to be annotated today.
-# TODO: integrate with global spmd types (e.g., ``TP: V`` + ``PartitionSpec``
-# carrying explicit shard-order info) once that lands.
 
 
 @dataclass(kw_only=True, slots=True)
@@ -54,12 +48,12 @@ class LocalMapConfig:
     argument when input gradients are irrelevant.
 
     Attributes:
-        in_grad_placements: Per-input-gradient SpmdLayouts (positional,
+        in_grad_placements: Per-input-gradient SPMD types (positional,
             ordered by ``forward`` args). Use ``None`` to omit
             input-gradient placements or for non-tensor args.
     """
 
-    in_grad_placements: tuple[SpmdLayout | None, ...] | None
+    in_grad_placements: tuple[SpmdType | None, ...] | None
 
     def to_dict(self) -> dict:
         return {"repr": repr(self)}
@@ -69,8 +63,8 @@ class LocalMapConfig:
 class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
-    All placements use ``SpmdLayout`` keyed by mesh axis names.  At
-    ``parallelize()`` time, SpmdLayouts are resolved to
+    All placements use ``SpmdType`` keyed by mesh axis names. At
+    ``parallelize()`` time, SPMD types are resolved to
     ``tuple[Placement, ...]`` in mesh axis order.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
@@ -100,7 +94,7 @@ class ShardingConfig:
         out_src_shardings: Source placement of the forward's output as a
             DTensor. When ``local_map`` is set this also tells ``local_map``
             what to wrap the local output back to. Accepts a single
-            ``SpmdLayout`` (single-output case) or a tuple (multi-
+            ``SpmdType`` (single-output case) or a tuple (multi-
             output case). ``None``
             means "infer from the output" (it's already a DTensor at the
             right placement, or there's no local_map to drive).
@@ -114,11 +108,11 @@ class ShardingConfig:
             ``in_grad_placements``.
     """
 
-    state_shardings: dict[str, SpmdLayout] = field(default_factory=dict)
-    in_src_shardings: dict[str, SpmdLayout] | None = None
-    in_dst_shardings: dict[str, SpmdLayout] | None = None
-    out_src_shardings: SpmdLayout | tuple[SpmdLayout, ...] | None = None
-    out_dst_shardings: SpmdLayout | None = None
+    state_shardings: dict[str, SpmdType] = field(default_factory=dict)
+    in_src_shardings: dict[str, SpmdType] | None = None
+    in_dst_shardings: dict[str, SpmdType] | None = None
+    out_src_shardings: SpmdType | tuple[SpmdType, ...] | None = None
+    out_dst_shardings: SpmdType | None = None
     local_map: LocalMapConfig | None = None
 
     def to_dict(self) -> dict:
@@ -127,10 +121,10 @@ class ShardingConfig:
 
 
 def resolve_placements(
-    layout: SpmdLayout,
+    layout: SpmdType,
     mesh: DeviceMesh,
 ) -> tuple[Placement, ...]:
-    """Resolve SpmdLayout against a mesh in axis order.
+    """Resolve an SPMD type against a mesh in axis order.
 
     Every sharding_config must explicitly declare a placement for every mesh axis
     it will be applied against. Missing declarations raise ``ValueError``;
@@ -146,22 +140,30 @@ def resolve_placements(
     # TODO(fegin): remove the size-1 ``Shard(d)``/``Partial`` to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-    axis_types = {}
-    for axis_name, axis_type in layout.per_axis_spmd_types().items():
+    axis_types = dict(layout.local_type)
+    if layout.partition_spec is not None:
+        for dim, entry in enumerate(layout.partition_spec):
+            for axis_name in (
+                () if entry is None else entry if isinstance(entry, tuple) else (entry,)
+            ):
+                axis_types[axis_name] = spmd.S(dim)
+    concrete_axis_types = {}
+    for axis_name in layout_axes(layout):
+        axis_type = axis_types[axis_name]
         for concrete_axis_name in unfold_dp_axis(axis_name):
-            axis_types[concrete_axis_name] = axis_type
+            concrete_axis_types[concrete_axis_name] = axis_type
 
     result = []
     for i, axis_name in enumerate(mesh.mesh_dim_names):
         key = MeshAxisName(axis_name)
-        if key not in axis_types:
+        if key not in concrete_axis_types:
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
-                f"{sorted(k.value for k in layout.axes())}; "
+                f"{sorted(k.value for k in layout_axes(layout))}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
-        p = spmd.spmd_type_to_dtensor_placement(axis_types[key])
+        p = spmd.spmd_type_to_dtensor_placement(concrete_axis_types[key])
         if isinstance(p, (Shard, Partial)) and mesh.size(i) == 1:
             p = Replicate()
         result.append(p)
