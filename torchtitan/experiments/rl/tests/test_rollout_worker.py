@@ -120,13 +120,16 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             advantage=_Config(_AdvantageEstimator()),
         )
         worker = _CustomWorker(worker_config)
+        await worker.setup_async(
+            renderer_config=_Config("renderer"),
+            hf_assets_path="hf_assets_path",
+        )
         group = await worker.run_group(
             generate_fn=generate_fn,
             sample="sample",
             group_id=7,
             group_size=2,
             sampling=SamplingConfig(seed=11),
-            renderer="renderer",
         )
 
         assert group.group_id == 7

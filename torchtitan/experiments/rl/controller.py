@@ -636,7 +636,10 @@ class Controller(Configurable):
                 generators=generators,
             )
 
-            await self._rollouter.setup_async()
+            await self._rollouter.setup_async(
+                renderer_config=config.renderer,
+                hf_assets_path=config.hf_assets_path,
+            )
 
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
@@ -690,7 +693,6 @@ class Controller(Configurable):
                     group_id=-(i + 1),
                     group_size=1,
                     sampling=sampling,
-                    renderer=self.renderer,
                 )
                 for i, sample in enumerate(samples)
             ),
@@ -966,7 +968,6 @@ class Controller(Configurable):
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
-                        renderer=self.renderer,
                     )
                 group.metrics = compute_rollout_metrics(
                     prefix="rollout", rollouts=group.rollouts
