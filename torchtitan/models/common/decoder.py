@@ -81,6 +81,21 @@ class Decoder(BaseModel):
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
+        # Whether this model's context parallel is driven by ShardingConfig.
+        # ``validate_cp_backend`` is documented as being for "the models that
+        # declare CP in ShardingConfig", but the check below runs for every
+        # decoder, so a model whose CP cannot be declarative has no way to say
+        # so. Kernels that do not dispatch through DTensor force the case:
+        # nothing in a ShardingConfig can reach them, and the model implements
+        # CP itself. Such a model sets this False and takes on its own CP
+        # preconditions.
+        #
+        # Deriving it instead -- asking whether any placement in the config
+        # names the CP axis -- was tried and is wrong: every model here sets
+        # its sharding AFTER delegating to this method, llama3 included, so
+        # at this point no model declares anything and the check would be
+        # silently skipped for all of them.
+        cp_via_sharding_config: bool = True
 
         @property
         def first_attention(self) -> BaseAttention.Config | None:
@@ -172,7 +187,8 @@ class Decoder(BaseModel):
 
             if parallelism.context_parallel_degree > 1:
                 # ShardingConfig-based CP requires the spmd_types backend.
-                validate_cp_backend(parallelism)
+                if self.cp_via_sharding_config:
+                    validate_cp_backend(parallelism)
                 if any(self.traverse(ScaledDotProductAttention.Config)) or any(
                     self.traverse(VarlenAttention.Config)
                 ):

@@ -18,7 +18,11 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
 )
-from .model import KimiK3Model
+from torchtitan.tools.logging import logger
+
+from .kda import KimiDeltaAttention
+from .model import KimiK3Model, KimiMLAAttention
+from .sharding import contract_for_mode, ULYSSES
 
 
 def parallelize_kimi_k3(
@@ -31,22 +35,21 @@ def parallelize_kimi_k3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ) -> nn.Module:
-    """Apply FSDP2 to the Kimi K3 decoder and vision encoder."""
+    """Apply FSDP2 and context parallelism to the Kimi K3 decoder and vision encoder."""
 
     unsupported_parallelisms = [
         name
         for name, enabled in (
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
-            ("context parallel", parallel_dims.cp_enabled),
             ("expert parallel", parallel_dims.ep_enabled),
         )
         if enabled
     ]
     if unsupported_parallelisms:
         raise NotImplementedError(
-            "Kimi K3 currently supports FSDP2 data parallelism "
-            f"only; disable {', '.join(unsupported_parallelisms)}."
+            "Kimi K3 currently supports FSDP2 data parallelism and context "
+            f"parallelism only; disable {', '.join(unsupported_parallelisms)}."
         )
     if parallelism.spmd_backend != "partial_dtensor":
         raise NotImplementedError(
@@ -62,6 +65,9 @@ def parallelize_kimi_k3(
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
     assert isinstance(model, KimiK3Model)
+    if parallel_dims.cp_enabled:
+        apply_cp_kimi_k3(model, parallel_dims, training.max_context_length)
+
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
         ac_policy.apply(model)
@@ -95,3 +101,107 @@ def parallelize_kimi_k3(
     )
 
     return model
+
+
+def _check_head_divisibility(
+    contract, num_heads: int, divisor: int, divisor_expr: str, kind: str, field: str
+) -> None:
+    """Enforce the head split a contract asks for, if it asks for one."""
+    if not contract.head_sharded:
+        return
+    if num_heads % divisor != 0:
+        raise ValueError(
+            f"{kind} {field}={num_heads} must be divisible by "
+            f"{divisor_expr}={divisor} for {contract.name} CP head sharding"
+        )
+
+
+def apply_cp_kimi_k3(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+    max_context_length: int | None = None,
+) -> None:
+    """Wire context parallelism: KCP on the KDA layers, Ulysses on the MLA layers.
+
+    Both at once, on disjoint layer kinds. KCP decomposes the delta-rule
+    recurrence and says nothing about softmax attention, so it does not replace
+    Ulysses; ``cp_mode="ulysses"`` runs the KDA layers the second way and is
+    kept as an A/B.
+
+    Imperative rather than declared because KDA's kernels are fla triton and
+    never see a DTensor; see ``cp_via_sharding_config`` on the model config for
+    why the declarative path cannot serve them.
+    """
+    cp_group = parallel_dims.get_mesh("cp").get_group()
+    cp_degree, tp_degree = parallel_dims.cp, parallel_dims.tp
+    model._cp_group = cp_group
+    # The CP mask rebuild is causal-only; hand the layers the context window
+    # so they can reject a folded stream that holds several documents.
+    # The window comes from the training config: K3's MLA is nope, so the
+    # decoder's RoPE-derived max_context_length raises rather than returning
+    # one. A folded stream longer than this holds more than one document, which
+    # the causal-only CP mask cannot represent.
+    max_ctx = max_context_length
+
+    num_mla = 0
+    kda_modules = []
+    for module in model.modules():
+        if isinstance(module, KimiMLAAttention):
+            module._cp_max_context_length = max_ctx
+            # The head axis may already be split by another parallelism, so
+            # Ulysses splits what is left: heads must divide by tp*cp.
+            _check_head_divisibility(
+                ULYSSES,
+                module.n_heads,
+                tp_degree * cp_degree,
+                "tp*cp",
+                "MLA",
+                "n_heads",
+            )
+            module._cp_group = cp_group
+            num_mla += 1
+        elif isinstance(module, KimiDeltaAttention):
+            kda_modules.append(module)
+
+    modes = {m.cp_mode for m in kda_modules}
+    for mode in modes:
+        contract = contract_for_mode(mode)
+        for module in kda_modules:
+            if module.cp_mode == mode:
+                _check_head_divisibility(
+                    contract,
+                    module.num_heads,
+                    tp_degree * cp_degree,
+                    "tp*cp",
+                    "KDA",
+                    "num_heads",
+                )
+    if "kcp" in modes:
+        # Checked here rather than at the first forward: the message is
+        # actionable at wiring time and the failure is otherwise an ImportError
+        # from inside a layer.
+        try:
+            from fla.modules.conv.cp.ops import causal_conv1d_cp  # noqa: F401
+            from fla.ops.cp.context import build_cp_context  # noqa: F401
+        except ImportError as err:
+            raise ValueError(
+                "cp_mode='kcp' needs fla-core's CP ops "
+                "(fla.ops.cp.context.build_cp_context and "
+                "fla.modules.conv.cp.ops.causal_conv1d_cp), which ship in "
+                f"fla-core >= 0.5.1; import failed with: {err}. Install a "
+                "newer fla-core or use cp_mode='ulysses'."
+            ) from err
+
+    for module in kda_modules:
+        module._cp_group = cp_group
+    if num_mla + len(kda_modules) == 0:
+        raise ValueError(
+            "context parallel is enabled but no attention layer was found to "
+            "wire it onto."
+        )
+    logger.info(
+        "Applied context parallel to %d MLA and %d KDA layer(s), modes=%s.",
+        num_mla,
+        len(kda_modules),
+        sorted(modes) or ["-"],
+    )
