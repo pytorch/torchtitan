@@ -33,11 +33,13 @@ GPUs. Scheduled and post-merge runs execute the complete suite with Real PG.
 - 1 GPU Fake PG cadence: pull requests on open, update, reopen, or
   ready-for-review. Reusable workflow callers run Fake PG by default.
 - 8 GPU Real PG cadence: every pull request event above runs tests marked
-  `use_real_pg=True`. Adding the `ciflow/8gpu` pull request label creates a
-  `ciflow/8gpu/*` tag and runs the complete suite with Real PG. Pushes and
-  merges to `main`, six-hour schedules, and manual dispatches also run the
-  complete suite with Real PG. Reusable workflow callers can explicitly
-  request `execution_mode: real_pg`, as the ROCm workflow does.
+  `use_real_pg=True` in separate `required subset - features` and
+  `required subset - models` jobs. Adding the `ciflow/8gpu` pull request label
+  creates a `ciflow/8gpu/*` tag and runs separate `full suite - features` and
+  `full suite - models` jobs with Real PG. Pushes and merges to `main`,
+  six-hour schedules, and manual dispatches also run both full-suite jobs with
+  Real PG. Reusable workflow callers can explicitly request
+  `execution_mode: real_pg`, as the ROCm workflow does.
 - 8 GPU H100 cadence: opt-in pull requests carrying the `ciflow/h100.8` label.
   The lane always uses Real PG; updates and reopened events rerun it while the
   label remains attached.
@@ -46,8 +48,8 @@ Feature tests provide depth of infrastructure composability. Fake-PG runs check
 that feature combinations configure, transform, and complete training, while
 Real-PG runs additionally cover real collectives and distributed state. Model
 tests provide width across supported implementations. Their definitions remain
-separate for clarity, but CI executes both suites in one workflow to share setup
-time.
+separate for clarity. Each 8 GPU Real-PG suite runs as its own CI job with an
+independent timeout; the model job also runs the FLUX integration tests.
 
 ### Numerics tests (Goal: deterministic regression coverage)
 
