@@ -278,12 +278,6 @@ DSV3_EP_OVERLAP_GRAPH = " --compile.ep_overlap.strategy graph"
 DSV3_EP_OVERLAP_GRAPH_BITWISE = (
     DSV3_EP_OVERLAP_GRAPH + " --compile.ep_overlap.disable_early_grad_accumulation"
 )
-DSV3_EP_OVERLAP_GRAPH_2GPU_PARALLELISM = (
-    "--training.disable_cuda_graphs"
-    " --parallelism.data_parallel_shard_degree=2"
-    " --parallelism.tensor_parallel_degree=1"
-    " --parallelism.expert_parallel_degree=2"
-)
 DSV3_EP_OVERLAP_DEFERRED_DW = " --compile.pass_pipeline ep_overlap_deferred_dw"
 
 
@@ -355,12 +349,12 @@ def _run_deepseek_v3_ep_overlap_moe_batch_loss_compare() -> bool:
 def _run_deepseek_v3_ep_overlap_deferred_dw_loss_compare() -> bool:
     """Run the deferred-dW schedule against the default EP overlap schedule.
 
-    Both sides use identical graph chunking (MoE batch scope, bitwise mode) on
-    2 GPUs; the test side only swaps the schedule pass via the pass pipeline,
-    so losses must be bitwise identical.
+    Both sides use identical graph chunking (MoE batch scope, bitwise mode);
+    the test side only swaps the schedule pass via the pass pipeline, so
+    losses must be bitwise identical.
     """
     common = (
-        DSV3_EP_OVERLAP_GRAPH_2GPU_PARALLELISM
+        DSV3_EP_OVERLAP_GRAPH_PARALLELISM
         + " "
         + DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS
         + DSV3_EP_OVERLAP_GRAPH_BITWISE
@@ -372,8 +366,6 @@ def _run_deepseek_v3_ep_overlap_deferred_dw_loss_compare() -> bool:
         test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=common,
         test_options=common + DSV3_EP_OVERLAP_DEFERRED_DW,
-        baseline_ngpus=2,
-        test_ngpus=2,
     )
 
 
