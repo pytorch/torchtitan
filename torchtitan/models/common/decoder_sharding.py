@@ -8,7 +8,6 @@ import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import (
-    KDA,
     FusedQKVLinear,
     GQAttention,
     QKVLinear,
@@ -18,6 +17,7 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
+from torchtitan.models.common.kda import KDA
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
 
 DP = MeshAxisName.DP

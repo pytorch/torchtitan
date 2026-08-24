@@ -14,17 +14,12 @@ import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common import Conv1d, Linear, RMSNorm
-from torchtitan.models.common.attention import (
-    KDA,
-    InnerKDA,
-    KDABackend,
-    KDAKernel,
-    create_varlen_metadata_for_document,
-)
+from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_kda_sharding,
 )
+from torchtitan.models.common.kda import KDA, InnerKDA, KDABackend, KDAKernel
 
 _HAS_BLACKWELL = (
     importlib.util.find_spec("attn_gym") is not None
@@ -92,13 +87,6 @@ class TestKDASharding(unittest.TestCase):
         output_proj_sharding = config.output_proj.sharding_config
         inner_kda_sharding = config.inner_kda.sharding_config
         kda_sharding = config.sharding_config
-        assert q_proj_sharding is not None
-        assert output_proj_sharding is not None
-        assert inner_kda_sharding is not None
-        assert inner_kda_sharding.in_src_shardings is not None
-        assert inner_kda_sharding.local_map is not None
-        assert inner_kda_sharding.local_map.in_grad_placements is not None
-        assert kda_sharding is not None
         self.assertEqual(
             q_proj_sharding.state_shardings["weight"].axis_types[tp_axis],
             spmd.S(0),
@@ -247,17 +235,15 @@ class TestKDA(unittest.TestCase):
         for backend in backends:
             model = self._make_kda(backend=backend)
             packed_TD = model(x_TD, masks)
-            start = 0
-            for document, length in enumerate(lengths):
-                with self.subTest(backend=backend, document=document):
-                    document_slice = slice(start, start + length)
-                    torch.testing.assert_close(
-                        packed_TD[document_slice].float(),
-                        model(x_TD[document_slice], None).float(),
-                        rtol=2e-2,
-                        atol=2e-2,
-                    )
-                start += length
+            independent_TD = torch.cat(
+                [model(document_TD, None) for document_TD in x_TD.split(lengths)]
+            )
+            torch.testing.assert_close(
+                packed_TD.float(),
+                independent_TD.float(),
+                rtol=2e-2,
+                atol=2e-2,
+            )
 
 
 if __name__ == "__main__":
