@@ -7,6 +7,7 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint as dcp
+from spmd_types import SpmdType
 
 from torchtitan.components.data import (
     FirstFitPackingConfig,
@@ -226,7 +227,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         dense_activation_placement(tp=input_grad_tp, cp=spmd.S(0)),
     )
     assert "weight" in sc.state_shardings
-    assert sc.state_shardings["_sr_seed"] == spmd.SpmdType(
+    assert sc.state_shardings["_sr_seed"] == SpmdType(
         {
             MeshAxisName.DP: spmd.V,
             MeshAxisName.CP: spmd.V,

@@ -24,7 +24,7 @@ TODO: this DTensor-based sharding path is transitional. Core is migrating to
 ``spmd_types`` (``spmd_backend="spmd_types"``), where state and activations are
 plain local shards rather than DTensor subclasses. Once that backend is ready,
 the DTensor-based sharding here should be deprecated in favor of it. The
-declarative ``ShardingConfig``/``spmd.SpmdType`` this module emits is already
+declarative ``ShardingConfig``/``SpmdType`` this module emits is already
 backend-agnostic, so the migration is a backend switch rather than a rewrite.
 """
 
@@ -32,6 +32,7 @@ import inspect
 
 import spmd_types as spmd
 import torch.nn as nn
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
@@ -51,14 +52,14 @@ def _hf_activation_placement(
     *,
     tp: spmd.PerMeshAxisSpmdType,
     cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
-) -> spmd.SpmdType:
+) -> SpmdType:
     """Placement for Transformers activations with batch and sequence dims."""
-    return spmd.SpmdType({DP: spmd.S(0), CP: cp, TP: tp})
+    return SpmdType({DP: spmd.S(0), CP: cp, TP: tp})
 
 
-def _hf_sequence_parallel_placement() -> spmd.SpmdType:
+def _hf_sequence_parallel_placement() -> SpmdType:
     """Sequence-parallel placement for ``(batch, sequence, hidden)`` tensors."""
-    return spmd.SpmdType(
+    return SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.V},
         partition_spec=spmd.PartitionSpec(DP, (CP, TP), None),
     )
@@ -92,7 +93,7 @@ def _hf_rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     )
 
 
-def _sp_activation(*, enable_sp: bool) -> spmd.SpmdType:
+def _sp_activation(*, enable_sp: bool) -> SpmdType:
     """Activation layout for the sequence-parallel region.
 
     When SP is enabled, the sequence dim is sharded across both CP and TP
@@ -219,9 +220,9 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
 
     # Input layout (b, heads, seq, dim): heads on dim 1 (TP), seq on dim 2 (CP).
     # k/v stay S(2) here; the funcol all-gather in the forward wrap handles CP.
-    heads_in = spmd.SpmdType({DP: spmd.R, CP: spmd.S(2), TP: spmd.S(1)})
+    heads_in = SpmdType({DP: spmd.R, CP: spmd.S(2), TP: spmd.S(1)})
     # Output layout (b, seq, heads, dim): seq on dim 1 (CP), heads on dim 2 (TP).
-    heads_out = spmd.SpmdType({DP: spmd.R, CP: spmd.S(1), TP: spmd.S(2)})
+    heads_out = SpmdType({DP: spmd.R, CP: spmd.S(1), TP: spmd.S(2)})
     attn._titan_flex_kernel = HFFlexKernel.Config(
         sharding_config=ShardingConfig(
             in_src_shardings={

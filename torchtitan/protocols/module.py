@@ -15,6 +15,7 @@ from typing import Any
 import spmd_types as spmd
 import torch
 import torch.nn as nn
+from spmd_types import SpmdType
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
@@ -136,7 +137,7 @@ class Module(nn.Module, Configurable):
             return
 
         saved = {
-            fqn: spmd.SpmdType(
+            fqn: SpmdType(
                 dict(spmd.get_local_type(buf)),
                 spmd.get_partition_spec(buf),
             )
@@ -291,7 +292,7 @@ class Module(nn.Module, Configurable):
         parallel_dims: ParallelDims,
         name: str,
         tensor: torch.Tensor,
-        layout: spmd.SpmdType,
+        layout: SpmdType,
         *,
         is_param: bool,
     ) -> None:
@@ -436,7 +437,7 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}: local_map is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[spmd.SpmdType] = [in_dst[name] for name in pos_args]
+        in_named: list[SpmdType] = [in_dst[name] for name in pos_args]
 
         if parallel_dims.spmd_backend == "spmd_types":
             return self._spmd_apply_local_map(fn, in_named, out_src)
@@ -446,8 +447,8 @@ class Module(nn.Module, Configurable):
         self,
         fn: Callable,
         parallel_dims: ParallelDims,
-        in_named: list[spmd.SpmdType],
-        out_src: spmd.SpmdType | tuple[spmd.SpmdType | None, ...],
+        in_named: list[SpmdType],
+        out_src: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
         """Apply DTensor local_map for a local-tensor compute region."""
         sharding_config = self._sharding_config
@@ -456,7 +457,7 @@ class Module(nn.Module, Configurable):
         assert lm is not None
 
         if isinstance(out_src, tuple):
-            out_named: list[spmd.SpmdType] = [p for p in out_src if p is not None]
+            out_named: list[SpmdType] = [p for p in out_src if p is not None]
         else:
             out_named = [out_src]
         # in_grad_placements may contain None for non-tensor args; filter
@@ -491,8 +492,8 @@ class Module(nn.Module, Configurable):
     def _spmd_apply_local_map(
         self,
         fn: Callable,
-        in_named: list[spmd.SpmdType],
-        out_src: spmd.SpmdType | tuple[spmd.SpmdType | None, ...],
+        in_named: list[SpmdType],
+        out_src: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         in_types = tuple(
@@ -501,7 +502,7 @@ class Module(nn.Module, Configurable):
         out_types = tree_map(
             lambda layout: (layout.local_type, layout.partition_spec),
             out_src,
-            is_leaf=lambda x: isinstance(x, spmd.SpmdType),
+            is_leaf=lambda x: isinstance(x, SpmdType),
         )
         return spmd.no_typecheck(
             in_types=in_types,

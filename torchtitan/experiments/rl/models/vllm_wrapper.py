@@ -20,6 +20,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.checkpointer import CheckpointManager
@@ -124,7 +125,7 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
     def __init__(
         self,
         adapter: BaseStateDictAdapter,
-        state_dict_layouts: dict[str, spmd.SpmdType],
+        state_dict_layouts: dict[str, SpmdType],
         parallel_dims: ParallelDims,
     ) -> None:
         self.adapter = adapter
@@ -573,12 +574,12 @@ class VLLMModelWrapper(Module):
         # the live weights fit.
         torch.cuda.empty_cache()
 
-    def get_state_dict_layouts(self) -> dict[str, spmd.SpmdType]:
+    def get_state_dict_layouts(self) -> dict[str, SpmdType]:
         """Return SPMD layouts keyed by the model's exposed state-dict names.
 
         TODO(pianpwk): Remove the fused QKV state-dict glue code.
         """
-        layouts: dict[str, spmd.SpmdType] = {}
+        layouts: dict[str, SpmdType] = {}
 
         for module_fqn, module in self.model.named_modules():
             module_prefix = f"{module_fqn}." if module_fqn else ""
@@ -619,7 +620,7 @@ class VLLMModelWrapper(Module):
                         "_q_scale",
                         "_v_scale",
                     }:
-                        layouts[f"{module_prefix}{buffer_name}"] = spmd.SpmdType({})
+                        layouts[f"{module_prefix}{buffer_name}"] = SpmdType({})
 
         return layouts
 
