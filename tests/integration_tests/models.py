@@ -5,156 +5,99 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import dataclasses
+import torchtitan_recipes.tests.models as recipes
 
 from tests.integration_tests import OverrideDefinitions
 
 
-def _enable_spmd_backend(t: OverrideDefinitions, backend: str) -> OverrideDefinitions:
-    """Use ``backend`` for every variant, or return an unsupported test unchanged."""
-    if backend == "spmd_types" and any(
-        "--module qwen3_5" in arg
-        or "--module kimi_k2_7" in arg
-        or "--module muse_glimmer" in arg
-        for variant in t.override_args
-        for arg in variant
-    ):
-        return t
-
-    test_name = f"{t.test_name}_{backend}"
-    new_args = []
-    for variant in t.override_args:
-        variant = tuple(
-            arg.replace(f"{t.test_name}/", f"{test_name}/") for arg in variant
-        )
-        prefix = [f"--parallelism.spmd_backend {backend}"]
-        suffix = []
-        # Compile, PP, and explicit AC modes are not compatible with SPMD
-        # typechecking yet; keep those as backend-only coverage.
-        if backend == "spmd_types" and not any(
-            token in arg
-            for arg in variant
-            for token in (
-                "compile.enable",
-                "pipeline_parallel_degree",
-                "activation-checkpoint:",
-            )
-        ):
-            prefix.append("--debug.spmd_typechecking")
-            suffix.append("activation-checkpoint:none")
-        new_args.append(tuple(prefix) + tuple(variant) + tuple(suffix))
-
-    return dataclasses.replace(
-        t,
-        override_args=tuple(new_args),
-        test_name=test_name,
-    )
-
-
 def build_model_tests_list() -> list[OverrideDefinitions]:
     """
-    Build a dictionary of model parallelism test configurations.
-    This test suite is aimed at testing the model parallelism of torchtitan, and will broadly cover
-    all the supported model parallelism patterns on all the supported models.
-
-    Returns:
-        A dictionary where each key is a model name and value is a list of OverrideDefinitions
+    Build the list of model parallelism test configurations.
+    This test suite is aimed at testing the model parallelism of torchtitan, and will
+    broadly cover all the supported model parallelism patterns on all the supported
+    models.
     """
-    model_tests = [
+    return [
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_tp2_cp2],
+            test_descr="Llama 3 FSDP+TP+CP",
+            test_name="llama3_fsdp+tp+cp",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
+            test_descr="Llama 3 FSDP+TP+PP",
+            test_name="llama3_fsdp+tp+pp",
+            ngpu=8,
+            golden_numerics_path="tests/assets/losses/real_pg/llama3_pp_a10g.txt",
+            use_real_pg=True,
+        ),
         # Integration Test Cases for DeepSeek V3
         OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel_mtp",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--compile.enable",
-                    "--override.imports torchtitan.overrides.helion_rope.helion_cos_sin_rope,"
-                    "torchtitan.overrides.helion_rope.helion_complex_rope",
-                ],
-            ],
-            "DeepSeek V3 MTP FSDP+EP+compile",
-            "deepseek_v3_mtp_fsdp+ep+compile",
+            configs=[recipes.deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile],
+            test_descr="DeepSeek V3 MTP FSDP+EP+compile",
+            test_name="deepseek_v3_mtp_fsdp+ep+compile",
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                ],
-            ],
-            "DeepSeek V3 PP+FSDP+TP+EP",
-            "deepseek_v3_pp+fsdp+tp+ep",
+            configs=[recipes.deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8],
+            test_descr="DeepSeek V3 FSDP+TP+CP+EP",
+            test_name="deepseek_v3_fsdp+tp+cp+ep",
             ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
+            ),
+            fake_pg_numerics_config=recipes.deepseek_v3_debugmodel_fsdp8_ep8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module deepseek_v3 --config deepseek_v3_debugmodel",
-                    "--parallelism.data_parallel_replicate_degree 2",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                ],
-            ],
-            "DeepSeek V3 HSDP+EP",
-            "deepseek_v3_hsdp+ep",
+            configs=[recipes.deepseek_v3_debugmodel_fsdp2_tp2_pp2_ep4],
+            test_descr="DeepSeek V3 PP+FSDP+TP+EP",
+            test_name="deepseek_v3_pp+fsdp+tp+ep",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_hsdp2x2_ep2],
+            test_descr="DeepSeek V3 HSDP+EP",
+            test_name="deepseek_v3_hsdp+ep",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2],
+            test_descr="DeepSeek V3 fused MLA+SwiGLU FSDP+EP",
+            test_name="deepseek_v3_fused_mla_swiglu_fsdp+ep",
+            ngpu=4,
+            skip_rocm_test=True,
         ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
-            [
-                [
-                    "--module qwen3 --config qwen3_debugmodel_moe_param_groups",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                ],
-            ],
-            "Qwen3 MoE FSDP+TP+EP (param groups)",
-            "qwen3_moe_fsdp+tp+ep_param_groups",
-            ngpu=4,
+            configs=[recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8],
+            test_descr="Qwen3 MoE FSDP+TP+CP+EP (param groups)",
+            test_name="qwen3_moe_fsdp+tp+cp+ep_param_groups",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
+            ),
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module qwen3 --config qwen3_debugmodel",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.no-enable-sequence-parallel",
-                    "--parallelism.context_parallel_degree 2",
-                ],
-                [
-                    "--module qwen3 --config qwen3_debugmodel",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                ],
+            configs=[
+                recipes.qwen3_debugmodel_fsdp2_tp2_cp2_no_sp,
+                recipes.qwen3_debugmodel_fsdp2_tp2_cp2,
             ],
-            "Qwen3 FSDP+TP+CP (SP disabled)",
-            "qwen3_fsdp+tp+cp_no_sp",
+            test_descr="Qwen3 FSDP+TP+CP (SP disabled)",
+            test_name="qwen3_fsdp+tp+cp_no_sp",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module qwen3 --config qwen3_debugmodel",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                    "--compile.enable",
-                    "--override.imports torchtitan.overrides.helion_rope.helion_cos_sin_rope",
-                ],
-            ],
-            "Qwen3 fused QKV FSDP+TP+CP + compile + Helion RoPE override",
-            "qwen3_fused_qkv_fsdp+tp+cp_compile_helion_rope",
+            configs=[recipes.qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope],
+            test_descr="Qwen3 fused QKV FSDP+TP+CP + compile + Helion RoPE override",
+            test_name="qwen3_fused_qkv_fsdp+tp+cp_compile_helion_rope",
             ngpu=8,
             # The Helion fused cos/sin RoPE kernel is CUDA-only and its autotuned
             # configs are tuned for NVIDIA H100; skip on ROCm where it is
@@ -162,135 +105,106 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module qwen3 --config qwen3_debugmodel_non_fused_qkv",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                ],
-            ],
+            configs=[recipes.qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2],
             # Reverse test: fused QKV is the debugmodel default, so exercise the
             # separate wq/wk/wv projection path under FSDP+TP+CP.
-            "Qwen3 non-fused QKV FSDP+TP+CP",
-            "qwen3_non_fused_qkv_fsdp+tp+cp",
+            test_descr="Qwen3 non-fused QKV FSDP+TP+CP",
+            test_name="qwen3_non_fused_qkv_fsdp+tp+cp",
             ngpu=8,
         ),
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
-            [
-                [
-                    "--module qwen3_5 --config qwen35_debugmodel_moe",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                ],
-            ],
-            "Qwen3.5 MoE FSDP+TP+EP+PP",
-            "qwen3_5_moe_fsdp+tp+ep+pp",
+            configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
+            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP",
+            test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module qwen3_5 --config qwen35_debugmodel_varlen_attn",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    # First-run FLA/TileLang kernel compile and autotune exceed
-                    # the default 100s train timeout.
-                    "--comm.train_timeout_seconds 600",
-                    "activation-checkpoint:selective",
-                ]
-            ],
-            "Qwen3.5 FSDP+TP+VARLEN_ATTN + per op SAC",
-            "qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
+            configs=[recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4],
+            test_descr="Qwen3.5 MoE FSDP+TP+EP",
+            test_name="qwen3_5_moe_fsdp+tp+ep",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/qwen3_5_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
+            test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + per op SAC",
+            test_name="qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
+            use_real_pg=True,
         ),
         # Integration Test Cases for gpt-oss
         OverrideDefinitions(
-            [
-                [
-                    "--module gpt_oss --config gpt_oss_debugmodel",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                    "--compile.enable",
-                ],
-            ],
-            "Gpt-oss FSDP+TP+EP+compile",
-            "gpt_oss_fsdp+tp+ep+compile",
+            configs=[recipes.gpt_oss_debugmodel_fsdp4_tp2_ep4_compile],
+            test_descr="Gpt-oss FSDP+TP+EP+compile",
+            test_name="gpt_oss_fsdp+tp+ep+compile",
             ngpu=8,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module gpt_oss --config gpt_oss_debugmodel_flex",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.context_parallel_load_balancer ptrr",
-                    "--parallelism.context_parallel_ptrr_mask_key basic_mask",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.expert_parallel_degree 4",
-                    "activation-checkpoint:selective",
-                ],
-            ],
-            "Gpt-oss PP+FSDP+CP+EP+SACOP",
-            "gpt_oss_pp+fsdp+cp+ep+sacop",
+            configs=[recipes.gpt_oss_debugmodel_fsdp4_tp2_ep4],
+            test_descr="GPT-OSS FSDP+TP+EP",
+            test_name="gpt_oss_fsdp+tp+ep",
             ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/gpt_oss_a10g.txt"
+            ),
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module gpt_oss --config gpt_oss_debugmodel",
-                    "--training.global_batch_size 64",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.expert_parallel_degree 4",
-                    "activation-checkpoint:selective",
-                ],
-            ],
-            "Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
-            "gpt_oss_pp+fsdp+ep+sacop",
+            configs=[recipes.gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac],
+            test_descr="GPT-OSS PP+FSDP+CP+EP+SACOP",
+            test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
+            golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
+            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            test_name="gpt_oss_pp+fsdp+ep+sacop",
+            ngpu=8,
+            use_real_pg=True,
         ),
         # Integration Test Cases for Kimi K2.7
         OverrideDefinitions(
-            [
-                [
-                    # Consolidate the former 2-GPU FSDP smoke and 8-GPU
-                    # FSDP+TP+EP+PP test into one supported FSDP+EP path. Kimi
-                    # DistributedMuon rejects TP because it produces _StridedShard
-                    # storage. PP support follows in the next stack change.
-                    # Do not enable --debug.spmd_typechecking: multimodal pixel
-                    # tensors from the dataloader are not SPMD-annotated yet.
-                    "--module kimi_k2_7 --config kimi_k2_5_debugmodel",
-                    "--parallelism.spmd_backend spmd_types",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--training.steps 1",
-                ],
-            ],
-            "Kimi K2.7 DistributedMuon spmd_types FSDP+EP",
-            "kimi_k2_5_muon_fsdp+ep_spmd_types",
+            configs=[recipes.kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2],
+            test_descr="Kimi K2.7 DistMuon PP+FSDP+EP",
+            test_name="kimi_k2_5_muon_pp+fsdp+ep",
             ngpu=4,
+            timeout=600,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k2_5_debugmodel_muon_fsdp8_ep8],
+            test_descr="Kimi K2.5 DistMuon FSDP+EP",
+            test_name="kimi_k2_5_muon_fsdp+ep",
+            ngpu=8,
         ),
         # Integration Test Cases for Muse Glimmer
         OverrideDefinitions(
-            [
-                [
-                    "--module muse_glimmer --config muse_glimmer_debugmodel_mm",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "Muse Glimmer multimodal FSDP+TP+SP",
-            "muse_glimmer_mm_fsdp+tp+sp",
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_tp2_cp2],
+            test_descr="Muse Glimmer text FSDP+TP+CP",
+            test_name="muse_glimmer_text_fsdp+tp+cp",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"
+            ),
+            fake_pg_numerics_config=recipes.muse_glimmer_debugmodel_fsdp8,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2],
+            test_descr="Muse Glimmer multimodal FSDP+TP+SP",
+            test_name="muse_glimmer_mm_fsdp+tp+sp",
             ngpu=4,
         ),
+        # Integration Test Case for Kimi K3
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_mm_fsdp2],
+            test_descr="Kimi K3 multimodal FSDP",
+            test_name="kimi_k3_mm_fsdp",
+            ngpu=2,
+        ),
     ]
-
-    return [_enable_spmd_backend(t, "spmd_types") for t in model_tests]

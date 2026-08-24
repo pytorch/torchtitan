@@ -1,0 +1,51 @@
+name: H100 Integration
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+    branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix:
+    if: >-
+      github.repository_owner == 'pytorch' &&
+      contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      gpu-arch: cuda
+
+  build-test:
+    needs: set-matrix
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      upload-artifact: h100-outputs
+      timeout: 90
+      script: |
+        TORCH_VERSION="${{ matrix.torch-version }}" \
+        INDEX_URL="${{ matrix.index-url }}" \
+        GPU_ARCH_TYPE="${{ matrix.gpu-arch-type }}" \
+        bash .github/scripts/run_8xgpu_integration_tests.sh

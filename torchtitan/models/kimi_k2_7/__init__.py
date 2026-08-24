@@ -9,14 +9,18 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
-
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    register_moe_load_balancing_hook,
+)
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_vlm
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
     RMSNorm,
+    ScaledBiasRowwiseLinear,
     TransformerBlock,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -33,6 +37,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model
 from .parallelize import parallelize_kimi_k2_5
+from .qk_clip import QKClipFlexAttention, register_qk_clip_hook
 from .state_dict_adapter import KimiK25StateDictAdapter
 
 from .vision_encoder import (
@@ -104,6 +109,17 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
+def _scaled_bias_rowwise_linear(
+    in_features: int, out_features: int
+) -> ScaledBiasRowwiseLinear.Config:
+    return ScaledBiasRowwiseLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        param_init=_LINEAR_INIT,
+    )
+
+
 def _vl_layernorm(dim: int, eps: float = 1e-5) -> LayerNorm.Config:
     return LayerNorm.Config(normalized_shape=dim, eps=eps)
 
@@ -138,11 +154,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_vl_linear(dim, dim),
+            proj=_scaled_bias_rowwise_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
-            fc2=_vl_linear(ffn_dim, dim),
+            fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
         ),
     )
 
@@ -168,9 +184,24 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_vl_linear(merged_dim, text_hidden_size),
+            linear_2=_scaled_bias_rowwise_linear(merged_dim, text_hidden_size),
         ),
     )
+
+
+def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexAttention.Config:
+    if attn_backend != "flex":
+        raise ValueError("Kimi QK clipping requires the FlexAttention backend.")
+    return QKClipFlexAttention.Config()
+
+
+def _register_optimizer_hooks(
+    optimizers: OptimizersContainer,
+    model_parts: list[nn.Module],
+    parallel_dims: ParallelDims,
+) -> None:
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_qk_clip_hook(optimizers, model_parts, parallel_dims)
 
 
 def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
@@ -181,6 +212,7 @@ def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
         norm_init=_NORM_INIT,
         depth_init=_depth_init,
         depth_experts_init=_depth_experts_init,
+        attention_config_factory=_qk_clip_attention_config,
     )
 
 
@@ -222,7 +254,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=4096 * 4,
+            max_context_length=4096 * 4,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -264,14 +296,14 @@ def _moonlight_16b_a3b_config(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
     rope_theta: float,
-    max_seq_len: int,
+    max_context_length: int,
     vision_encoder: "KimiK25VisionEncoder.Config | None" = None,
 ) -> KimiK25Model.Config:
     """Shared Moonshot 16B-A3B DeepSeekV3 text tower (MLA + sigmoid-routed MoE).
 
     Used by both Moonlight (text-only) and Kimi-VL (with a vision encoder): they
     share the architecture (no q-LoRA, no RoPE scaling, 64 experts top-6); only
-    the RoPE ``theta`` / ``max_seq_len`` and the vision tower differ.
+    the RoPE ``theta`` / ``max_context_length`` and the vision tower differ.
     """
     dim = 2048
     vocab_size = 163840
@@ -299,7 +331,11 @@ def _moonlight_16b_a3b_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        rope=ComplexRoPE.Config(dim=64, max_seq_len=max_seq_len, theta=rope_theta),
+        rope=ComplexRoPE.Config(
+            dim=64,
+            max_context_length=max_context_length,
+            theta=rope_theta,
+        ),
     )
     return KimiK25Model.Config(
         vocab_size=vocab_size,
@@ -329,7 +365,7 @@ def _moonlight_16b_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=50000.0,
-        max_seq_len=8192,
+        max_context_length=8192,
         vision_encoder=None,
     )
 
@@ -350,7 +386,7 @@ def _kimi_vl_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=800000.0,
-        max_seq_len=131072,
+        max_context_length=131072,
         vision_encoder=_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
@@ -416,7 +452,7 @@ def _kimi_k2_5(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_seq_len=262144,
+            max_context_length=262144,
             theta=50000.0,
             scaling="yarn",
             rope_factor=64.0,
@@ -481,6 +517,6 @@ def model_registry(
         model=config,
         parallelize_fn=parallelize_kimi_k2_5,
         pipelining_fn=pipeline_vlm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_register_optimizer_hooks,
         state_dict_adapter=KimiK25StateDictAdapter,
     )

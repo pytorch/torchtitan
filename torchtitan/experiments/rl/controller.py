@@ -42,7 +42,7 @@ _batcher_loop
 +----------------------------------------------------------------------------------------+
 | training_sample_group = training_sample_builder.build_from_group(rollout_group=group)  |
 | if no trainable samples: group_buffer.release_active_groups(1, "untrainable_group")    |
-| maybe_training_batch = batcher.add_training_samples(training_sample_group)             |
+| batch, trainable = batcher.add_training_samples(training_sample_group)                  |
 | training_batch_queue.put(TrainingBatch)                                                |
 +-----------------------+------------------------------+---------------------------------+
                         |  ^                           |
@@ -356,8 +356,13 @@ class Controller(Configurable):
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
-            # Mirror the batcher width into trainer.training.seq_len for the model build.
-            self.trainer.training.seq_len = self.async_loop.batcher.batch.seq_len
+            # RL policy inputs are shaped by BatchConfig, so mirror its shape
+            # into the trainer's token-based configuration.
+            batch_config = self.async_loop.batcher.batch
+            self.trainer.training.max_context_length = batch_config.seq_len
+            self.trainer.training.num_tokens_per_microbatch_per_dp_rank = (
+                batch_config.local_batch_size * batch_config.seq_len
+            )
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
@@ -439,6 +444,8 @@ class Controller(Configurable):
             dump_dir=config.dump_folder
         )
 
+    # TODO: if possible, consider closing components concurrently to speed up
+    # the shutdown.
     async def close(self):
         """Best-effort: tear down actors, close metric backends, then stop proc meshes."""
         logger.info("Closing: tearing down actors and process meshes.")
@@ -1011,16 +1018,15 @@ class Controller(Configurable):
                     rollout_group=rollout_group
                 )
 
-            if not training_sample_group.training_samples:
-                await group_buffer.release_active_groups(1, reason="untrainable_group")
-
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
             with sl.log_trace_span("batcher_pack"):
-                maybe_training_batch = await asyncio.to_thread(
+                maybe_training_batch, group_is_trainable = await asyncio.to_thread(
                     batcher.add_training_samples,
                     training_sample_group=training_sample_group,
                 )
+            if not group_is_trainable:
+                await group_buffer.release_active_groups(1, reason="untrainable_group")
             if maybe_training_batch is not None:
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)

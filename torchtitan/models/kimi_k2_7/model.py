@@ -10,17 +10,23 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-from .sharding import set_kimi_k2_5_sharding_config
+from .sharding import (
+    annotate_multimodal_input_spmd_types,
+    set_kimi_k2_5_sharding_config,
+)
 from .vision_encoder import KimiK25VisionEncoder
 
 
@@ -32,7 +38,7 @@ class KimiK25Model(DeepSeekV3Model):
         forward(tokens, pixel_values[/videos], grid_thw, ...)
           |
           +-- tok_embeddings(tokens)               -> text embeddings
-          +-- vision_encoder(pixels)               -> padded vision features
+          +-- vision_encoder(pixels)               -> packed vision features
           +-- scatter at vision placeholder runs   -> multimodal embeddings
           +-- decoder layers (MLA + MoE)           -> hidden states
           +-- norm -> lm_head                      -> logits
@@ -151,11 +157,11 @@ class KimiK25Model(DeepSeekV3Model):
         Images and videos share one unified ``<|media_pad|>`` placeholder.
 
         Args:
-            tokens: (batch, seq_len) token IDs.
-            pixel_values: (num_images, max_num_patch, patch_dim) padded image
+            tokens: ``(num_tokens,)`` packed token IDs.
+            pixel_values: ``(total_num_patches, patch_dim)`` packed image
                 patches, or None for text-only / video-only batches.
             grid_thw: (num_images, 3) patch counts ``[t, h, w]`` per image.
-            pixel_values_videos: padded video patches, or None (mixing with
+            pixel_values_videos: Packed video patches, or None (mixing with
                 ``pixel_values`` in one batch is not yet supported).
             grid_thw_videos: (num_videos, 3) patch counts per video.
             special_tokens: tokenizer-resolved ``image_id``/``video_id``;
@@ -164,19 +170,33 @@ class KimiK25Model(DeepSeekV3Model):
             positions: Per-token position IDs for packed sequences.
 
         Returns:
-            (batch, seq_len, vocab_size) logits.
+            ``(num_tokens, vocab_size)`` logits.
         """
-        if self.tok_embeddings is not None:
-            x = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                grid_thw=grid_thw,
-                pixel_values_videos=pixel_values_videos,
-                grid_thw_videos=grid_thw_videos,
-                special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
-            )
-        else:
-            x = tokens
+        with multimodal_context():
+            if get_spmd_backend() == "spmd_types":
+                annotate_multimodal_input_spmd_types(
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw_videos=grid_thw_videos,
+                )
+
+            if self.tok_embeddings is not None:
+                x = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
+                    pixel_values_videos=pixel_values_videos,
+                    grid_thw_videos=grid_thw_videos,
+                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                )
+            else:
+                x = tokens
+
+        if spmd.is_type_checking():
+            # The scatter restores a token-aligned tensor, so text-model DP
+            # resumes as global batch sharding after the multimodal region.
+            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
             x = layer(x, attention_masks, positions)

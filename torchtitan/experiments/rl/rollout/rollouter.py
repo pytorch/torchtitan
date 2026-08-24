@@ -73,14 +73,14 @@ class Rollouter(Configurable):
 
     Customization:
         Rollouter supports customization at several levels:
-          - Sample source: override `Config`'s dataset fields, and/or the
-            `get_training_sample` / `get_validation_sample` methods.
-          - Group execution, coarse: override `run_group_rollouts` for your own
-            orchestration. `RolloutWorker` then becomes optional -- but override
-            `setup_async` too, or the worker pool is still spawned unused.
-          - Group execution, fine: keep the stock orchestration and point `worker`
-            at a `RolloutWorker.Config` subclass, overriding only what you need
-            (`make_env_group`, `score_group`, `run_group`).
+          - To change how samples are loaded, override `Config`'s dataset fields,
+            and/or the `get_training_sample` / `get_validation_sample` methods.
+          - To replace the group orchestration entirely, override `run_group_rollouts`.
+            This makes `RolloutWorker` optional. Override `setup_async` as well
+            to avoid starting an unused worker pool.
+          - To keep the default orchestration but customize individual steps, set
+            `worker` to a `RolloutWorker.Config` subclass and override `make_env_group`,
+            `score_group`, or `run_group` as needed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -119,6 +119,7 @@ class Rollouter(Configurable):
         self._train_dataset = config.train_dataset.build()
         self._validation_dataset = config.validation_dataset.build()
 
+        # assigned on `setup_async`
         self._worker_actors: RolloutWorkerActor | None = None
         self._worker_mesh: ProcMesh | None = None
 
