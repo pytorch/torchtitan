@@ -3526,6 +3526,58 @@ class TestChunkPasses(TestCase):
             names.index("full_inductor_compilation_pass"),
         )
 
+    def test_coda_pass_pipeline_gating_and_order(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.enable_coda = True
+        config.compile.coda_patterns = ["B_linear_dw_bf16_to_fp32"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--compile.enable_coda requires --compile.numerics_changing_optim",
+        ):
+            self._compile_pass_names(traced_result, config)
+
+        config.compile.numerics_changing_optim = True
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("full_inductor_compilation_pass"),
+        )
+
+        config.compile.inductor_compilation = "regional"
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("concretize_ep_chunk_symbolic_shapes_pass"),
+            names.index("B_linear_dw_bf16_to_fp32"),
+        )
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("regional_inductor_pass"),
+        )
+
+    def test_deepseek_v3_16b_coda_parallelism(self):
+        from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+            graph_trainer_deepseek_v3_16b_coda,
+        )
+
+        config = graph_trainer_deepseek_v3_16b_coda()
+        self.assertEqual(config.parallelism.data_parallel_shard_degree, 2)
+        self.assertEqual(config.parallelism.expert_parallel_degree, 2)
+        self.assertEqual(
+            config.model_spec.model.layers[0].attention.inner_attention.kernel_options,
+            {"BACKEND": "FLASH"},
+        )
+        self.assertEqual(
+            type(
+                config.model_spec.model.layers[1].moe.routed_experts.token_dispatcher
+            ).__qualname__,
+            "MinimalAsyncEPTokenDispatcher.Config",
+        )
+        self.assertIn(
+            "torchtitan.overrides.helion_rope.helion_complex_rope",
+            config.override.imports,
+        )
+
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
             ("seq", "layers.*.moe"),

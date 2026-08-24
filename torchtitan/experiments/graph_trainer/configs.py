@@ -134,6 +134,37 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
 
+    enable_coda: bool = False
+    """Fuse supported GEMM epilogues with FlexGEMM in the joint training graph.
+
+    CODA changes floating-point reduction order and therefore also requires
+    ``numerics_changing_optim``.
+    """
+
+    coda_patterns: list[str] = field(default_factory=list)
+    """CODA patterns to apply. An empty list enables every registered pattern.
+
+    Supported names are defined by ``CODA_PATTERN_NAMES`` in ``coda_passes``.
+    """
+
+    compile_time_benchmark: bool | None = None
+    """Benchmark each CODA rewrite before changing the graph.
+
+    ``None`` and ``True`` enable a 20 ms comparison. The rewrite is
+    retained only when its compiled FlexGEMM region is faster. ``False`` applies
+    requested rewrites directly.
+    """
+
+    coda_benchmark_strict: bool = False
+    """Raise candidate rewrite or benchmark errors instead of rejecting them."""
+
+    coda_autotune: bool | None = None
+    """Autotune QuACK grid configurations for CODA FlexGEMMs.
+
+    ``None`` and ``True`` enable autotuning. ``False`` uses QuACK's untuned
+    configuration selection.
+    """
+
     cpu_offload_prefetch_n_layers: int = 1
     """Prefetch reloads this many layers ahead in the backward graph
     to overlap H2D transfers with compute."""

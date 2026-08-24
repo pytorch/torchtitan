@@ -59,6 +59,15 @@ def compute_config_fingerprint(
         "compile:full_recompute_save_ops:"
         f"{compile_config.full_recompute_save_ops}\n".encode()
     )
+    h.update(f"compile:enable_coda:{compile_config.enable_coda}\n".encode())
+    h.update(f"compile:coda_patterns:{compile_config.coda_patterns}\n".encode())
+    h.update(
+        f"compile:compile_time_benchmark:{compile_config.compile_time_benchmark}\n".encode()
+    )
+    h.update(
+        f"compile:coda_benchmark_strict:{compile_config.coda_benchmark_strict}\n".encode()
+    )
+    h.update(f"compile:coda_autotune:{compile_config.coda_autotune}\n".encode())
     h.update(
         f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
     )
