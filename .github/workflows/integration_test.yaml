@@ -136,14 +136,14 @@ jobs:
           "$RUNNER_ARTIFACT_DIR/flux"
 
   integration-real-pg:
-    name: 8 GPU Integration (Real PG - ${{ matrix.suite_config.name }})
+    name: 8 GPU Integration (Real PG - ${{ github.event_name == 'pull_request' && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
     needs: set-matrix-real-pg
     if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
       matrix:
-        suite_config: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"required subset","test_suite":"features,models","test_scope":"real_pg_required","run_flux":true,"artifact_suffix":"required"}]' || '[{"name":"full suite - features","test_suite":"features","test_scope":"all","run_flux":false,"artifact_suffix":"features"},{"name":"full suite - models","test_suite":"models","test_scope":"all","run_flux":true,"artifact_suffix":"models"}]') }}
+        test_suite: [features, models]
         runner_config: ${{ fromJSON(needs.set-matrix-real-pg.outputs.matrix).include }}
     with:
       runner: ${{ matrix.runner_config.runner }}
@@ -151,7 +151,7 @@ jobs:
       gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
       docker-image: ${{ matrix.runner_config['docker-image'] }}
       repository: pytorch/torchtitan
-      upload-artifact: integration-8gpu-${{ matrix.suite_config.artifact_suffix }}-outputs
+      upload-artifact: integration-8gpu-${{ matrix.test_suite }}-outputs
       timeout: 60
       script: |
         set -eux
@@ -192,17 +192,18 @@ jobs:
         if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
           TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
         fi
+        TEST_SCOPE_ARG=""
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          TEST_SCOPE_ARG="--test_scope=real_pg_required"
+        fi
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.runner_config['gpu-arch-type'] }} \
-          --test_suite ${{ matrix.suite_config.test_suite }} \
-          --test_scope ${{ matrix.suite_config.test_scope }} \
-          --execution_mode real_pg --ngpu 8 \
-          $EXPORT_ARG $TEST_NAME_ARG \
+          --test_suite ${{ matrix.test_suite }} --execution_mode real_pg --ngpu 8 \
+          $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
           "$RUNNER_ARTIFACT_DIR"
-        if [[ "${{ matrix.suite_config.run_flux }}" == "true" ]]; then
+        if [[ "${{ matrix.test_suite }}" == "models" ]]; then
           python -m tests.integration_tests.flux \
             --execution_mode real_pg --ngpu 8 \
-            --test_scope ${{ matrix.suite_config.test_scope }} \
-            $TEST_NAME_ARG \
+            $TEST_NAME_ARG $TEST_SCOPE_ARG \
             "$RUNNER_ARTIFACT_DIR/flux"
         fi
