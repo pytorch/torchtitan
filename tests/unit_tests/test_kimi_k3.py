@@ -7,7 +7,6 @@
 import unittest
 
 import torch
-import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
@@ -31,7 +30,7 @@ def _small_model_config() -> KimiK3Model.Config:
         qk_nope_head_dim=16,
         qk_rope_head_dim=16,
         v_head_dim=16,
-        kda_head_dim=128,
+        kda_head_dim=64,
         conv_kernel_size=3,
         dense_hidden_dim=128,
         latent_dim=32,
@@ -65,29 +64,19 @@ def _kda_recurrent_reference(
     A_log_H: torch.Tensor,
     dt_bias_HK: torch.Tensor,
     *,
-    lower_bound: float | None,
+    lower_bound: float,
 ) -> torch.Tensor:
-    """Explicit KDA recurrence in FP32, matching the released Kimi K3 math.
-
-    ``lower_bound`` selects the same two gate activations FLA exposes through
-    ``safe_gate``: the bounded ``lower_bound * sigmoid(...)`` form when set,
-    and ``-exp(A_log) * softplus(...)`` when ``None``.
-    """
+    """Explicit bounded KDA recurrence in FP32."""
     input_dtype = q_BLHK.dtype
     q_BLHK = q_BLHK.float()
     k_BLHK = k_BLHK.float()
     q_BLHK = q_BLHK * torch.rsqrt(q_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
     k_BLHK = k_BLHK * torch.rsqrt(k_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
     v_BLHV = v_BLHV.float()
-    if lower_bound is None:
-        log_decay_BLHK = -torch.exp(A_log_H.float()).view(1, 1, -1, 1) * F.softplus(
-            gate_BLHK.float() + dt_bias_HK.float()
-        )
-    else:
-        log_decay_BLHK = lower_bound * torch.sigmoid(
-            torch.exp(A_log_H.float()).view(1, 1, -1, 1)
-            * (gate_BLHK.float() + dt_bias_HK.float())
-        )
+    log_decay_BLHK = lower_bound * torch.sigmoid(
+        torch.exp(A_log_H.float()).view(1, 1, -1, 1)
+        * (gate_BLHK.float() + dt_bias_HK.float())
+    )
     decay_BLHK = torch.exp(log_decay_BLHK)
     beta_BLH = torch.sigmoid(beta_BLH.float())
 
@@ -126,8 +115,9 @@ class TestKimiK3(unittest.TestCase):
         self.assertIsInstance(attention_masks, BlockMask)
 
     @unittest.skipIf(
-        not torch.cuda.is_available() or torch.cuda.get_device_capability() < (10, 0),
-        "Attention Gym KDA requires CUDA capability 10.0 or newer.",
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
+        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
     )
     def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
@@ -143,8 +133,12 @@ class TestKimiK3(unittest.TestCase):
             )
 
         lower_bound = -5.0
-        A_log_H = torch.rand(num_heads, device="cuda")
-        A_log_H = A_log_H.uniform_(1.0, 16.0).log().requires_grad_()
+        A_log_H = (
+            torch.empty(num_heads, device="cuda")
+            .uniform_(1.0, 16.0)
+            .log_()
+            .requires_grad_()
+        )
         actual_inputs = (
             parameter(2, 64, num_heads, head_dim),
             parameter(2, 64, num_heads, head_dim),

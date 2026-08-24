@@ -7,11 +7,7 @@
 import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import (
-    FusedQKVLinear,
-    GQAttention,
-    QKVLinear,
-)
+from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedFeedForward,
     RowParallelLinear,
@@ -315,7 +311,7 @@ def set_kda_sharding(
     """Configure head-sharded TP for KDA with folded token tensors.
 
     Projections use ``(T, C)``, while the gate and recurrence use
-    ``(T, N, K)``. The Attention Gym boundary converts head-sharded DTensors
+    ``(T, N, K)``. The inner KDA boundary converts head-sharded DTensors
     to rank-local tensors before adding the singleton kernel batch dimension.
     """
     if cp_enabled:

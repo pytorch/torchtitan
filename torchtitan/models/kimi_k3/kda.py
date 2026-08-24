@@ -15,10 +15,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    VarlenMetadata,
-)
+from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d, RMSNorm
 from torchtitan.protocols.module import Module
@@ -28,15 +25,6 @@ try:
     import attn_gym.linear.kda as _attn_gym_kda
 except ImportError:
     _attn_gym_kda = None
-
-__all__ = [
-    "KDA",
-    "InnerKDA",
-    "KDABackend",
-    "KDAKernel",
-    "KimiDeltaAttention",
-    "KimiKDAKernel",
-]
 
 
 class KDABackend(StrEnum):
@@ -55,6 +43,16 @@ def _naive_l2norm(x_BLNK: torch.Tensor) -> torch.Tensor:
     ).to(input_dtype)
 
 
+def _pytorch_causal_conv1d(
+    x_BTC: torch.Tensor,
+    weight_C1W: torch.Tensor,
+) -> torch.Tensor:
+    x_BCT = F.pad(x_BTC.transpose(1, 2), (weight_C1W.shape[-1] - 1, 0))
+    return F.silu(
+        F.conv1d(x_BCT, weight_C1W, groups=weight_C1W.shape[0]).transpose(1, 2)
+    )
+
+
 def _naive_gate_cumsum(
     raw_gate_BLNK: torch.Tensor,
     A_log_N: torch.Tensor,
@@ -71,10 +69,7 @@ def _naive_gate_cumsum(
     spans = (
         gate_BLNK.unbind(0)
         if cu_seqlens_host is None
-        else (
-            gate_BLNK[0, start:end]
-            for start, end in pairwise(cu_seqlens_host)
-        )
+        else (gate_BLNK[0, start:end] for start, end in pairwise(cu_seqlens_host))
     )
 
     chunks = [chunk for span in spans for chunk in span.split(chunk_size, dim=0)]
@@ -132,9 +127,7 @@ class KDAKernel(Module):
             return KDABackend.NAIVE
 
         capability = (
-            torch.cuda.get_device_capability(q_BLNK.device)
-            if q_BLNK.is_cuda
-            else None
+            torch.cuda.get_device_capability(q_BLNK.device) if q_BLNK.is_cuda else None
         )
         fused_supported = (
             q_BLNK.is_cuda
@@ -157,20 +150,20 @@ class KDAKernel(Module):
                     "to FLA."
                 )
             return KDABackend.ATTN_GYM
-        elif (
+        if (
             self.backend is KDABackend.AUTO
             and fused_supported
             and _attn_gym_kda is not None
         ):
             return KDABackend.ATTN_GYM
-        else:
-            try:
-                from fla.ops.kda import chunk_kda as fla_chunk_kda  # noqa: F401
-            except ImportError as error:
-                raise ImportError(
-                    "KDA requires flash-linear-attention when Attention Gym is "
-                    "unsupported: pip install flash-linear-attention"
-                ) from error
+
+        try:
+            from fla.ops.kda import chunk_kda as fla_chunk_kda  # noqa: F401
+        except ImportError as error:
+            raise ImportError(
+                "KDA requires flash-linear-attention when Attention Gym is "
+                "unsupported: pip install flash-linear-attention"
+            ) from error
 
         if self.backend is KDABackend.AUTO:
             reason = (
@@ -335,39 +328,28 @@ class InnerKDA(Module):
                 activation="silu",
                 cu_seqlens=kernel_cu_seqlens,
             )
+        elif kernel_cu_seqlens is None:
+            conv_output_BTC = _pytorch_causal_conv1d(
+                mixed_qkv_BTC,
+                conv_weight_C1W,
+            )
         else:
-            channels = mixed_qkv_BTC.shape[-1]
-
-            def convolve(x_BTC: torch.Tensor) -> torch.Tensor:
-                conv_input_BCT = F.pad(
-                    x_BTC.transpose(1, 2),
-                    (conv_weight_C1W.shape[-1] - 1, 0),
+            if kernel_cu_seqlens_host is None:
+                raise ValueError(
+                    "KDA varlen convolution requires host sequence offsets."
                 )
-                return F.silu(
-                    F.conv1d(
-                        conv_input_BCT,
+            conv_output_BTC = torch.cat(
+                [
+                    _pytorch_causal_conv1d(
+                        mixed_qkv_BTC[:, start:end],
                         conv_weight_C1W,
-                        groups=channels,
-                    ).transpose(1, 2)
-                )
-
-            if kernel_cu_seqlens is None:
-                conv_output_BTC = convolve(mixed_qkv_BTC)
-            else:
-                if kernel_cu_seqlens_host is None:
-                    raise ValueError(
-                        "KDA varlen convolution requires host sequence offsets."
                     )
-                conv_output_BTC = torch.cat(
-                    [
-                        convolve(mixed_qkv_BTC[:, start:end])
-                        for start, end in pairwise(kernel_cu_seqlens_host)
-                    ],
-                    dim=1,
-                )
+                    for start, end in pairwise(kernel_cu_seqlens_host)
+                ],
+                dim=1,
+            )
 
-        projection_dim = conv_output_BTC.shape[-1] // 3
-        q_BTC, k_BTC, v_BTC = conv_output_BTC.split(projection_dim, dim=-1)
+        q_BTC, k_BTC, v_BTC = conv_output_BTC.chunk(3, dim=-1)
         q_BTNK, k_BTNK, v_BTNK = (
             tensor.unflatten(-1, (-1, self.head_dim))
             for tensor in (q_BTC, k_BTC, v_BTC)
@@ -495,11 +477,9 @@ class KDA(Module):
             self.output_norm.eps,
         )
         output_gate_TNK = self.output_gate(x_TD).view_as(out_TNK).float()
-        out_TD = self.output_proj(
+        return self.output_proj(
             (out_float_TNK * output_gate_TNK.sigmoid()).to(out_TNK.dtype).flatten(-2)
         )
-        return out_TD
 
 
 KimiDeltaAttention = KDA
-KimiKDAKernel = KDAKernel
