@@ -10,7 +10,7 @@ import torch
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.kda import KDABackend, KDAKernel
+from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -30,7 +30,7 @@ def _small_model_config() -> KimiK3Model.Config:
         qk_nope_head_dim=16,
         qk_rope_head_dim=16,
         v_head_dim=16,
-        kda_head_dim=64,
+        kda_head_dim=128,
         conv_kernel_size=3,
         dense_hidden_dim=128,
         latent_dim=32,
@@ -152,10 +152,7 @@ class TestKimiK3(unittest.TestCase):
             tensor.detach().clone().requires_grad_() for tensor in actual_inputs
         )
 
-        kernel = KDAKernel.Config(
-            backend=KDABackend.ATTN_GYM,
-            lower_bound=lower_bound,
-        ).build()
+        kernel = KDAKernel.Config(lower_bound=lower_bound).build()
         actual_BLHV = kernel(*actual_inputs)
         expected_BLHV = _kda_recurrent_reference(
             *expected_inputs,

@@ -19,7 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_kda_sharding,
 )
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDABackend, KDAKernel
+from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel
 
 _HAS_BLACKWELL = (
     importlib.util.find_spec("attn_gym") is not None
@@ -28,7 +28,7 @@ _HAS_BLACKWELL = (
 )
 
 
-def _kda_config(*, backend: KDABackend) -> KDA.Config:
+def _kda_config() -> KDA.Config:
     def linear(in_features: int, out_features: int) -> Linear.Config:
         return Linear.Config(
             in_features=in_features,
@@ -63,7 +63,7 @@ def _kda_config(*, backend: KDABackend) -> KDA.Config:
         output_gate=linear(32, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=128,
-            kernel=KDAKernel.Config(backend=backend),
+            kernel=KDAKernel.Config(),
         ),
         output_norm=RMSNorm.Config(normalized_shape=128),
         output_proj=linear(projection_dim, 32),
@@ -72,7 +72,7 @@ def _kda_config(*, backend: KDABackend) -> KDA.Config:
 
 class TestKDASharding(unittest.TestCase):
     def test_folded_token_tp_contracts(self):
-        config = _kda_config(backend=KDABackend.NAIVE)
+        config = _kda_config()
         input_layout = dense_sequence_parallel_placement()
         set_kda_sharding(
             config,
@@ -126,8 +126,8 @@ class TestKDASharding(unittest.TestCase):
     _HAS_BLACKWELL, "KDA requires Attention Gym on CUDA capability 10.0 or 10.3"
 )
 class TestKDA(unittest.TestCase):
-    def _make_kda(self, *, backend: KDABackend):
-        model = _kda_config(backend=backend).build()
+    def _make_kda(self):
+        model = _kda_config().build()
         model = model.to(device="cuda", dtype=torch.bfloat16)
         torch.manual_seed(1)
         with torch.no_grad():
@@ -141,82 +141,6 @@ class TestKDA(unittest.TestCase):
     def _inputs(self, seed: int, tokens: int = 128) -> torch.Tensor:
         torch.manual_seed(seed)
         return torch.randn(tokens, 32, device="cuda", dtype=torch.bfloat16)
-
-    def test_attention_gym_and_naive_backends_agree(self):
-        attention_gym = self._make_kda(backend=KDABackend.ATTN_GYM)
-        naive = self._make_kda(backend=KDABackend.NAIVE)
-        naive.load_state_dict(attention_gym.state_dict())
-
-        x_attention_gym_TD = self._inputs(seed=0).requires_grad_()
-        x_naive_TD = x_attention_gym_TD.detach().clone().requires_grad_()
-        actual_TD = attention_gym(x_attention_gym_TD)
-        expected_TD = naive(x_naive_TD)
-        torch.testing.assert_close(
-            actual_TD.float(), expected_TD.float(), rtol=2e-2, atol=2e-2
-        )
-
-        output_grad_TD = torch.randn_like(actual_TD)
-        actual_grads = torch.autograd.grad(
-            actual_TD,
-            (x_attention_gym_TD, *attention_gym.parameters()),
-            grad_outputs=output_grad_TD,
-        )
-        expected_grads = torch.autograd.grad(
-            expected_TD,
-            (x_naive_TD, *naive.parameters()),
-            grad_outputs=output_grad_TD,
-        )
-        for actual_grad, expected_grad in zip(
-            actual_grads,
-            expected_grads,
-            strict=True,
-        ):
-            torch.testing.assert_close(
-                actual_grad.float(),
-                expected_grad.float(),
-                rtol=5e-2,
-                atol=5e-2,
-            )
-
-    @unittest.skipUnless(
-        importlib.util.find_spec("fla") is not None,
-        "FLA is required for fallback parity",
-    )
-    def test_attention_gym_and_fla_backends_agree(self):
-        attention_gym = self._make_kda(backend=KDABackend.ATTN_GYM)
-        fla = self._make_kda(backend=KDABackend.FLA)
-        fla.load_state_dict(attention_gym.state_dict())
-
-        x_attention_gym_TD = self._inputs(seed=4).requires_grad_()
-        x_fla_TD = x_attention_gym_TD.detach().clone().requires_grad_()
-        actual_TD = attention_gym(x_attention_gym_TD)
-        expected_TD = fla(x_fla_TD)
-        torch.testing.assert_close(
-            actual_TD.float(), expected_TD.float(), rtol=2e-2, atol=2e-2
-        )
-
-        output_grad_TD = torch.randn_like(actual_TD)
-        actual_grads = torch.autograd.grad(
-            actual_TD,
-            (x_attention_gym_TD, *attention_gym.parameters()),
-            grad_outputs=output_grad_TD,
-        )
-        expected_grads = torch.autograd.grad(
-            expected_TD,
-            (x_fla_TD, *fla.parameters()),
-            grad_outputs=output_grad_TD,
-        )
-        for actual_grad, expected_grad in zip(
-            actual_grads,
-            expected_grads,
-            strict=True,
-        ):
-            torch.testing.assert_close(
-                actual_grad.float(),
-                expected_grad.float(),
-                rtol=5e-2,
-                atol=5e-2,
-            )
 
     def test_varlen_matches_independent_document_forwards(self):
         lengths = (37, 64, 91)
@@ -232,21 +156,17 @@ class TestKDA(unittest.TestCase):
         )
         self.assertEqual(masks.cu_seq_q_host, (0, 37, 101, 192))
 
-        backends = [KDABackend.ATTN_GYM, KDABackend.NAIVE]
-        if importlib.util.find_spec("fla") is not None:
-            backends.append(KDABackend.FLA)
-        for backend in backends:
-            model = self._make_kda(backend=backend)
-            packed_TD = model(x_TD, masks)
-            independent_TD = torch.cat(
-                [model(document_TD, None) for document_TD in x_TD.split(lengths)]
-            )
-            torch.testing.assert_close(
-                packed_TD.float(),
-                independent_TD.float(),
-                rtol=2e-2,
-                atol=2e-2,
-            )
+        model = self._make_kda()
+        packed_TD = model(x_TD, masks)
+        independent_TD = torch.cat(
+            [model(document_TD, None) for document_TD in x_TD.split(lengths)]
+        )
+        torch.testing.assert_close(
+            packed_TD.float(),
+            independent_TD.float(),
+            rtol=2e-2,
+            atol=2e-2,
+        )
 
 
 if __name__ == "__main__":
