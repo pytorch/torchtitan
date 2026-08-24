@@ -338,7 +338,6 @@ def run_tt(
     print(f"Loading TorchTitan Kimi K3 (debugmodel) on {device} ...")
     model.to(device)
     assert model.vision_encoder is not None
-    model.vision_encoder.to(vision_dtype)
 
     if force_hf_routing:
         print("Using HF expert selections with TorchTitan router scores")
