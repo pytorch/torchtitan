@@ -22,6 +22,7 @@ from typing import cast
 
 import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -135,7 +136,7 @@ try:
                         sc,
                         state_shardings={
                             **sc.state_shardings,
-                            "_sr_seed": spmd.SpmdType(
+                            "_sr_seed": SpmdType(
                                 {
                                     MeshAxisName.DP: spmd.V,
                                     MeshAxisName.CP: spmd.V,

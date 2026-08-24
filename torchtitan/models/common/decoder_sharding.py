@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import spmd_types as spmd
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -21,13 +22,13 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> spmd.SpmdType:
+def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
     """Placement for dense-path params/buffers.
 
     DP/CP axes are spmd.R; the DTensor bridge unfolds DP into storage axes.
     TP placement is caller-specified.
     """
-    return spmd.SpmdType(
+    return SpmdType(
         {
             DP: spmd.R,
             CP: spmd.R,
@@ -40,7 +41,7 @@ def dense_activation_placement(
     *,
     tp: spmd.PerMeshAxisSpmdType,
     cp: spmd.PerMeshAxisSpmdType,
-) -> spmd.SpmdType:
+) -> SpmdType:
     """Placement for dense-path activations.
 
     DP is token-sharded. CP and TP placements are caller-specified. Tensor
@@ -48,7 +49,7 @@ def dense_activation_placement(
     """
     cp_shards_tokens = isinstance(cp, spmd.Shard)
     tp_shards_features = isinstance(tp, spmd.Shard)
-    return spmd.SpmdType(
+    return SpmdType(
         {
             DP: spmd.V,
             CP: spmd.V if cp_shards_tokens else cp,
@@ -61,9 +62,9 @@ def dense_activation_placement(
     )
 
 
-def token_id_placement() -> spmd.SpmdType:
+def token_id_placement() -> SpmdType:
     """Placement for decoder token IDs with shape ``(tokens,)``."""
-    return spmd.SpmdType(
+    return SpmdType(
         {
             DP: spmd.V,
             CP: spmd.V,
@@ -75,10 +76,10 @@ def token_id_placement() -> spmd.SpmdType:
 
 def attention_activation_placement(
     *, cp: spmd.PerMeshAxisSpmdType = spmd.S(0)
-) -> spmd.SpmdType:
+) -> SpmdType:
     """Placement for attention activations with shape ``(tokens, heads, dim)``."""
     if isinstance(cp, spmd.Shard):
-        return spmd.SpmdType(
+        return SpmdType(
             {
                 DP: spmd.V,
                 CP: spmd.V,
@@ -86,7 +87,7 @@ def attention_activation_placement(
             },
             partition_spec=spmd.PartitionSpec((DP, CP), TP, None),
         )
-    return spmd.SpmdType(
+    return SpmdType(
         {
             DP: spmd.S(0),
             CP: cp,
@@ -95,9 +96,9 @@ def attention_activation_placement(
     )
 
 
-def dense_sequence_parallel_placement() -> spmd.SpmdType:
+def dense_sequence_parallel_placement() -> SpmdType:
     """Sequence-parallel ``(tokens, hidden)`` activation placement."""
-    return spmd.SpmdType(
+    return SpmdType(
         {
             DP: spmd.V,
             CP: spmd.V,
@@ -283,7 +284,7 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     kv_dst_placements = attention_activation_placement(cp=spmd.R)
     kv_grad_placements = attention_activation_placement(cp=spmd.P)
 
-    out_src: spmd.SpmdType = q_placements
+    out_src: SpmdType = q_placements
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
             "q_TNH": q_placements,
@@ -305,7 +306,7 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
-    attn_x_layout: spmd.SpmdType,
+    attn_x_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
     """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
