@@ -21,8 +21,6 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.optim import Optimizer
 
-from torchtitan.tools.logging import logger
-
 from ._optimizer_reshard_runtime import _BucketedRedistributionRuntime, _BufferSlot
 
 from ._optimizer_reshard_schedule import (
@@ -749,47 +747,8 @@ class DistMuon(Optimizer):
             if isinstance(entry, _ParameterComputeLayout):
                 execution_plan.append(entry)
                 continue
-            execution_plan.extend(self._lower_matrix_batch(entry, grouped[entry]))
+            execution_plan.append(_make_local_matrix_execution(grouped[entry]))
         return tuple(execution_plan)
-
-    def _lower_matrix_batch(
-        self,
-        key: tuple[Any, ...],
-        members: Sequence[_ParameterComputeLayout],
-    ) -> list[_ParameterComputeLayout | _LocalMatrixBatch]:
-        """Split one compatible group into scratch-bounded batched runs.
-
-        The bound is physical and local shard shapes are unknown until
-        construction, so this is decided here rather than in configuration.
-        """
-        runs: list[_ParameterComputeLayout | _LocalMatrixBatch] = []
-        run_layouts: list[_ParameterComputeLayout] = []
-        run_bytes = 0
-        for layout in members:
-            shape, _dtype, _device = _local_matrix_batch_spec(layout)
-            layout_bytes = math.prod(shape) * layout.param.element_size()
-            if run_layouts and run_bytes + layout_bytes > _MAX_LOCAL_MATRIX_BATCH_BYTES:
-                runs.append(_make_local_matrix_execution(run_layouts))
-                run_layouts = []
-                run_bytes = 0
-            run_layouts.append(layout)
-            run_bytes += layout_bytes
-        runs.append(_make_local_matrix_execution(run_layouts))
-
-        if len(runs) > 1:
-            matrix_shape, dtype, device = key
-            logger.warning(
-                "%d compatible %s %s local matrices on %s exceed the %d byte "
-                "batch scratch bound, so they run as %d batched calls instead "
-                "of one",
-                len(members),
-                matrix_shape,
-                dtype,
-                device,
-                _MAX_LOCAL_MATRIX_BATCH_BYTES,
-                len(runs),
-            )
-        return runs
 
     @staticmethod
     def _local_tensor_spec(
@@ -798,11 +757,6 @@ class DistMuon(Optimizer):
         assert compute_layout.storage_is_compute_ready
         tensor = compute_layout.param.to_local().detach()
         return tensor.shape, tensor.dtype, tensor.device
-
-
-# Bound persistent scratch for a combined local batch. A single layout may
-# exceed this cap and continues through the existing unbatched path.
-_MAX_LOCAL_MATRIX_BATCH_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
