@@ -246,8 +246,7 @@ def _initialize_dist_muon(
     ](tensor_device)
     optimizer._redistribution_runtime.reserve_buffers(
         optimizer._bucket_plans,
-        local_tensor_spec=optimizer._local_tensor_spec,
-        local_bucket_executor=optimizer,
+        plan_local_work=optimizer._plan_local_bucket,
     )
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
 
@@ -325,11 +324,10 @@ class DistMuon(Optimizer):
         self._preflight_step()
         self._redistribution_runtime.run(
             self._bucket_plans,
-            local_tensor_spec=self._local_tensor_spec,
             prepare=self._prepare_local,
             compute=self._compute_update,
             finalize=self._apply_update,
-            local_bucket_executor=self,
+            run_local_work=self._execute_local_bucket,
         )
         return loss
 
@@ -2155,8 +2153,7 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     muon._validate_plan_across_ranks()
     muon._redistribution_runtime.reserve_buffers(
         muon._bucket_plans,
-        local_tensor_spec=muon._local_tensor_spec,
-        local_bucket_executor=muon,
+        plan_local_work=muon._plan_local_bucket,
     )
     # init_optim_state may have validated placeholder state before the load.
     muon._first_step_validated = False
