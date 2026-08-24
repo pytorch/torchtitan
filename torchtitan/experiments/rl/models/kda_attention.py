@@ -212,7 +212,7 @@ class VLLMKDAWrapper(Module, MambaBase):
             metadata=metadata,
         ).transpose(0, 1)
         query, key, value = (
-            tensor.reshape(1, -1, self.local_num_heads, self.head_dim).contiguous()
+            tensor.reshape(1, -1, self.local_num_heads, self.head_dim)
             for tensor in convolved_TC.unflatten(-1, (-1, 3, self.head_dim)).unbind(-2)
         )
 
@@ -223,7 +223,7 @@ class VLLMKDAWrapper(Module, MambaBase):
         assert has_initial_state is not None
         assert query_start_loc is not None
         cumulative_gate = bounded_gate_cumsum(
-            raw_gate.to(torch.bfloat16).contiguous(),
+            raw_gate.to(torch.bfloat16),
             A_log.float(),
             dt_bias.float(),
             chunk_size=64,

@@ -724,14 +724,13 @@ def _from_local(local: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
 def _resolve_positions(
     positions: torch.Tensor | None, query_local: torch.Tensor
 ) -> torch.Tensor:
-    # ``positions=None`` means "0, 1, ..., seq_len-1" per row (what the PyTorch
-    # path does via ``cache[0:seq_len]``); the kernel gathers by index, so make
-    # those explicit, contiguous (batch, seq_len) ids.
+    # ``positions=None`` means "0, 1, ..., T-1". The kernel gathers by index,
+    # so make those IDs explicit.
     if positions is not None:
         return _to_local(positions)
-    batch, seqlen = query_local.shape[0], query_local.shape[1]
-    pos = torch.arange(seqlen, device=query_local.device, dtype=torch.int32)
-    return pos.unsqueeze(0).expand(batch, -1).contiguous()
+    return torch.arange(
+        query_local.shape[0], device=query_local.device, dtype=torch.int32
+    )
 
 
 def _cossin_eligible(
@@ -804,6 +803,18 @@ def _complex_eligible(
 
 if _HELION_IMPORT_ERROR is None:
 
+    def _helion_cossin_rope_fwd_tnh(xq, xk, cache, pos):
+        xq_out, xk_out = _helion_cossin_rope_fwd(
+            xq.unsqueeze(0), xk.unsqueeze(0), cache, pos.unsqueeze(0)
+        )
+        return xq_out.squeeze(0), xk_out.squeeze(0)
+
+    def _helion_complex_rope_fwd_tnh(xq, xk, cache, pos):
+        xq_out, xk_out = _helion_complex_rope_fwd(
+            xq.unsqueeze(0), xk.unsqueeze(0), cache, pos.unsqueeze(0)
+        )
+        return xq_out.squeeze(0), xk_out.squeeze(0)
+
     def _apply_helion_cossin_rope(
         query: torch.Tensor,
         key: torch.Tensor,
@@ -824,12 +835,14 @@ if _HELION_IMPORT_ERROR is None:
         xk = xk.contiguous()
         cache = cache.contiguous()
         pos = pos.contiguous()
-        if not _cossin_eligible(xq, xk, cache, pos):
+        if not _cossin_eligible(
+            xq.unsqueeze(0), xk.unsqueeze(0), cache, pos.unsqueeze(0)
+        ):
             warn_once(
                 logger,
                 "HelionCosSinRoPE: inputs unsupported by the fused kernel (need "
                 "CUDA q/k/cache/positions on one device, a 2D cache of width "
-                "2 * head_dim, and integer (batch, seq_len) position ids); "
+                "2 * head_dim, and integer (num_tokens,) position ids); "
                 "falling back to the PyTorch cos/sin RoPE.",
             )
             return None
@@ -844,18 +857,31 @@ if _HELION_IMPORT_ERROR is None:
         # propagation rule registration system.
         xq_out, xk_out = spmd.local_map(
             in_types=(
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xq_BLNH
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xk_BLNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xq_TNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xk_TNH
                 {"dp": spmd.R, "cp": spmd.R, "tp": spmd.R},  # rope_cache_MD
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},  # positions_BL
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                    spmd.PartitionSpec(("dp", "cp")),
+                ),  # positions_T
             ),
             out_types=(
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xq_out_BLNH
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xk_out_BLNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xq_out_TNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xk_out_TNH
             ),
-        )(lambda xq, xk, cache, pos: _helion_cossin_rope_fwd(xq, xk, cache, pos))(
-            xq, xk, cache, pos
-        )
+        )(_helion_cossin_rope_fwd_tnh)(xq, xk, cache, pos)
         return _from_local(xq_out, query), _from_local(xk_out, key)
 
     def _apply_helion_complex_rope(
@@ -873,12 +899,14 @@ if _HELION_IMPORT_ERROR is None:
         cache_real = torch.view_as_real(cache)
         cache_real = cache_real.contiguous()
         pos = pos.contiguous()
-        if not _complex_eligible(xq, xk, cache_real, pos):
+        if not _complex_eligible(
+            xq.unsqueeze(0), xk.unsqueeze(0), cache_real, pos.unsqueeze(0)
+        ):
             warn_once(
                 logger,
                 "HelionComplexRoPE: inputs unsupported by the fused kernel "
                 "(need CUDA q/k/cache/positions on one device, a complex cache of "
-                "width head_dim / 2, and integer (batch, seq_len) position ids); "
+                "width head_dim / 2, and integer (num_tokens,) position ids); "
                 "falling back to the PyTorch complex RoPE.",
             )
             return None
@@ -889,18 +917,31 @@ if _HELION_IMPORT_ERROR is None:
         # propagation rule registration system.
         xq_out, xk_out = spmd.local_map(
             in_types=(
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xq_BLNH
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xk_BLNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xq_TNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xk_TNH
                 {"dp": spmd.R, "cp": spmd.R, "tp": spmd.R},  # rope_cache_real
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.R},  # positions_BL
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                    spmd.PartitionSpec(("dp", "cp")),
+                ),  # positions_T
             ),
             out_types=(
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xq_out_BLNH
-                {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # xk_out_BLNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xq_out_TNH
+                (
+                    {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                ),  # xk_out_TNH
             ),
-        )(lambda xq, xk, cache, pos: _helion_complex_rope_fwd(xq, xk, cache, pos))(
-            xq, xk, cache_real, pos
-        )
+        )(_helion_complex_rope_fwd_tnh)(xq, xk, cache_real, pos)
         return _from_local(xq_out, query), _from_local(xk_out, key)
 
 else:

@@ -83,6 +83,8 @@ class _StubCompileConfig:
     mode: str = "aot_fx_trace"
     backend: str = "aot_eager"
     passes: list = field(default_factory=list)
+    memory_policy: str = "default"
+    full_recompute_save_ops: str = ""
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
 
 
@@ -119,6 +121,58 @@ def _make_stub_model(params=None, buffers=None):
     return model
 
 
+class TestPrecompileMain(unittest.TestCase):
+    def test_validates_memory_policy_after_model_setup(self):
+        from torchtitan.experiments.graph_trainer import precompile_main
+
+        events = []
+        compile_config = SimpleNamespace(mode="aot_fx_trace")
+        config = SimpleNamespace(compile=compile_config)
+        config_manager = MagicMock()
+        config_manager.parse_args.return_value = config
+        setup_result = (
+            object(),
+            object(),
+            object(),
+            compile_config,
+            object(),
+            object(),
+            object(),
+        )
+
+        def common_setup(_config):
+            events.append("setup")
+            return setup_result
+
+        def validate(actual_compile_config):
+            self.assertIs(actual_compile_config, compile_config)
+            self.assertEqual(events, ["setup"])
+            events.append("validate")
+
+        def precompile(*_args):
+            self.assertEqual(events, ["setup", "validate"])
+            events.append("precompile")
+
+        with (
+            patch.object(precompile_main, "ConfigManager", return_value=config_manager),
+            patch.object(precompile_main, "_common_setup", side_effect=common_setup),
+            patch.object(
+                precompile_main,
+                "validate_memory_policy_config",
+                side_effect=validate,
+            ),
+            patch.object(
+                precompile_main,
+                "_precompile_aot_fx_trace",
+                side_effect=precompile,
+            ),
+            patch.object(precompile_main.dist, "destroy_process_group"),
+        ):
+            precompile_main.main()
+
+        self.assertEqual(events, ["setup", "validate", "precompile"])
+
+
 class TestConfigFingerprint(unittest.TestCase):
     def test_deterministic(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -132,6 +186,22 @@ class TestConfigFingerprint(unittest.TestCase):
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
         self.assertEqual(fp1, fp2)
         self.assertEqual(len(fp1), 16)
+
+    def test_memory_policy_save_ops_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+        cfg_a = _StubCompileConfig(memory_policy="full")
+        cfg_b = _StubCompileConfig(
+            memory_policy="full",
+            full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+        )
+
+        fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
+        fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
+        self.assertNotEqual(fp_a, fp_b)
 
     def test_model_shape_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -224,6 +294,53 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_standalone_inductor_precompile(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            standalone_inductor_compilation_pass,
+        )
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+            run_traced,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_fx_trace_load,
+            precompile_fx_trace_save,
+        )
+
+        model = torch.nn.Sequential(
+            torch.nn.RMSNorm(8),
+            torch.nn.Linear(8, 4),
+        ).cuda()
+
+        def train_step(x, unused):
+            loss = model(x).square().sum()
+            return loss, *torch.autograd.grad(loss, tuple(model.parameters()))
+
+        x = torch.randn(2, 8, device="cuda")
+        unused = torch.randn(1, device="cuda")
+        expected = train_step(x, unused)
+        traced = minimal_fx_tracer(train_step, module=model)(x, unused)
+        traced.gm = standalone_inductor_compilation_pass(
+            traced.gm, traced.example_inputs
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            precompile_fx_trace_save(traced, storage)
+            loaded = precompile_fx_trace_load(storage, expected_fingerprint="")
+
+        with patch(
+            "torch._inductor.standalone_compile",
+            side_effect=AssertionError("precompiled graph must not compile again"),
+        ):
+            for _ in range(2):
+                actual = run_traced(loaded, module=model)(x, unused)
+                for actual_tensor, expected_tensor in zip(
+                    actual, expected, strict=True
+                ):
+                    torch.testing.assert_close(actual_tensor, expected_tensor)
+
     def test_artifact_pickle_roundtrip(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import SubclassLayout
         from torchtitan.experiments.graph_trainer.precompile import (

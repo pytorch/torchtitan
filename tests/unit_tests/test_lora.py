@@ -23,9 +23,7 @@ def test_lora_model_builds():
     model_spec = model_registry(
         "debugmodel",
         converters=[
-            LoRAConverter.Config(
-                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
-            ),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
         ],
     )
     model = model_spec.model.build()
@@ -38,6 +36,12 @@ def test_lora_model_builds():
 
     assert len(lora_params) > 0, "No LoRA parameters found"
     assert len(frozen_linears) > 0, "No frozen parameters found"
+    lora_modules = {name.rsplit(".", 2)[0] for name in lora_params}
+    assert lora_modules == {
+        f"layers.{layer}.attention.{projection}"
+        for layer in range(6)
+        for projection in ("qkv_linear.wqkv", "wo")
+    }
     for name in lora_params:
         assert model.get_parameter(
             name
@@ -59,24 +63,23 @@ def test_lora_forward():
     model_spec = model_registry(
         "debugmodel",
         converters=[
-            LoRAConverter.Config(
-                rank=8, alpha=16.0, target_modules=["wq", "wkv", "wo"]
-            ),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
         ],
     )
     model = model_spec.model.build()
     model.init_states()
 
     vocab_size = model_spec.model.vocab_size
-    batch_size, seq_len = 2, 16
-    tokens = torch.randint(0, vocab_size, (batch_size, seq_len))
-    positions = torch.arange(seq_len).repeat(batch_size, 1)
+    num_documents, seq_len = 2, 16
+    num_tokens = num_documents * seq_len
+    tokens = torch.randint(0, vocab_size, (num_tokens,))
+    positions = torch.arange(seq_len).repeat(num_documents)
     attention_masks = model.get_attention_masks(positions)
     # The default attention backend is FlexAttention, which does not support
     # backward on CPU; this is a forward-only shape check, so run under no_grad.
     with torch.no_grad():
         output = model(tokens, attention_masks=attention_masks, positions=positions)
-    assert output.shape == (batch_size, seq_len, vocab_size)
+    assert output.shape == (num_tokens, vocab_size)
 
 
 def test_validate_converter_order():

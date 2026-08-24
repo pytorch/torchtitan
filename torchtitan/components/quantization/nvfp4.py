@@ -124,11 +124,15 @@ try:
                     )
                     rowwise = isinstance(weight_tp, spmd.Shard) and weight_tp.dim == 1
                     if rowwise:
-                        in_layout = dense_activation_placement(tp=spmd.S(-1))
-                        in_grad = dense_activation_placement(tp=spmd.S(-1))
+                        in_layout = dense_activation_placement(
+                            tp=spmd.S(-1), cp=spmd.S(0)
+                        )
+                        in_grad = dense_activation_placement(
+                            tp=spmd.S(-1), cp=spmd.S(0)
+                        )
                     else:
-                        in_layout = dense_activation_placement(tp=spmd.R)
-                        in_grad = dense_activation_placement(tp=spmd.P)
+                        in_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+                        in_grad = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
                     instance._sharding_config = replace(
                         sc,
                         state_shardings={

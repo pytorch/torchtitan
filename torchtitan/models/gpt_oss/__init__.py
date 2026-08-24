@@ -277,7 +277,7 @@ def _debugmodel(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -321,7 +321,7 @@ def _20b(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -365,7 +365,7 @@ def _120b(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_seq_len=131072,
+                max_context_length=131072,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,

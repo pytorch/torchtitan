@@ -4,15 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Shape suffix legend (see attention.py):
-#   B = batch, L = sequence length, D = model dimension, C = packed QKV channels,
-#   N = num heads, K = key/value head dimension (KDA uses K == V), W = conv width
+"""Kimi Delta Attention with Attention Gym and FLA training backends."""
+
+# Shape suffix legend:
+# T = packed tokens, D = model dimension, C = projection channels,
+# N = num heads, K = head dimension, W = convolution width.
 
 from dataclasses import dataclass
-from functools import partial
-from typing import Any, Literal, get_args
+from functools import cache
+from itertools import pairwise
+from typing import Any, get_args, Literal
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.common.attention.attention import (
@@ -22,34 +26,83 @@ from torchtitan.models.common.attention.attention import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d, RMSNorm
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger, warn_once
 
 try:
-    from attn_gym.linear.kda import chunk_kda, recurrent_kda
-    from attn_gym.linear.kda.fwd.triton.gate_fwd import bounded_gate_cumsum
-    from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
-    from attn_gym.linear.kda.short_conv import causal_conv1d
+    from attn_gym.linear.kda import (
+        bounded_gate_cumsum,
+        causal_conv1d,
+        chunk_kda,
+        l2norm,
+    )
 except ImportError:
-    chunk_kda: Any = None
-    recurrent_kda: Any = None
     bounded_gate_cumsum: Any = None
-    l2norm: Any = None
     causal_conv1d: Any = None
+    chunk_kda: Any = None
+    l2norm: Any = None
 
 
 __all__ = ["KDA", "KDAAttention", "KDABackend", "KDAInnerAttention"]
 
-KDABackend = Literal["chunked", "recurrent"]
+KDABackend = Literal["auto", "fused", "fla", "reference"]
+
+
+@cache
+def _get_fla_chunk_kda():
+    try:
+        from fla.ops.kda import chunk_kda as fla_chunk_kda
+    except ImportError as error:
+        raise ImportError(
+            "KDA requires flash-linear-attention on GPUs unsupported by the "
+            "Attention Gym fused backend: pip install flash-linear-attention"
+        ) from error
+    return fla_chunk_kda
+
+
+def _reference_l2norm(x_BLNK: torch.Tensor) -> torch.Tensor:
+    input_dtype = x_BLNK.dtype
+    x_float_BLNK = x_BLNK.float()
+    return (
+        x_float_BLNK
+        * torch.rsqrt(x_float_BLNK.square().sum(dim=-1, keepdim=True) + 1e-6)
+    ).to(input_dtype)
+
+
+def _reference_gate_cumsum(
+    raw_gate_BLNK: torch.Tensor,
+    A_log_N: torch.Tensor,
+    dt_bias_NK: torch.Tensor,
+    *,
+    lower_bound: float,
+    chunk_size: int,
+    cu_seqlens: torch.Tensor | None,
+) -> torch.Tensor:
+    gate_BLNK = lower_bound * torch.sigmoid(
+        A_log_N.float().exp().view(1, 1, -1, 1)
+        * (raw_gate_BLNK.float() + dt_bias_NK.float())
+    )
+    if cu_seqlens is None:
+        spans = gate_BLNK.unbind(0)
+    else:
+        offsets = cu_seqlens.tolist()
+        spans = [gate_BLNK[0, start:end] for start, end in pairwise(offsets)]
+
+    chunks = [chunk for span in spans for chunk in span.split(chunk_size, dim=0)]
+    cumulative_TNK = torch.cat([chunk.cumsum(dim=0) for chunk in chunks], dim=0)
+    log2_e = 1.4426950408889634
+    if cu_seqlens is None:
+        return cumulative_TNK.reshape_as(gate_BLNK) * log2_e
+    return cumulative_TNK.unsqueeze(0) * log2_e
 
 
 class KDAInnerAttention(Module):
-    """Stateless dispatch to the delta-rule core."""
+    """Apply KDA preprocessing and dispatch to an Attention Gym core."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        # "chunked": parallel within chunks, for training (default)
-        # "recurrent": pure-torch token at a time; the reference the chunked
-        # kernel is checked against in tests, far too slow to train with
-        backend: KDABackend = "chunked"
+        backend: KDABackend = "auto"
+        lower_bound: float = -5.0
+        chunk_size: int = 64
 
         def __post_init__(self):
             valid = get_args(KDABackend)
@@ -58,223 +111,363 @@ class KDAInnerAttention(Module):
                     f"unknown KDA backend {self.backend!r}. "
                     f"Valid: {', '.join(repr(name) for name in valid)}."
                 )
+            if not -5.0 <= self.lower_bound < 0.0:
+                raise ValueError(
+                    "KDA lower_bound must be in the safe range [-5, 0), "
+                    f"got {self.lower_bound}."
+                )
+            if self.chunk_size != 64:
+                raise ValueError(
+                    "Attention Gym KDA requires chunk_size=64, "
+                    f"got {self.chunk_size}."
+                )
 
     def __init__(self, config: Config):
         super().__init__()
-        if chunk_kda is None:
+        if config.backend in ("fused", "reference") and chunk_kda is None:
             raise ImportError(
-                "KDA requires attention-gym, an optional dependency: "
-                "pip install attention-gym"
+                "KDA requires Attention Gym: pip install 'attn-gym[linear]'"
             )
         self.backend = config.backend
+        self.lower_bound = config.lower_bound
+        self.chunk_size = config.chunk_size
+        self._resolved_backend: KDABackend | None = None
+
+    def resolve_backend(self, q_BLNK: torch.Tensor) -> KDABackend:
+        """Select Attention Gym fused KDA when supported, otherwise FLA."""
+        if self.backend != "auto":
+            if self.backend == "fused":
+                self._validate_fused_support(q_BLNK)
+            return self.backend
+
+        if self._resolved_backend is not None:
+            return self._resolved_backend
+        if q_BLNK.device.type != "cuda":
+            raise RuntimeError(
+                "KDA backend='auto' requires CUDA. Use backend='reference' "
+                "for correctness testing on CPU."
+            )
+        if chunk_kda is not None and self._has_fused_support(q_BLNK):
+            self._resolved_backend = "fused"
+            return self._resolved_backend
+        _get_fla_chunk_kda()
+        capability = torch.cuda.get_device_capability(q_BLNK.device)
+        reason = (
+            "is unavailable"
+            if chunk_kda is None
+            else f"does not support CUDA capability {capability}"
+        )
+        warn_once(
+            logger,
+            f"Attention Gym fused KDA {reason}; falling back to FLA.",
+        )
+        self._resolved_backend = "fla"
+        return self._resolved_backend
+
+    @staticmethod
+    def _has_fused_support(q_BLNK: torch.Tensor) -> bool:
+        return (
+            q_BLNK.device.type == "cuda"
+            and q_BLNK.shape[-1] == 128
+            and torch.cuda.get_device_capability(q_BLNK.device) in {(10, 0), (10, 3)}
+        )
+
+    @classmethod
+    def _validate_fused_support(cls, q_BLNK: torch.Tensor) -> None:
+        if cls._has_fused_support(q_BLNK):
+            return
+        capability = (
+            torch.cuda.get_device_capability(q_BLNK.device)
+            if q_BLNK.device.type == "cuda"
+            else None
+        )
+        raise RuntimeError(
+            "Attention Gym fused KDA requires a CUDA tensor with head_dim=128 "
+            "on Blackwell SM100/SM103; got "
+            f"device={q_BLNK.device}, shape={tuple(q_BLNK.shape)}, "
+            f"capability={capability}. Use backend='auto' to fall back to FLA."
+        )
 
     def forward(
         self,
         q_BLNK: torch.Tensor,
         k_BLNK: torch.Tensor,
         v_BLNK: torch.Tensor,
-        g_BLNK: torch.Tensor,
-        beta_BLN: torch.Tensor,
+        raw_gate_BLNK: torch.Tensor,
+        raw_beta_BLN: torch.Tensor,
+        A_log_N: torch.Tensor,
+        dt_bias_NK: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Apply the gated delta rule.
+        backend = self.resolve_backend(q_BLNK)
+        if backend == "fla":
+            fla_chunk_kda = _get_fla_chunk_kda()
+            output_BLNK, _ = fla_chunk_kda(
+                q_BLNK,
+                k_BLNK,
+                v_BLNK,
+                raw_gate_BLNK,
+                raw_beta_BLN,
+                A_log=A_log_N,
+                dt_bias=dt_bias_NK.reshape(-1),
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=True,
+                lower_bound=self.lower_bound,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=(
+                    cu_seqlens.to(device="cpu") if cu_seqlens is not None else None
+                ),
+            )
+            return output_BLNK
 
-        ``g_BLNK`` is the per-channel log2 decay: chunk-local cumulative for
-        ``"chunked"``, per token for ``"recurrent"``.
-        """
-        core = (
-            chunk_kda
-            if self.backend == "chunked"
-            else partial(recurrent_kda, impl="reference")
-        )
-        output, _ = core(
+        if backend == "fused":
+            q_BLNK = l2norm(q_BLNK)
+            k_BLNK = l2norm(k_BLNK)
+            cumulative_gate_BLNK = bounded_gate_cumsum(
+                raw_gate_BLNK.to(torch.bfloat16),
+                A_log_N.float(),
+                dt_bias_NK.float(),
+                chunk_size=self.chunk_size,
+                lower_bound=self.lower_bound,
+                cu_seqlens=cu_seqlens,
+            )
+        else:
+            q_BLNK = _reference_l2norm(q_BLNK)
+            k_BLNK = _reference_l2norm(k_BLNK)
+            cumulative_gate_BLNK = _reference_gate_cumsum(
+                raw_gate_BLNK,
+                A_log_N,
+                dt_bias_NK,
+                lower_bound=self.lower_bound,
+                chunk_size=self.chunk_size,
+                cu_seqlens=cu_seqlens,
+            )
+
+        output_BLNK, _ = chunk_kda(
             q_BLNK,
             k_BLNK,
             v_BLNK,
-            g_BLNK,
-            beta_BLN,
+            cumulative_gate_BLNK,
+            raw_beta_BLN.float().sigmoid(),
             cu_seqlens=cu_seqlens,
+            impl=backend,
         )
-        return output
+        return output_BLNK
 
 
 class KDAAttention(Module):
-    """Dense inner KDA implementation shared with the paged vLLM boundary.
-
-    Owns the depthwise convolution, the q/k L2 norm, the gate map, and the
-    recurrence. Holds no parameters: the outer :class:`KDA` passes the conv weight
-    and the gate parameters in, so an inference wrapper can replace this module
-    without moving state. It is also the single DTensor-to-local boundary for the
-    head-parallel region, so it computes on rank-local head shards.
-    """
+    """Run the short convolution and the rank-local KDA kernel."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        head_dim: int = 128
-        gate_lower_bound: float = -5.0
+        head_dim: int
         inner_attention: KDAInnerAttention.Config
 
         def __post_init__(self):
-            if self.gate_lower_bound >= 0:
+            if self.head_dim < 1:
+                raise ValueError(f"head_dim must be positive, got {self.head_dim}")
+            if self.inner_attention.backend == "fused" and self.head_dim != 128:
                 raise ValueError(
-                    f"gate_lower_bound must be negative, got {self.gate_lower_bound}"
+                    "Attention Gym's fused KDA backend requires head_dim=128, "
+                    f"got {self.head_dim}."
                 )
 
     def __init__(self, config: Config):
         super().__init__()
         self.head_dim = config.head_dim
-        self.gate_lower_bound = config.gate_lower_bound
         self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
-        mixed_qkv_BLC: torch.Tensor,
-        raw_gate_BLNK: torch.Tensor,
-        raw_beta_BLN: torch.Tensor,
-        conv_weight_C1W: torch.Tensor,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        raw_gate_TNK: torch.Tensor,
+        raw_beta_TN: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
         A_log_N: torch.Tensor,
         dt_bias_NK: torch.Tensor,
-        *,
-        cu_seqlens: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor,
     ) -> torch.Tensor:
-        """Run convolution, gate map, and recurrence on rank-local head shards.
-
-        ``mixed_qkv_BLC`` is the packed QKV projection before the convolution;
-        ``raw_gate_BLNK`` and ``raw_beta_BLN`` are the projections before the gate
-        map and the sigmoid.
-        """
-        conv_output_BLC = causal_conv1d(
-            mixed_qkv_BLC,
-            conv_weight_C1W[:, 0],
-            activation="silu",
-            cu_seqlens=cu_seqlens,
+        kernel_cu_seqlens = cu_seqlens if cu_seqlens.numel() > 2 else None
+        mixed_qkv_BTC = torch.cat(
+            (query_TC, key_TC, value_TC),
+            dim=-1,
+        ).unsqueeze(0)
+        conv_weight_C1W = torch.cat(
+            (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
+            dim=0,
         )
-        conv_output_BLN3K = conv_output_BLC.unflatten(-1, (-1, 3, self.head_dim))
-        q_BLNK, k_BLNK, v_BLNK = (
-            tensor.contiguous() for tensor in conv_output_BLN3K.unbind(-2)
-        )
+        backend = self.inner_attention.resolve_backend(raw_gate_TNK.unsqueeze(0))
+        if backend == "fused":
+            conv_output_BTC = causal_conv1d(
+                mixed_qkv_BTC,
+                conv_weight_C1W[:, 0],
+                activation="silu",
+                cu_seqlens=kernel_cu_seqlens,
+            )
+        else:
+            channels = mixed_qkv_BTC.shape[-1]
 
-        return self.inner_attention(
-            l2norm(q_BLNK),
-            l2norm(k_BLNK),
-            v_BLNK,
-            self._gate(raw_gate_BLNK, A_log_N, dt_bias_NK, cu_seqlens),
-            raw_beta_BLN.float().sigmoid(),
-            cu_seqlens=cu_seqlens,
-        )
+            def convolve(x_BTC: torch.Tensor) -> torch.Tensor:
+                conv_input_BCT = F.pad(
+                    x_BTC.transpose(1, 2),
+                    (conv_weight_C1W.shape[-1] - 1, 0),
+                )
+                return F.silu(
+                    F.conv1d(
+                        conv_input_BCT,
+                        conv_weight_C1W,
+                        groups=channels,
+                    ).transpose(1, 2)
+                )
 
-    def _gate(
-        self,
-        raw_gate_BLNK: torch.Tensor,
-        A_log_N: torch.Tensor,
-        dt_bias_NK: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Map the raw gate projection to a log2 decay.
+            if kernel_cu_seqlens is None:
+                conv_output_BTC = convolve(mixed_qkv_BTC)
+            else:
+                offsets = kernel_cu_seqlens.tolist()
+                conv_output_BTC = torch.cat(
+                    [
+                        convolve(mixed_qkv_BTC[:, start:end])
+                        for start, end in pairwise(offsets)
+                    ],
+                    dim=1,
+                )
 
-        ``chunk_size=1`` makes the cumulative sum an identity, which is what the
-        recurrent backend wants; the chunked core wants it accumulated within each
-        64-token chunk. The prefix sums are sequence-local, so ``cu_seqlens`` has
-        to reach here too: a document starting mid-chunk would otherwise inherit
-        its predecessor's gate prefix.
-        """
-        return bounded_gate_cumsum(
-            raw_gate_BLNK.to(torch.bfloat16).contiguous(),
-            A_log_N.float(),
-            dt_bias_NK.float(),
-            chunk_size=64 if self.inner_attention.backend == "chunked" else 1,
-            lower_bound=self.gate_lower_bound,
-            cu_seqlens=cu_seqlens,
+        projection_dim = conv_output_BTC.shape[-1] // 3
+        q_BTC, k_BTC, v_BTC = conv_output_BTC.split(projection_dim, dim=-1)
+        q_BTNK, k_BTNK, v_BTNK = (
+            tensor.unflatten(-1, (-1, self.head_dim))
+            for tensor in (q_BTC, k_BTC, v_BTC)
         )
+        output_BTNK = self.inner_attention(
+            q_BTNK,
+            k_BTNK,
+            v_BTNK,
+            raw_gate_TNK.unsqueeze(0),
+            raw_beta_TN.unsqueeze(0),
+            A_log_N,
+            dt_bias_NK,
+            cu_seqlens=kernel_cu_seqlens,
+        )
+        return output_BTNK.squeeze(0)
 
 
 class KDA(Module):
-    """KDA (Kimi Delta Attention) linear-attention layer.
-
-    Recurrent state and per channel gated delta rule::
-
-        x -> fused QKV + low-rank gate/beta projections
-          -> attention: conv + SiLU -> L2-norm q/k -> gate map -> delta rule
-          -> sigmoid-gated RMSNorm -> output projection
-    """
+    """Kimi Delta Attention with checkpoint-compatible Kimi K3 parameters."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_heads: int
-        head_dim: int = 128
-        in_proj_qkv: Linear.Config
-        conv_qkv: Conv1d.Config
-        gate_proj_a: Linear.Config
-        gate_proj_b: Linear.Config
-        beta_proj: Linear.Config
-        out_gate_proj_a: Linear.Config
-        out_gate_proj_b: Linear.Config
-        out_norm: RMSNorm.Config
-        out_proj: Linear.Config
-        # Module.Config, not KDAAttention.Config: this is the slot an inference
-        # wrapper substitutes its own module into.
+        head_dim: int
+        conv_kernel_size: int
+        q_proj: Linear.Config
+        k_proj: Linear.Config
+        v_proj: Linear.Config
+        q_conv: Conv1d.Config
+        k_conv: Conv1d.Config
+        v_conv: Conv1d.Config
+        forget_a: Linear.Config
+        forget_b: Linear.Config
+        beta: Linear.Config
+        output_gate: Linear.Config
         attention: Module.Config
+        output_norm: RMSNorm.Config
+        output_proj: Linear.Config
 
         def __post_init__(self):
             if self.num_heads < 1:
                 raise ValueError(f"num_heads must be positive, got {self.num_heads}")
+            if self.head_dim < 1:
+                raise ValueError(f"head_dim must be positive, got {self.head_dim}")
+            if self.conv_kernel_size < 1:
+                raise ValueError(
+                    "conv_kernel_size must be positive, " f"got {self.conv_kernel_size}"
+                )
 
     def __init__(self, config: Config):
         super().__init__()
         self.num_heads = config.num_heads
         self.head_dim = config.head_dim
+        self.conv_kernel_size = config.conv_kernel_size
 
-        self.in_proj_qkv = config.in_proj_qkv.build()
-        self.conv_qkv = config.conv_qkv.build()
-        self.gate_proj_a = config.gate_proj_a.build()
-        self.gate_proj_b = config.gate_proj_b.build()
-        self.beta_proj = config.beta_proj.build()
-        self.out_gate_proj_a = config.out_gate_proj_a.build()
-        self.out_gate_proj_b = config.out_gate_proj_b.build()
-        self.out_norm = config.out_norm.build()
-        self.out_proj = config.out_proj.build()
+        self.q_proj = config.q_proj.build()
+        self.k_proj = config.k_proj.build()
+        self.v_proj = config.v_proj.build()
+        self.q_conv = config.q_conv.build()
+        self.k_conv = config.k_conv.build()
+        self.v_conv = config.v_conv.build()
+        self.forget_a = config.forget_a.build()
+        self.forget_b = config.forget_b.build()
+        self.beta = config.beta.build()
+        self.output_gate = config.output_gate.build()
         self.attention = config.attention.build()
+        self.output_norm = config.output_norm.build()
+        self.output_proj = config.output_proj.build()
 
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
     def forward(
         self,
-        x_BLD: torch.Tensor,
+        x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
-        cu_seqlens = None
-        if isinstance(attention_masks, VarlenMetadata):
-            cu_seqlens = attention_masks.cu_seq_q
+        del positions
+        if x_TD.ndim != 2:
+            raise ValueError(
+                "KDA input must have shape [T, D], " f"got {tuple(x_TD.shape)}."
+            )
 
-        # add back B = 1 for packed documents
-        kernel_B, kernel_L = (B, L) if cu_seqlens is None else (1, B * L)
-
-        def flatten(tensor: torch.Tensor) -> torch.Tensor:
-            if cu_seqlens is None:
-                return tensor
-            return tensor.reshape(1, B * L, *tensor.shape[2:])
-
-        raw_gate_BLNK = self.gate_proj_b(self.gate_proj_a(x_BLD)).reshape(
-            kernel_B, kernel_L, -1, self.head_dim
+        if attention_masks is not None and not isinstance(
+            attention_masks, VarlenMetadata
+        ):
+            raise ValueError(
+                "KDA attention_masks must be VarlenMetadata or None, "
+                f"got {type(attention_masks).__name__}."
+            )
+        num_tokens = x_TD.shape[0]
+        cu_seqlens = (
+            attention_masks.cu_seq_q
+            if isinstance(attention_masks, VarlenMetadata)
+            else torch.tensor(
+                [0, num_tokens],
+                dtype=torch.int32,
+                device=x_TD.device,
+            )
         )
-        out_BLNK = self.attention(
-            flatten(self.in_proj_qkv(x_BLD)),
-            raw_gate_BLNK,
-            flatten(self.beta_proj(x_BLD)).reshape(kernel_B, kernel_L, -1),
-            self.conv_qkv.weight,
+        raw_gate_TNK = self.forget_b(self.forget_a(x_TD)).reshape(
+            num_tokens, self.num_heads, self.head_dim
+        )
+        raw_beta_TN = self.beta(x_TD).reshape(num_tokens, self.num_heads)
+        out_TNK = self.attention(
+            self.q_proj(x_TD),
+            self.k_proj(x_TD),
+            self.v_proj(x_TD),
+            raw_gate_TNK,
+            raw_beta_TN,
+            self.q_conv.weight,
+            self.k_conv.weight,
+            self.v_conv.weight,
             self.A_log,
             self.dt_bias,
-            cu_seqlens=cu_seqlens,
+            cu_seqlens,
         )
-        out_BLNK = self._gated_norm(out_BLNK, flatten(x_BLD))
-        # Merge heads and, under varlen, unpack the flattened batch.
-        return self.out_proj(out_BLNK.reshape(B, L, -1))
 
-    def _gated_norm(self, out_BLNK: torch.Tensor, x_BLD: torch.Tensor) -> torch.Tensor:
-        """Per-head RMSNorm scaled by a sigmoid gate (Kimi gates with ``sigmoid``)"""
-        normed = self.out_norm(out_BLNK)
-        gate = self.out_gate_proj_b(self.out_gate_proj_a(x_BLD)).view_as(normed)
-        return normed * gate.sigmoid()
+        out_float_TNK = out_TNK.float()
+        assert self.output_norm.eps is not None
+        out_float_TNK = out_float_TNK * torch.rsqrt(
+            out_float_TNK.square().mean(dim=-1, keepdim=True) + self.output_norm.eps
+        )
+        out_float_TNK = out_float_TNK * self.output_norm.weight.float()
+        output_gate_TNK = self.output_gate(x_TD).view_as(out_TNK).float()
+        out_TD = self.output_proj(
+            (out_float_TNK * output_gate_TNK.sigmoid()).to(out_TNK.dtype).flatten(-2)
+        )
+        return out_TD

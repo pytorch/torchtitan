@@ -12,26 +12,44 @@ overwrites with the vision encoder's per-item features at the positions
 ``get_vision_positions`` locates.
 """
 
+import contextlib
+
+import spmd_types as spmd
 import torch
+
+from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.distributed.utils import get_spmd_backend
+
+
+def multimodal_context() -> contextlib.AbstractContextManager[None]:
+    """Use a DP-local mesh while preparing multimodal inputs.
+
+    Under ``spmd_types`` the vision encoder and the vision->text scatter run
+    per-DP-rank on that rank's own images: the pixel tensors are DP-local
+    (``V@DP``), so the region must execute with DP treated as a local axis.
+    After the scatter the tensor is token-aligned again and global DP batch
+    sharding resumes. A no-op outside ``spmd_types`` (or when DP is size 1).
+    """
+    if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
+        return spmd.set_current_mesh(local_axes=("dp",))
+    return contextlib.nullcontext()
 
 
 def get_vision_positions(
     tokens: torch.Tensor,
     num_vision_tokens_per_item: torch.Tensor,
     placeholder_id: int,
-) -> list[tuple[int, int, int, int]]:
+) -> list[tuple[int, int, int]]:
     """Locate each visual item's placeholder run in the token sequence.
 
     Args:
-        tokens: (bsz, seq_len) token IDs.
+        tokens: ``(T,)`` token IDs.
         num_vision_tokens_per_item: (num_items,) valid token count per visual item, in
             the order the items appear in ``tokens``.
         placeholder_id: token id whose contiguous runs mark vision spans.
 
     Returns:
-        ``(item_idx, sample_idx, vision_start, n_tokens)`` per item, where
-        ``vision_start`` is the position of the run's first placeholder token
-        within its sample.
+        ``(item_idx, vision_start, n_tokens)`` per item.
 
     Raises:
         ValueError: if the number of placeholder runs does not equal the number
@@ -40,18 +58,13 @@ def get_vision_positions(
             misaligned; scattering anyway would silently corrupt the embeddings,
             so fail loudly with the offending counts.
     """
-    vision_mask = tokens == placeholder_id  # (bsz, seq_len)
-    # Shift within each row (row boundaries padded False) so a placeholder
-    # ending one sample and starting the next are NOT merged into one run across
-    # the flattened batch boundary.
+    vision_mask = tokens == placeholder_id
     prev_mask = torch.zeros_like(vision_mask)
-    prev_mask[:, 1:] = vision_mask[:, :-1]
+    prev_mask[1:] = vision_mask[:-1]
     next_mask = torch.zeros_like(vision_mask)
-    next_mask[:, :-1] = vision_mask[:, 1:]
-    flat_mask = vision_mask.view(-1)
-    region_starts = torch.where(flat_mask & ~prev_mask.view(-1))[0]
-    region_ends = torch.where(flat_mask & ~next_mask.view(-1))[0]
-    seq_len = tokens.shape[1]
+    next_mask[:-1] = vision_mask[1:]
+    region_starts = torch.where(vision_mask & ~prev_mask)[0]
+    region_ends = torch.where(vision_mask & ~next_mask)[0]
 
     num_items = int(num_vision_tokens_per_item.shape[0])
     num_runs = int(region_starts.shape[0])
@@ -63,11 +76,15 @@ def get_vision_positions(
             f"exactly one placeholder run."
         )
 
+    # Convert each metadata tensor once. Per-item ``.item()`` calls would
+    # synchronize CUDA once per scalar.
+    region_starts_list = region_starts.tolist()
     run_lengths = (region_ends - region_starts + 1).tolist()
-    positions: list[tuple[int, int, int, int]] = []
+    num_vision_tokens_per_item_list = num_vision_tokens_per_item.tolist()
+    positions: list[tuple[int, int, int]] = []
     for i in range(num_items):
-        start = int(region_starts[i].item())
-        n_tokens = int(num_vision_tokens_per_item[i].item())
+        start = int(region_starts_list[i])
+        n_tokens = int(num_vision_tokens_per_item_list[i])
         if run_lengths[i] != n_tokens:
             raise ValueError(
                 f"Multimodal misalignment: placeholder run {i} spans "
@@ -75,7 +92,7 @@ def get_vision_positions(
                 f"{n_tokens} embedding(s). The placeholder count in the prompt "
                 f"must match the vision token count for that item."
             )
-        positions.append((i, start // seq_len, start % seq_len, n_tokens))
+        positions.append((i, start, n_tokens))
     return positions
 
 
@@ -83,17 +100,25 @@ def scatter_vision_embeds(
     inputs_embeds: torch.Tensor,
     *,
     vision_embeds: torch.Tensor,
-    vision_positions: list[tuple[int, int, int, int]],
+    vision_positions: list[tuple[int, int, int]],
 ) -> torch.Tensor:
-    """Copy padded vision features into the text sequence at placeholder runs.
+    """Copy packed vision features into the text sequence at placeholder runs.
 
     Args:
-        inputs_embeds: (batch, seq_len, dim) text embeddings, modified in place.
-        vision_embeds: (num_items, max_tokens, dim) padded vision features.
+        inputs_embeds: ``(T, D)`` text embeddings, modified in place.
+        vision_embeds: Packed vision features ``(total_tokens, dim)``.
         vision_positions: from ``get_vision_positions``.
     """
-    for item_idx, sample_idx, vision_start, n_tokens in vision_positions:
-        inputs_embeds[
-            sample_idx, vision_start : vision_start + n_tokens, :
-        ] = vision_embeds[item_idx, :n_tokens, :].to(inputs_embeds.dtype)
+    vision_offset = 0
+    for _, vision_start, num_tokens in vision_positions:
+        inputs_embeds[vision_start : vision_start + num_tokens] = vision_embeds[
+            vision_offset : vision_offset + num_tokens
+        ].to(inputs_embeds.dtype)
+        vision_offset += num_tokens
+
+    if vision_offset != vision_embeds.shape[0]:
+        raise ValueError(
+            f"Vision placeholder runs consume {vision_offset} embeddings but "
+            f"the packed vision output contains {vision_embeds.shape[0]}."
+        )
     return inputs_embeds
