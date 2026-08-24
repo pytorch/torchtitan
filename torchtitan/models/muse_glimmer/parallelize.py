@@ -20,8 +20,8 @@ from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
+    resolve_fsdp_mesh,
 )
-from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, validate_config
 from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel
@@ -43,14 +43,6 @@ def parallelize_muse_glimmer(
             "Muse Glimmer only supports spmd_backend='spmd_types'; "
             f"got '{parallelism.spmd_backend}'."
         )
-
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
-        """
-
     # When the model owns the vision stack (multimodal flavor), the encoder +
     # adapter are submodules: TP is applied by ``model.parallelize`` (driven by
     # the sharding configs set in update_from_config), and AC/compile/FSDP are
@@ -70,7 +62,6 @@ def parallelize_muse_glimmer(
                 f"divisible by TP degree ({parallel_dims.tp})"
             )
 
-    validate_config(parallel_dims, model)
     model.parallelize(parallel_dims)
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components

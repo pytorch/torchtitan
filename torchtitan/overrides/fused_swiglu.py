@@ -410,12 +410,13 @@ def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
     # propagation rule registration system.
+    activation_type = (
+        {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+        spmd.PartitionSpec(("dp", "cp"), "tp"),
+    )
     return spmd.local_map(
-        in_types=(
-            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # gate_BLF
-            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # up_BLF
-        ),
-        out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
+        in_types=(activation_type, activation_type),
+        out_types=activation_type,
     )(
         lambda gate, up: silu_and_mul_op(
             gate.reshape(-1, gate.shape[-1]),

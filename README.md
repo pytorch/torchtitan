@@ -4,8 +4,6 @@
 
 #### A PyTorch native platform for training generative AI models
 
-[![8 GPU Feature Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_features.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_features.yaml?query=branch%3Amain)
-[![8 GPU Model Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_models.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_models.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2410.06511-b31b1b.svg)](https://arxiv.org/abs/2410.06511)
 [![ICLR](https://img.shields.io/badge/ICLR-2025-violet.svg)](https://iclr.cc/virtual/2025/poster/29620)
 [![forum](https://img.shields.io/badge/pytorch-forum-DE3412.svg)](https://discuss.pytorch.org/c/distributed/torchtitan/44)
@@ -50,6 +48,13 @@ We look forward to your contributions!
 * To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. New ideas should start there. To contribute, follow the [`experiments guidelines`](torchtitan/experiments/README.md).
 * For fixes and contributions to core, follow these [`guidelines`](CONTRIBUTING.md).
 
+## Test status
+
+| Hardware | Integration Tests | Unit Tests |
+| --- | --- | --- |
+| CPU | - | [![CPU Unit Test](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu.yaml?query=branch%3Amain) |
+| NVIDIA GPU | [![Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml?query=branch%3Amain) [![H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml?query=branch%3Amain) | [![GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml?query=branch%3Amain) |
+
 ## Llama 3.1 training
 
 ### Key features available
@@ -70,7 +75,7 @@ We look forward to your contributions!
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
 11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
-12. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
+12. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
 13. Flexible learning rate scheduler (warmup-stable-decay)
 14. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage
 15. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
@@ -167,7 +172,6 @@ srun torchrun --nnodes 2
 ```
 
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
-
 
 ## Citation
 

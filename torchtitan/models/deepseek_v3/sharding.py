@@ -90,7 +90,7 @@ def _set_deepseek_v3_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
     # MLA attention input: x is gathered to Replicate. RoPE is read from the
@@ -100,7 +100,7 @@ def _set_deepseek_v3_layer_sharding(
             "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         },
     )
     attention.rope.sharding_config = ShardingConfig(
@@ -159,7 +159,7 @@ def _set_deepseek_v3_mtp_sharding(
     activation = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     norm = norm_config(enable_sp=enable_sp)
 
@@ -172,7 +172,9 @@ def _set_deepseek_v3_mtp_sharding(
         if enable_sp:
             mtp_layer_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
-                    "mtp_input_valid_mask": dense_activation_placement(tp=spmd.R),
+                    "mtp_input_valid_mask": dense_activation_placement(
+                        tp=spmd.R, cp=spmd.S(0)
+                    ),
                 },
                 in_dst_shardings={
                     "mtp_input_valid_mask": activation,

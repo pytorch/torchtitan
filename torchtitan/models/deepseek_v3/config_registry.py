@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
@@ -58,8 +58,8 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -158,8 +158,8 @@ def deepseek_v3_16b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -230,8 +230,8 @@ def deepseek_v3_671b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
+            max_context_length=4096,
             steps=10000,
             disable_cuda_graphs=True,
         ),

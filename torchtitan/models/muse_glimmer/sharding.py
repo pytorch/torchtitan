@@ -11,6 +11,7 @@ import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     colwise_config,
     dense_activation_placement,
     dense_param_placement,
@@ -20,6 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
+    token_id_placement,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -68,12 +70,13 @@ def set_muse_glimmer_sharding_config(
     differ only in how the token embeddings flow into the first decoder layer:
 
     * **Text-only**: the base decoder sharding is the whole story. The token
-      embeddings emit sequence-parallel (``Shard(1)``) activations that flow
+      embeddings emit sequence-parallel (``Shard(0)``) activations that flow
       straight into the decoder layers.
     * **Multimodal** (``config.vision_encoder is not None``): ``MuseGlimmerModel.forward``
       scatters vision features into the token embeddings over the full
-      ``[batch, seq]`` *between* ``tok_embeddings`` and the decoder layers, so the
-      embedding output must be ``Replicate`` -- not ``Shard(1)``/SP.
+      ``[num_tokens]`` sequence *between* ``tok_embeddings`` and the decoder
+      layers, so the embedding output must be ``Replicate`` -- not
+      ``Shard(0)``/SP.
       :func:`_set_multimodal_sharding` overrides the embedding + norm (and the
       vision-injection modules) to ``Replicate``, and the layer loop gives the
       first decoder layer a ``Replicate`` input that its attention reduce-scatters
@@ -132,16 +135,16 @@ def _set_multimodal_sharding(
     """Override the text-path sharding for the multimodal (vision) model.
 
     ``MuseGlimmerModel.forward`` scatters vision features into the token embeddings
-    (masked index over the full ``[batch, seq]``) between ``tok_embeddings`` and
+    (masked index over the full ``[num_tokens]``) between ``tok_embeddings`` and
     the decoder layers, so that activation must be ``Replicate`` -- not
-    ``Shard(1)``/SP. This re-points the embedding children at ``Replicate``
+    ``Shard(0)``/SP. This re-points the embedding children at ``Replicate``
     outputs, marks the vision-injection modules ``Replicate`` so the whole vision
     path stays DTensor-consistent, and (under SP) re-shards the first decoder
     layer to take that ``Replicate`` input -- its rowwise ``wo`` reduce-scatters
-    back to ``Shard(1)``, restoring SP activations for every later layer. Mirrors
+    back to ``Shard(0)``, restoring SP activations for every later layer. Mirrors
     qwen3_5's multimodal sharding overrides.
     """
-    replicate = dense_activation_placement(tp=spmd.R)
+    replicate = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     # The vision encoder + adapter emit TP-invariant activations (the common
     # vision_encoder_sharding helpers flow {DP: V, TP: I}). The LLM-side injection
     # modules only promote the TP axis I->R so the features become TP-Replicate for
@@ -154,7 +157,7 @@ def _set_multimodal_sharding(
     vision_tp_replicate = SpmdLayout({DP: spmd.V, TP: spmd.R})
     emb_cfg = config.tok_embeddings
 
-    # Embedding output Replicate (vs Shard(1)/SP): the vision scatter needs the
+    # Embedding output Replicate (vs Shard(0)/SP): the vision scatter needs the
     # full sequence. Vocab-parallel Embedding.forward runs a manual local masked
     # lookup on a Shard(0) weight and emits a Partial sum; local_map localizes the
     # Replicate DTensor input so the manual path sees a plain tensor (otherwise it
@@ -163,9 +166,9 @@ def _set_multimodal_sharding(
     # set_decoder_sharding_config.
     emb_cfg.embedding.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": replicate},
-        in_dst_shardings={"input": replicate},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        in_src_shardings={"input": token_id_placement()},
+        in_dst_shardings={"input": token_id_placement()},
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=replicate,
         local_map=LocalMapConfig(in_grad_placements=None),
     )
@@ -199,14 +202,12 @@ def _set_multimodal_sharding(
             out_src_shardings=vision_tp_replicate,
         )
 
-    # First-layer SP bridge: tok_embeddings now emits Replicate activations (the
-    # vision scatter needs the full sequence), but the decoder blocks run
-    # sequence-parallel (Shard(1)). Give the first block a block-level sharding
-    # config that redistributes its Replicate input to SP at the block boundary,
-    # so the block internals (and the residual around attention) are uniformly SP.
-    # Every later block already receives SP from the previous block's SP output.
-    # Only needed under SP -- without SP the whole decoder uses Replicate
-    # activations. Mirrors qwen3_5's per-layer x_BLD redistribution.
+    # First-layer SP bridge: tok_embeddings now emits Replicate activations, but the
+    # rest of the decoder expects sequence-parallel activations (Shard(0)). Re-shard
+    # the first layer to take a Replicate input; its rowwise ``wo`` (output_sp)
+    # reduce-scatters back to Shard(0), restoring SP activations for every later layer.
+    # Only needed under SP -- without SP the whole decoder already uses Replicate
+    # activations. Mirrors qwen3_5's first-layer Replicate input layout.
     if enable_sp and config.layers:
         config.layers[0].sharding_config = ShardingConfig(
             in_src_shardings={"x": replicate},
@@ -229,7 +230,7 @@ def _set_muse_glimmer_layer_sharding(
     sp_activation = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     # All four norms operate on the sequence-parallel activation.
     layer_cfg.attention_norm.sharding_config = ShardingConfig(
@@ -247,10 +248,10 @@ def _set_muse_glimmer_layer_sharding(
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(attention.inner_attention)
 
-    # QK norms: shard on head dim (dim=2), independent of SP. Scaleless, so no
+    # QK norms: shard on head dim (dim=1), independent of SP. Scaleless, so no
     # weight state to distribute.
     if attention.qk_norm is not None:
-        head_shard = dense_activation_placement(tp=spmd.S(2))
+        head_shard = attention_activation_placement()
         attention.qk_norm.sharding_config = ShardingConfig(
             in_src_shardings={"input": head_shard},
             in_dst_shardings={"input": head_shard},
@@ -313,6 +314,23 @@ def set_muse_glimmer_vision_sharding_config(
     set_vision_transformer_block_sharding_config(
         encoder_cfg.block,
         rope_cache_dp=spmd.V,
+    )
+
+    vision_invariant = SpmdLayout({DP: spmd.V, TP: spmd.I})
+    pos_param_invariant = SpmdLayout({DP: spmd.R, TP: spmd.I})
+    encoder_cfg.pos_embed.sharding_config = ShardingConfig(
+        in_src_shardings={"pos_param": pos_param_invariant},
+        in_dst_shardings={"pos_param": pos_param_invariant},
+        out_src_shardings=vision_invariant,
+        local_map=LocalMapConfig(in_grad_placements=(pos_param_invariant,)),
+    )
+    encoder_cfg.token_permute.sharding_config = ShardingConfig(
+        in_src_shardings={"x": vision_invariant, "index": vision_invariant},
+        in_dst_shardings={"x": vision_invariant, "index": vision_invariant},
+        out_src_shardings=vision_invariant,
+        local_map=LocalMapConfig(
+            in_grad_placements=(vision_invariant, vision_invariant)
+        ),
     )
 
     if adapter_cfg is not None:

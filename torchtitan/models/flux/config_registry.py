@@ -6,7 +6,7 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.metrics import MetricsProcessor
@@ -75,8 +75,8 @@ def flux_debugmodel() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=4,
-            seq_len=_flux_seq_len(img_size, max_t5_encoding_len),
+            num_tokens_per_microbatch_per_dp_rank=2048,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             max_norm=2.0,
             steps=10,
             disable_cuda_graphs=True,
@@ -145,8 +145,8 @@ def flux_dev() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=32,
-            seq_len=_flux_seq_len(img_size, max_t5_encoding_len),
+            num_tokens_per_microbatch_per_dp_rank=24576,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
             disable_cuda_graphs=True,
         ),
@@ -202,8 +202,8 @@ def flux_schnell() -> FluxTrainer.Config:
             decay_ratio=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=64,
-            seq_len=_flux_seq_len(img_size, max_t5_encoding_len),
+            num_tokens_per_microbatch_per_dp_rank=32768,
+            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
             disable_cuda_graphs=True,
         ),

@@ -125,9 +125,11 @@ class GptOssGroupedExperts(GroupedExperts):
             mlp2_weight_EDF = self.mlp2_weight_EDF
             mlp2_bias_ED = self.mlp2_bias_ED
 
-        # Determine tp_degree from device mesh if available
+        # Determine tp_degree from the active backend's device mesh.
         tp_degree = 1
-        if isinstance(self.mlp1_weight_EGD, DTensor):
+        if get_spmd_backend() == "spmd_types":
+            tp_degree = spmd_mesh_size("tp")
+        elif isinstance(self.mlp1_weight_EGD, DTensor):
             mesh_dim_names = self.mlp1_weight_EGD.device_mesh.mesh_dim_names
             # pyrefly: ignore[not-iterable]
             if "tp" in mesh_dim_names:
