@@ -19,6 +19,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.moe import get_expert_parameter_owner
 from torchtitan.tools.logging import logger
 
 if TYPE_CHECKING:
@@ -273,11 +274,11 @@ def apply_fsdp_to_decoder(
         # Dense blocks (no ``moe_enabled``) fall through to a plain fully_shard.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
-            # Expert weights live on the grouped-GEMM child (inner_experts).
             # pyrefly: ignore [missing-attribute]
-            experts = transformer_block.moe.routed_experts.inner_experts
+            routed_experts = transformer_block.moe.routed_experts
+            experts = get_expert_parameter_owner(routed_experts)
             expert_params = set(experts.parameters())
-            num_experts = experts.num_experts
+            num_experts = routed_experts.num_experts
 
             if ep_degree > 1:
                 assert edp_mesh is not None

@@ -142,6 +142,14 @@ def _common_setup(config):
         ac_config=config.activation_checkpoint,
         dump_folder=config.dump_folder,
     )
+    post_parallelize_fn = getattr(model_spec, "post_parallelize_fn", None)
+    if post_parallelize_fn is not None:
+        post_parallelize_fn(
+            config=config,
+            model_parts=[model],
+            parallel_dims=parallel_dims,
+            device=device,
+        )
 
     # CooR must be disabled during init_weights because DTensor RNG ops
     # (weight initialization seeding) raise NotImplementedError under
@@ -184,6 +192,30 @@ def _prepare_loss_for_precompile(model, loss_fn) -> None:
     model._skip_lm_head = True
 
 
+def _decoder_trace_kwargs(
+    model,
+    model_config: Decoder.Config,
+    *,
+    num_tokens: int,
+    max_context_length: int,
+    device: torch.device,
+) -> dict[str, Any]:
+    attention = model_config.first_attention
+    if attention is None:
+        return {}
+
+    positions = torch.arange(num_tokens, dtype=torch.int32, device=device)
+    positions %= max_context_length
+    extra_kwargs: dict[str, Any] = {"positions": positions}
+    if isinstance(
+        attention.inner_attention, (FlexAttention.Config, VarlenAttention.Config)
+    ):
+        extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
+            positions=positions,
+        )
+    return extra_kwargs
+
+
 def _precompile_aot_fx_trace(
     config,
     model,
@@ -223,22 +255,17 @@ def _precompile_aot_fx_trace(
         * parallel_dims.cp
     )
     dummy_global_valid_tokens = float(global_num_tokens)
-    extra_kwargs: dict[str, Any] = {}
-
-    if isinstance(model_config, Decoder.Config) and model_config.layers:
-        attn_config = model_config.layers[0].attention
-        inner_attention = attn_config.inner_attention
-
-        positions = (
-            torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
-            % config.training.max_context_length
+    extra_kwargs = (
+        _decoder_trace_kwargs(
+            model,
+            model_config,
+            num_tokens=num_tokens,
+            max_context_length=config.training.max_context_length,
+            device=dummy_inputs.device,
         )
-        extra_kwargs["positions"] = positions
-
-        if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
-            extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
-                positions=positions,
-            )
+        if isinstance(model_config, Decoder.Config)
+        else {}
+    )
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
@@ -351,18 +378,22 @@ def main():
     ) = _common_setup(config)
     validate_memory_policy_config(compile_config)
 
-    _precompile_aot_fx_trace(
-        config,
-        model,
-        model_config,
-        model_spec,
-        compile_config,
-        parallel_dims,
-        device,
-        tokenizer,
-    )
-
-    dist.destroy_process_group()
+    try:
+        _precompile_aot_fx_trace(
+            config,
+            model,
+            model_config,
+            model_spec,
+            compile_config,
+            parallel_dims,
+            device,
+            tokenizer,
+        )
+    finally:
+        cleanup_fn = getattr(model_spec, "cleanup_fn", None)
+        if cleanup_fn is not None:
+            cleanup_fn()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -47,6 +47,9 @@ dev = [
 remat = [
     "torch_remat>=0.2.0",
 ]
+dist-moe = [
+    "dist-moe>=0.1.0",
+]
 
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}

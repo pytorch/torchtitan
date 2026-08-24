@@ -24,6 +24,7 @@ import torch
 import torch.fx as fx
 from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
+    _recompute_changed_user_metadata,
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
     is_wait_tensor,
@@ -47,8 +48,12 @@ from torch.utils._ordered_set import OrderedSet
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
+    matches_module_fqn_pattern,
 )
-from torchtitan.experiments.graph_trainer.fsdp_patterns import find_fsdp_unshard_outputs
+from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_unshard_outputs,
+    is_fsdp_all_gather_output_split,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -810,6 +815,130 @@ def _read_fsdp_bucket_meta(node: fx.Node) -> tuple[tuple[str, ...], str] | None:
     if not isinstance(plan_fqns, tuple) or direction not in {"fwd", "bwd"}:
         return None
     return plan_fqns, direction
+
+
+_FSDP_PARAMETER_RECONSTRUCTION_OPS = {
+    operator.getitem,
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten._unsafe_view.default,
+    torch.ops.aten.alias.default,
+    torch.ops.aten.clone.default,
+    torch.ops.aten.detach.default,
+    torch.ops.aten.reshape.default,
+    torch.ops.aten.slice.Tensor,
+    torch.ops.aten.view.default,
+    torch.ops.aten.view.dtype,
+}
+
+
+def _bucket_outputs_are_compact_at_use(split_outputs: list[fx.Node]) -> bool:
+    saw_terminal_use = False
+    work = list(split_outputs)
+    visited: set[fx.Node] = set()
+    while work:
+        node = work.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+
+        reconstruction_users = []
+        has_terminal_use = False
+        for user in node.users:
+            if (
+                user.op == "call_function"
+                and user.target in _FSDP_PARAMETER_RECONSTRUCTION_OPS
+            ):
+                reconstruction_users.append(user)
+            else:
+                has_terminal_use = True
+
+        if has_terminal_use:
+            saw_terminal_use = True
+            value = node.meta.get("val")
+            if not isinstance(value, torch.Tensor):
+                raise RuntimeError(
+                    f"FSDP parameter reconstruction node {node.name} is "
+                    "missing tensor metadata"
+                )
+            if not value.is_contiguous():
+                return False
+        work.extend(reconstruction_users)
+
+    if not saw_terminal_use:
+        names = ", ".join(output.name for output in split_outputs)
+        raise RuntimeError(f"FSDP bucket outputs have no terminal use: {names}")
+    return True
+
+
+def materialize_fsdp_bucket_outputs_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    module_fqn_patterns: tuple[str, ...],
+) -> torch.fx.GraphModule:
+    """Materialize selected non-compact FSDP all-gather bucket outputs."""
+    del example_inputs
+    if not module_fqn_patterns:
+        return gm
+
+    num_materialized = 0
+    for node in gm.graph.nodes:
+        if node.target not in {
+            torch.ops.aten.split_with_sizes.default,
+            torch.ops.aten.split_with_sizes_copy.default,
+        }:
+            continue
+        bucket_meta = _read_fsdp_bucket_meta(node)
+        if bucket_meta is None:
+            continue
+        plan_fqns, _direction = bucket_meta
+        if not any(
+            matches_module_fqn_pattern(pattern, fqn)
+            for pattern in module_fqn_patterns
+            for fqn in plan_fqns
+        ):
+            continue
+        if not is_fsdp_all_gather_output_split(node):
+            continue
+
+        split_outputs = [
+            user
+            for user in node.users
+            if user.op == "call_function" and user.target == operator.getitem
+        ]
+        if len(split_outputs) != len(node.users):
+            raise RuntimeError(f"Selected FSDP split {node.name} has non-getitem users")
+        output_values = [output.meta.get("val") for output in split_outputs]
+        if not output_values or not all(
+            isinstance(value, torch.Tensor) for value in output_values
+        ):
+            raise RuntimeError(
+                f"Selected FSDP split {node.name} is missing tensor metadata"
+            )
+        if _bucket_outputs_are_compact_at_use(split_outputs):
+            continue
+        if node.target == torch.ops.aten.split_with_sizes_copy.default:
+            raise RuntimeError(
+                f"Copy split {node.name} still has non-compact output metadata"
+            )
+
+        node.target = torch.ops.aten.split_with_sizes_copy.default
+        _recompute_changed_user_metadata([node])
+        if not _bucket_outputs_are_compact_at_use(split_outputs):
+            raise RuntimeError(
+                f"Materialized FSDP split {node.name} still reaches a "
+                "non-compact parameter use"
+            )
+        num_materialized += 1
+
+    if num_materialized:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(
+            "Materialized %d compact FSDP all-gather bucket split(s)",
+            num_materialized,
+        )
+    return gm
 
 
 def _collect_bucketed_fsdp_comms(

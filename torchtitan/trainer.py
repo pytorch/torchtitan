@@ -52,9 +52,9 @@ from torchtitan.distributed.cudagraph import (
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
-    LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
@@ -178,9 +178,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
                 return
 
-            for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
-                LocalTokenDispatcher.Config
+            for _, experts_config, _, _ in self.model_spec.model.traverse(
+                RoutedExperts.Config
             ):
+                if experts_config.supports_cuda_graphs:
+                    continue
+                dispatcher_config = experts_config.token_dispatcher
                 if isinstance(
                     dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
                 ) or (
@@ -458,6 +461,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # model_parts is used instead
                 del model
 
+                post_parallelize_fn = getattr(
+                    model_spec, "post_parallelize_fn", None
+                )
+                if post_parallelize_fn is not None:
+                    post_parallelize_fn(
+                        config=config,
+                        model_parts=self.model_parts,
+                        parallel_dims=parallel_dims,
+                        device=self.device,
+                    )
+
                 for m in self.model_parts:
                     m.to_empty(device=init_device)
                     with torch.no_grad():
@@ -486,14 +500,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
+                self.model_parts = [model]
+                post_parallelize_fn = getattr(
+                    model_spec, "post_parallelize_fn", None
+                )
+                if post_parallelize_fn is not None:
+                    post_parallelize_fn(
+                        config=config,
+                        model_parts=self.model_parts,
+                        parallel_dims=parallel_dims,
+                        device=self.device,
+                    )
                 model.to_empty(device=init_device)
                 with torch.no_grad():
                     # TODO: Change this back to init_weights once
                     # autoparallel contains the wrap_init_states
                     cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
-
-                self.model_parts = [model]
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
@@ -1089,3 +1112,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
+        model_spec = self.config.model_spec
+        cleanup_fn = (
+            getattr(model_spec, "cleanup_fn", None) if model_spec is not None else None
+        )
+        if cleanup_fn is not None:
+            cleanup_fn()

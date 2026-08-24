@@ -19,7 +19,6 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
-from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
@@ -233,7 +232,9 @@ class CUDAGraphWrapper:
         handling is needed beyond accepting them here.
         """
         for i, inp in enumerate(inputs):
-            if isinstance(inp, (torch.Tensor, int, float, torch._C.Generator)):
+            if inp is None or isinstance(
+                inp, (torch.Tensor, int, float, torch._C.Generator)
+            ):
                 continue
             if is_opaque_value(inp):
                 continue
@@ -257,14 +258,11 @@ class CUDAGraphWrapper:
     def __call__(self, *args):
         if not self._has_warmup:
             self._has_warmup = True
-            device = torch.cuda.current_device()
-
-            # warmup in cudagraph memory pool to avoid fragmentation
-            # across eager memory pool and cudagraph memory pool.
-            with _use_cuda_memory_pool_manager(
-                device, _cg_manager.graph_pool, _cg_manager.stream
-            ):
+            current_stream = torch.cuda.current_stream()
+            _cg_manager.stream.wait_stream(current_stream)
+            with torch.cuda.stream(_cg_manager.stream):
                 out = self._runnable(*args)
+            current_stream.wait_stream(_cg_manager.stream)
             return out
 
         if self._cudagraph is None:
@@ -281,6 +279,7 @@ class CUDAGraphWrapper:
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
                 enable_annotations=_cg_manager.enable_annotations,
+                capture_error_mode="thread_local",
             ):
                 # `output` is managed by pytorch's cudagraph pool
                 self._output = self._runnable(*args)
@@ -555,6 +554,7 @@ def cudagraph_pass(
     is_forward: bool = True,
     static_input_indices: list[int] | None = None,
     tensor_input_indices: list[int] | None = None,
+    require: bool = False,
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -588,6 +588,11 @@ def cudagraph_pass(
         )
 
     if not is_cudagraph_compatible(gm):
+        if require:
+            raise RuntimeError(
+                "CUDA graph capture was required, but the full train-step "
+                "graph contains an incompatible operation"
+            )
         logger.warning(
             "Skipping cudagraph: graph is not compatible after all preceding "
             "passes. Use --compile.disable_passes cudagraph_pass to silence."

@@ -79,6 +79,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
     deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
+    materialize_fsdp_bucket_outputs_pass,
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
@@ -156,6 +157,34 @@ class TestDefaultTransformerBlockBuckets(TestCase):
         )
 
 
+class TestMutatedStorageMemoryPolicy(TestCase):
+    def test_mutated_storage_root_is_saved(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        padded = graph.call_function(
+            torch.ops.aten.zeros.default,
+            args=([4],),
+            kwargs={"dtype": torch.float32, "device": torch.device("cpu")},
+        )
+        prefix = graph.call_function(
+            torch.ops.aten.slice.Tensor,
+            args=(padded, 0, 0, 3),
+        )
+        graph.call_function(torch.ops.aten.copy_.default, args=(prefix, x))
+        view = graph.call_function(torch.ops.aten.view.default, args=(padded, [2, 2]))
+        backward = graph.call_function(torch.ops.aten.clone.default, args=(view,))
+        backward.meta["autograd_backward"] = True
+        graph.output(backward)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        expected = gm(torch.tensor([1.0, 2.0, 3.0]))
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+
+        self.assertEqual(padded.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        selective_activation_remat_pass(gm)
+        self.assertEqual(gm(torch.tensor([1.0, 2.0, 3.0])), expected)
+
+
 class TestFSDPUnshardDedupPass(TestCase):
     def _duplicate_unshard_graph(self) -> torch.fx.GraphModule:
         graph = torch.fx.Graph()
@@ -215,6 +244,69 @@ class TestFSDPUnshardDedupPass(TestCase):
             1,
         )
         gm.graph.lint()
+
+
+class TestMaterializeFSDPBucketOutputsPass(TestCase):
+    def _make_bucketed_all_gather(self, fqns: tuple[str, ...]):
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        all_gather = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(param, 2, "fsdp_pg"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather,),
+        )
+        reshaped = graph.call_function(
+            torch.ops.aten.reshape.default,
+            args=(wait, [2, 6]),
+        )
+        split = graph.call_function(
+            torch.ops.aten.split_with_sizes.default,
+            args=(reshaped, [4, 2], 1),
+        )
+        left = graph.call_function(operator.getitem, args=(split, 0))
+        right = graph.call_function(operator.getitem, args=(split, 1))
+        graph.output((left, right))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        gathered = torch.empty(2, 6)
+        split_values = gathered.split([4, 2], dim=1)
+        param.meta["val"] = torch.empty(6)
+        all_gather.meta["val"] = gathered
+        wait.meta["val"] = gathered
+        reshaped.meta["val"] = gathered
+        split.meta["val"] = split_values
+        split.meta[_FSDP_BUCKET_META] = {
+            "plan_fqns": fqns,
+            "direction": "fwd",
+        }
+        left.meta["val"], right.meta["val"] = split_values
+        return gm, split, (left, right)
+
+    def test_materializes_selected_noncompact_all_gather_split(self):
+        gm, split, outputs = self._make_bucketed_all_gather(
+            ("layers.0.attention", "layers.0.moe.routed_experts")
+        )
+
+        materialize_fsdp_bucket_outputs_pass(
+            gm,
+            module_fqn_patterns=("layers.*.moe.routed_experts",),
+        )
+
+        self.assertIs(split.target, torch.ops.aten.split_with_sizes_copy.default)
+        self.assertTrue(all(output.meta["val"].is_contiguous() for output in outputs))
+
+    def test_preserves_unmatched_bucket(self):
+        gm, split, _outputs = self._make_bucketed_all_gather(("layers.0",))
+
+        materialize_fsdp_bucket_outputs_pass(
+            gm,
+            module_fqn_patterns=("layers.*.moe.routed_experts",),
+        )
+
+        self.assertIs(split.target, torch.ops.aten.split_with_sizes.default)
 
 
 class ToyModel(Module):
@@ -3524,6 +3616,58 @@ class TestChunkPasses(TestCase):
         self.assertLess(
             names.index("concretize_ep_chunk_symbolic_shapes_pass"),
             names.index("full_inductor_compilation_pass"),
+        )
+
+    def test_coda_pass_pipeline_gating_and_order(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.enable_coda = True
+        config.compile.coda_patterns = ["B_linear_dw_bf16_to_fp32"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--compile.enable_coda requires --compile.numerics_changing_optim",
+        ):
+            self._compile_pass_names(traced_result, config)
+
+        config.compile.numerics_changing_optim = True
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("full_inductor_compilation_pass"),
+        )
+
+        config.compile.inductor_compilation = "regional"
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("concretize_ep_chunk_symbolic_shapes_pass"),
+            names.index("B_linear_dw_bf16_to_fp32"),
+        )
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("regional_inductor_pass"),
+        )
+
+    def test_deepseek_v3_16b_coda_parallelism(self):
+        from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+            graph_trainer_deepseek_v3_16b_coda,
+        )
+
+        config = graph_trainer_deepseek_v3_16b_coda()
+        self.assertEqual(config.parallelism.data_parallel_shard_degree, 2)
+        self.assertEqual(config.parallelism.expert_parallel_degree, 2)
+        self.assertEqual(
+            config.model_spec.model.layers[0].attention.inner_attention.kernel_options,
+            {"BACKEND": "FLASH"},
+        )
+        self.assertEqual(
+            type(
+                config.model_spec.model.layers[1].moe.routed_experts.token_dispatcher
+            ).__qualname__,
+            "MinimalAsyncEPTokenDispatcher.Config",
+        )
+        self.assertIn(
+            "torchtitan.overrides.helion_rope.helion_complex_rope",
+            config.override.imports,
         )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):

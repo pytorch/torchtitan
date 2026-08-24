@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
+from torch._higher_order_ops.effects import has_effects
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
@@ -198,6 +199,89 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def _node_argument(
+    node: torch.fx.Node,
+    index: int,
+    name: str,
+) -> object | None:
+    if index < len(node.args):
+        return node.args[index]
+    return node.kwargs.get(name)
+
+
+def _aliasing_inputs(node: torch.fx.Node) -> set[torch.fx.Node]:
+    source = node
+    output_index = 0
+    if node.target is operator.getitem:
+        parent, index = node.args[:2]
+        if not isinstance(parent, torch.fx.Node) or not isinstance(index, int):
+            return set()
+        source = parent
+        output_index = index
+
+    schema = getattr(source.target, "_schema", None)
+    if schema is None or output_index >= len(schema.returns):
+        return set()
+    output_alias = schema.returns[output_index].alias_info
+    if output_alias is None:
+        return set()
+    output_aliases = output_alias.before_set | output_alias.after_set
+
+    inputs = set()
+    for index, argument in enumerate(schema.arguments):
+        input_alias = argument.alias_info
+        if input_alias is None:
+            continue
+        input_aliases = input_alias.before_set | input_alias.after_set
+        value = _node_argument(source, index, argument.name)
+        if output_aliases & input_aliases and isinstance(value, torch.fx.Node):
+            inputs.add(value)
+    return inputs
+
+
+def _storage_roots(node: torch.fx.Node) -> set[torch.fx.Node]:
+    roots: set[torch.fx.Node] = set()
+    pending = [node]
+    seen: set[torch.fx.Node] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        aliased_inputs = _aliasing_inputs(current)
+        if aliased_inputs:
+            pending.extend(aliased_inputs)
+        else:
+            roots.add(current)
+    return roots
+
+
+def _force_save_mutated_storage_roots(gm: torch.fx.GraphModule) -> int:
+    roots: set[torch.fx.Node] = set()
+    for node in gm.graph.nodes:
+        if node.op != "call_function" or _is_backward_node(node):
+            continue
+        schema = getattr(node.target, "_schema", None)
+        if schema is None or not schema.is_mutable:
+            continue
+        for index, argument in enumerate(schema.arguments):
+            if argument.alias_info is None or not argument.alias_info.is_write:
+                continue
+            value = _node_argument(node, index, argument.name)
+            if isinstance(value, torch.fx.Node):
+                roots.update(_storage_roots(value))
+
+    num_forced = 0
+    for root in roots:
+        if root.meta.get("recompute") in (
+            CheckpointPolicy.PREFER_RECOMPUTE,
+            CheckpointPolicy.MUST_RECOMPUTE,
+        ):
+            root.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            num_forced += 1
+    return num_forced
+
+
 def tag_sac_policy(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -255,6 +339,10 @@ def tag_sac_policy(
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
+        if has_effects(node.target):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            continue
+
         if node.target in (
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
@@ -280,6 +368,8 @@ def tag_sac_policy(
         # mm ops between MUST_SAVE and PREFER_RECOMPUTE. We omit that here
         # because the alternating heuristic is arbitrary.
         node.meta["recompute"] = policy_fn(node)
+
+    mutated_storage_saves = _force_save_mutated_storage_roots(gm)
 
     # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
     # feeds into a node in a higher layer, saving it is cheaper than
@@ -328,6 +418,10 @@ def tag_sac_policy(
         layer_stats[_get_layer_id(node)][key] += 1
 
     logger.info("Applied selective activation checkpointing (SAC) graph pass.")
+    if mutated_storage_saves:
+        logger.info(
+            f"  Forced {mutated_storage_saves} mutated storage roots to MUST_SAVE"
+        )
     if boundary_saves:
         logger.info(f"  Forced {boundary_saves} nodes to MUST_SAVE at layer boundaries")
     for layer_id in sorted(layer_stats):
