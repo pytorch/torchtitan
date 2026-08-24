@@ -19,7 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_kda_sharding,
 )
-from torchtitan.models.common.kda import KDA, InnerKDA, KDABackend, KDAKernel
+from torchtitan.models.kimi_k3.kda import KDA, InnerKDA, KDABackend, KDAKernel
 
 _HAS_BLACKWELL = (
     importlib.util.find_spec("attn_gym") is not None
@@ -143,15 +143,15 @@ class TestKDA(unittest.TestCase):
         torch.manual_seed(seed)
         return torch.randn(tokens, 32, device="cuda", dtype=torch.bfloat16)
 
-    def test_fused_and_reference_backends_agree(self):
-        fused = self._make_kda(backend=KDABackend.ATTN_GYM)
-        reference = self._make_kda(backend=KDABackend.NAIVE)
-        reference.load_state_dict(fused.state_dict())
+    def test_attention_gym_and_naive_backends_agree(self):
+        attention_gym = self._make_kda(backend=KDABackend.ATTN_GYM)
+        naive = self._make_kda(backend=KDABackend.NAIVE)
+        naive.load_state_dict(attention_gym.state_dict())
 
-        x_fused_TD = self._inputs(seed=0).requires_grad_()
-        x_reference_TD = x_fused_TD.detach().clone().requires_grad_()
-        actual_TD = fused(x_fused_TD)
-        expected_TD = reference(x_reference_TD)
+        x_attention_gym_TD = self._inputs(seed=0).requires_grad_()
+        x_naive_TD = x_attention_gym_TD.detach().clone().requires_grad_()
+        actual_TD = attention_gym(x_attention_gym_TD)
+        expected_TD = naive(x_naive_TD)
         torch.testing.assert_close(
             actual_TD.float(), expected_TD.float(), rtol=2e-2, atol=2e-2
         )
@@ -159,12 +159,12 @@ class TestKDA(unittest.TestCase):
         output_grad_TD = torch.randn_like(actual_TD)
         actual_grads = torch.autograd.grad(
             actual_TD,
-            (x_fused_TD, *fused.parameters()),
+            (x_attention_gym_TD, *attention_gym.parameters()),
             grad_outputs=output_grad_TD,
         )
         expected_grads = torch.autograd.grad(
             expected_TD,
-            (x_reference_TD, *reference.parameters()),
+            (x_naive_TD, *naive.parameters()),
             grad_outputs=output_grad_TD,
         )
         for actual_grad, expected_grad in zip(
@@ -180,14 +180,14 @@ class TestKDA(unittest.TestCase):
             )
 
     @unittest.skipUnless(_HAS_FLA, "FLA is required for fallback parity")
-    def test_fused_and_fla_backends_agree(self):
-        fused = self._make_kda(backend=KDABackend.ATTN_GYM)
+    def test_attention_gym_and_fla_backends_agree(self):
+        attention_gym = self._make_kda(backend=KDABackend.ATTN_GYM)
         fla = self._make_kda(backend=KDABackend.FLA)
-        fla.load_state_dict(fused.state_dict())
+        fla.load_state_dict(attention_gym.state_dict())
 
-        x_fused_TD = self._inputs(seed=4).requires_grad_()
-        x_fla_TD = x_fused_TD.detach().clone().requires_grad_()
-        actual_TD = fused(x_fused_TD)
+        x_attention_gym_TD = self._inputs(seed=4).requires_grad_()
+        x_fla_TD = x_attention_gym_TD.detach().clone().requires_grad_()
+        actual_TD = attention_gym(x_attention_gym_TD)
         expected_TD = fla(x_fla_TD)
         torch.testing.assert_close(
             actual_TD.float(), expected_TD.float(), rtol=2e-2, atol=2e-2
@@ -196,7 +196,7 @@ class TestKDA(unittest.TestCase):
         output_grad_TD = torch.randn_like(actual_TD)
         actual_grads = torch.autograd.grad(
             actual_TD,
-            (x_fused_TD, *fused.parameters()),
+            (x_attention_gym_TD, *attention_gym.parameters()),
             grad_outputs=output_grad_TD,
         )
         expected_grads = torch.autograd.grad(

@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
-from torchtitan.components.data import TextCollator
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
+
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -270,13 +271,8 @@ class KimiK3Model(Decoder):
             dataset = config.dataloader.dataset
             # TODO: Support sample packing by resetting the Q/K/V causal-convolution
             # and KDA recurrent states at document boundaries.
-            if not isinstance(config.dataloader.collator, TextCollator.Config):
-                from torchtitan.hf_datasets.multimodal.mm_datasets import (
-                    MMSamplePackingConfig,
-                )
-
-                if isinstance(dataset, MMSamplePackingConfig):
-                    raise ValueError("Kimi K3 does not yet support sample packing.")
+            if isinstance(dataset, MMSamplePackingConfig):
+                raise ValueError("Kimi K3 does not yet support sample packing.")
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(
