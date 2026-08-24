@@ -33,10 +33,11 @@ GPUs. Scheduled and post-merge runs execute the complete suite with Real PG.
 - 1 GPU Fake PG cadence: pull requests on open, update, reopen, or
   ready-for-review. Reusable workflow callers run Fake PG by default.
 - 8 GPU Real PG cadence: every pull request event above runs tests marked
-  `use_real_pg=True`. Pushes and merges to `main`, six-hour schedules, and
-  manual dispatches run the complete suite with Real PG. Reusable workflow
-  callers can explicitly request `execution_mode: real_pg`, as the ROCm
-  workflow does.
+  `use_real_pg=True`. Adding the `ciflow/8gpu` pull request label creates a
+  `ciflow/8gpu/*` tag and runs the complete suite with Real PG. Pushes and
+  merges to `main`, six-hour schedules, and manual dispatches also run the
+  complete suite with Real PG. Reusable workflow callers can explicitly
+  request `execution_mode: real_pg`, as the ROCm workflow does.
 - 8 GPU H100 cadence: opt-in pull requests carrying the `ciflow/h100.8` label.
   The lane always uses Real PG; updates and reopened events rerun it while the
   label remains attached.
@@ -57,8 +58,9 @@ case through `loss_compare.py`. Fake-PG execution skips seed-checkpoint creation
 and uses its fixed initialization path.
 
 - A10G cases run on one physical GPU with Fake PG for pull requests and eight
-  physical A10Gs with Real PG after merge or on schedule. Their golden paths can
-  use `{execution_mode}` to select the `fake_pg/` or `real_pg/` directory.
+  physical A10Gs with Real PG after merge, on schedule, or when triggered by
+  the `ciflow/8gpu` label. Their golden paths can use `{execution_mode}` to
+  select the `fake_pg/` or `real_pg/` directory.
   Fake-PG numerical cases may select a separate FSDP-only or FSDP+EP config to
   avoid treating sequence-parallel synthetic values as a numerical oracle.
 - Fake-PG goldens guard PyTorch FakeProcessGroup's deterministic synthetic
