@@ -10,23 +10,37 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from attn_gym.linear.kda import bounded_gate_cumsum, causal_conv1d, chunk_kda, l2norm
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import Conv1d, RMSNorm
+from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
 
-try:
-    import attn_gym.linear.kda as _attn_gym_kda
-except ImportError:
-    _attn_gym_kda = None
 
+class KimiRMSNormGated(Module):
+    """Per-head RMSNorm followed by a sigmoid output gate."""
 
-def _require_attention_gym():
-    if _attn_gym_kda is None:
-        raise ImportError("KDA requires Attention Gym: pip install 'attn-gym[linear]'")
-    return _attn_gym_kda
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        eps: float = 1e-5
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.eps = config.eps
+        self.weight = nn.Parameter(torch.empty(config.dim))
+
+    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        input_dtype = x.dtype
+        normalized = F.rms_norm(
+            x.float(),
+            (x.shape[-1],),
+            self.weight.float(),
+            self.eps,
+        )
+        return (normalized * gate.float().sigmoid()).to(input_dtype)
 
 
 class KDAKernel(Module):
@@ -46,6 +60,13 @@ class KDAKernel(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.lower_bound = config.lower_bound
+        if torch.cuda.is_available():
+            capability = torch.cuda.get_device_capability()
+            if capability not in {(10, 0), (10, 3)}:
+                raise RuntimeError(
+                    "Attention Gym KDA requires Blackwell SM100/SM103; "
+                    f"got CUDA capability {capability}."
+                )
 
     def forward(
         self,
@@ -59,27 +80,14 @@ class KDAKernel(Module):
         *,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        attention_gym_kda = _require_attention_gym()
-        capability = (
-            torch.cuda.get_device_capability(q_BLNK.device) if q_BLNK.is_cuda else None
-        )
-        if (
-            not q_BLNK.is_cuda
-            or q_BLNK.shape[-1] != 128
-            or capability not in {(10, 0), (10, 3)}
-        ):
-            raise RuntimeError(
-                "Attention Gym KDA requires a CUDA tensor with head_dim=128 on "
-                "Blackwell SM100/SM103; got "
-                f"device={q_BLNK.device}, shape={tuple(q_BLNK.shape)}, "
-                f"capability={capability}."
-            )
+        if not q_BLNK.is_cuda:
+            raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
 
-        output_BLNK, _ = attention_gym_kda.chunk_kda(
-            attention_gym_kda.l2norm(q_BLNK),
-            attention_gym_kda.l2norm(k_BLNK),
+        output_BLNK, _ = chunk_kda(
+            l2norm(q_BLNK),
+            l2norm(k_BLNK),
             v_BLNK,
-            attention_gym_kda.bounded_gate_cumsum(
+            bounded_gate_cumsum(
                 raw_gate_BLNK.to(torch.bfloat16),
                 A_log_N.float(),
                 dt_bias_NK.float(),
@@ -124,9 +132,8 @@ class InnerKDA(Module):
         conv_v_weight_C1W: torch.Tensor,
         A_log_N: torch.Tensor,
         dt_bias_NK: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
-        kernel_cu_seqlens = cu_seqlens if cu_seqlens.numel() > 2 else None
         raw_gate_BLNK = raw_gate_TNK.unsqueeze(0)
         raw_beta_BLN = raw_beta_TN.unsqueeze(0)
         mixed_qkv_BTC = torch.cat(
@@ -137,11 +144,11 @@ class InnerKDA(Module):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
-        conv_output_BTC = _require_attention_gym().causal_conv1d(
+        conv_output_BTC = causal_conv1d(
             mixed_qkv_BTC,
             conv_weight_C1W[:, 0],
             activation="silu",
-            cu_seqlens=kernel_cu_seqlens,
+            cu_seqlens=cu_seqlens,
         )
 
         q_BTC, k_BTC, v_BTC = conv_output_BTC.chunk(3, dim=-1)
@@ -157,7 +164,7 @@ class InnerKDA(Module):
             raw_beta_BLN,
             A_log_N,
             dt_bias_NK,
-            cu_seqlens=kernel_cu_seqlens,
+            cu_seqlens=cu_seqlens,
         )
         return output_BTNK.squeeze(0)
 
@@ -181,14 +188,16 @@ class KDA(Module):
         beta: Linear.Config
         output_gate: Linear.Config
         inner_kda: Module.Config
-        output_norm: RMSNorm.Config
+        output_norm: KimiRMSNormGated.Config
         output_proj: Linear.Config
 
         def __post_init__(self):
             if self.num_heads < 1:
                 raise ValueError(f"num_heads must be positive, got {self.num_heads}")
-            if self.head_dim < 1:
-                raise ValueError(f"head_dim must be positive, got {self.head_dim}")
+            if self.head_dim != 128:
+                raise ValueError(
+                    "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
+                )
             if self.conv_kernel_size < 1:
                 raise ValueError(
                     f"conv_kernel_size must be positive, got {self.conv_kernel_size}"
@@ -229,11 +238,7 @@ class KDA(Module):
             )
 
         if attention_masks is None:
-            cu_seqlens = torch.tensor(
-                [0, x_TD.shape[0]],
-                dtype=torch.int32,
-                device=x_TD.device,
-            )
+            cu_seqlens = None
         elif isinstance(attention_masks, VarlenMetadata):
             cu_seqlens = attention_masks.cu_seq_q
         else:
@@ -260,16 +265,8 @@ class KDA(Module):
             cu_seqlens,
         )
 
-        out_float_TNK = F.rms_norm(
-            out_TNK.float(),
-            (self.head_dim,),
-            self.output_norm.weight.float(),
-            self.output_norm.eps,
-        )
-        output_gate_TNK = self.output_gate(x_TD).view_as(out_TNK).float()
-        return self.output_proj(
-            (out_float_TNK * output_gate_TNK.sigmoid()).to(out_TNK.dtype).flatten(-2)
-        )
+        output_gate_TNK = self.output_gate(x_TD).view_as(out_TNK)
+        return self.output_proj(self.output_norm(out_TNK, output_gate_TNK).flatten(-2))
 
 
 KimiDeltaAttention = KDA
