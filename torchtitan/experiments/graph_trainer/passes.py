@@ -461,11 +461,8 @@ def construct_ep_overlap_deferred_dw_graph_passes(
 ) -> list[Callable]:
     """Default pipeline with EP scheduling swapped for deferred-dW scheduling.
 
-    ``defer_param_grad_schedule_pass`` runs the baseline ep_overlap schedule
-    with backward dW-only work deferred into the backward all-to-all
-    launch -> wait windows (see ``defer_param_grad_pass``). Selected with
-    ``--compile.pass_pipeline ep_overlap_deferred_dw``; the schedule kwargs
-    bound by the default pipeline are reused unchanged.
+    ``defer_param_grad_schedule_pass`` reuses the schedule kwargs bound by the
+    default pipeline (see ``defer_param_grad_pass`` for the contract).
     """
     if not config.compile.ep_overlap.enabled:
         raise ValueError(

@@ -34,10 +34,8 @@ For each selected forward/backward region:
   before advancing to the next marker pair;
 * an optional deferred-compute set (dW-only work selected by
   ``defer_param_grad_pass``) is withheld from filler until every token-exchange
-  launch of its backward region has been emitted, then released between those
-  launches and their waits; deferred nodes without a legal
-  launch -> deferred -> wait placement keep baseline order with a debug
-  message rather than an error;
+  launch of its backward region has been emitted, then released before the
+  waits; nodes without a legal placement keep baseline order, never an error;
 * all graph nodes remain in the sorted graph exactly once and the final graph
   must lint.
 
@@ -622,12 +620,6 @@ def _deferrable_region_nodes(
             region.root_fqn,
             ", ".join(sorted(node.name for node in skipped)[:8]),
         )
-    if not deferrable:
-        logger.debug(
-            "ep_overlap fell back to the baseline schedule for %r (backward): "
-            "no deferred dW node has a legal launch->dW->wait placement.",
-            region.root_fqn,
-        )
     return deferrable
 
 
@@ -812,7 +804,6 @@ def _build_region_phases(
             include_waits=False,
         )
 
-    windowed_deferred = deferred & emitted
     remaining = {
         chunk_id: set(region.bodies_by_chunk[chunk_id].nodes) - emitted
         for chunk_id in chunk_order
@@ -831,14 +822,6 @@ def _build_region_phases(
                 owner_by_node=owner_by_node,
                 include_waits=True,
             )
-
-    if tail_deferred := deferred - windowed_deferred:
-        logger.debug(
-            "ep_overlap deferred dW node(s) for %r (backward) became ready "
-            "only after a token-exchange wait, so they gain no overlap: %s",
-            region.root_fqn,
-            ", ".join(sorted(node.name for node in tail_deferred)[:8]),
-        )
 
     missing = [
         node

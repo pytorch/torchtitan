@@ -8,10 +8,8 @@
 
 Contract
 ========
-This pass composes the reusable dI/dW classification from
-``backward_partition`` with the ``ep_overlap_pass`` scheduler. It consumes the
-same chunked-region metadata as ``ep_overlap_schedule_pass`` and adds one
-scheduling preference: backward weight-gradient work that provably feeds only
+Composes the dI/dW classification from ``backward_partition`` with the
+``ep_overlap_pass`` scheduler: backward weight-gradient work that provably feeds only
 parameter-gradient outputs is withheld until every backward token-exchange
 launch of its region is in flight, then emitted between those launches and
 their waits. Gradient reductions and other collectives are never part of the
@@ -37,8 +35,7 @@ therefore anchored per backward region:
 ``movable_nodes`` from ``partition_backward_nodes`` intersected with the
 backward chunk bodies is then exactly the weight-gradient-only work
 (grouped-mm wgrads plus their quantize/transpose plumbing) that may move into
-a launch -> wait window. Classification is pure dataflow, so BF16 and
-quantized backwards with the same dependency structure defer identically.
+a launch -> wait window.
 """
 
 from __future__ import annotations
