@@ -68,6 +68,7 @@ def cross_entropy_loss(
     )
 
 
+@spmd.register_autograd_function
 class _LossParallelCrossEntropy(torch.autograd.Function):
     """
     Vocab-parallel cross-entropy on plain (non-DTensor) local tensors.
@@ -85,22 +86,30 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
     """
 
     @staticmethod
-    def spmd_typecheck(
-        result: torch.Tensor,
-        *,
+    def typecheck_forward(
         logits: torch.Tensor,
         labels: torch.Tensor,
         tp_group: dist.ProcessGroup,
-    ) -> None:
+        global_vocab_size: int,
+        reduction: str = "sum",
+    ) -> torch.Tensor:
         """
         SPMD type: logits S(-1)@TP, labels I@TP -> loss I@TP.
         Non-TP axes are passed through from logits to the output.
         """
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(labels, {tp_group: spmd.I})
+        result = _LossParallelCrossEntropy.apply(
+            logits,
+            labels,
+            tp_group,
+            global_vocab_size,
+            reduction,
+        )
         output_type = dict(spmd.get_local_type(logits))
-        output_type[spmd.MeshAxis.of(tp_group)] = spmd.I
+        output_type[tp_group] = spmd.I
         spmd.assert_type(result, output_type)
+        return result
 
     @staticmethod
     # pyrefly: ignore [bad-override]
