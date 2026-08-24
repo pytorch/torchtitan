@@ -210,3 +210,29 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
 
     assert generated["img_height"] == 6
     assert generated["img_width"] == 10
+
+
+def test_generic_validator_raises_on_zero_validation_batches(monkeypatch):
+    loader = _ClosableLoader([])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    with pytest.raises(ValueError, match="zero batches"):
+        validator.validate([nn.Identity()], step=1)
+
+    assert loader.closed
+
+
+def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
+    row = (
+        {"input": torch.ones(1, 1)},
+        torch.full((1, 1), validate_module.IGNORE_INDEX, dtype=torch.long),
+    )
+    loader = _ClosableLoader([row])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    with pytest.raises(ValueError, match="zero valid tokens"):
+        validator.validate([nn.Identity()], step=1)
+
+    assert loader.closed
