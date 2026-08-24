@@ -11,6 +11,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort.data import (
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rollouter import (
     AlphabetSortRollouter,
+    AlphabetSortWorker,
 )
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
 
@@ -19,5 +20,6 @@ __all__ = [
     "AlphabetSortEnv",
     "AlphabetSortSample",
     "AlphabetSortRollouter",
+    "AlphabetSortWorker",
     "RewardAlphabetSort",
 ]
