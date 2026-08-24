@@ -3323,6 +3323,57 @@ class TestChunkPasses(TestCase):
             names.index("full_inductor_compilation_pass"),
         )
 
+    def test_coda_pass_pipeline_gating_and_order(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.coda_passes_enabled = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--compile.coda_passes_enabled requires "
+            "--compile.numerics_changing_optim",
+        ):
+            self._compile_pass_names(traced_result, config)
+
+        config.compile.numerics_changing_optim = True
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("full_inductor_compilation_pass"),
+        )
+
+        config.compile.inductor_compilation = "regional"
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("regional_inductor_pass"),
+        )
+
+    def test_coda_benchmark_uses_terminal_inductor_passes(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.coda_passes_enabled = True
+        config.compile.numerics_changing_optim = True
+        config.compile.coda_patterns = ["F_mm_residual_rmsnorm"]
+
+        with patch(
+            "torchtitan.experiments.graph_trainer.coda_passes._configured_coda_pass",
+            return_value=lambda gm, _inputs: gm,
+        ) as configured_coda_pass:
+            passes = compile_time_passes(
+                traced_result,
+                config,
+                use_cuda_graph=False,
+            )
+
+        processor = configured_coda_pass.call_args.kwargs["benchmark_graph_processor"]
+        self.assertEqual(
+            configured_coda_pass.call_args.args[0].name,
+            "F_mm_residual_rmsnorm",
+        )
+        terminal_passes = processor.keywords["passes"]
+        self.assertEqual(processor.func.__name__, "apply_graph_passes")
+        self.assertIs(processor.keywords["compile_config"], config.compile)
+        self.assertEqual(passes[-len(terminal_passes) :], terminal_passes)
+
     def test_fsdp_dense_region_scheduler_pass_gating(self):
         def transformer_batch_default(config):
             pass

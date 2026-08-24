@@ -310,14 +310,49 @@ def compile_time_passes(
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    if not include_inductor:
-        return passes
-
-    passes.extend(
+    terminal_inductor_passes = (
         final_inductor_compile_passes(
             config.compile,
         )
+        if config.compile.coda_passes_enabled or include_inductor
+        else []
     )
+
+    if config.compile.coda_passes_enabled:
+        if not config.compile.numerics_changing_optim:
+            raise ValueError(
+                "--compile.coda_passes_enabled requires "
+                "--compile.numerics_changing_optim"
+            )
+        from torchtitan.experiments.graph_trainer.coda_passes import (
+            _CODA_PATTERNS,
+            _configured_coda_pass,
+            CODA_PATTERN_NAMES,
+        )
+
+        enabled = set(config.compile.coda_patterns or CODA_PATTERN_NAMES)
+        if unknown := enabled.difference(CODA_PATTERN_NAMES):
+            raise ValueError(f"Unknown CODA pattern entries: {sorted(unknown)}")
+        passes.extend(
+            _configured_coda_pass(
+                _CODA_PATTERNS[name],
+                compile_time_benchmark=config.compile.coda_compile_time_benchmark,
+                benchmark_strict=False,
+                coda_autotune=config.compile.coda_compile_time_autotune,
+                benchmark_graph_processor=functools.partial(
+                    apply_graph_passes,
+                    passes=terminal_inductor_passes,
+                    compile_config=config.compile,
+                ),
+            )
+            for name in CODA_PATTERN_NAMES
+            if name in enabled
+        )
+
+    if not include_inductor:
+        return passes
+
+    passes.extend(terminal_inductor_passes)
     return passes
 
 
