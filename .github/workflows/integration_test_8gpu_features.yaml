@@ -68,7 +68,8 @@ jobs:
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
         python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+       python -m pip install --force-reinstall --pre \
+         "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
 
         # The torchcomms feature tests are currently disabled, so do not install
         # torchcomms in the main feature job. Its wheel pins torch exactly and
