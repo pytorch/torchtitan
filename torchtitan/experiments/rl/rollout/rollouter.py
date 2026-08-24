@@ -192,6 +192,8 @@ class Rollouter(Configurable):
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
+        # Use Monarch `choose` API to randomly select an actor in the mesh, and
+        # send the message to its `run_group` endpoint.
         return await self._worker_actors.run_group.choose(
             generate_fn=generate_fn,
             sample=sample,
