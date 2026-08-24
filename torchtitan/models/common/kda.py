@@ -6,14 +6,11 @@
 
 """Kimi Delta Attention with Attention Gym and FLA training backends."""
 
-# Shape suffix legend:
-# T = packed tokens, D = model dimension, C = projection channels,
-# N = num heads, K = head dimension, W = convolution width.
-
+import math
 from dataclasses import dataclass
-from functools import cache
+from enum import StrEnum
 from itertools import pairwise
-from typing import Any, Literal, get_args
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -41,22 +38,20 @@ except ImportError:
     chunk_kda: Any = None
     l2norm: Any = None
 
+try:
+    from fla.ops.kda import chunk_kda as fla_chunk_kda
+except ImportError:
+    fla_chunk_kda: Any = None
+
 
 __all__ = ["KDA", "InnerKDA", "KDABackend", "KDAKernel"]
 
-KDABackend = Literal["auto", "fused", "fla", "reference"]
 
-
-@cache
-def _get_fla_chunk_kda():
-    try:
-        from fla.ops.kda import chunk_kda as fla_chunk_kda
-    except ImportError as error:
-        raise ImportError(
-            "KDA requires flash-linear-attention on GPUs unsupported by the "
-            "Attention Gym fused backend: pip install flash-linear-attention"
-        ) from error
-    return fla_chunk_kda
+class KDABackend(StrEnum):
+    AUTO = "auto"
+    FLA = "fla"
+    ATTN_GYM = "attn_gym"
+    NAIVE = "naive"
 
 
 def _reference_l2norm(x_BLNK: torch.Tensor) -> torch.Tensor:
@@ -90,8 +85,8 @@ def _reference_gate_cumsum(
     chunks = [chunk for span in spans for chunk in span.split(chunk_size, dim=0)]
     cumulative_TNK = torch.cat([chunk.cumsum(dim=0) for chunk in chunks], dim=0)
     if cu_seqlens is None:
-        return cumulative_TNK.reshape_as(gate_BLNK) * 1.4426950408889634
-    return cumulative_TNK.unsqueeze(0) * 1.4426950408889634
+        return cumulative_TNK.reshape_as(gate_BLNK) * math.log2(math.e)
+    return cumulative_TNK.unsqueeze(0) * math.log2(math.e)
 
 
 class KDAKernel(Module):
@@ -99,17 +94,11 @@ class KDAKernel(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        backend: KDABackend = "auto"
+        backend: KDABackend = KDABackend.AUTO
         lower_bound: float = -5.0
         chunk_size: int = 64
 
         def __post_init__(self):
-            valid = get_args(KDABackend)
-            if self.backend not in valid:
-                raise ValueError(
-                    f"unknown KDA backend {self.backend!r}. "
-                    f"Valid: {', '.join(repr(name) for name in valid)}."
-                )
             if not -5.0 <= self.lower_bound < 0.0:
                 raise ValueError(
                     "KDA lower_bound must be in the safe range [-5, 0), "
@@ -122,33 +111,56 @@ class KDAKernel(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if config.backend in ("fused", "reference") and chunk_kda is None:
+        if (
+            config.backend in (KDABackend.ATTN_GYM, KDABackend.NAIVE)
+            and chunk_kda is None
+        ):
             raise ImportError(
                 "KDA requires Attention Gym: pip install 'attn-gym[linear]'"
+            )
+        if config.backend is KDABackend.FLA and fla_chunk_kda is None:
+            raise ImportError(
+                "KDA backend='fla' requires flash-linear-attention: "
+                "pip install flash-linear-attention"
             )
         self.backend = config.backend
         self.lower_bound = config.lower_bound
         self.chunk_size = config.chunk_size
-        self._resolved_backend: KDABackend | None = None
 
     def resolve_backend(self, q_BLNK: torch.Tensor) -> KDABackend:
         """Select Attention Gym fused KDA when supported, otherwise FLA."""
-        if self.backend != "auto":
-            if self.backend == "fused":
-                self._validate_fused_support(q_BLNK)
+        is_cuda = q_BLNK.device.type == "cuda"
+        capability = (
+            torch.cuda.get_device_capability(q_BLNK.device) if is_cuda else None
+        )
+        fused_supported = (
+            is_cuda and q_BLNK.shape[-1] == 128 and capability in {(10, 0), (10, 3)}
+        )
+
+        if self.backend is KDABackend.ATTN_GYM:
+            if fused_supported:
+                return KDABackend.ATTN_GYM
+            raise RuntimeError(
+                "Attention Gym fused KDA requires a CUDA tensor with head_dim=128 "
+                "on Blackwell SM100/SM103; got "
+                f"device={q_BLNK.device}, shape={tuple(q_BLNK.shape)}, "
+                f"capability={capability}. Use backend='auto' to fall back to FLA."
+            )
+        if self.backend is not KDABackend.AUTO:
             return self.backend
 
-        if self._resolved_backend is not None:
-            return self._resolved_backend
-        if q_BLNK.device.type != "cuda":
+        if not is_cuda:
             raise RuntimeError(
                 "KDA backend='auto' requires CUDA. Use backend='reference' "
                 "for correctness testing on CPU."
             )
-        if chunk_kda is not None and self._has_fused_support(q_BLNK):
-            self._resolved_backend = "fused"
-            return self._resolved_backend
-        _get_fla_chunk_kda()
+        if chunk_kda is not None and fused_supported:
+            return KDABackend.ATTN_GYM
+        if fla_chunk_kda is None:
+            raise ImportError(
+                "KDA requires flash-linear-attention on GPUs unsupported by the "
+                "Attention Gym fused backend: pip install flash-linear-attention"
+            )
         capability = torch.cuda.get_device_capability(q_BLNK.device)
         reason = (
             "is unavailable"
@@ -159,32 +171,7 @@ class KDAKernel(Module):
             logger,
             f"Attention Gym fused KDA {reason}; falling back to FLA.",
         )
-        self._resolved_backend = "fla"
-        return self._resolved_backend
-
-    @staticmethod
-    def _has_fused_support(q_BLNK: torch.Tensor) -> bool:
-        return (
-            q_BLNK.device.type == "cuda"
-            and q_BLNK.shape[-1] == 128
-            and torch.cuda.get_device_capability(q_BLNK.device) in {(10, 0), (10, 3)}
-        )
-
-    @classmethod
-    def _validate_fused_support(cls, q_BLNK: torch.Tensor) -> None:
-        if cls._has_fused_support(q_BLNK):
-            return
-        capability = (
-            torch.cuda.get_device_capability(q_BLNK.device)
-            if q_BLNK.device.type == "cuda"
-            else None
-        )
-        raise RuntimeError(
-            "Attention Gym fused KDA requires a CUDA tensor with head_dim=128 "
-            "on Blackwell SM100/SM103; got "
-            f"device={q_BLNK.device}, shape={tuple(q_BLNK.shape)}, "
-            f"capability={capability}. Use backend='auto' to fall back to FLA."
-        )
+        return KDABackend.FLA
 
     def forward(
         self,
@@ -199,8 +186,7 @@ class KDAKernel(Module):
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         backend = self.resolve_backend(q_BLNK)
-        if backend == "fla":
-            fla_chunk_kda = _get_fla_chunk_kda()
+        if backend is KDABackend.FLA:
             output_BLNK, _ = fla_chunk_kda(
                 q_BLNK,
                 k_BLNK,
@@ -221,7 +207,7 @@ class KDAKernel(Module):
             )
             return output_BLNK
 
-        if backend == "fused":
+        if backend is KDABackend.ATTN_GYM:
             q_BLNK = l2norm(q_BLNK)
             k_BLNK = l2norm(k_BLNK)
             cumulative_gate_BLNK = bounded_gate_cumsum(
@@ -251,7 +237,7 @@ class KDAKernel(Module):
             cumulative_gate_BLNK,
             raw_beta_BLN.float().sigmoid(),
             cu_seqlens=cu_seqlens,
-            impl=backend,
+            impl="fused" if backend is KDABackend.ATTN_GYM else "reference",
         )
         return output_BLNK
 
@@ -267,7 +253,7 @@ class InnerKDA(Module):
         def __post_init__(self):
             if self.head_dim < 1:
                 raise ValueError(f"head_dim must be positive, got {self.head_dim}")
-            if self.kernel.backend == "fused" and self.head_dim != 128:
+            if self.kernel.backend is KDABackend.ATTN_GYM and self.head_dim != 128:
                 raise ValueError(
                     "Attention Gym's fused KDA backend requires head_dim=128, "
                     f"got {self.head_dim}."
@@ -302,7 +288,7 @@ class InnerKDA(Module):
             dim=0,
         )
         backend = self.kernel.resolve_backend(raw_gate_TNK.unsqueeze(0))
-        if backend == "fused":
+        if backend is KDABackend.ATTN_GYM:
             conv_output_BTC = causal_conv1d(
                 mixed_qkv_BTC,
                 conv_weight_C1W[:, 0],
