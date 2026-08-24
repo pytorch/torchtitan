@@ -6,11 +6,19 @@
 
 """On-the-fly synthetic token sequences with a configurable length distribution.
 
-Intended for DP load-balancing and throughput experiments where token *content*
-is irrelevant and only the sequence-length distribution matters.
+These datasets serve DP load-balancing and throughput experiments where token
+content is irrelevant and only the sequence-length distribution matters. Lengths
+are drawn from a ``LengthSpec`` and filled with random token ids generated
+directly, so lengths are exact (no retokenization drift) while content carries
+no signal.
+
+Because tokens are random, MoE routing is effectively random and expert load is
+not balanced. For deterministic per-expert load in MoE perf/DP-balance runs, set
+the training config's ``moe_force_load_balance=True`` (round-robin token
+assignment, debug-only).
 
 To inspect a length distribution (stats, histogram, DP-balance) before training,
-run ``scripts/preview_synthetic_lengths.py`` against a JSON spec, e.g.::
+run ``scripts/preview_synthetic_lengths.py`` against a JSON spec::
 
     python -m scripts.preview_synthetic_lengths --spec buckets.json \\
         --seed 0 --samples 100000 --dp 8 --per-rank-batch 4
@@ -179,21 +187,10 @@ def synthetic_dataloader(
             source is checkpoint-resumable.
         num_packing_bins: Number of FirstFit packing bins.
 
-    Notes:
-        - Content is random and irrelevant for perf/load-balancing; only the
-          length distribution matters. Because tokens are random, MoE routing is
-          effectively random and expert load is not balanced; for deterministic
-          per-expert load in MoE perf/DP-balance runs, set the training config's
-          ``moe_force_load_balance=True`` (round-robin token assignment,
-          debug-only).
-        - Lengths are exact (token ids are generated directly, so there is no
-          retokenization drift).
-        - The source does not drop oversize sequences; ``FirstFitPackingConfig``
-          drops ``len(input_ids) > max_context_length``, so size ``length_spec``
-          to your ``max_context_length`` -- otherwise long draws are silently
-          dropped and the realized distribution is biased.
-        - Inspect a spec without training via
-          ``python -m scripts.preview_synthetic_lengths --spec spec.json --dp 8``.
+    The source does not drop oversize sequences; ``FirstFitPackingConfig`` drops
+    ``len(input_ids) > max_context_length``, so size ``length_spec`` to your
+    ``max_context_length`` -- otherwise long draws are silently dropped and the
+    realized distribution is biased.
     """
     synthetic_ds = SingleDatasetConfig(
         source=SyntheticSource.Config(
