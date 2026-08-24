@@ -32,7 +32,9 @@ SAMPLE_MESSAGES = [
     {"role": "assistant", "content": "Hi there"},
 ]
 
-ASSETS_TOKENIZER = os.path.join(os.path.dirname(__file__), "..", "assets", "tokenizer")
+ASSETS_TOKENIZER = os.path.join(
+    os.path.dirname(__file__), "..", "..", "assets", "tokenizer"
+)
 
 
 class DummyTokenizer(BaseTokenizer):

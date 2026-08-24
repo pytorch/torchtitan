@@ -12,7 +12,9 @@ import torch
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataset
 
-_TOKENIZER_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "tokenizer")
+_TOKENIZER_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "assets", "tokenizer"
+)
 
 
 def _build_dataset(seq_len: int) -> HuggingFaceTextDataset:

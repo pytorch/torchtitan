@@ -1,0 +1,19 @@
+name: Integration Tests - Features (ROCm)
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  features:
+    uses: ./.github/workflows/integration_test.yaml
+    with:
+      gpu-arch: rocm
+      execution_mode: real_pg
+    secrets: inherit
