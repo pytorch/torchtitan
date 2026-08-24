@@ -175,83 +175,6 @@ packed_tokens_ds = ConcatThenSplitPackingConfig(
 )
 ```
 
-## Synthetic length-distribution data (experiments)
-
-For DP load-balancing and throughput experiments you often want sequences whose
-token *content* is irrelevant but whose *lengths* follow a chosen distribution.
-`SyntheticSource` is an infinite `grain.IterDataset` that draws sequence lengths
-from a `LengthSpec` and fills each with random token ids, emitting `TextSequence`
-records directly (no processor). As a source it has no access to the tokenizer,
-so `vocab_size` is explicit. No dataset is written to disk.
-
-For the common case, `synthetic_dataloader_builder` wires the source into a
-FirstFit-packed dataloader config:
-
-```python
-from torchtitan.components.data import (
-    BucketLengthSpec,
-    LengthBucket,
-    synthetic_dataloader_builder,
-)
-
-config.dataloader = synthetic_dataloader_builder(
-    length_spec=BucketLengthSpec(
-        buckets=(
-            # keep max_len < training.max_context_length; longer draws are dropped
-            LengthBucket(min_len=1, max_len=128, weight=3.0),
-            LengthBucket(min_len=1024, max_len=2000, weight=1.0),
-        ),
-    ),
-    vocab_size=128_256,
-    seed=0,
-)
-```
-
-To customize the pipeline, wire the source yourself. FirstFit preserves each
-sampled length; `ConcatThenSplit` would re-chunk into uniform blocks and erase
-the distribution you configured:
-
-```python
-from torchtitan.components.data import (
-    BucketLengthSpec,
-    FirstFitPackingConfig,
-    GrainDataLoader,
-    LengthBucket,
-    SingleDatasetConfig,
-    SyntheticSource,
-)
-
-synthetic_ds = SingleDatasetConfig(
-    source=SyntheticSource.Config(
-        length_spec=BucketLengthSpec(
-            buckets=(LengthBucket(min_len=1, max_len=128),),
-        ),
-        vocab_size=128_256,
-        seed=0,
-    ),
-)
-synthetic_packed_ds = FirstFitPackingConfig(dataset=synthetic_ds)
-
-config.dataloader = GrainDataLoader.Config(dataset=synthetic_packed_ds, shuffle=False)
-```
-
-Notes:
-- Content is random and irrelevant for perf/load-balancing; only the length
-  distribution matters.
-- Lengths are exact (token ids are generated directly, so there is no
-  retokenization drift).
-- Each DP rank derives an independent, reproducible stream from the source
-  `seed` + loader policy seed + `dp_rank`, and the source is
-  checkpoint-resumable.
-- The source does not drop oversize sequences; `FirstFitPackingConfig` drops
-  `len(input_ids) > max_context_length`, so size buckets to your
-  `max_context_length` — otherwise long draws are silently dropped and the
-  realized distribution is biased.
-- `vocab_size` is required and independent of the tokenizer; set it to your
-  model's vocab size.
-- Inspect a spec without training via
-  `python -m scripts.preview_synthetic_lengths --spec spec.json --dp 8`.
-
 # SFT
 
 SFT changes the processor and packing policy, not the loader:
@@ -512,3 +435,29 @@ With effective DP greater than one, `repeat=False` is rejected because ranks can
 - effective DP degree
 
 Resume requires unchanged code, config, source contents, tokenizer, and effective DP degree.
+
+# Synthetic length-distribution data (experiments)
+
+`synthetic_dataloader` builds a dataloader that emits random-content sequences whose *lengths* follow a chosen distribution:
+
+```python
+from torchtitan.components.data import (
+    BucketLengthSpec,
+    LengthBucket,
+    synthetic_dataloader,
+)
+
+config.dataloader = synthetic_dataloader(
+    length_spec=BucketLengthSpec(
+        buckets=(
+            # keep max_len < training.max_context_length; longer draws are dropped
+            LengthBucket(min_len=1, max_len=128, weight=3.0),
+            LengthBucket(min_len=1024, max_len=2000, weight=1.0),
+        ),
+    ),
+    vocab_size=128_256,
+    seed=0,
+)
+```
+
+See the `synthetic_dataloader` docstring in `synthetic.py`.

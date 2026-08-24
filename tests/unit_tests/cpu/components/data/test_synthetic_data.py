@@ -144,7 +144,7 @@ def test_synthetic_source_resumes_across_chunk_boundary():
 
 
 import torch
-from torchtitan.components.data import synthetic_dataloader_builder
+from torchtitan.components.data import synthetic_dataloader
 
 
 class FakeTokenizer:
@@ -160,7 +160,7 @@ class FakeTokenizer:
 
 
 def _loader():
-    return synthetic_dataloader_builder(
+    return synthetic_dataloader(
         length_spec=BucketLengthSpec(buckets=(LengthBucket(min_len=2, max_len=6),)),
         vocab_size=100,
         seed=0,
@@ -173,14 +173,14 @@ def _loader():
     )
 
 
-def test_synthetic_dataloader_builder_produces_batches():
+def test_synthetic_dataloader_produces_batches():
     inputs, labels = next(iter(_loader()))
     assert "input" in inputs and "positions" in inputs
     assert inputs["input"].shape[-1] == 16  # num_tokens_per_batch
     assert labels.shape[-1] == 16
 
 
-def test_synthetic_dataloader_builder_resumes_exactly():
+def test_synthetic_dataloader_resumes_exactly():
     loader = _loader()
     it = iter(loader)
     next(it)

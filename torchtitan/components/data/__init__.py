@@ -30,7 +30,7 @@ from torchtitan.components.data.synthetic import (
     BucketLengthSpec,
     LengthBucket,
     LengthSpec,
-    synthetic_dataloader_builder,
+    synthetic_dataloader,
     SyntheticSource,
 )
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
@@ -60,5 +60,5 @@ __all__ = [
     "TextSequence",
     "TrainerBatch",
     "WeightedDataset",
-    "synthetic_dataloader_builder",
+    "synthetic_dataloader",
 ]

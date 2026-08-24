@@ -8,6 +8,12 @@
 
 Intended for DP load-balancing and throughput experiments where token *content*
 is irrelevant and only the sequence-length distribution matters.
+
+To inspect a length distribution (stats, histogram, DP-balance) before training,
+run ``scripts/preview_synthetic_lengths.py`` against a JSON spec, e.g.::
+
+    python -m scripts.preview_synthetic_lengths --spec buckets.json \\
+        --seed 0 --samples 100000 --dp 8 --per-rank-batch 4
 """
 
 import math
@@ -123,9 +129,7 @@ class _SyntheticIterator(grain.DatasetIterator):
 
     _buffer_size = 1024
 
-    def __init__(
-        self, length_spec: LengthSpec, seed: int, vocab_size: int
-    ) -> None:
+    def __init__(self, length_spec: LengthSpec, seed: int, vocab_size: int) -> None:
         super().__init__()
         self._length_spec = length_spec
         self._vocab_size = vocab_size
@@ -154,7 +158,7 @@ class _SyntheticIterator(grain.DatasetIterator):
         self._offset = 0
 
 
-def synthetic_dataloader_builder(
+def synthetic_dataloader(
     *,
     length_spec: LengthSpec,
     vocab_size: int,
@@ -165,8 +169,31 @@ def synthetic_dataloader_builder(
 
     Returns a ready ``GrainDataLoader.Config`` for the common experiment case:
     ``SyntheticSource`` -> ``SingleDatasetConfig`` -> ``FirstFitPackingConfig``.
-    FirstFit preserves each sampled length and drops sequences longer than the
-    context window, so size ``length_spec`` to your ``max_context_length``.
+
+    Args:
+        length_spec: Distribution to draw sequence lengths from.
+        vocab_size: Vocab size for the random token ids; required and
+            independent of the tokenizer. Set it to your model's vocab size.
+        seed: Base seed. Each DP rank derives an independent, reproducible
+            stream from ``seed`` + loader policy seed + ``dp_rank``, and the
+            source is checkpoint-resumable.
+        num_packing_bins: Number of FirstFit packing bins.
+
+    Notes:
+        - Content is random and irrelevant for perf/load-balancing; only the
+          length distribution matters. Because tokens are random, MoE routing is
+          effectively random and expert load is not balanced; for deterministic
+          per-expert load in MoE perf/DP-balance runs, set the training config's
+          ``moe_force_load_balance=True`` (round-robin token assignment,
+          debug-only).
+        - Lengths are exact (token ids are generated directly, so there is no
+          retokenization drift).
+        - The source does not drop oversize sequences; ``FirstFitPackingConfig``
+          drops ``len(input_ids) > max_context_length``, so size ``length_spec``
+          to your ``max_context_length`` -- otherwise long draws are silently
+          dropped and the realized distribution is biased.
+        - Inspect a spec without training via
+          ``python -m scripts.preview_synthetic_lengths --spec spec.json --dp 8``.
     """
     synthetic_ds = SingleDatasetConfig(
         source=SyntheticSource.Config(
