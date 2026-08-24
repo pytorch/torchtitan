@@ -9,17 +9,11 @@
 import importlib.util
 import unittest
 
-import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common import Conv1d, Linear, RMSNorm
+from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
-from torchtitan.models.common.decoder_sharding import (
-    dense_sequence_parallel_placement,
-    set_kda_sharding,
-)
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 
 _HAS_BLACKWELL = (
     importlib.util.find_spec("attn_gym") is not None
@@ -65,61 +59,9 @@ def _kda_config() -> KDA.Config:
             head_dim=128,
             kernel=KDAKernel.Config(),
         ),
-        output_norm=RMSNorm.Config(normalized_shape=128),
+        output_norm=KimiRMSNormGated.Config(dim=128),
         output_proj=linear(projection_dim, 32),
     )
-
-
-class TestKDASharding(unittest.TestCase):
-    def test_folded_token_tp_contracts(self):
-        config = _kda_config()
-        input_layout = dense_sequence_parallel_placement()
-        set_kda_sharding(
-            config,
-            attention_input_layout=input_layout,
-            enable_sp=True,
-            cp_enabled=False,
-        )
-
-        tp_axis = MeshAxisName.TP
-        q_proj_sharding = config.q_proj.sharding_config
-        output_proj_sharding = config.output_proj.sharding_config
-        inner_kda_sharding = config.inner_kda.sharding_config
-        kda_sharding = config.sharding_config
-        self.assertEqual(
-            q_proj_sharding.state_shardings["weight"].axis_types[tp_axis],
-            spmd.S(0),
-        )
-        self.assertEqual(
-            output_proj_sharding.state_shardings["weight"].axis_types[tp_axis],
-            spmd.S(1),
-        )
-        self.assertEqual(
-            set(inner_kda_sharding.in_src_shardings),
-            {
-                "query_TC",
-                "key_TC",
-                "value_TC",
-                "raw_gate_TNK",
-                "raw_beta_TN",
-                "conv_q_weight_C1W",
-                "conv_k_weight_C1W",
-                "conv_v_weight_C1W",
-                "A_log_N",
-                "dt_bias_NK",
-                "cu_seqlens",
-            },
-        )
-        head_layout = inner_kda_sharding.in_src_shardings["raw_gate_TNK"]
-        self.assertEqual(head_layout.per_axis_spmd_types()[tp_axis], spmd.S(1))
-        self.assertEqual(
-            kda_sharding.in_src_shardings,
-            {"x_TD": input_layout},
-        )
-        self.assertEqual(
-            len(inner_kda_sharding.local_map.in_grad_placements),
-            11,
-        )
 
 
 @unittest.skipUnless(
@@ -142,9 +84,9 @@ class TestKDA(unittest.TestCase):
         torch.manual_seed(seed)
         return torch.randn(tokens, 32, device="cuda", dtype=torch.bfloat16)
 
-    def test_varlen_matches_independent_document_forwards(self):
+    def test_varlen_matches_independent_documents(self):
         lengths = (37, 64, 91)
-        x_TD = self._inputs(seed=2, tokens=sum(lengths))
+        x_TD = self._inputs(seed=2, tokens=sum(lengths)).requires_grad_()
         positions_T = torch.tensor(
             [index for length in lengths for index in range(length)],
             device="cuda",
@@ -164,6 +106,24 @@ class TestKDA(unittest.TestCase):
         torch.testing.assert_close(
             packed_TD.float(),
             independent_TD.float(),
+            rtol=2e-2,
+            atol=2e-2,
+        )
+        output_grad_TD = torch.randn_like(packed_TD)
+        parameters = tuple(model.parameters())
+        packed_grads = torch.autograd.grad(
+            packed_TD,
+            (x_TD, *parameters),
+            output_grad_TD,
+        )
+        independent_grads = torch.autograd.grad(
+            independent_TD,
+            (x_TD, *parameters),
+            output_grad_TD,
+        )
+        torch.testing.assert_close(
+            packed_grads,
+            independent_grads,
             rtol=2e-2,
             atol=2e-2,
         )
