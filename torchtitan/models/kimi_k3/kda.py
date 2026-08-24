@@ -4,12 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Kimi Delta Attention with Attention Gym and FLA training backends."""
+"""Kimi Delta Attention using Attention Gym kernels."""
 
-import math
 from dataclasses import dataclass
-from enum import StrEnum
-from itertools import pairwise
 
 import torch
 import torch.nn.functional as F
@@ -19,7 +16,6 @@ from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadat
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d, RMSNorm
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger, warn_once
 
 try:
     import attn_gym.linear.kda as _attn_gym_kda
@@ -27,156 +23,29 @@ except ImportError:
     _attn_gym_kda = None
 
 
-class KDABackend(StrEnum):
-    AUTO = "auto"
-    FLA = "fla"
-    ATTN_GYM = "attn_gym"
-    NAIVE = "naive"
-
-
-def _naive_l2norm(x_BLNK: torch.Tensor) -> torch.Tensor:
-    input_dtype = x_BLNK.dtype
-    x_float_BLNK = x_BLNK.float()
-    return (
-        x_float_BLNK
-        * torch.rsqrt(x_float_BLNK.square().sum(dim=-1, keepdim=True) + 1e-6)
-    ).to(input_dtype)
-
-
-def _naive_causal_conv1d(
-    x_BTC: torch.Tensor,
-    weight_C1W: torch.Tensor,
-) -> torch.Tensor:
-    x_BCT = F.pad(x_BTC.transpose(1, 2), (weight_C1W.shape[-1] - 1, 0))
-    return F.silu(
-        F.conv1d(x_BCT, weight_C1W, groups=weight_C1W.shape[0]).transpose(1, 2)
-    )
-
-
-def _naive_gate_cumsum(
-    raw_gate_BLNK: torch.Tensor,
-    A_log_N: torch.Tensor,
-    dt_bias_NK: torch.Tensor,
-    *,
-    lower_bound: float,
-    chunk_size: int,
-    cu_seqlens_host: tuple[int, ...] | None,
-) -> torch.Tensor:
-    gate_BLNK = lower_bound * torch.sigmoid(
-        A_log_N.float().exp().view(1, 1, -1, 1)
-        * (raw_gate_BLNK.float() + dt_bias_NK.float())
-    )
-    spans = (
-        gate_BLNK.unbind(0)
-        if cu_seqlens_host is None
-        else (gate_BLNK[0, start:end] for start, end in pairwise(cu_seqlens_host))
-    )
-
-    chunks = [chunk for span in spans for chunk in span.split(chunk_size, dim=0)]
-    cumulative_TNK = torch.cat([chunk.cumsum(dim=0) for chunk in chunks], dim=0)
-    return (
-        cumulative_TNK.reshape_as(gate_BLNK)
-        if cu_seqlens_host is None
-        else cumulative_TNK.unsqueeze(0)
-    ) * math.log2(math.e)
+def _require_attention_gym():
+    if _attn_gym_kda is None:
+        raise ImportError("KDA requires Attention Gym: pip install 'attn-gym[linear]'")
+    return _attn_gym_kda
 
 
 class KDAKernel(Module):
-    """Apply KDA preprocessing and dispatch to the configured kernel backend."""
+    """Apply KDA preprocessing and the Attention Gym kernel."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        backend: KDABackend = KDABackend.AUTO
         lower_bound: float = -5.0
-        chunk_size: int = 64
 
         def __post_init__(self):
-            try:
-                self.backend = KDABackend(self.backend)
-            except ValueError as error:
-                valid = ", ".join(backend.value for backend in KDABackend)
-                raise ValueError(
-                    f"Unknown KDA backend {self.backend!r}; expected one of {valid}."
-                ) from error
             if not -5.0 <= self.lower_bound < 0.0:
                 raise ValueError(
                     "KDA lower_bound must be in the safe range [-5, 0), "
                     f"got {self.lower_bound}."
                 )
-            if self.chunk_size != 64:
-                raise ValueError(
-                    f"Attention Gym KDA requires chunk_size=64, got {self.chunk_size}."
-                )
 
     def __init__(self, config: Config):
         super().__init__()
-        if (
-            config.backend in (KDABackend.ATTN_GYM, KDABackend.NAIVE)
-            and _attn_gym_kda is None
-        ):
-            raise ImportError(
-                "KDA requires Attention Gym: pip install 'attn-gym[linear]'"
-            )
-        self.backend = config.backend
         self.lower_bound = config.lower_bound
-        self.chunk_size = config.chunk_size
-
-    def resolve_backend(self, q_BLNK: torch.Tensor) -> KDABackend:
-        """Select Attention Gym fused KDA when supported, otherwise FLA."""
-        if self.backend is KDABackend.NAIVE:
-            return KDABackend.NAIVE
-
-        capability = (
-            torch.cuda.get_device_capability(q_BLNK.device) if q_BLNK.is_cuda else None
-        )
-        fused_supported = (
-            q_BLNK.is_cuda
-            and q_BLNK.shape[-1] == 128
-            and capability in {(10, 0), (10, 3)}
-        )
-
-        if self.backend is KDABackend.AUTO and not q_BLNK.is_cuda:
-            raise RuntimeError(
-                "KDA backend AUTO requires CUDA. Use KDABackend.NAIVE for "
-                "correctness testing on CPU."
-            )
-        if self.backend is KDABackend.ATTN_GYM:
-            if not fused_supported:
-                raise RuntimeError(
-                    "Attention Gym KDA requires a CUDA tensor with head_dim=128 "
-                    "on Blackwell SM100/SM103; got "
-                    f"device={q_BLNK.device}, shape={tuple(q_BLNK.shape)}, "
-                    f"capability={capability}. Use KDABackend.AUTO to fall back "
-                    "to FLA."
-                )
-            return KDABackend.ATTN_GYM
-        if (
-            self.backend is KDABackend.AUTO
-            and fused_supported
-            and _attn_gym_kda is not None
-        ):
-            return KDABackend.ATTN_GYM
-
-        try:
-            from fla.ops.kda import chunk_kda as fla_chunk_kda  # noqa: F401
-        except ImportError as error:
-            raise ImportError(
-                "KDA requires flash-linear-attention when Attention Gym is "
-                "unsupported: pip install flash-linear-attention"
-            ) from error
-
-        if self.backend is KDABackend.AUTO:
-            reason = (
-                "is unavailable"
-                if _attn_gym_kda is None
-                else "does not support "
-                f"head_dim={q_BLNK.shape[-1]} on CUDA capability {capability}"
-            )
-            warn_once(
-                logger,
-                f"Attention Gym KDA {reason}; falling back to FLA.",
-            )
-        return KDABackend.FLA
 
     def forward(
         self,
@@ -189,80 +58,37 @@ class KDAKernel(Module):
         dt_bias_NK: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
-        cu_seqlens_host: tuple[int, ...] | None = None,
-        backend: KDABackend | None = None,
     ) -> torch.Tensor:
-        if backend is None:
-            backend = self.resolve_backend(q_BLNK)
+        attention_gym_kda = _require_attention_gym()
+        capability = (
+            torch.cuda.get_device_capability(q_BLNK.device) if q_BLNK.is_cuda else None
+        )
         if (
-            cu_seqlens is not None
-            and cu_seqlens_host is None
-            and backend is not KDABackend.ATTN_GYM
+            not q_BLNK.is_cuda
+            or q_BLNK.shape[-1] != 128
+            or capability not in {(10, 0), (10, 3)}
         ):
-            raise ValueError(
-                "FLA and naive KDA varlen execution require host sequence offsets."
+            raise RuntimeError(
+                "Attention Gym KDA requires a CUDA tensor with head_dim=128 on "
+                "Blackwell SM100/SM103; got "
+                f"device={q_BLNK.device}, shape={tuple(q_BLNK.shape)}, "
+                f"capability={capability}."
             )
-        if backend is KDABackend.FLA:
-            from fla.ops.kda import chunk_kda as fla_chunk_kda
 
-            output_BLNK, _ = fla_chunk_kda(
-                q_BLNK,
-                k_BLNK,
-                v_BLNK,
-                raw_gate_BLNK,
-                raw_beta_BLN,
-                A_log=A_log_N,
-                dt_bias=dt_bias_NK.reshape(-1),
-                use_qk_l2norm_in_kernel=True,
-                use_gate_in_kernel=True,
-                use_beta_sigmoid_in_kernel=True,
-                safe_gate=True,
-                lower_bound=self.lower_bound,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=(
-                    torch.tensor(
-                        cu_seqlens_host,
-                        dtype=torch.int32,
-                        device="cpu",
-                    )
-                    if cu_seqlens_host is not None
-                    else None
-                ),
-            )
-            return output_BLNK
-
-        assert _attn_gym_kda is not None
-        if backend is KDABackend.ATTN_GYM:
-            q_BLNK = _attn_gym_kda.l2norm(q_BLNK)
-            k_BLNK = _attn_gym_kda.l2norm(k_BLNK)
-            cumulative_gate_BLNK = _attn_gym_kda.bounded_gate_cumsum(
+        output_BLNK, _ = attention_gym_kda.chunk_kda(
+            attention_gym_kda.l2norm(q_BLNK),
+            attention_gym_kda.l2norm(k_BLNK),
+            v_BLNK,
+            attention_gym_kda.bounded_gate_cumsum(
                 raw_gate_BLNK.to(torch.bfloat16),
                 A_log_N.float(),
                 dt_bias_NK.float(),
-                chunk_size=self.chunk_size,
+                chunk_size=64,
                 lower_bound=self.lower_bound,
                 cu_seqlens=cu_seqlens,
-            )
-        else:
-            q_BLNK = _naive_l2norm(q_BLNK)
-            k_BLNK = _naive_l2norm(k_BLNK)
-            cumulative_gate_BLNK = _naive_gate_cumsum(
-                raw_gate_BLNK,
-                A_log_N,
-                dt_bias_NK,
-                lower_bound=self.lower_bound,
-                chunk_size=self.chunk_size,
-                cu_seqlens_host=cu_seqlens_host,
-            )
-
-        output_BLNK, _ = _attn_gym_kda.chunk_kda(
-            q_BLNK,
-            k_BLNK,
-            v_BLNK,
-            cumulative_gate_BLNK,
+            ),
             raw_beta_BLN.float().sigmoid(),
             cu_seqlens=cu_seqlens,
-            impl="fused" if backend is KDABackend.ATTN_GYM else "reference",
         )
         return output_BLNK
 
@@ -276,12 +102,9 @@ class InnerKDA(Module):
         kernel: KDAKernel.Config
 
         def __post_init__(self):
-            if self.head_dim < 1:
-                raise ValueError(f"head_dim must be positive, got {self.head_dim}")
-            if self.kernel.backend is KDABackend.ATTN_GYM and self.head_dim != 128:
+            if self.head_dim != 128:
                 raise ValueError(
-                    "Attention Gym's fused KDA backend requires head_dim=128, "
-                    f"got {self.head_dim}."
+                    "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
                 )
 
     def __init__(self, config: Config):
@@ -302,13 +125,8 @@ class InnerKDA(Module):
         A_log_N: torch.Tensor,
         dt_bias_NK: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        *,
-        cu_seqlens_host: tuple[int, ...] | None = None,
     ) -> torch.Tensor:
         kernel_cu_seqlens = cu_seqlens if cu_seqlens.numel() > 2 else None
-        kernel_cu_seqlens_host = (
-            cu_seqlens_host if kernel_cu_seqlens is not None else None
-        )
         raw_gate_BLNK = raw_gate_TNK.unsqueeze(0)
         raw_beta_BLN = raw_beta_TN.unsqueeze(0)
         mixed_qkv_BTC = torch.cat(
@@ -319,35 +137,12 @@ class InnerKDA(Module):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
-        backend = self.kernel.resolve_backend(raw_gate_BLNK)
-        if backend is KDABackend.ATTN_GYM:
-            assert _attn_gym_kda is not None
-            conv_output_BTC = _attn_gym_kda.causal_conv1d(
-                mixed_qkv_BTC,
-                conv_weight_C1W[:, 0],
-                activation="silu",
-                cu_seqlens=kernel_cu_seqlens,
-            )
-        elif kernel_cu_seqlens is None:
-            conv_output_BTC = _naive_causal_conv1d(
-                mixed_qkv_BTC,
-                conv_weight_C1W,
-            )
-        else:
-            if kernel_cu_seqlens_host is None:
-                raise ValueError(
-                    "KDA varlen convolution requires host sequence offsets."
-                )
-            conv_output_BTC = torch.cat(
-                [
-                    _naive_causal_conv1d(
-                        mixed_qkv_BTC[:, start:end],
-                        conv_weight_C1W,
-                    )
-                    for start, end in pairwise(kernel_cu_seqlens_host)
-                ],
-                dim=1,
-            )
+        conv_output_BTC = _require_attention_gym().causal_conv1d(
+            mixed_qkv_BTC,
+            conv_weight_C1W[:, 0],
+            activation="silu",
+            cu_seqlens=kernel_cu_seqlens,
+        )
 
         q_BTC, k_BTC, v_BTC = conv_output_BTC.chunk(3, dim=-1)
         q_BTNK, k_BTNK, v_BTNK = (
@@ -363,8 +158,6 @@ class InnerKDA(Module):
             A_log_N,
             dt_bias_NK,
             cu_seqlens=kernel_cu_seqlens,
-            cu_seqlens_host=kernel_cu_seqlens_host,
-            backend=backend,
         )
         return output_BTNK.squeeze(0)
 
@@ -441,10 +234,8 @@ class KDA(Module):
                 dtype=torch.int32,
                 device=x_TD.device,
             )
-            cu_seqlens_host = None
         elif isinstance(attention_masks, VarlenMetadata):
             cu_seqlens = attention_masks.cu_seq_q
-            cu_seqlens_host = attention_masks.cu_seq_q_host
         else:
             raise ValueError(
                 "KDA attention_masks must be VarlenMetadata or None, "
@@ -467,7 +258,6 @@ class KDA(Module):
             self.A_log,
             self.dt_bias,
             cu_seqlens,
-            cu_seqlens_host=cu_seqlens_host,
         )
 
         out_float_TNK = F.rms_norm(
