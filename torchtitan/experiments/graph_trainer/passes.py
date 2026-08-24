@@ -342,15 +342,41 @@ def compile_time_passes(
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    if not include_inductor:
-        return passes
-
-    passes.extend(
+    terminal_inductor_passes = (
         final_inductor_compile_passes(
             config.compile,
             use_cudagraph=use_cudagraph,
         )
+        if config.compile.coda_passes_enabled or include_inductor
+        else []
     )
+
+    if config.compile.coda_passes_enabled:
+        if not config.compile.numerics_changing_optim:
+            raise ValueError(
+                "--compile.coda_passes_enabled requires "
+                "--compile.numerics_changing_optim"
+            )
+        from torchtitan.experiments.graph_trainer.coda_passes import (
+            get_coda_pattern_passes,
+        )
+
+        passes.extend(
+            get_coda_pattern_passes(
+                compile_time_benchmark=config.compile.coda_compile_time_benchmark,
+                coda_autotune=config.compile.coda_compile_time_autotune,
+                benchmark_graph_processor=functools.partial(
+                    apply_graph_passes,
+                    passes=terminal_inductor_passes,
+                    compile_config=config.compile,
+                ),
+            )
+        )
+
+    if not include_inductor:
+        return passes
+
+    passes.extend(terminal_inductor_passes)
     return passes
 
 

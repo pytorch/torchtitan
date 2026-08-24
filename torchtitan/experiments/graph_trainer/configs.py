@@ -137,6 +137,24 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
 
+    coda_passes_enabled: bool = False
+    """ Apply CODA passes to fuse GEMM epilogues with FlexGEMM.
+    """
+
+    coda_compile_time_benchmark: bool = True
+    """Benchmark each CODA rewrite before changing the graph.
+
+    The rewrite is retained only when its compiled FlexGEMM region is faster.
+    ``False`` applies rewrites directly.
+    """
+
+    coda_compile_time_autotune: bool = False
+    """Autotune QuACK grid configurations for CODA FlexGEMMs during compilation.
+
+    ``False`` uses explicit preautotuned settings.
+    ``True`` runs QuACK autotuning during compilation.
+    """
+
     cpu_offload_prefetch_n_layers: int = 1
     """Prefetch reloads this many layers ahead in the backward graph
     to overlap H2D transfers with compute."""
