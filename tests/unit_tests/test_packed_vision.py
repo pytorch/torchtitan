@@ -115,6 +115,22 @@ class TestPackedVision(unittest.TestCase):
         torch.testing.assert_close(packed, torch.cat([patches_0, patches_1]))
         torch.testing.assert_close(grids, torch.stack([grid_0, grid_1]))
 
+    def test_collator_counts_partial_temporal_patch(self) -> None:
+        collator = MultiModalCollator.Config(
+            max_images_per_batch=1,
+            temporal_patch_size=2,
+        ).build(
+            context=SimpleNamespace(
+                tokenizer=None,
+                num_tokens_per_batch=0,
+                max_context_length=0,
+            )
+        )
+        batch = [{"pixel_values_videos": [torch.empty(3, 1, 1, 1)]}]
+
+        with self.assertRaisesRegex(ValueError, "2 vision entries"):
+            collator(batch)
+
     def test_block_diagonal_mask_respects_segments(self) -> None:
         mask = create_block_diagonal_mask(
             torch.tensor([3, 2]), total_tokens=5, device=torch.device("cpu")

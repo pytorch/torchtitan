@@ -21,7 +21,6 @@ from torchtitan.tools.utils import device_type
 __all__ = [
     "MeshAxisName",
     "ParallelDims",
-    "SpmdLayout",
     "layout_axes",
     "unfold_dp_axis",
     "unfold_dp_axes",
@@ -52,15 +51,16 @@ class MeshAxisName(StrEnum):
     EFSDP = "efsdp"
 
 
-SpmdLayout = spmd.SpmdType
-
-
-def layout_axes(layout: SpmdLayout) -> tuple[MeshAxisName, ...]:
+def layout_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
     """Return and validate the named mesh axes used by a sharding config."""
-    return tuple(
-        MeshAxisName(axis)  # pyrefly: ignore [bad-argument-type]
-        for axis in layout.local_type
-    )
+    axes = []
+    for axis in layout.local_type:
+        if not isinstance(axis, str):
+            raise TypeError(
+                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
+            )
+        axes.append(MeshAxisName(axis))
+    return tuple(axes)
 
 
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
@@ -495,7 +495,7 @@ class ParallelDims:
         return self.get_activated_mesh([axis for axis in axes_list if axis in in_band])
 
     def resolve_shared_mesh(
-        self, placements: Iterable["SpmdLayout | None"]
+        self, placements: Iterable[spmd.SpmdType | None]
     ) -> DeviceMesh | None:
         """Resolve the mesh shared by a list of SpmdLayouts.
 

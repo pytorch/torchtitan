@@ -312,6 +312,10 @@ class MemoryBudgetAC(ActivationCheckpointing):
         https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
         """
 
+        def __post_init__(self) -> None:
+            if not 0 <= self.memory_budget <= 1:
+                raise ValueError("memory_budget must be finite and between 0 and 1.")
+
     def apply(self, model: nn.Module) -> None:
         _disable_dynamo_lru_cache()
         config = cast("MemoryBudgetAC.Config", self.config)
