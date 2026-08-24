@@ -25,7 +25,15 @@ _CP_DISABLED = True
 _FLEX_CP_INDUCTOR_DISABLED = True
 
 
-def _build_llama3_tests() -> list[OverrideDefinitions]:
+def _graph_capture_args(gpu_arch_type: str) -> list[str]:
+    """Return the explicit graph-capture option for the accelerator."""
+    if gpu_arch_type == "cuda":
+        return ["--compile.enable_cudagraph"]
+    if gpu_arch_type == "xpu":
+        return ["--compile.enable_xpugraph"]
+    return []
+
+def _build_llama3_tests(gpu_arch_type: str = "cuda",) -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
     return [
         # === JIT mode tests ===
@@ -206,7 +214,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.context_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace llama3 FSDP+TP+CP",
+            "aot_fx_trace llama3 FSDP+TP+CP+graph_capture",
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
@@ -219,6 +227,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    *_graph_capture_args(gpu_arch_type),
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -800,8 +809,8 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda","rocm","xpu"],
+        help="GPU architecture type. Must be specified as either 'cuda','rocm' or 'xpu'.",
     )
     parser.add_argument(
         "--test_suite",
