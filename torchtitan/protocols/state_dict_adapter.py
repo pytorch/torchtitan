@@ -11,9 +11,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
+import spmd_types as spmd
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
@@ -161,7 +162,7 @@ class StateDictAdapter(BaseStateDictAdapter):
 class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
     def __init__(
         self,
-        state_dict_layouts: Mapping[str, SpmdLayout],
+        state_dict_layouts: Mapping[str, spmd.SpmdType],
         parallel_dims: ParallelDims,
     ) -> None:
         self.state_dict_layouts = state_dict_layouts

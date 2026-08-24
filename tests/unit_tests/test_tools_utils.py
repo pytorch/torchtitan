@@ -4,10 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
-from torchtitan.tools.utils import get_cuda_flash_attention_impl, get_local_device
+from torchtitan.tools.utils import (
+    GarbageCollection,
+    get_cuda_flash_attention_impl,
+    get_local_device,
+)
 
 
 class _FakeDeviceModule:
@@ -16,6 +22,18 @@ class _FakeDeviceModule:
 
     def device_count(self) -> int:
         return self.num_devices
+
+
+def test_gc_debug_collects_once_per_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    gc_collect = Mock()
+    monkeypatch.setattr("torchtitan.tools.utils.gc.collect", gc_collect)
+    garbage_collection = GarbageCollection.__new__(GarbageCollection)
+    garbage_collection.debug = True
+
+    for step in (1, 2):
+        assert garbage_collection.run(step)
+        gc_collect.assert_called_once_with(2)
+        gc_collect.reset_mock()
 
 
 def test_get_local_device_uses_local_rank_when_multiple_devices_visible(

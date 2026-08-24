@@ -25,11 +25,16 @@ from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpointer.base import (
     BaseCheckpointManager,
+    CheckpointStorage,
     MODEL,
     ModelWrapper,
     purge_thread,
 )
-from torchtitan.components.checkpointer.dcp import AsyncMode, CheckpointManager
+from torchtitan.components.checkpointer.dcp import (
+    _FilesystemCheckpointStorage,
+    AsyncMode,
+    CheckpointManager,
+)
 
 
 class FakeOptimizersContainer:
@@ -1071,6 +1076,13 @@ class TestFindLoadStepRemote(unittest.TestCase):
         with fsspec.open(url, "wb") as f:
             f.write(b"x")
 
+    def _manager(self):
+        # The real storage adapter, so this keeps covering the fsspec path that
+        # torchtitan.tools.filesystem provides and the backend Storage does not.
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager._storage = _FilesystemCheckpointStorage()
+        return manager
+
     def test_returns_max_valid_step(self):
         self._write(f"{self.root}/step-10/.metadata")
         self._write(f"{self.root}/step-20/.metadata")
@@ -1079,12 +1091,107 @@ class TestFindLoadStepRemote(unittest.TestCase):
         # A non-checkpoint directory must be ignored.
         self._write(f"{self.root}/logs/events")
 
-        manager = CheckpointManager.__new__(CheckpointManager)
-        self.assertEqual(manager._find_load_step(folder=self.root), 20)
+        self.assertEqual(self._manager()._find_load_step(folder=self.root), 20)
 
     def test_missing_folder_returns_negative_one(self):
+        self.assertEqual(self._manager()._find_load_step(folder=self.root), -1)
+
+
+class TestFilesystemCheckpointStorage(unittest.TestCase):
+    """The DCP adapter must answer the CheckpointStorage protocol using
+    torchtitan.tools.filesystem, including for remote fsspec URIs."""
+
+    def setUp(self):
+        self.storage = _FilesystemCheckpointStorage()
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+
+    def test_satisfies_the_protocol(self):
+        # A Protocol is structural, so nothing checks conformance at runtime.
+        # Assert it here or a renamed method would only surface as an
+        # AttributeError deep inside a save.
+        self.assertIsInstance(self.storage, CheckpointStorage)
+
+    def test_distinguishes_directories_from_files(self):
+        directory = os.path.join(self.root, "step-1")
+        os.makedirs(directory)
+        file_path = os.path.join(directory, ".metadata")
+        with open(file_path, "wb"):
+            pass
+
+        self.assertTrue(self.storage.isdir(directory))
+        self.assertFalse(self.storage.isfile(directory))
+        self.assertTrue(self.storage.isfile(file_path))
+        self.assertFalse(self.storage.isdir(file_path))
+        self.assertFalse(self.storage.isdir(os.path.join(self.root, "absent")))
+        self.assertFalse(self.storage.isfile(os.path.join(self.root, "absent")))
+
+    def test_listdir_returns_entry_names(self):
+        os.makedirs(os.path.join(self.root, "step-1"))
+        os.makedirs(os.path.join(self.root, "step-2"))
+
+        self.assertEqual({"step-1", "step-2"}, set(self.storage.listdir(self.root)))
+
+    def test_remove_deletes_a_populated_directory(self):
+        directory = os.path.join(self.root, "step-1")
+        os.makedirs(directory)
+        with open(os.path.join(directory, ".metadata"), "wb"):
+            pass
+
+        self.storage.remove(directory)
+
+        self.assertFalse(os.path.exists(directory))
+
+    def test_reaches_remote_uris_through_fsspec(self):
+        name = f"test-{uuid.uuid4().hex}"
+        root = f"memory://{name}"
+        memory_fs = fsspec.filesystem("memory")
+        self.addCleanup(memory_fs.rm, f"/{name}", recursive=True)
+        with fsspec.open(f"{root}/step-1/.metadata", "wb") as f:
+            f.write(b"x")
+
+        self.assertTrue(self.storage.isdir(f"{root}/step-1"))
+        self.assertTrue(self.storage.isfile(f"{root}/step-1/.metadata"))
+        self.assertEqual(["step-1"], self.storage.listdir(root))
+
+
+class TestShouldPurge(unittest.TestCase):
+    """_should_purge lives on the base so every manager, and TorchFT's
+    narrowing override, share one definition of who deletes checkpoints."""
+
+    def _manager(self, *, keep_latest_k: int, folder_exists: bool = True):
         manager = CheckpointManager.__new__(CheckpointManager)
-        self.assertEqual(manager._find_load_step(folder=self.root), -1)
+        manager.keep_latest_k = keep_latest_k
+        manager.folder = "/checkpoint"
+        manager._storage = mock.Mock()
+        manager._storage.isdir.return_value = folder_exists
+        return manager
+
+    def test_defined_on_the_base_not_the_dcp_manager(self):
+        self.assertNotIn("_should_purge", vars(CheckpointManager))
+        self.assertIn("_should_purge", vars(BaseCheckpointManager))
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_rank_zero_with_retention_and_an_existing_folder_purges(self, _rank):
+        self.assertTrue(self._manager(keep_latest_k=2)._should_purge())
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_retention_disabled_does_not_purge(self, _rank):
+        self.assertFalse(self._manager(keep_latest_k=0)._should_purge())
+
+    @mock.patch("torch.distributed.get_rank", return_value=1)
+    def test_nonzero_rank_does_not_purge(self, _rank):
+        self.assertFalse(self._manager(keep_latest_k=2)._should_purge())
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_absent_folder_does_not_purge(self, _rank):
+        manager = self._manager(keep_latest_k=2, folder_exists=False)
+
+        self.assertFalse(manager._should_purge())
+
+        # Probed through the seam rather than the filesystem module, so a
+        # manager on non-local storage asks its own backend.
+        manager._storage.isdir.assert_called_once_with("/checkpoint")
 
 
 class TestPurgeThread(unittest.TestCase):
