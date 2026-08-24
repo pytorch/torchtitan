@@ -23,11 +23,7 @@ from torch.optim import Optimizer
 
 from torchtitan.tools.logging import logger
 
-from ._optimizer_reshard_runtime import (
-    _BucketedRedistributionRuntime,
-    _BufferSlot,
-    _LocalBucketExecutor,
-)
+from ._optimizer_reshard_runtime import _BucketedRedistributionRuntime, _BufferSlot
 
 from ._optimizer_reshard_schedule import (
     _bind_bucket_configs,
@@ -256,10 +252,7 @@ def _initialize_dist_muon(
     optimizer.register_load_state_dict_post_hook(_after_load_state_dict, prepend=True)
 
 
-class DistMuon(
-    Optimizer,
-    _LocalBucketExecutor["_ParameterComputeLayout"],
-):
+class DistMuon(Optimizer):
     """Muon optimizer constructed by ``build_dist_muon``.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
