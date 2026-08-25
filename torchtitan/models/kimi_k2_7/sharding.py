@@ -99,7 +99,9 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
     are unchanged full SP.
     """
     config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True)
+        },
         in_src_shardings={"input": token_id_placement()},
         in_dst_shardings={"input": token_id_placement()},
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),

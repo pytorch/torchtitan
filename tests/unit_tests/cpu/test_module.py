@@ -412,6 +412,18 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
         ):
             module.parallelize(parallel_dims)
 
+        allowed_module = self.WeightModule(
+            (4, 5),
+            SpmdLayout(
+                {MeshAxisName.TP: spmd.V},
+                partition_spec=(None, MeshAxisName.TP),
+                allow_uneven_sharding=True,
+            ),
+        )
+        with patch.object(allowed_module, "_spmd_distribute_state"):
+            allowed_module._distribute_states(parallel_dims)
+        self.assertEqual(allowed_module._spmd_logical_state_shapes, {"weight": (4, 5)})
+
     def test_rejects_uneven_ep_parameter_sharding(self):
         module = self.WeightModule(
             (3, 4),
