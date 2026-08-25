@@ -9,9 +9,11 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from spmd_types.types import partition_spec_get_shard
 from torch.distributed._tensor import (
     distribute_tensor,
     DTensor,
@@ -24,6 +26,7 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 _active_parametrization = True
@@ -43,6 +46,27 @@ def disable_active_parametrization() -> Generator[None, None, None]:
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
+
+
+def _spmd_local_tensor_to_dtensor(
+    tensor: torch.Tensor,
+    non_dp_mesh: DeviceMesh | None,
+    non_dp_mesh_axes: tuple[spmd.MeshAxis, ...] | None,
+    param_spmd_type: spmd.SpmdType | None,
+) -> torch.Tensor:
+    """Restore active model-parallel DTensor metadata on an SPMD local tensor."""
+    if param_spmd_type is None or non_dp_mesh is None:
+        return tensor
+
+    assert non_dp_mesh_axes is not None
+    placements = tuple(
+        spmd.spmd_type_to_dtensor_placement(
+            partition_spec_get_shard(param_spmd_type.partition_spec, axis)
+            or param_spmd_type.local_type[axis]
+        )
+        for axis in non_dp_mesh_axes
+    )
+    return DTensor.from_local(tensor, non_dp_mesh, placements, run_check=False)
 
 
 def _distribute_dtensor(
@@ -142,9 +166,12 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
+    object.__setattr__(module, "_simple_fsdp_parametrization", parametrization)
     param_name_to_property = {
         param_name: property(
-            lambda self, pn=param_name: parametrization(self._parameters[pn])
+            lambda self, pn=param_name: self._simple_fsdp_parametrization(
+                self._parameters[pn], pn
+            )
         )
         for param_name in param_names
     }
@@ -171,11 +198,18 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
+        non_dp_mesh_axes: tuple[spmd.MeshAxis, ...] | None = None,
+        param_spmd_types: dict[str, spmd.SpmdType] | None = None,
     ) -> None:
         super().__init__()
+        if get_spmd_backend() == "spmd_types":
+            assert non_dp_mesh_axes is not None
+            assert param_spmd_types is not None
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
         self.mode = mode
+        self.non_dp_mesh_axes = non_dp_mesh_axes
+        self.param_spmd_types = param_spmd_types
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
         self.grad_placements: list[Placement] = [
             Partial(reduce_op="sum")
@@ -184,7 +218,7 @@ class ReplicateComputation(Module):
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
 
-    def replicate_compute(self, x: DTensor) -> torch.Tensor:
+    def replicate_compute(self, x: DTensor, param_name: str) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
@@ -219,9 +253,24 @@ class ReplicateComputation(Module):
             )
             non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
 
-            output = DTensor.from_local(
-                replicated_local_tensor, non_dp_mesh, non_dp_placements
-            )
+            if self.param_spmd_types is not None:
+                output = replicated_local_tensor
+                param_spmd_type = self.param_spmd_types[param_name]
+                assert self.non_dp_mesh_axes is not None
+                for axis in self.non_dp_mesh_axes:
+                    if param_spmd_type.local_type[axis] is spmd.R:
+                        output = spmd.redistribute(
+                            output,
+                            axis,
+                            src=spmd.I,
+                            dst=spmd.R,
+                            op_dtype=self.param_dtype,
+                            backward_options={"op_dtype": self.reduce_dtype},
+                        )
+            else:
+                output = DTensor.from_local(
+                    replicated_local_tensor, non_dp_mesh, non_dp_placements
+                )
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
                 placements=self.compute_placements,
@@ -236,7 +285,7 @@ class ReplicateComputation(Module):
 
         return output
 
-    def forward(self, x: DTensor) -> torch.Tensor:
+    def forward(self, x: DTensor, param_name: str) -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -246,7 +295,7 @@ class ReplicateComputation(Module):
         if not _active_parametrization:
             return x
 
-        output = self.replicate_compute(x)
+        output = self.replicate_compute(x, param_name)
         return output
 
 
@@ -256,7 +305,9 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
+    non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
+    use_spmd_types = get_spmd_backend() == "spmd_types"
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -272,6 +323,15 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     modules = list(model.modules())
+    non_dp_mesh_axes: tuple[spmd.MeshAxis, ...] | None = None
+    if use_spmd_types:
+        non_dp_mesh_axes = ()
+    if use_spmd_types and non_dp_mesh is not None:
+        assert non_dp_mesh.mesh_dim_names is not None
+        non_dp_mesh_axes = tuple(
+            spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))
+            for axis_name in non_dp_mesh.mesh_dim_names
+        )
 
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
@@ -280,8 +340,30 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        param_spmd_types: dict[str, spmd.SpmdType] | None = (
+            {} if use_spmd_types else None
+        )
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                param_spmd_type = None
+                if use_spmd_types and non_dp_mesh is not None:
+                    if not spmd.has_local_type(p):
+                        raise ValueError(
+                            f"Parameter {p_name!r} must have an SPMD type before "
+                            "applying SimpleFSDP with a non-DP mesh."
+                        )
+                    param_spmd_type = spmd.SpmdType(
+                        dict(spmd.get_local_type(p)),
+                        spmd.get_partition_spec(p),
+                    )
+                    assert param_spmd_types is not None
+                    param_spmd_types[p_name] = param_spmd_type
+                p = _spmd_local_tensor_to_dtensor(
+                    p,
+                    non_dp_mesh,
+                    non_dp_mesh_axes,
+                    param_spmd_type,
+                )
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
@@ -314,6 +396,8 @@ def data_parallel(
                 param_sharding,
                 mode,
                 mp_policy=mp_policy,
+                non_dp_mesh_axes=non_dp_mesh_axes,
+                param_spmd_types=param_spmd_types,
             ),
         )
     return model

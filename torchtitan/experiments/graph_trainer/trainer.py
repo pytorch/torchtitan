@@ -241,7 +241,21 @@ class GraphTrainer(Trainer):
                     compile_config=self.config.compile,
                 )
         with self.train_context():
-            outputs = run_traced(self._traced_step, module=model)(
+            precompile_meshes = None
+            if (
+                self.config.compile.precompile_artifact_dir
+                and self.config.parallelism.spmd_backend == "spmd_types"
+            ):
+                from torchtitan.experiments.graph_trainer.precompile import (
+                    get_spmd_precompile_meshes,
+                )
+
+                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+            outputs = run_traced(
+                self._traced_step,
+                module=model,
+                precompile_meshes=precompile_meshes,
+            )(
                 inputs,
                 labels,
                 global_valid_tokens,
