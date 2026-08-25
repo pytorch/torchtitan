@@ -7,6 +7,7 @@
 import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
@@ -20,7 +21,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
-    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.embedding import Embedding
@@ -170,17 +170,31 @@ class Decoder(BaseModel):
                     "Weight tying is not supported with Pipeline Parallel."
                 )
 
-            if parallelism.context_parallel_degree > 1:
-                # ShardingConfig-based CP requires the spmd_types backend.
+            from torchtitan.models.common.cp_attention import ContextParallelKernel
+
+            cp_enabled = parallelism.context_parallel_degree > 1
+            if cp_enabled:
                 validate_cp_backend(parallelism)
-                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
-                    self.traverse(VarlenAttention.Config)
-                ):
-                    raise NotImplementedError(
-                        "Context Parallel is not supported with "
-                        "ScaledDotProductAttention or VarlenAttention. "
-                        "Use FlexAttention or disable CP."
+            for fqn, traversed, _, _ in self.traverse(BaseAttention.Config):
+                # traverse returns the base config type.
+                attention = cast(BaseAttention.Config, traversed)
+                kernel = attention.inner_attention._owner
+                is_cp_kernel = kernel is not None and issubclass(
+                    kernel, ContextParallelKernel
+                )
+                if is_cp_kernel == cp_enabled:
+                    continue
+                if cp_enabled:
+                    raise ValueError(
+                        f"{fqn}.inner_attention must use a ContextParallelKernel, "
+                        "such as AllGatherCPFlexAttention, when the context "
+                        "parallel degree is larger than 1. See an example in "
+                        "torchtitan_recipes/muse_glimmer.py."
                     )
+                raise ValueError(
+                    f"{fqn}.inner_attention is a ContextParallelKernel but the "
+                    "context parallel degree is 1. Select a non-CP kernel."
+                )
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention

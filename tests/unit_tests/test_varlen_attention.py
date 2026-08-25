@@ -95,7 +95,11 @@ class TestPackedVarlenAttention(unittest.TestCase):
         self.assertEqual(axis_types[MeshAxisName.DP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.CP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.TP], spmd.S(1))
-        self.assertEqual(k_dst_layout.per_axis_spmd_types()[MeshAxisName.CP], spmd.R)
+        self.assertEqual(k_dst_layout.per_axis_spmd_types()[MeshAxisName.CP], spmd.S(0))
+        self.assertEqual(
+            k_dst_layout.per_axis_spmd_types(),
+            (sharding.in_src_shardings or {})["k_TNH"].per_axis_spmd_types(),
+        )
 
     def test_out_transform_receives_tn_lse(self):
         num_tokens, num_heads, head_dim = 5, 2, 4

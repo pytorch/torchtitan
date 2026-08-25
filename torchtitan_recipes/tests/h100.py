@@ -7,6 +7,11 @@
 """Configurations for the ``h100`` integration test suite."""
 
 from torchtitan.distributed.activation_checkpoint import FullAC
+
+from torchtitan.models.common.cp_attention import (
+    AllGatherCPFlexAttention,
+    use_cp_kernel,
+)
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -53,6 +58,7 @@ def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
 
 def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     config = llama3_debugmodel_float8()
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.compile.enable = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
@@ -69,6 +75,7 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
     config.compile.enable = False
     # TODO: Drop this once the H100 suite is migrated to the spmd_types backend.
     config.parallelism.spmd_backend = "spmd_types"
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.tensor_parallel_degree = 2

@@ -293,14 +293,6 @@ class MuseGlimmerModel(Decoder):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layers[0].attention.inner_attention, VarlenAttention.Config
-            ):
-                raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
-                )
-
             from .sharding import set_muse_glimmer_sharding_config
 
             set_muse_glimmer_sharding_config(
