@@ -284,26 +284,8 @@ def _infer_block_layout_tables_from_stages(
     )
 
 
-def stack_blocks(blocks: list[torch.Tensor]) -> torch.Tensor:
-    """Stack per-block tensors into the ``[T, N, D]`` carrier.
-
-    ``T`` is ``B * L`` flattened and ``N`` is the block axis, which is the
-    layout the upstream K3 model threads through its block signature. Nothing
-    downstream needs B or L back: the pipeline adapter slices and stacks along
-    the block axis and reasons about block INDICES, never about batch or
-    sequence extents.
-
-    Used when crossing a pipeline stage boundary, where the list has to become
-    one tensor for P2P send/recv.
-    """
-    if not blocks:
-        raise ValueError("stack_blocks needs at least one block to infer D")
-    D = blocks[0].shape[-1]
-    return torch.stack([b.reshape(-1, D) for b in blocks], dim=1)
-
-
 def unstack_blocks(blocks_tensor: torch.Tensor) -> list[torch.Tensor]:
-    """Inverse of ``stack_blocks``: the columns of a ``[T, N, D]`` carrier.
+    """The columns of a ``[T, N, D]`` carrier, as a list of blocks.
 
     Returns ``[T, D]`` views, one per block. Views share storage with the input
     so autograd gradients flow back correctly.

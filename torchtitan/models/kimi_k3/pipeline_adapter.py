@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import inspect
 import math
 import threading
@@ -46,13 +48,78 @@ from torchtitan.distributed.pipeline_parallel import (
     get_schedule_class as _tt_get_schedule_class,
     pipeline_llm,
 )
-from torchtitan.models.kimi_k3.knobs import register_topology, topology
 from torchtitan.models.kimi_k3.layout import (
     _infer_block_layout_tables_from_stages,
     BlockLayoutTables,
     unstack_blocks,
 )
 from torchtitan.tools.logging import logger
+
+
+# ----- Topology knobs, resolved once from config --------------------------- #
+# These decide the pipeline topology, so every rank must resolve them
+# identically; a per-rank disagreement hangs a collective with nothing
+# pointing at the cause. They are read from call sites deep in the split
+# where no config is in scope, so the resolved record is module-global:
+# registered once at the pipelining entry, read back below.
+
+@dataclass
+class _TopologyKnobs:
+    """Resolved topology."""
+
+    attn_res_cache: bool = False
+
+
+_TOPOLOGY: _TopologyKnobs | None = None
+_WARNED_UNREGISTERED = False
+
+
+def _register_topology(config) -> _TopologyKnobs:
+    """Resolve the topology from ``config`` once. Idempotent, first call wins.
+
+    A field the config does not carry keeps its default.
+    """
+    global _TOPOLOGY
+
+    defaults = _TopologyKnobs()
+    resolved = _TopologyKnobs(
+        attn_res_cache=bool(
+            getattr(config, "attn_res_cache", defaults.attn_res_cache)
+        ),
+    )
+    if _TOPOLOGY is not None and _TOPOLOGY != resolved:
+        logger.warning(
+            "topology re-registered with a different resolution: keeping %r, "
+            "ignoring %r. Two entry points were handed different configs.",
+            _TOPOLOGY,
+            resolved,
+        )
+        return _TOPOLOGY
+    _TOPOLOGY = resolved
+    return _TOPOLOGY
+
+
+def _topology() -> _TopologyKnobs:
+    """The resolved topology, or the defaults with a warning."""
+    global _WARNED_UNREGISTERED
+
+    if _TOPOLOGY is not None:
+        return _TOPOLOGY
+    if not _WARNED_UNREGISTERED:
+        _WARNED_UNREGISTERED = True
+        logger.warning(
+            "topology knob read before register_topology(); using defaults. "
+            "Config fields are NOT being honoured on this path."
+        )
+    return _TopologyKnobs()
+
+
+def _reset_topology_for_testing() -> None:
+    """Tests need to re-resolve; production code must not call this."""
+    global _TOPOLOGY, _WARNED_UNREGISTERED
+
+    _TOPOLOGY = None
+    _WARNED_UNREGISTERED = False
 
 
 def adapter_enabled() -> bool:
@@ -64,7 +131,7 @@ def adapter_enabled() -> bool:
     (pipeline_parallel_first_stage_less_layers and _last_stage_less_layers both
     0); anything else passes through on the naive transport.
     """
-    return topology().attn_res_cache
+    return _topology().attn_res_cache
 
 
 # ----- Rank-shared cache across virtual stages ----------------------------- #
@@ -1039,7 +1106,7 @@ def pipeline_kimi_k3(model: nn.Module, **kwargs):
     # before parallelize, so whichever comes first registers; register_topology is
     # idempotent and reports a disagreement rather than letting order decide.
     if hasattr(model, "config"):
-        register_topology(model.config)
+        _register_topology(model.config)
 
     _inject_kimi_k3_fqns(model, kwargs)
     pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
