@@ -435,3 +435,29 @@ With effective DP greater than one, `repeat=False` is rejected because ranks can
 - effective DP degree
 
 Resume requires unchanged code, config, source contents, tokenizer, and effective DP degree.
+
+# Synthetic length-distribution data (experiments)
+
+`synthetic_dataloader` builds a dataloader that emits random-content sequences whose *lengths* follow a chosen distribution:
+
+```python
+from torchtitan.components.data import (
+    BucketLengthSpec,
+    LengthBucket,
+    synthetic_dataloader,
+)
+
+config.dataloader = synthetic_dataloader(
+    length_spec=BucketLengthSpec(
+        buckets=(
+            # keep max_len < training.max_context_length; longer draws are dropped
+            LengthBucket(min_len=1, max_len=128, weight=3.0),
+            LengthBucket(min_len=1024, max_len=2000, weight=1.0),
+        ),
+    ),
+    vocab_size=128_256,
+    seed=0,
+)
+```
+
+See the `synthetic_dataloader` docstring in `synthetic.py`.
