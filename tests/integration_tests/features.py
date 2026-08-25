@@ -308,5 +308,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="Kimi K3 text decoder, expert parallel ep2",
             test_name="kimi_k3_text_ep2",
             ngpu=2,
+            use_real_pg=True,
         ),
     ]
