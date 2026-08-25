@@ -50,10 +50,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="DeepSeek V3 FSDP+TP+CP+EP",
             test_name="deepseek_v3_fsdp+tp+cp+ep",
             ngpu=8,
-            golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
-            ),
-            fake_pg_numerics_config=recipes.deepseek_v3_debugmodel_fsdp8_ep8,
+            golden_numerics_path="tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_fsdp2_tp2_pp2_ep4],
@@ -191,10 +189,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="Muse Glimmer text FSDP+TP+CP",
             test_name="muse_glimmer_text_fsdp+tp+cp",
             ngpu=8,
-            golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"
-            ),
-            fake_pg_numerics_config=recipes.muse_glimmer_debugmodel_fsdp8,
+            golden_numerics_path="tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt",
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2],

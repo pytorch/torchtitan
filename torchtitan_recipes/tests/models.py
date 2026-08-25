@@ -27,23 +27,6 @@ from torchtitan.trainer import Trainer
 from . import _use_spmd_types
 
 
-def _configure_fake_pg_numerics(
-    config: Trainer.Config, *, expert_parallel_degree: int = 1
-) -> Trainer.Config:
-    """Use a stable logical-world-eight topology for Fake-PG numerics."""
-    config.parallelism.data_parallel_replicate_degree = 1
-    config.parallelism.data_parallel_shard_degree = 8
-    config.parallelism.context_parallel_degree = 1
-    config.parallelism.tensor_parallel_degree = 1
-    config.parallelism.pipeline_parallel_degree = 1
-    config.parallelism.expert_parallel_degree = expert_parallel_degree
-    config.training.max_context_length = 512
-    config.training.num_tokens_per_microbatch_per_dp_rank = 512
-    config.training.steps = 10
-    config.training.disable_cuda_graphs = True
-    return config
-
-
 def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel()
     config.parallelism.data_parallel_shard_degree = 2
@@ -82,12 +65,6 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile() -> Trainer.Config:
     ]
     config.training.disable_cuda_graphs = True
     return config
-
-
-def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
-    return _configure_fake_pg_numerics(
-        deepseek_v3_debugmodel(), expert_parallel_degree=8
-    )
 
 
 def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
@@ -359,12 +336,6 @@ def kimi_k3_debugmodel_mm_fsdp2() -> Trainer.Config:
     config = kimi_k3_debugmodel()
     config.parallelism.data_parallel_shard_degree = 2
     return config
-
-
-def muse_glimmer_debugmodel_fsdp8() -> Trainer.Config:
-    from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
-
-    return _configure_fake_pg_numerics(muse_glimmer_debugmodel())
 
 
 def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
