@@ -457,6 +457,9 @@ class HFTransformerModel(BaseModel):
 
             self.max_seq_len = training.max_context_length
 
+            if hasattr(config.loss, "global_vocab_size"):
+                config.loss.global_vocab_size = self.vocab_size
+
             self.deterministic = debug.deterministic
 
             # Configure HF-specific settings to match TorchTitan settings
