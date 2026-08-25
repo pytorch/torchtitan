@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 
 
@@ -40,6 +41,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         simple_fsdp wrap, parameters silently stay in fp32 on a single GPU and
         any downstream bf16-only kernel (e.g. MXFP8) breaks.
         """
+        set_spmd_backend("partial_dtensor")
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=1,
