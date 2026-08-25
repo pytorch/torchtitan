@@ -54,6 +54,8 @@ if TYPE_CHECKING:
     )
     from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
+    from .state_dict_adapter import DCPStateDictAdapter
+
 
 class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
@@ -129,6 +131,8 @@ class CheckpointManager(BaseCheckpointManager):
             model state dicts between native format and other formats.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
             with config.folder
+        state_dict_adapter (Optional[DCPStateDictAdapter]): Converts runtime state
+            to and from its native DCP representation.
 
     """
 
@@ -159,6 +163,7 @@ class CheckpointManager(BaseCheckpointManager):
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
+        state_dict_adapter: DCPStateDictAdapter | None = None,
     ) -> None:
 
         self.enable = config.enable
@@ -168,6 +173,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
+        self.state_dict_adapter = state_dict_adapter
 
         self.states = states
         self.states.update(
@@ -281,6 +287,14 @@ class CheckpointManager(BaseCheckpointManager):
         storage_writer: HuggingFaceStorageWriter | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
 
+        if self.state_dict_adapter is not None:
+            if to_hf:
+                raise ValueError(
+                    "DCP state-dict adaptation is not supported for Hugging Face "
+                    "checkpoint export."
+                )
+            state_dict = self.state_dict_adapter.to_dcp(state_dict)
+
         # HF Format Conversion
         if to_hf:
             assert self.sd_adapter is not None, "sd_adapter is required for to_hf=True"
@@ -375,6 +389,14 @@ class CheckpointManager(BaseCheckpointManager):
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
 
+        if self.state_dict_adapter is not None:
+            if from_hf:
+                raise ValueError(
+                    "DCP state-dict adaptation is not supported for Hugging Face "
+                    "checkpoint loading."
+                )
+            state_dict = self.state_dict_adapter.to_dcp(state_dict)
+
         if from_hf:
             assert self.sd_adapter is not None, (
                 "trying to load checkpoint in HF safetensors format, "
@@ -392,6 +414,9 @@ class CheckpointManager(BaseCheckpointManager):
             self.states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
+
+            if self.state_dict_adapter is not None:
+                state_dict = self.state_dict_adapter.from_dcp(state_dict)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
