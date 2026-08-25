@@ -20,7 +20,7 @@ assignment, debug-only).
 To inspect a length distribution (stats, histogram, DP-balance) before training,
 run ``scripts/preview_synthetic_lengths.py`` against a JSON spec::
 
-    python -m scripts.preview_synthetic_lengths --spec buckets.json \\
+    python -m scripts.preview_synthetic_lengths --spec buckets.json \
         --seed 0 --samples 100000 --dp 8 --per-rank-batch 4
 """
 
