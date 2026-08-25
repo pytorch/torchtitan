@@ -19,13 +19,6 @@ DTensors, avoiding mixed plain-Tensor / DTensor errors in RoPE.
 
 MoE layers are already Titan Module instances with ShardingConfig and
 are handled by ``model.parallelize()`` directly.
-
-TODO: this DTensor-based sharding path is transitional. Core is migrating to
-``spmd_types`` (``spmd_backend="spmd_types"``), where state and activations are
-plain local shards rather than DTensor subclasses. Once that backend is ready,
-the DTensor-based sharding here should be deprecated in favor of it. The
-declarative ``ShardingConfig``/``SpmdType`` this module emits is already
-backend-agnostic, so the migration is a backend switch rather than a rewrite.
 """
 
 import inspect
@@ -117,7 +110,7 @@ def set_hf_sharding_configs(
 
     Root-level and per-layer modules all use ``_sharding_config``.
     MoE layers are skipped (already have ShardingConfig from Titan MoE).
-    Actual DTensor distribution happens later in ``model.parallelize()``.
+    Actual state distribution happens later in ``model.parallelize()``.
 
     Args:
         model: The HFTransformerModel with Module-converted children.
@@ -134,7 +127,9 @@ def set_hf_sharding_configs(
             state_shardings=emb_state,
             in_src_shardings={"input": _hf_activation_placement(tp=spmd.R)},
             in_dst_shardings={"input": _hf_activation_placement(tp=spmd.R)},
+            out_src_shardings=_hf_activation_placement(tp=spmd.P),
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
+            local_map=LocalMapConfig(in_grad_placements=None),
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
@@ -162,6 +157,7 @@ def set_hf_sharding_configs(
             # no-op when TP is absent from the runtime mesh, so no flag is
             # needed: core cross_entropy_loss detects the vocab-sharded pred
             # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
+            out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
             out_dst_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
         )
 
@@ -416,6 +412,7 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings=state,
         in_src_shardings={"hidden_states": sp_layout},
         in_dst_shardings={"hidden_states": sp_layout},
+        out_src_shardings=sp_layout,
         out_dst_shardings=sp_layout,
     )
 
