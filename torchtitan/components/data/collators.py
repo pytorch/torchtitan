@@ -70,7 +70,7 @@ class TextCollator(Collator):
             input_ids = torch.nn.functional.pad(input_ids, (0, pad_len))
             labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
             positions = torch.cat(
-                [positions, torch.arange(pad_len, dtype=positions.dtype)]
+                [positions, torch.zeros(pad_len, dtype=positions.dtype)]
             )
 
         return {
