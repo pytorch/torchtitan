@@ -220,10 +220,20 @@ def run_single_test(
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
     base_env.pop("COMM_MODE", None)
+    # An inherited RANK would silently redirect a Fake PG run to another rank.
+    base_env.pop("RANK", None)
     if use_fake_pg:
         base_env["COMM_MODE"] = "fake_backend"
 
-    for run, override_arg in enumerate(test_flavor.override_args):
+    # A Fake PG process stands in for one global rank.
+    ranks_to_run = test_flavor.fake_pg_ranks if use_fake_pg else (None,)
+    runs = (
+        (run, override_arg, simulated_rank)
+        for run, override_arg in enumerate(test_flavor.override_args)
+        for simulated_rank in ranks_to_run
+    )
+
+    for run, override_arg, simulated_rank in runs:
         test_output_dir = str(Path(output_dir) / test_name)
         config_fn = test_flavor.configs[run] if test_flavor.configs else None
         config = config_fn() if config_fn is not None else None
@@ -231,6 +241,8 @@ def run_single_test(
             validate_fake_pg_compatibility(test_flavor, config)
         env = base_env.copy()
         env["TORCHTITAN_TEST_OUTPUT_DIR"] = test_output_dir
+        if simulated_rank is not None:
+            env["RANK"] = str(simulated_rank)
         if config_fn is not None:
             env["MODULE"] = config_fn.__module__
             env["CONFIG"] = config_fn.__name__
@@ -309,9 +321,12 @@ def run_single_test(
         captured = result.stdout or ""
 
         end_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        flavor = test_flavor.test_descr
+        if simulated_rank is not None:
+            flavor += f" (simulated rank {simulated_rank})"
         header = (
             f"===== [{test_name}] start {start_ts} end {end_ts} "
-            f"flavor: {test_flavor.test_descr} (rc={returncode}) =====\n"
+            f"flavor: {flavor} (rc={returncode}) =====\n"
             f"===== [{test_name}] command: {cmd} =====\n"
         )
         footer = f"===== [{test_name}] end of output (rc={returncode}) =====\n"
@@ -326,7 +341,7 @@ def run_single_test(
                 else f"rc={returncode}"
             )
             raise RuntimeError(
-                f"\nFailed test flavor: {test_flavor.test_descr} ({reason}).\n"
+                f"\nFailed test flavor: {flavor} ({reason}).\n"
                 f"Command: {cmd}\n"
                 f"Last 50 lines:\n{tail}\n"
             )

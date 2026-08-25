@@ -536,6 +536,18 @@ def init_distributed(
     return torch.distributed.get_world_size()
 
 
+def pp_backend_is_fake(parallel_dims: ParallelDims) -> bool:
+    """Whether Pipeline Parallel runs over a fake process group.
+
+    Read the backend rather than ``comm.mode``: ``init_distributed`` leaves an
+    already-initialized process group alone, so the requested mode can differ
+    from what the ranks actually got.
+    """
+    if not parallel_dims.pp_enabled:
+        return False
+    return dist.get_backend(parallel_dims.get_mesh("pp").get_group("pp")) == "fake"
+
+
 def set_pg_timeouts(
     timeout: timedelta,
     parallel_dims: ParallelDims,

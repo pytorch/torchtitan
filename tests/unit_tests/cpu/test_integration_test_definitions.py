@@ -56,6 +56,26 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
     )
 
 
+def test_fake_pg_run_simulates_selected_ranks(monkeypatch, tmp_path: Path) -> None:
+    ranks = []
+
+    def fake_run_cmd(cmd, timeout=None, env=None):
+        ranks.append(env["RANK"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
+
+    monkeypatch.setattr("tests.integration_tests.run_tests._run_cmd", fake_run_cmd)
+    test = OverrideDefinitions(
+        configs=[llama3_debugmodel],
+        test_name="fake_pg_ranks_test",
+        ngpu=4,
+        fake_pg_ranks=(0, 2),
+    )
+
+    run_single_test(test, str(tmp_path), use_fake_pg=True)
+
+    assert ranks == ["0", "2"]
+
+
 def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     config = llama3_debugmodel_fsdp2_tp2_pp2()
 
@@ -141,7 +161,6 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
     ("test_name", "incompatibility"),
     [
         ("checkpoint", "checkpointing"),
-        ("pipeline_parallel", "pipeline parallelism"),
         ("fsdp+varlen_attn+per_op_sac", "selective AC"),
     ],
 )
@@ -151,8 +170,6 @@ def test_fake_pg_incompatible_test_requires_explicit_marker(
     config = llama3_debugmodel()
     if test_name == "checkpoint":
         config.checkpoint.enable = True
-    elif test_name == "pipeline_parallel":
-        config.parallelism.pipeline_parallel_degree = 2
 
     test = OverrideDefinitions(configs=[llama3_debugmodel], test_name=test_name)
 

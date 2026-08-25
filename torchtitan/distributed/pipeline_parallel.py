@@ -8,6 +8,8 @@ import dataclasses
 import math
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -23,11 +25,20 @@ from torch.distributed.pipelining.schedules import (
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.placement_types import Placement
 
-from torchtitan.components.loss import LossFunction
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.utils import pp_backend_is_fake
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -93,6 +104,36 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
+    # Fake PG drops PipelineStage's P2P metadata exchange, so provide static
+    # stage IO only for that backend. A real group infers it from the
+    # parallelized modules and only checks a supplied description under
+    # TORCH_DISTRIBUTED_DEBUG=DETAIL.
+    stage_io = None
+    if pp_backend_is_fake(parallel_dims):
+        if not isinstance(model_config, Decoder.Config):
+            raise ValueError(
+                "Pipeline Parallel on a fake process group needs a static "
+                "stage IO description, which is unavailable because "
+                f"{type(model_config).__name__} is not a decoder. Run with "
+                "comm.mode=default."
+            )
+        unsupported = _unsupported_split_reason(module_names_per_stage)
+        if unsupported is not None:
+            raise ValueError(
+                "Pipeline Parallel on a fake process group needs a static "
+                f"stage IO description, which is unavailable because "
+                f"{unsupported}. Split every stage boundary between decoder "
+                "blocks with parallelism.module_fqns_per_model_part, or run "
+                "with comm.mode=default."
+            )
+        stage_io = _build_decoder_stage_io(
+            parallel_dims=parallel_dims,
+            parallelism=parallelism,
+            training=training,
+            model_config=model_config,
+            lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
+        )
+
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = _pipeline_module_split(
         model,
@@ -101,6 +142,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        stage_io=stage_io,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -569,6 +611,149 @@ def _get_pp_rank_to_stage_indices_mapping(
         raise ValueError(f"Unknown style {style}")
 
 
+@dataclass(frozen=True)
+class _StageIO:
+    """Example tensors for the values that cross pipeline stage boundaries.
+
+    ``PipelineStage`` only reads metadata off them -- shape, dtype,
+    requires_grad, plus mesh and placements for DTensor -- so they live on the
+    meta device.
+    """
+
+    root_input: torch.Tensor
+    hidden: torch.Tensor
+    final_output: torch.Tensor
+
+
+def _unsupported_split_reason(module_names_per_stage: list[list[str]]) -> str | None:
+    """Why this split cannot be given a static stage IO description.
+
+    Every boundary is described with the same hidden state, which only holds
+    where the split cuts between two decoder blocks. Elsewhere the layout
+    differs: the root norm all-gathers the sequence, and several models keep
+    the embedding output replicated until the first block.
+    """
+    for stage_idx in range(len(module_names_per_stage) - 1):
+        before = module_names_per_stage[stage_idx]
+        after = module_names_per_stage[stage_idx + 1]
+        if not before or not before[-1].startswith("layers."):
+            return f"stage {stage_idx} does not end at a decoder block"
+        if not after or not after[0].startswith("layers."):
+            return f"stage {stage_idx + 1} does not start at a decoder block"
+    return None
+
+
+def _as_activation(
+    local: torch.Tensor,
+    parallel_dims: ParallelDims,
+    *,
+    tp_placement: Placement,
+    global_shape: torch.Size | None = None,
+) -> torch.Tensor:
+    """Runtime representation of an activation the model produces.
+
+    ``partial_dtensor`` wraps activations in a DTensor over the TP axis alone;
+    ``spmd_types`` keeps them plain.
+    """
+    if parallel_dims.spmd_backend != "partial_dtensor" or not parallel_dims.tp_enabled:
+        return local
+    mesh = parallel_dims.get_mesh("tp")
+
+    if global_shape is None:
+        return DTensor.from_local(local, mesh, (tp_placement,))
+    return DTensor.from_local(
+        local,
+        mesh,
+        (tp_placement,),
+        shape=global_shape,
+        stride=torch.empty(global_shape, device="meta").stride(),
+    )
+
+
+def _build_decoder_stage_io(
+    *,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    training: TrainingConfig,
+    model_config: Decoder.Config,
+    lm_head_in_loss: bool,
+) -> _StageIO:
+    """Describe the tensors a decoder pipeline passes between its stages.
+
+    Stage 0 takes token ids, every boundary carries hidden states, and the last
+    stage returns hidden states when the loss owns the lm_head, logits
+    otherwise. The norm in front of the lm_head replicates the sequence, so the
+    last output is never sequence-parallel.
+    """
+    # CP shards the microbatch before it reaches stage 0.
+    num_tokens = training.num_tokens_per_microbatch_per_dp_rank // parallel_dims.cp
+    dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+    sp_enabled = parallel_dims.tp_enabled and parallelism.enable_sequence_parallel
+
+    def example(*shape: int, dtype: torch.dtype = dtype) -> torch.Tensor:
+        return torch.empty(shape, dtype=dtype, device="meta")
+
+    hidden = _as_activation(
+        example(
+            num_tokens // parallel_dims.tp if sp_enabled else num_tokens,
+            model_config.dim,
+        ),
+        parallel_dims,
+        tp_placement=Shard(0) if sp_enabled else Replicate(),
+    )
+    if lm_head_in_loss:
+        final_output = _as_activation(
+            example(num_tokens, model_config.dim),
+            parallel_dims,
+            tp_placement=Replicate(),
+        )
+    else:
+        vocab_size = model_config.vocab_size
+        local_vocab_size = vocab_size
+        if parallel_dims.tp_enabled:
+            tp_mesh = parallel_dims.get_mesh("tp")
+            local_vocab_size, _ = Shard.local_shard_size_and_offset(
+                vocab_size, parallel_dims.tp, tp_mesh.get_local_rank()
+            )
+        final_output = _as_activation(
+            example(num_tokens, local_vocab_size),
+            parallel_dims,
+            tp_placement=Shard(-1),
+            # A vocabulary the TP degree does not divide leaves the last rank
+            # with a shorter shard than the others.
+            global_shape=torch.Size([num_tokens, vocab_size]),
+        )
+
+    return _StageIO(
+        root_input=example(num_tokens, dtype=torch.int64),
+        hidden=hidden.requires_grad_(),
+        final_output=final_output.requires_grad_(),
+    )
+
+
+def _static_stage_metadata(
+    stage_io: _StageIO, stage_idx: int, num_stages: int
+) -> dict[str, Any]:
+    """``PipelineStage`` metadata arguments for one stage.
+
+    Supplying these skips the P2P metadata handshake, which a fake process
+    group cannot run because it drops every send.
+    """
+    is_first = stage_idx == 0
+    is_last = stage_idx == num_stages - 1
+    # Gradients match the activation they belong to, minus requires_grad.
+    hidden_grad = stage_io.hidden.detach()
+    return {
+        "input_args": (stage_io.root_input if is_first else stage_io.hidden,),
+        "output_args": (stage_io.final_output if is_last else stage_io.hidden,),
+        # Token ids and the loss-side output carry no cross-stage gradient. The
+        # entry stays in the tuple because a bare None reads as "unknown" and
+        # sends the whole pipeline back to dynamic inference.
+        "input_grads": (None,) if is_first else (hidden_grad,),
+        "output_grads": (None,) if is_last else (hidden_grad,),
+    }
+
+
 def _pipeline_module_split(
     whole_model: nn.Module,
     pp_mesh: DeviceMesh,
@@ -576,6 +761,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    stage_io: _StageIO | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -599,6 +785,9 @@ def _pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
+        get_mesh: Callback resolving a DeviceMesh from mesh axis names
+        stage_io: Tensors crossing the stage boundaries. When given, stages get
+                  static metadata instead of inferring it over P2P
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -629,6 +818,11 @@ def _pipeline_module_split(
             device,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
+            **(
+                _static_stage_metadata(stage_io, stage_idx, num_stages)
+                if stage_io is not None
+                else {}
+            ),
         )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx} "

@@ -936,15 +936,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     group=pp_mesh.get_group(),
                 )
 
-            step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
-            # Keep the check and optimizer kernels ordered on the device without
-            # synchronizing the host on every step. The RuntimeError is catchable
-            # on CPU, while a failed CUDA assertion invalidates the process.
-            torch._assert_async(
-                step_is_finite,
-                "Loss or gradient norm is not finite on at least one rank at "
-                f"step {self.step}. Stopping training before the optimizer update.",
-            )
+            # A fake process group drops every PP send. Its received values,
+            # loss, and gradient norm are fabricated.
+            if not dist_utils.pp_backend_is_fake(parallel_dims):
+                step_is_finite = loss_is_finite.logical_and(
+                    torch.isfinite(grad_norm).all()
+                )
+                # Keep the check and optimizer kernels ordered on the device
+                # without synchronizing the host on every step. The RuntimeError
+                # is catchable on CPU, while a failed CUDA assertion invalidates
+                # the process.
+                torch._assert_async(
+                    step_is_finite,
+                    "Loss or gradient norm is not finite on at least one rank at "
+                    f"step {self.step}. Stopping training before the optimizer update.",
+                )
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
             self.lr_schedulers.step()

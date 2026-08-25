@@ -56,12 +56,20 @@ class TestInvalidLoss(unittest.TestCase):
         while True:
             yield input_dict, labels
 
-    def _run_step(self, loss_value: float, should_log: bool) -> None:
+    def _run_step(
+        self,
+        loss_value: float,
+        should_log: bool,
+        fake_pp_backend: bool = False,
+    ) -> None:
         trainer = self._make_trainer(loss_value, should_log)
         # sl.* are logging side effects; clip_grad_norm_ needs real params.
         with patch("torchtitan.trainer.sl", MagicMock()), patch(
             "torchtitan.trainer.dist_utils.clip_grad_norm_",
             return_value=torch.tensor(1.0),
+        ), patch(
+            "torchtitan.trainer.dist_utils.pp_backend_is_fake",
+            return_value=fake_pp_backend,
         ):
             trainer.train_step(self._data_iterator())
 
@@ -82,6 +90,9 @@ class TestInvalidLoss(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             self._run_step(float("nan"), should_log=False)
         self.assertIn("not finite", str(ctx.exception))
+
+    def test_fake_pp_skips_the_check(self):
+        self._run_step(float("nan"), should_log=True, fake_pp_backend=True)
 
 
 if __name__ == "__main__":

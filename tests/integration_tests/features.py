@@ -119,11 +119,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="pp_dp_1f1b",
             use_real_pg=True,
         ),
+        # Also exercise this PP+TP case under Fake PG on the first and last PP
+        # stages, which ranks 0 and 2 own.
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
             test_descr="PP+TP GPipe 2D test",
             test_name="pp_tp_gpipe",
-            use_real_pg=True,
+            fake_pg_ranks=(0, 2),
         ),
         OverrideDefinitions(
             configs=[
@@ -150,6 +152,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="PP looped 1F1B test",
             test_name="pp_looped_1f1b",
             ngpu=4,
+            # Eight virtual stages over six decoder blocks leaves the first
+            # stage holding only the embedding, which has no static stage IO
+            # description, so this cannot move to the Fake PG tier.
             use_real_pg=True,
         ),
         # TODO: Disabled with the FlexAttention default (SDPA is no longer a

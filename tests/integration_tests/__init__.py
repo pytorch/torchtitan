@@ -40,6 +40,8 @@ class OverrideDefinitions:
     """Run through loss_compare.py using this mode-specific golden path."""
     use_real_pg: bool = False
     """Whether the test requires communication semantics from a real PG."""
+    fake_pg_ranks: Sequence[int] = (0,)
+    """Global ranks to simulate under Fake PG, one run each."""
     configs: Sequence[Callable[[], Trainer.Config]] = ()
     """One configuration per run, selected with ``--module``/``--config``.
 
@@ -48,6 +50,12 @@ class OverrideDefinitions:
     """
 
     def __post_init__(self):
+        out_of_range = [r for r in self.fake_pg_ranks if not 0 <= r < self.ngpu]
+        if out_of_range:
+            raise ValueError(
+                f"{self.test_name}: fake_pg_ranks {out_of_range} fall outside "
+                f"the simulated world of {self.ngpu} ranks."
+            )
         if not self.configs:
             return
         if not self.override_args:
@@ -70,8 +78,6 @@ def validate_fake_pg_compatibility(
 
     if config.checkpoint.enable or config.checkpoint.create_seed_checkpoint:
         incompatibilities.append("checkpointing")
-    if config.parallelism.pipeline_parallel_degree > 1:
-        incompatibilities.append("pipeline parallelism")
     # TODO: FSDP + selective AC backward recompute has a shard/storage shape
     # mismatch with Fake PG under spmd_types. Keep this test on a real PG until
     # that interaction is fixed. Issue #4149.
