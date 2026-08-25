@@ -293,6 +293,13 @@ class CompileConfig:
 
     backend: str = "inductor"
 
+    fullgraph: bool = True
+    """Require each compiled component to be captured as one graph.
+
+    Set to ``False`` to permit graph breaks around operators that explicitly
+    disable Dynamo, such as the current Qwen3.5/3.6 FLA causal-conv path.
+    """
+
     def __post_init__(self) -> None:
         if self.enable_async_tensor_parallel and not (
             self.enable and "model" in self.components

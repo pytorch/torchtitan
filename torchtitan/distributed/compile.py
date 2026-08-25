@@ -67,9 +67,15 @@ def apply_compile(
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block.compile(backend=backend, fullgraph=True)
+        transformer_block.compile(
+            backend=backend,
+            fullgraph=compile_config.fullgraph,
+        )
 
-    logger.info("Compiling each TransformerBlock with torch.compile")
+    logger.info(
+        "Compiling each TransformerBlock with torch.compile "
+        f"(backend={compile_config.backend}, fullgraph={compile_config.fullgraph})"
+    )
 
 
 def _maybe_enable_async_tp(

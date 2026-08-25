@@ -90,6 +90,27 @@ class TestApplyCompile(unittest.TestCase):
         finally:
             torch._inductor.config._micro_pipeline_tp = previous_micro_pipeline_tp
 
+    def test_apply_compile_forwards_fullgraph_setting(self):
+        model = TinyModel(num_layers=2, dim=128)
+        compile_config = CompileConfig(
+            enable=True,
+            backend="inductor",
+            fullgraph=False,
+        )
+        parallel_dims = MagicMock(tp_enabled=False)
+
+        with patch.object(torch.nn.Module, "compile") as compile_module:
+            apply_compile(
+                model,
+                compile_config=compile_config,
+                parallel_dims=parallel_dims,
+            )
+
+        self.assertEqual(compile_module.call_count, 2)
+        for call in compile_module.call_args_list:
+            self.assertEqual(call.kwargs["backend"], "inductor")
+            self.assertFalse(call.kwargs["fullgraph"])
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_grouped_mm_compiles_and_runs(self):
         model = TinyModel(num_layers=2, dim=128).cuda()
