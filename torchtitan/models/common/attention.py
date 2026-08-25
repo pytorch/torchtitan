@@ -222,7 +222,7 @@ class VarlenAttention(Module):
 
 
 class FlexAttention(Module):
-    """Inner attention using ``flex_attention`` with torch.compile and CP support.
+    """Inner attention using ``flex_attention`` with torch.compile.
 
     Inputs use ``[T, N, H]``. The FlexAttention kernel requires a batch
     dimension, so inputs are adapted to ``[1, N, T, H]`` only at the kernel

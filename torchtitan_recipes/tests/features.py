@@ -9,6 +9,11 @@
 import os
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+
+from torchtitan.models.common.cp_attention import (
+    AllGatherCPFlexAttention,
+    use_cp_kernel,
+)
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel,
@@ -279,6 +284,7 @@ def llama3_debugmodel_hsdp2x2() -> Trainer.Config:
 def llama3_debugmodel_cp4() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=True)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.context_parallel_degree = 4
     return config
 
@@ -292,6 +298,7 @@ def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=True)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
     return config
@@ -300,6 +307,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=True)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -308,6 +316,7 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
 
 def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
     config = llama3_debugmodel_hsdp2x2()
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.context_parallel_degree = 2
     return config
 
@@ -357,6 +366,7 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=False)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.validator.enable = True
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2

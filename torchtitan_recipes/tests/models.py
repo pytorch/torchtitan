@@ -8,6 +8,11 @@
 
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
+
+from torchtitan.models.common.cp_attention import (
+    AllGatherCPFlexAttention,
+    use_cp_kernel,
+)
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
@@ -46,6 +51,7 @@ def _configure_fake_pg_numerics(
 
 def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel()
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -92,6 +98,7 @@ def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -152,6 +159,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_ep4() -> Trainer.Config:
 
 def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config = qwen3_debugmodel_moe_param_groups()
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -166,6 +174,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
 def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config = qwen3_debugmodel()
     _use_spmd_types(config, typechecking=True)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -181,6 +190,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_no_sp() -> Trainer.Config:
 def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
     config = qwen3_debugmodel()
     _use_spmd_types(config, typechecking=False)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -192,6 +202,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
 def qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2() -> Trainer.Config:
     config = qwen3_debugmodel_non_fused_qkv()
     _use_spmd_types(config, typechecking=True)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -269,6 +280,7 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
 def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config = gpt_oss_debugmodel_flex()
     _use_spmd_types(config, typechecking=False)
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = "ptrr"
@@ -359,6 +371,7 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 
     config = muse_glimmer_debugmodel()
+    use_cp_kernel(config, AllGatherCPFlexAttention)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
