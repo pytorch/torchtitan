@@ -441,9 +441,19 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         labels_type[dp_group] = spmd.S(0)
 
                     # run custom autograd
-                    local_logits = (
-                        logits_dtensor.to_local().detach().requires_grad_(True)
-                    )
+                    local_logits = logits_dtensor.to_local().detach()
+                    valid_local_vocab_size = local_logits.shape[-1]
+                    padded_local_vocab_size = (
+                        vocab_size + dist.get_world_size(tp_group) - 1
+                    ) // dist.get_world_size(tp_group)
+                    if valid_local_vocab_size < padded_local_vocab_size:
+                        padded_logits = local_logits.new_full(
+                            (*local_logits.shape[:-1], padded_local_vocab_size),
+                            1000.0,
+                        )
+                        padded_logits[..., :valid_local_vocab_size].copy_(local_logits)
+                        local_logits = padded_logits
+                    local_logits.requires_grad_(True)
                     local_labels = labels_dtensor.to_local()
                     spmd.assert_type(local_logits, logits_type)
                     spmd.assert_type(local_labels, labels_type)
@@ -467,8 +477,16 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     with loss_parallel():
                         wrapper_loss.backward()
                     local_loss.backward()
+                    local_grad = local_logits.grad[..., :valid_local_vocab_size]
+                    if valid_local_vocab_size < padded_local_vocab_size:
+                        self.assertEqual(
+                            torch.count_nonzero(
+                                local_logits.grad[..., valid_local_vocab_size:]
+                            ).item(),
+                            0,
+                        )
                     local_grad_dtensor = DTensor.from_local(
-                        local_logits.grad,
+                        local_grad,
                         mesh,
                         logits_placements,
                         shape=torch.Size((T, vocab_size)),

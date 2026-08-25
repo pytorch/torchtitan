@@ -61,6 +61,7 @@ class SpmdLayout:
 
     axis_types: dict[MeshAxisName, spmd.PerMeshAxisSpmdType]
     partition_spec: spmd.PartitionSpec | tuple[Any, ...] | None = None
+    allow_uneven_sharding: bool = False
 
     def __post_init__(self) -> None:
         sharded_dims: dict[int, MeshAxisName] = {}

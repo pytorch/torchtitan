@@ -337,8 +337,9 @@ class Module(nn.Module, Configurable):
         param: nn.Parameter,
         layout: SpmdLayout,
         parallel_dims: ParallelDims,
-    ) -> None:
-        """Reject parameter layouts that produce uneven TP or EP local shards."""
+    ) -> bool:
+        """Validate uneven TP or EP parameter sharding and report its presence."""
+        has_uneven_sharding = False
         axis_sizes = {
             MeshAxisName.TP: parallel_dims.tp,
             MeshAxisName.EP: parallel_dims.ep,
@@ -360,6 +361,10 @@ class Module(nn.Module, Configurable):
             if param.shape[tensor_dim] % axis_size == 0:
                 continue
 
+            has_uneven_sharding = True
+            if layout.allow_uneven_sharding:
+                continue
+
             raise ValueError(
                 "spmd_types does not support uneven model-parallel parameter "
                 f"sharding: {type(self).__name__}.{name} with shape "
@@ -368,6 +373,7 @@ class Module(nn.Module, Configurable):
                 f"across model-parallel mesh axis {axis_name.value} with size "
                 f"{axis_size}."
             )
+        return has_uneven_sharding
 
     def _distribute_states(self, parallel_dims: ParallelDims) -> None:
         """Distribute params and buffers per ``state_shardings``.
@@ -388,12 +394,17 @@ class Module(nn.Module, Configurable):
                     "in sharding_config.state_shardings."
                 )
             if parallel_dims.spmd_backend == "spmd_types":
-                self._validate_even_model_parallel_param_sharding(
+                has_uneven_sharding = self._validate_even_model_parallel_param_sharding(
                     name,
                     param,
                     spmd_layout,
                     parallel_dims,
                 )
+                if has_uneven_sharding:
+                    logical_shapes = self.__dict__.setdefault(
+                        "_spmd_logical_state_shapes", {}
+                    )
+                    logical_shapes[name] = tuple(param.shape)
                 self._spmd_distribute_state(
                     parallel_dims,
                     name,
