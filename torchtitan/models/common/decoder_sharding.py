@@ -10,7 +10,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.models.common.dist_gemm import (
-    AllGatherFusedFeedForward,
+    DistGEMMFeedForward,
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
@@ -319,7 +319,7 @@ def set_dense_ffn_sharding(
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute
     # collectives move inside the modules.
-    dist_gemm = isinstance(feed_forward_cfg, AllGatherFusedFeedForward.Config)
+    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
     if dist_gemm:
         validate_dist_gemm_preconditions(enable_sp=enable_sp)
     feed_forward_cfg.sharding_config = (

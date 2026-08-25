@@ -7,7 +7,7 @@
 """Model components that fold the TP collectives into their GEMMs.
 
 :class:`AllGatherFusedQKVLinear`, :class:`RowParallelLinear` and
-:class:`AllGatherFusedFeedForward` are drop-in replacements for the stock QKV,
+:class:`DistGEMMFeedForward` are drop-in replacements for the stock QKV,
 output and SwiGLU projections. They keep the stock parameter layouts and only
 move the TP collective into the GEMM, over the autograd Functions in
 ``torchtitan/distributed/linear.py``. ``RowParallelLinear`` serves both attention's ``wo`` and the
@@ -175,7 +175,7 @@ class RowParallelLinear(Linear):
         )
 
 
-class AllGatherFusedFeedForward(FeedForward):
+class DistGEMMFeedForward(FeedForward):
     """SwiGLU feed-forward with both TP collectives folded into its GEMMs.
 
     ``w1`` and ``w3`` share an input, so one all-gather feeds both
@@ -202,7 +202,7 @@ class AllGatherFusedFeedForward(FeedForward):
             # with bias=False, so this is a misconfiguration rather than a gap.
             if self.w1.bias or self.w3.bias:
                 raise ValueError(
-                    "AllGatherFusedFeedForward does not support a bias on w1/w3; "
+                    "DistGEMMFeedForward does not support a bias on w1/w3; "
                     "the fused all-gather takes no per-weight bias. Use the stock "
                     "FeedForward, or build w1/w3 with bias=False."
                 )
@@ -233,7 +233,7 @@ class AllGatherFusedFeedForward(FeedForward):
 
 __all__ = [
     "validate_dist_gemm_preconditions",
-    "AllGatherFusedFeedForward",
+    "DistGEMMFeedForward",
     "AllGatherFusedQKVLinear",
     "RowParallelLinear",
 ]
