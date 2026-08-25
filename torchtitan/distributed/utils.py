@@ -27,7 +27,7 @@ from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_module, device_type, get_local_device
+from torchtitan.tools.utils import device_module, device_type
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -341,7 +341,7 @@ def set_batch_invariance(enable: bool) -> None:
 
     # Set NCCL env vars for deterministic inter-GPU collectives.
     # Must be set BEFORE dist.init_process_group.
-    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/batch_invariant.py
+    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/determinism/batch_invariant.py
     os.environ["NCCL_LAUNCH_MODE"] = "GROUP"  # Fixed kernel launch ordering
     os.environ[
         "NCCL_COLLNET_ENABLE"
@@ -429,7 +429,6 @@ def get_spmd_context(
 
 def init_fake_mode(
     world_size: int,
-    comm_mode: str = "fake_backend",
     *,
     rank: int = 0,
 ) -> None:
@@ -437,22 +436,13 @@ def init_fake_mode(
 
     Args:
         world_size: The number of GPUs to simulate
-        comm_mode: Communication mode ("fake_backend" or "local_tensor")
         rank: Global rank to simulate
-
     """
     torch.distributed.init_process_group(
         "fake",
         rank=rank,
         world_size=world_size,
     )
-
-    # If local_tensor mode is enabled, initialize LocalTensorMode context
-    if comm_mode == "local_tensor":
-        from torch.distributed import _local_tensor
-
-        lm = _local_tensor.LocalTensorMode(world_size)
-        lm.__enter__()
 
 
 def init_distributed(
@@ -474,7 +464,7 @@ def init_distributed(
     # cannot access the SPMD process groups needed for collectives.
     torch.autograd.set_multithreading_enabled(False)
 
-    if comm_config.mode in ("fake_backend", "local_tensor"):
+    if comm_config.mode == "fake_backend":
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:
             raise ValueError(
@@ -497,7 +487,7 @@ def init_distributed(
             raise ValueError(
                 f"RANK must be in [0, {world_size}) for fake mode, got: {rank}"
             )
-        init_fake_mode(world_size, comm_config.mode, rank=rank)
+        init_fake_mode(world_size, rank=rank)
         return world_size
 
     def _warn_overwrite_env(env, val):
@@ -539,24 +529,10 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
-    device_id: torch.device | None = None
-    if comm_config.mode == "torchcomms":
-        try:
-            import torchcomms  # noqa: F401
-        except ImportError as err:
-            raise ImportError(
-                "torchcomms package is required for --comm.mode=torchcomms."
-            ) from err
-        import torch.distributed.config as dist_config
-
-        dist_config.use_torchcomms = True
-        device_id = get_local_device()
-
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
         timeout=timedelta(seconds=comm_config.init_timeout_seconds),
         _ranks=ranks if ranks is not None else [],
-        device_id=device_id,
     )
 
     return torch.distributed.get_world_size()

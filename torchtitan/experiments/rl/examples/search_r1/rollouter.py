@@ -13,9 +13,38 @@ from torchtitan.experiments.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.experiments.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.experiments.rl.examples.search_r1.rubric import RewardExactMatch
 
-from torchtitan.experiments.rl.rollout.rollouter import Rollouter
+from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
 
 from torchtitan.experiments.rl.rubrics import Rubric
+
+
+class SearchR1Worker(RolloutWorker):
+    """Search-R1's multi-turn search env and rubric.
+
+    Pure config; all methods inherited.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RolloutWorker.Config):
+        rubric: Rubric.Config = field(
+            default_factory=lambda: Rubric.Config(
+                reward_fns=[
+                    # Default = pure-EM 0/1. Put search on the gradient (anti
+                    # closed-book reward hacking) via the levers, e.g.
+                    #   RewardExactMatch.Config(weight=1.0, no_search_penalty=0.2,
+                    #                           retrieval_score=0.1)
+                    RewardExactMatch.Config(weight=1.0),
+                ],
+                # A truncated rollout has no final answer -> no reward / learning signal.
+                truncation_reward=0.0,
+            )
+        )
+        message_env: SearchR1Env.Config = field(default_factory=SearchR1Env.Config)
+        token_env: TokenEnv.Config = field(
+            default_factory=lambda: TokenEnv.Config(
+                max_rollout_tokens=3072, max_num_turns=4
+            )
+        )
 
 
 class SearchR1Rollouter(Rollouter):
@@ -41,22 +70,4 @@ class SearchR1Rollouter(Rollouter):
                 shuffle=False,
             )
         )
-        rubric: Rubric.Config = field(
-            default_factory=lambda: Rubric.Config(
-                reward_fns=[
-                    # Default = pure-EM 0/1. Put search on the gradient (anti
-                    # closed-book reward hacking) via the levers, e.g.
-                    #   RewardExactMatch.Config(weight=1.0, no_search_penalty=0.2,
-                    #                           retrieval_score=0.1)
-                    RewardExactMatch.Config(weight=1.0),
-                ],
-                # A truncated rollout has no final answer -> no reward / learning signal.
-                truncation_reward=0.0,
-            )
-        )
-        message_env: SearchR1Env.Config = field(default_factory=SearchR1Env.Config)
-        token_env: TokenEnv.Config = field(
-            default_factory=lambda: TokenEnv.Config(
-                max_rollout_tokens=3072, max_num_turns=4
-            )
-        )
+        worker: SearchR1Worker.Config = field(default_factory=SearchR1Worker.Config)

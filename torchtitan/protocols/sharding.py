@@ -19,11 +19,8 @@ from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import (
-    layout_axes,
-    MeshAxisName,
-    unfold_dp_axis,
-)
+from torchtitan.distributed.parallel_dims import MeshAxisName, unfold_dp_axis
+from torchtitan.distributed.spmd_types import _per_axis_types, layout_axes
 
 
 __all__ = [
@@ -140,16 +137,8 @@ def resolve_placements(
     # TODO(fegin): remove the size-1 ``Shard(d)``/``Partial`` to ``Replicate()``
     # conversion once FlexShard replaces ``fully_shard``.
     assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
-    axis_types = dict(layout.local_type)
-    if layout.partition_spec is not None:
-        for dim, entry in enumerate(layout.partition_spec):
-            for axis_name in (
-                () if entry is None else entry if isinstance(entry, tuple) else (entry,)
-            ):
-                axis_types[axis_name] = spmd.S(dim)
     concrete_axis_types = {}
-    for axis_name in layout_axes(layout):
-        axis_type = axis_types[axis_name]
+    for axis_name, axis_type in _per_axis_types(layout).items():
         for concrete_axis_name in unfold_dp_axis(axis_name):
             concrete_axis_types[concrete_axis_name] = axis_type
 

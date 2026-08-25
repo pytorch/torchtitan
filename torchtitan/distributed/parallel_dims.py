@@ -21,7 +21,6 @@ from torchtitan.tools.utils import device_type
 __all__ = [
     "MeshAxisName",
     "ParallelDims",
-    "layout_axes",
     "unfold_dp_axis",
     "unfold_dp_axes",
 ]
@@ -49,18 +48,6 @@ class MeshAxisName(StrEnum):
     PP = "pp"
     EP = "ep"
     EFSDP = "efsdp"
-
-
-def layout_axes(layout: SpmdType) -> tuple[MeshAxisName, ...]:
-    """Return and validate the named mesh axes used by a sharding config."""
-    axes = []
-    for axis in layout.local_type:
-        if not isinstance(axis, str):
-            raise TypeError(
-                f"TorchTitan SPMD layouts require named mesh axes, got {axis!r}"
-            )
-        axes.append(MeshAxisName(axis))
-    return tuple(axes)
 
 
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
@@ -539,6 +526,8 @@ class ParallelDims:
         filters every axis out; callers should treat this as a no-op for the
         corresponding boundary.
         """
+        from torchtitan.distributed.spmd_types import layout_axes
+
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None

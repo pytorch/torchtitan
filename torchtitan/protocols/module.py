@@ -22,9 +22,10 @@ from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import layout_axes, ParallelDims
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
+    layout_axes,
     set_current_spmd_mesh,
     spmd_distribute_tensor,
     spmd_redistribute_per_axis,
