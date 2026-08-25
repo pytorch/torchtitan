@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from attn_gym.linear.kda import bounded_gate_cumsum, causal_conv1d, chunk_kda, l2norm
+from attn_gym.linear.kda import bound_gate, causal_conv1d, chunk_kda, l2norm
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
@@ -83,18 +83,18 @@ class KDAKernel(Module):
         if not q_BLNK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
 
+        gate_BLNK = bound_gate(
+            raw_gate_BLNK,
+            A_log_N.float(),
+            dt_bias_NK.float(),
+            lower_bound=self.lower_bound,
+            impl="fused",
+        )
         output_BLNK, _ = chunk_kda(
             l2norm(q_BLNK),
             l2norm(k_BLNK),
             v_BLNK,
-            bounded_gate_cumsum(
-                raw_gate_BLNK.to(torch.bfloat16),
-                A_log_N.float(),
-                dt_bias_NK.float(),
-                chunk_size=64,
-                lower_bound=self.lower_bound,
-                cu_seqlens=cu_seqlens,
-            ),
+            gate_BLNK,
             raw_beta_BLN.float().sigmoid(),
             cu_seqlens=cu_seqlens,
         )
