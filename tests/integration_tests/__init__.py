@@ -81,9 +81,6 @@ def validate_fake_pg_compatibility(
         incompatibilities.append("checkpointing")
     if config.parallelism.pipeline_parallel_degree > 1:
         incompatibilities.append("pipeline parallelism")
-    if config.comm.mode not in ("default", "fake_backend"):
-        incompatibilities.append(f"comm.mode={config.comm.mode}")
-
     # TODO: FSDP + selective AC backward recompute has a shard/storage shape
     # mismatch with Fake PG under spmd_types. Keep this test on a real PG until
     # that interaction is fixed. Issue #4149.
