@@ -126,7 +126,9 @@ def set_hf_sharding_configs(
     if model.tok_embeddings is not None and not isinstance(
         model.tok_embeddings, nn.Identity
     ):
-        emb_state: dict = {"weight": dense_param_placement(tp=spmd.S(0))}
+        emb_state: dict = {
+            "weight": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True)
+        }
         for buf_name, _ in model.tok_embeddings.named_buffers(recurse=False):
             emb_state[buf_name] = dense_param_placement(tp=spmd.R)
         model.tok_embeddings._sharding_config = ShardingConfig(
@@ -147,8 +149,10 @@ def set_hf_sharding_configs(
         )
         model.lm_head._sharding_config = ShardingConfig(
             state_shardings={
-                "weight": dense_param_placement(tp=spmd.S(0)),
-                "bias": dense_param_placement(tp=spmd.S(0)),
+                "weight": dense_param_placement(
+                    tp=spmd.S(0), allow_uneven_sharding=True
+                ),
+                "bias": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True),
             },
             in_src_shardings={
                 "input": lm_head_input,

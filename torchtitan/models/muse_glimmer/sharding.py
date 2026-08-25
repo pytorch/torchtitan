@@ -165,7 +165,9 @@ def _set_multimodal_sharding(
     # all-reduced to Replicate. Mirrors the text-path tok_embeddings config in
     # set_decoder_sharding_config.
     emb_cfg.embedding.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True)
+        },
         in_src_shardings={"input": token_id_placement()},
         in_dst_shardings={"input": token_id_placement()},
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
