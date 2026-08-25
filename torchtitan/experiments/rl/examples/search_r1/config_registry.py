@@ -39,7 +39,10 @@ from torchtitan.experiments.rl.controller import (
     Controller,
     ValidationConfig,
 )
-from torchtitan.experiments.rl.examples.search_r1.rollouter import SearchR1Rollouter
+from torchtitan.experiments.rl.examples.search_r1.rollouter import (
+    SearchR1Rollouter,
+    SearchR1Worker,
+)
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
@@ -69,7 +72,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=SearchR1Rollouter.Config(
-            advantage=AdvantageEstimator.Config(should_std_normalize=True),
+            worker=SearchR1Worker.Config(
+                advantage=AdvantageEstimator.Config(should_std_normalize=True),
+            ),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -188,7 +193,9 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         ),
         compile=CompileConfig(enable=False),
         rollouter=SearchR1Rollouter.Config(
-            advantage=AdvantageEstimator.Config(should_std_normalize=True),
+            worker=SearchR1Worker.Config(
+                advantage=AdvantageEstimator.Config(should_std_normalize=True),
+            ),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=False),  # TODO: TBD
         metrics=MetricsProcessor.Config(enable_wandb=True),

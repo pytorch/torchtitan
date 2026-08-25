@@ -6,6 +6,7 @@
 
 import unittest
 
+import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard
@@ -15,6 +16,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.models.qwen3.model import Qwen3Model
+
+
+pytestmark = pytest.mark.multi_gpu
 
 
 def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:

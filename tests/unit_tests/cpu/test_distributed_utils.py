@@ -24,7 +24,7 @@ def test_fake_pg_uses_requested_rank(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
         assert init_distributed(CommConfig(mode="fake_backend")) == 8
-    init_fake_mode.assert_called_once_with(8, "fake_backend", rank=6)
+    init_fake_mode.assert_called_once_with(8, rank=6)
 
 
 def test_fake_pg_rejects_out_of_range_rank(

@@ -1,0 +1,203 @@
+name: Integration Tests
+
+on:
+  workflow_call:
+    inputs:
+      gpu-arch:
+        description: "GPU architecture to test ('cuda' or 'rocm')"
+        required: false
+        type: string
+        default: cuda
+      execution_mode:
+        description: "Process-group mode for reusable workflow calls"
+        required: false
+        type: string
+        default: fake_pg
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      export_results:
+        description: Export numerical results instead of comparing with goldens
+        required: false
+        type: boolean
+        default: false
+      test_name:
+        description: Run one integration test by name instead of the full suite
+        required: false
+        type: string
+        default: all
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix-fake-pg:
+    if: >-
+      (github.event_name == 'pull_request' ||
+       (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) &&
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: linux.g5.4xlarge.nvidia.gpu
+      gpu-arch: ${{ inputs.gpu-arch || 'cuda' }}
+
+  set-matrix-real-pg:
+    if: >-
+      (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') &&
+      (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: ${{ inputs.gpu-arch || 'cuda' }}
+
+  integration-fake-pg:
+    name: 1 GPU Integration (Fake PG)
+    needs: set-matrix-fake-pg
+    if: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) && needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-fake-pg.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      upload-artifact: integration-1gpu-outputs
+      timeout: 60
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+        export HF_HOME="$RUNNER_TEMP/hf_home"
+        export HF_DATASETS_CACHE="$RUNNER_TEMP/hf_home/datasets"
+
+        pip config --user set global.progress_bar off
+        TORCH_SPEC="torch"
+        if [ -n "${{ matrix.torch-version }}" ]; then
+          TORCH_SPEC="torch==${{ matrix.torch-version }}"
+        fi
+        python -m pip install --force-reinstall --pre \
+          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+        fi
+
+        sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
+        sudo mkdir -p "$HF_HOME"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_ARTIFACT_DIR"
+        sudo chown -R $(id -u):$(id -g) "$HF_HOME"
+        cleanup_artifacts() {
+          find "$RUNNER_ARTIFACT_DIR" -type d \( -name checkpoint -o -name inference_results \) -prune -exec rm -rf {} +
+          chmod -R a+rX "$RUNNER_ARTIFACT_DIR"
+        }
+        trap cleanup_artifacts EXIT
+
+        EXPORT_ARG=""
+        if [[ "${{ inputs.export_results || false }}" == "true" ]]; then
+          EXPORT_ARG="--export-numerics"
+        fi
+        TEST_NAME_ARG=""
+        if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
+          TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
+        fi
+        python -m tests.integration_tests.run_tests \
+          --gpu_arch_type ${{ matrix.gpu-arch-type }} \
+          --test_suite features,models --execution_mode fake_pg --ngpu 1 \
+          $EXPORT_ARG $TEST_NAME_ARG \
+          "$RUNNER_ARTIFACT_DIR"
+        python -m tests.integration_tests.flux \
+          --execution_mode fake_pg --ngpu 1 \
+          $TEST_NAME_ARG \
+          "$RUNNER_ARTIFACT_DIR/flux"
+
+  integration-real-pg:
+    name: 8 GPU Integration (Real PG)
+    needs: set-matrix-real-pg
+    if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-real-pg.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      upload-artifact: integration-8gpu-outputs
+      timeout: 60
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+        export HF_HOME="$RUNNER_TEMP/hf_home"
+        export HF_DATASETS_CACHE="$RUNNER_TEMP/hf_home/datasets"
+
+        pip config --user set global.progress_bar off
+        TORCH_SPEC="torch"
+        if [ -n "${{ matrix.torch-version }}" ]; then
+          TORCH_SPEC="torch==${{ matrix.torch-version }}"
+        fi
+        python -m pip install --force-reinstall --pre \
+          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+        fi
+
+        sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
+        sudo mkdir -p "$HF_HOME"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_ARTIFACT_DIR"
+        sudo chown -R $(id -u):$(id -g) "$HF_HOME"
+        cleanup_artifacts() {
+          find "$RUNNER_ARTIFACT_DIR" -type d \( -name checkpoint -o -name inference_results \) -prune -exec rm -rf {} +
+          chmod -R a+rX "$RUNNER_ARTIFACT_DIR"
+        }
+        trap cleanup_artifacts EXIT
+
+        EXPORT_ARG=""
+        if [[ "${{ inputs.export_results || false }}" == "true" ]]; then
+          EXPORT_ARG="--export-numerics"
+        fi
+        TEST_NAME_ARG=""
+        if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
+          TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
+        fi
+        TEST_SCOPE_ARG=""
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          TEST_SCOPE_ARG="--test_scope=real_pg_required"
+        fi
+        python -m tests.integration_tests.run_tests \
+          --gpu_arch_type ${{ matrix.gpu-arch-type }} \
+          --test_suite features,models --execution_mode real_pg --ngpu 8 \
+          $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
+          "$RUNNER_ARTIFACT_DIR"
+        python -m tests.integration_tests.flux \
+          --execution_mode real_pg --ngpu 8 \
+          $TEST_NAME_ARG $TEST_SCOPE_ARG \
+          "$RUNNER_ARTIFACT_DIR/flux"
