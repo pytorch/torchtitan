@@ -6,6 +6,7 @@
 
 
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -27,8 +28,13 @@ from torchtitan.models.common.multimodal import (
     multimodal_context,
     scatter_vision_embeds,
 )
-from torchtitan.models.utils import get_model_nparams_and_flops
+from torchtitan.models.utils import (
+    delta_rule_flops_per_token,
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
@@ -310,12 +316,38 @@ class Qwen35Model(Decoder):
         ) -> tuple[int, int]:
             # The vision encoder cost scales with patches rather than text
             # sequence length, so this remains a decoder-only MFU estimate.
-            return get_model_nparams_and_flops(
-                self,
+            qwen_model = cast("Qwen35Model", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                seq_len,
-                excluded_module_names=("vision_encoder",),
+                excluded_modules=(qwen_model.vision_encoder,),
             )
+            sequence_mixing_flops = 0
+            for layer in self.layers:
+                if isinstance(layer.attention, Qwen35Attention.Config):
+                    attention = layer.attention
+                    sequence_mixing_flops += quadratic_attention_flops_per_token(
+                        num_heads=attention.n_heads,
+                        qk_head_dim=attention.head_dim,
+                        value_head_dim=attention.head_dim,
+                        seq_len=seq_len,
+                    )
+                elif isinstance(layer.delta_net, GatedDeltaNet.Config):
+                    delta_net = layer.delta_net
+                    num_value_heads = (
+                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
+                    )
+                    sequence_mixing_flops += delta_rule_flops_per_token(
+                        num_heads=num_value_heads,
+                        key_head_dim=delta_net.key_head_dim,
+                        value_head_dim=delta_net.value_head_dim,
+                    )
+                else:
+                    configured_mixer = layer.attention or layer.delta_net
+                    logger.warning(
+                        "Skipping FLOP accounting for unsupported Qwen 3.5 "
+                        f"sequence mixer {type(configured_mixer).__name__}."
+                    )
+            return nparams, 6 * active_nparams + sequence_mixing_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

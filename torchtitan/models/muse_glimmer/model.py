@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -33,8 +34,12 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import get_model_nparams_and_flops
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
@@ -312,17 +317,38 @@ class MuseGlimmerModel(Decoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             # Vision modules run per image rather than per text token.
-            return get_model_nparams_and_flops(
-                self,
+            muse_model = cast("MuseGlimmerModel", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                seq_len,
-                excluded_module_names=(
-                    "vision_encoder",
-                    "vision_adapter",
-                    "vision_projection",
-                    "perception_emb_norm",
+                excluded_modules=(
+                    muse_model.vision_encoder,
+                    muse_model.vision_adapter,
+                    muse_model.vision_projection,
+                    muse_model.perception_emb_norm,
                 ),
             )
+            attention_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                if not isinstance(attention, Attention.Config):
+                    logger.warning(
+                        "Skipping FLOP accounting for unsupported Muse Glimmer "
+                        f"attention config {type(attention).__name__}."
+                    )
+                    continue
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    value_head_dim=head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=attention.window_size,
+                )
+            return nparams, 6 * active_nparams + attention_flops
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

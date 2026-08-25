@@ -414,7 +414,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         return stacked_tensor
 
 
-def full_attention_flops_per_token(
+def quadratic_attention_flops_per_token(
     *,
     num_heads: int,
     qk_head_dim: int,
@@ -422,7 +422,7 @@ def full_attention_flops_per_token(
     seq_len: int,
     sliding_window_size: int | None = None,
 ) -> int:
-    """Training FLOPs per token for full or sliding-window attention.
+    """Training FLOPs per token for quadratic or windowed attention.
 
     ``qk_head_dim`` and ``value_head_dim`` describe the two attention
     contractions. The factor of 6 accounts for multiply-adds in forward and
@@ -447,101 +447,26 @@ def delta_rule_flops_per_token(
     return 6 * 3 * num_heads * key_head_dim * value_head_dim
 
 
-def _sequence_mixing_flops_per_token(layers: Iterable[object], seq_len: int) -> int:
-    total = 0
-    for layer in layers:
-        attention = getattr(layer, "attention", None)
-        if attention is not None:
-            num_heads = attention.n_heads
-            if all(
-                hasattr(attention, name)
-                for name in (
-                    "qk_nope_head_dim",
-                    "qk_rope_head_dim",
-                    "v_head_dim",
-                )
-            ):
-                qk_head_dim = attention.qk_nope_head_dim + attention.qk_rope_head_dim
-                value_head_dim = attention.v_head_dim
-            elif hasattr(attention, "head_dim"):
-                qk_head_dim = attention.head_dim
-                if qk_head_dim is None:
-                    qk_head_dim = attention.dim // num_heads
-                value_head_dim = qk_head_dim
-            else:
-                raise ValueError(
-                    "Unsupported full-attention config for FLOP accounting: "
-                    f"{type(attention).__name__}."
-                )
-            total += full_attention_flops_per_token(
-                num_heads=num_heads,
-                qk_head_dim=qk_head_dim,
-                value_head_dim=value_head_dim,
-                seq_len=seq_len,
-                sliding_window_size=getattr(attention, "sliding_window_size", None),
-            )
-            continue
-
-        linear_attention = getattr(layer, "delta_attention", None)
-        if linear_attention is None:
-            linear_attention = getattr(layer, "delta_net", None)
-        if linear_attention is None:
-            raise ValueError(
-                "Transformer layer does not define a supported sequence mixer: "
-                f"{type(layer).__name__}."
-            )
-
-        if all(
-            hasattr(linear_attention, name)
-            for name in ("key_head_dim", "value_head_dim", "in_proj_v")
-        ):
-            key_head_dim = linear_attention.key_head_dim
-            value_head_dim = linear_attention.value_head_dim
-            num_heads = linear_attention.in_proj_v.out_features // value_head_dim
-        elif all(hasattr(linear_attention, name) for name in ("num_heads", "head_dim")):
-            num_heads = linear_attention.num_heads
-            key_head_dim = linear_attention.head_dim
-            value_head_dim = linear_attention.head_dim
-        else:
-            raise ValueError(
-                "Unsupported linear-attention config for FLOP accounting: "
-                f"{type(linear_attention).__name__}."
-            )
-        total += delta_rule_flops_per_token(
-            num_heads=num_heads,
-            key_head_dim=key_head_dim,
-            value_head_dim=value_head_dim,
-        )
-    return total
-
-
-def get_model_nparams_and_flops(
-    model_config: Decoder.Config,
+def get_nparams_and_active_nparams(
     model: nn.Module,
-    seq_len: int,
     *,
-    excluded_module_names: Iterable[str] = (),
+    excluded_modules: Iterable[nn.Module | None] = (),
 ) -> tuple[int, int]:
-    """Calculate total parameters and training FLOPs per token.
+    """Count total and matmul-active parameters for a native decoder.
 
-    Parameterized operations use the conventional ``6 * active_parameters``
-    estimate. Routed-expert parameters are weighted by the owning MoE module's
-    active expert ratio. Untied token embeddings and explicitly excluded module
-    subtrees do not contribute to the per-token estimate.
-
-    Parameter-free sequence-mixing work is derived independently for every
-    layer in the final model config, so per-layer config overrides are reflected
-    without requiring model-specific callbacks.
+    Routed-expert parameters are weighted by the owning MoE module's active
+    expert ratio. Embedding tables are excluded unless their parameter is shared
+    with the output head. Explicitly excluded subtrees are also assigned zero
+    per-token parameter cost.
 
     Args:
-        model_config: Final model configuration after runtime overrides.
         model: Built model whose parameters are counted.
-        seq_len: Training sequence length.
-        excluded_module_names: Names of module subtrees whose cost does not
-            scale per text token, such as a vision encoder.
+        excluded_modules: Module subtrees whose cost does not scale per text
+            token, such as a vision encoder.
 
     Returns:
-        Total parameter count and estimated training FLOPs per token.
+        Total parameter count and effective parameter count for the conventional
+        ``6 * active_parameters`` training FLOP estimate.
     """
     named_parameters = list(model.named_parameters())
     nparams = sum(param.numel() for _, param in named_parameters)
@@ -555,17 +480,21 @@ def get_model_nparams_and_flops(
             for param in module.routed_experts.parameters():
                 parameter_weights[id(param)] = active_expert_ratio
 
-    if not model_config.enable_weight_tying:
-        for module in model.modules():
-            if isinstance(module, nn.Embedding):
-                for param in module.parameters(recurse=False):
+    lm_head = getattr(model, "lm_head", None)
+    lm_head_parameter_ids = (
+        {id(param) for param in lm_head.parameters()}
+        if isinstance(lm_head, nn.Module)
+        else set()
+    )
+    for module in model.modules():
+        if isinstance(module, nn.Embedding):
+            for param in module.parameters(recurse=False):
+                if id(param) not in lm_head_parameter_ids:
                     parameter_weights[id(param)] = Fraction(0)
 
-    for module_name in excluded_module_names:
-        excluded_module = getattr(model, module_name)
+    for excluded_module in excluded_modules:
         if excluded_module is None:
             continue
-        assert isinstance(excluded_module, nn.Module)
         for param in excluded_module.parameters():
             parameter_weights[id(param)] = Fraction(0)
 
@@ -575,12 +504,7 @@ def get_model_nparams_and_flops(
     assert nparams_for_matmul.denominator == 1
     active_nparams = nparams_for_matmul.numerator
 
-    num_sequence_mixing_flops_per_token = _sequence_mixing_flops_per_token(
-        model_config.layers, seq_len
-    )
-    num_flops_per_token = 6 * active_nparams + num_sequence_mixing_flops_per_token
-
     logger.info(
         f"Total parameter count: {nparams:,}, active parameters: {active_nparams:,}"
     )
-    return nparams, num_flops_per_token
+    return nparams, active_nparams

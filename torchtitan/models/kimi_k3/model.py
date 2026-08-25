@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import torch
 from torch import nn
@@ -23,8 +24,13 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import get_model_nparams_and_flops
+from torchtitan.models.utils import (
+    delta_rule_flops_per_token,
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 from .kda import KimiDeltaAttention
 from .moe import KimiFeedForward, KimiLatentMoE
@@ -278,12 +284,37 @@ class KimiK3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            return get_model_nparams_and_flops(
-                self,
+            kimi_model = cast("KimiK3Model", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                seq_len,
-                excluded_module_names=("vision_encoder",),
+                excluded_modules=(kimi_model.vision_encoder,),
             )
+            sequence_mixing_flops = 0
+            for layer in self.layers:
+                if isinstance(layer.attention, KimiMLAAttention.Config):
+                    attention = layer.attention
+                    sequence_mixing_flops += quadratic_attention_flops_per_token(
+                        num_heads=attention.n_heads,
+                        qk_head_dim=(
+                            attention.qk_nope_head_dim + attention.qk_rope_head_dim
+                        ),
+                        value_head_dim=attention.v_head_dim,
+                        seq_len=seq_len,
+                    )
+                elif isinstance(layer.delta_attention, KimiDeltaAttention.Config):
+                    delta_attention = layer.delta_attention
+                    sequence_mixing_flops += delta_rule_flops_per_token(
+                        num_heads=delta_attention.num_heads,
+                        key_head_dim=delta_attention.head_dim,
+                        value_head_dim=delta_attention.head_dim,
+                    )
+                else:
+                    configured_mixer = layer.attention or layer.delta_attention
+                    logger.warning(
+                        "Skipping FLOP accounting for unsupported Kimi K3 "
+                        f"sequence mixer {type(configured_mixer).__name__}."
+                    )
+            return nparams, 6 * active_nparams + sequence_mixing_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

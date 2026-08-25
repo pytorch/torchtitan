@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
@@ -21,8 +22,12 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
-from torchtitan.models.utils import get_model_nparams_and_flops
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 
 class Attention(BaseAttention):
@@ -188,6 +193,47 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         return x
 
 
+def get_deepseek_v3_nparams_and_flops(
+    model_config: MTPDecoder.Config,
+    model: nn.Module,
+    seq_len: int,
+    *,
+    excluded_modules: Iterable[nn.Module | None] = (),
+) -> tuple[int, int]:
+    """Estimate DeepSeek-style decoder FLOPs from the final model config."""
+    nparams, active_nparams = get_nparams_and_active_nparams(
+        model,
+        excluded_modules=excluded_modules,
+    )
+
+    attention_flops = 0
+    for layers in (model_config.layers, model_config.mtp_layers):
+        for layer in layers:
+            attention = layer.attention
+            if not isinstance(attention, Attention.Config):
+                logger.warning(
+                    "Skipping FLOP accounting for unsupported DeepSeek V3 "
+                    f"attention config {type(attention).__name__}."
+                )
+                continue
+            attention_flops += quadratic_attention_flops_per_token(
+                num_heads=attention.n_heads,
+                qk_head_dim=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+                value_head_dim=attention.v_head_dim,
+                seq_len=seq_len,
+            )
+
+    # The base parameter term counts one lm_head use. MTP applies that same
+    # output projection once more for every prediction depth.
+    lm_head = getattr(model, "lm_head", None)
+    if isinstance(lm_head, nn.Module):
+        active_nparams += len(model_config.mtp_layers) * sum(
+            param.numel() for param in lm_head.parameters()
+        )
+
+    return nparams, 6 * active_nparams + attention_flops
+
+
 class DeepSeekV3Model(MTPDecoder):
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
@@ -220,9 +266,4 @@ class DeepSeekV3Model(MTPDecoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-
-            return get_model_nparams_and_flops(
-                self,
-                model,
-                seq_len,
-            )
+            return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
