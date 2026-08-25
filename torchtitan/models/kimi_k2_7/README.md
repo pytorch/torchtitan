@@ -31,6 +31,14 @@ pip install av torchvision
 | Kimi-VL-A3B | 2048 | 27 | 16 | 64 (top-6) | 1152 | 27 | 16 |
 | Kimi-K2.5 | 7168 | 61 | 64 | 384 (top-8) | 1152 | 27 | 16 |
 
+## QK clipping
+
+All recipes use the existing DistMuon parameter groups with the QK clipping
+update from the Kimi K2 technical report. They record the maximum attention
+score for each MLA head, reduce those maxima across data- and context-parallel
+ranks, and clip the Q/K projection weights after each optimizer step.
+The update currently uses the report values `threshold=100.0` and `alpha=0.5`.
+
 ## Supported Parallelisms
 
 | Feature | Notes |
