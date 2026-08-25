@@ -101,39 +101,11 @@ def kimi_k3_debugmodel() -> Trainer.Config:
 
 
 def kimi_k3_debugmodel_text() -> Trainer.Config:
-    model_spec = model_registry("debugmodel_text")
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
-            ),
-        ),
-        hf_assets_path="./tests/assets/tokenizer",
-        tokenizer=MultiModalTokenizer.Config(**KIMI_K3_SPECIAL_TOKENS),
-        metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
-        dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=TEXT_DATASETS["c4_test"]),
-        ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
-        ),
-        # TODO: Kimi K3 has no spmd_types annotations yet.
-        parallelism=ParallelismConfig(spmd_backend="partial_dtensor"),
-        training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=256,
-            max_context_length=256,
-            steps=10,
-            dtype="bfloat16",
-            disable_cuda_graphs=True,
-        ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
-        activation_checkpoint=SelectiveAC.Config(),
+    """The debug model with no vision tower, trained on the packed text dataset."""
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry("debugmodel_text")
+    config.loss.loss_fn.global_vocab_size = decoder_vocab_size(config.model_spec)
+    config.dataloader = GrainDataLoader.Config(
+        dataset=ConcatThenSplitPackingConfig(dataset=TEXT_DATASETS["c4_test"]),
     )
+    return config
