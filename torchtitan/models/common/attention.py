@@ -264,6 +264,19 @@ class FlexAttention(Module):
         super().__init__()
         self.kernel_options = config.kernel_options
 
+    def _get_aux_request(self, *, return_lse: bool) -> AuxRequest:
+        """Return the auxiliary outputs needed from this attention call."""
+        return AuxRequest(lse=return_lse)
+
+    def _process_aux(self, aux: Any) -> None:
+        """Consume auxiliary outputs requested by ``_get_aux_request``.
+
+        For example, a subclass may request ``max_scores`` and accumulate
+        per-head attention maxima across forwards. The base implementation is
+        a no-op.
+        """
+        pass
+
     @staticmethod
     def compiled_flex_attn(
         q: torch.Tensor,
@@ -304,10 +317,12 @@ class FlexAttention(Module):
             q_local = spmd.get_local_type(q)
             q_ps = get_partition_spec(q)
             spmd.assert_type(out, q_local, q_ps)
+            # Aux outputs are (B, N, T) = q minus the trailing head dim.
+            aux_ps = None if q_ps is None else spmd.PartitionSpec(*q_ps[:-1])
             if return_aux.lse:
-                # lse is (B, N, L) = q minus the trailing (unsharded) head dim.
-                lse_ps = None if q_ps is None else spmd.PartitionSpec(*q_ps[:-1])
-                spmd.assert_type(aux.lse, q_local, lse_ps)
+                spmd.assert_type(aux.lse, q_local, aux_ps)
+            if return_aux.max_scores:
+                spmd.assert_type(aux.max_scores, q_local, aux_ps)
         return out, aux
 
     def forward(
@@ -333,6 +348,7 @@ class FlexAttention(Module):
         q_BNTH = q_TNH.transpose(0, 1).unsqueeze(0)
         k_BNTH = k_TNH.transpose(0, 1).unsqueeze(0)
         v_BNTH = v_TNH.transpose(0, 1).unsqueeze(0)
+        aux_request = self._get_aux_request(return_lse=out_transform is not None)
 
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
@@ -352,9 +368,10 @@ class FlexAttention(Module):
                 block_mask=attention_masks,
                 scale=scale,
                 enable_gqa=enable_gqa,
-                return_aux=AuxRequest(lse=out_transform is not None),
+                return_aux=aux_request,
                 kernel_options=self.kernel_options,
             )
+        self._process_aux(aux)
         out_TNH = out_BNTH.squeeze(0).transpose(0, 1)
         if out_transform is None:
             return out_TNH
