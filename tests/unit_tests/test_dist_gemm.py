@@ -364,16 +364,18 @@ class TestFusedSwigluOverlapNumerics(DTensorTestBase):
         x = torch.randn(bsz, seq, dim, device=dev)
         ref = stock(x)
 
-        # w13 is (hidden/R, 2, dim): this rank's colwise slice of both halves.
+        # w13.weight interleaves this rank's colwise slices of both halves.
         with torch.no_grad():
-            fused.w13 = torch.nn.Parameter(
+            fused.w13.weight = torch.nn.Parameter(
                 torch.stack(
                     [
                         stock.w1.weight.chunk(R, 0)[self.rank],
                         stock.w3.weight.chunk(R, 0)[self.rank],
                     ],
                     dim=1,
-                ).contiguous()
+                )
+                .flatten(0, 1)
+                .contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
                 stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
