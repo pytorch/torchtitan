@@ -20,7 +20,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
 from torchtitan.distributed.parallel_dims import MeshAxisName, unfold_dp_axis
-from torchtitan.distributed.spmd_types import _per_axis_types, layout_axes
+from torchtitan.distributed.spmd_types import _per_axis_types, spmd_axes
 
 
 __all__ = [
@@ -149,7 +149,7 @@ def resolve_placements(
             raise ValueError(
                 f"ShardingConfig does not declare a placement for mesh axis "
                 f"{axis_name!r}. Declared: "
-                f"{sorted(k.value for k in layout_axes(layout))}; "
+                f"{sorted(k.value for k in spmd_axes(layout))}; "
                 f"required: {list(mesh.mesh_dim_names)}."
             )
         p = spmd.spmd_type_to_dtensor_placement(concrete_axis_types[key])

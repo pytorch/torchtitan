@@ -496,14 +496,14 @@ class ParallelDims:
         filters every axis out; callers should treat this as a no-op for the
         corresponding boundary.
         """
-        from torchtitan.distributed.spmd_types import layout_axes
+        from torchtitan.distributed.spmd_types import spmd_axes
 
         non_none = [p for p in placements if p is not None]
         if not non_none:
             return None
-        axes = layout_axes(non_none[0])
+        axes = spmd_axes(non_none[0])
         for p in non_none[1:]:
-            p_axes = layout_axes(p)
+            p_axes = spmd_axes(p)
             assert p_axes == axes, (
                 f"Inconsistent mesh axes within a boundary: "
                 f"{sorted(k.value for k in axes)} vs "
