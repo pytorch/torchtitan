@@ -137,9 +137,7 @@ class Decoder(BaseModel):
             return rope_cfg.max_context_length
 
         def _validate_cp_backend(self, parallelism) -> None:
-            """ShardingConfig-driven CP requires the spmd_types backend. A model
-            whose CP is not ShardingConfig-driven overrides this and takes on
-            its own preconditions."""
+            """Overridable CP backend check. TODO: remove after KDA becomes torch-native and Kimi K3 migrates to spmd_types."""
             from torchtitan.distributed.context_parallel import validate_cp_backend
 
             validate_cp_backend(parallelism)
