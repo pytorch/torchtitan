@@ -145,7 +145,9 @@ def set_qwen35_sharding_config(
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     # Vision scatter needs the full embedding sequence on every TP rank.
     config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True)
+        },
         in_src_shardings={"input": token_id_placement()},
         in_dst_shardings={"input": token_id_placement()},
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),

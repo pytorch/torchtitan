@@ -21,7 +21,11 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdLayout:
+def dense_param_placement(
+    *,
+    tp: spmd.PerMeshAxisSpmdType,
+    allow_uneven_sharding: bool = False,
+) -> SpmdLayout:
     """Placement for dense-path params/buffers.
 
     DP/CP axes are spmd.R; the DTensor bridge unfolds DP into storage axes.
@@ -32,7 +36,8 @@ def dense_param_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdLayout:
             DP: spmd.R,
             CP: spmd.R,
             TP: tp,
-        }
+        },
+        allow_uneven_sharding=allow_uneven_sharding,
     )
 
 
@@ -358,7 +363,9 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     embed_out_src = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     embed_input = token_id_placement()
     config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True)
+        },
         in_src_shardings={"input": embed_input},
         in_dst_shardings={"input": embed_input},
         out_src_shardings=embed_out_src,
@@ -368,7 +375,9 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0), allow_uneven_sharding=True)
+        },
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),

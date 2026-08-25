@@ -356,6 +356,12 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
 
 
 class TestModuleRedistributionDTensor(DTensorTestBase):
+    class WeightModule(Module):
+        def __init__(self, shape: tuple[int, ...], layout: SpmdLayout):
+            super().__init__()
+            self.weight = nn.Parameter(torch.empty(shape))
+            self._sharding_config = ShardingConfig(state_shardings={"weight": layout})
+
     @property
     def world_size(self):
         return 2
@@ -380,6 +386,65 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
     class Identity(Module):
         def forward(self, x):
             return x
+
+    def test_rejects_uneven_tp_parameter_sharding(self):
+        module = self.WeightModule(
+            (4, 5),
+            SpmdLayout(
+                {MeshAxisName.TP: spmd.V},
+                partition_spec=(None, MeshAxisName.TP),
+            ),
+        )
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=2,
+            spmd_backend="spmd_types",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"WeightModule\.weight.*tensor dimension 1.*mesh axis tp with size 2",
+        ):
+            module.parallelize(parallel_dims)
+
+        allowed_module = self.WeightModule(
+            (4, 5),
+            SpmdLayout(
+                {MeshAxisName.TP: spmd.V},
+                partition_spec=(None, MeshAxisName.TP),
+                allow_uneven_sharding=True,
+            ),
+        )
+        with patch.object(allowed_module, "_spmd_distribute_state"):
+            allowed_module._distribute_states(parallel_dims)
+        self.assertEqual(allowed_module._spmd_logical_state_shapes, {"weight": (4, 5)})
+
+    def test_rejects_uneven_ep_parameter_sharding(self):
+        module = self.WeightModule(
+            (3, 4),
+            SpmdLayout({MeshAxisName.EP: spmd.S(0)}),
+        )
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=2,
+            world_size=2,
+            spmd_backend="spmd_types",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"WeightModule\.weight.*tensor dimension 0.*mesh axis ep with size 2",
+        ):
+            module.parallelize(parallel_dims)
 
     @with_comms
     def test_dtensor_must_match_declared_src_shardings(self):

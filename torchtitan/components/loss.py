@@ -131,16 +131,18 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         vocab_start = min(global_vocab_size, chunk_size * tp_rank)
         vocab_end = min(global_vocab_size, vocab_start + chunk_size)
         local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits.shape[-1] != local_vocab_size:
+        padded_local_vocab_size = logits.shape[-1]
+        if padded_local_vocab_size not in (local_vocab_size, chunk_size):
             raise ValueError(
                 "_LossParallelCrossEntropy expected local vocab size "
-                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits.shape[-1]}."
+                f"{local_vocab_size} or padded size {chunk_size} for global "
+                f"vocab size {global_vocab_size}, got {padded_local_vocab_size}."
             )
         if local_vocab_size == 0:
             raise ValueError(
                 "_LossParallelCrossEntropy does not support empty vocab shards."
             )
+        logits = logits[..., :local_vocab_size]
 
         torch._assert_async(
             torch.all(
@@ -188,6 +190,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         ctx.logits_dtype = logits_dtype
         ctx.vocab_start = vocab_start
         ctx.local_vocab_size = local_vocab_size
+        ctx.padded_local_vocab_size = padded_local_vocab_size
         ctx.reduction = reduction
         if reduction == "none":
             return result
@@ -221,6 +224,11 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         )
         grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
         grad_logits = grad_logits.to(ctx.logits_dtype)
+        if ctx.padded_local_vocab_size > ctx.local_vocab_size:
+            grad_logits = F.pad(
+                grad_logits,
+                (0, ctx.padded_local_vocab_size - ctx.local_vocab_size),
+            )
         return grad_logits, None, None, None, None
 
 
