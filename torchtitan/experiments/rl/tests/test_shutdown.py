@@ -164,6 +164,10 @@ def _make_stub_rl_trainer():
     """Create an Controller with a minimal stub config (no VLLMGenerator validation)."""
     from torchtitan.experiments.rl.observability import metrics as m
 
+    class _StubRollouter:
+        async def close(self):
+            pass
+
     class _StubConfig:
         async_loop = AsyncLoopConfig()
         metrics = m.MetricsProcessor.Config()
@@ -181,7 +185,7 @@ def _make_stub_rl_trainer():
         generator = SimpleNamespace(
             sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
-        rollouter = SimpleNamespace(build=lambda: SimpleNamespace())
+        rollouter = SimpleNamespace(build=lambda: _StubRollouter())
 
         def to_dict(self):
             return {}

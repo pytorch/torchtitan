@@ -434,14 +434,6 @@ def main(custom_trainer_class: type[Trainer] | None = None) -> None:
     trainer: Trainer | None = None
 
     try:
-        # TODO(local_tensor): Remove this special case once LocalTensor supports
-        # init_states() and foreach_allgather. In local tensor mode, skip
-        # training/checkpointing as the # model is not fully initialized
-        # pyrefly: ignore [missing-attribute]
-        if config.comm.mode == "local_tensor":
-            logger.info("Local tensor mode enabled - skipping training execution")
-            return
-
         # pyrefly: ignore [missing-attribute]
         if custom_trainer_class is not None:
             trainer = custom_trainer_class(config)
