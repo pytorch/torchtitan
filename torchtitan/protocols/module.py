@@ -25,8 +25,8 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
-    layout_axes,
     set_current_spmd_mesh,
+    spmd_axes,
     spmd_distribute_tensor,
     spmd_redistribute_per_axis,
     spmd_validate_redistributions,
@@ -300,7 +300,7 @@ class Module(nn.Module, Configurable):
         # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
         # using all axes, and defer size-1 axis filtering to spmd_types internals.
         mesh = parallel_dims.get_optional_mesh(
-            [axis.value for axis in layout_axes(layout)],
+            [axis.value for axis in spmd_axes(layout)],
             include_singleton_axes=True,
         )
         assert mesh is not None
@@ -350,7 +350,7 @@ class Module(nn.Module, Configurable):
                     is_param=True,
                 )
                 continue
-            axes = layout_axes(spmd_layout)
+            axes = spmd_axes(spmd_layout)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -393,7 +393,7 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
                 continue
-            axes = layout_axes(spmd_layout)
+            axes = spmd_axes(spmd_layout)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
