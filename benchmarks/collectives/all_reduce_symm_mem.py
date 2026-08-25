@@ -6,31 +6,33 @@
 
 """Benchmark NCCL all-reduce on an NCCL symmetric-memory pool.
 
-This benchmark compares five out-of-place, end-to-end paths. Each path starts
-with a regular CUDA input, preserves it, and returns a regular CUDA output:
+This benchmark compares five out-of-place paths. Each path starts with a
+regular CUDA input and preserves it. Output placement follows the underlying
+implementation; for example, vLLM NCCL SymK returns a symmetric-pool tensor.
 
 1. ``nccl_regular_e2e``: clone the input, then run regular NCCL in-place on the
    clone. This matches TorchTitan's NCCL fallback.
-2. ``nccl_symk_e2e``: copy into an NCCL-pool staging buffer registered with
-   ``symm=True``, run NCCL SymK, then copy into the regular CUDA output.
+2. ``nccl_symk_e2e``: copy the regular input into a ProcessGroupNCCL symmetric
+   buffer, run NCCL in-place on that buffer, and return it directly. This is
+   out-of-place relative to the original input and has no copy-out.
 3. ``custom_e2e``: TorchTitan's out-of-place ``_custom_all_reduce``
    implementation. It preserves the original input and returns a new tensor.
    The measurement includes any copies needed to stage data through the
    persistent symmetric-memory buffer.
-4. ``vllm_custom_e2e``: vLLM's ``CustomAllreduce`` with
-   ``registered=False``, matching the direct custom-AR leg used by TorchTitan's
-   RL integration. The vLLM op stages the regular input through its
-   pre-registered IPC buffer and writes directly to a new output. Sizes rejected
-   by vLLM's production eligibility check are reported as ``nan`` rather than
-   silently measuring a fallback. This isolates the custom kernel; vLLM's full
-   dispatcher may select NCCL symmetric memory before reaching it.
+4. ``vllm_tp_e2e``: vLLM's production
+   ``tensor_model_parallel_all_reduce`` entry point. Its dispatcher selects
+   NCCL symmetric memory, vLLM CustomAllreduce, PyTorch symmetric memory,
+   PyNCCL, or the PyTorch NCCL fallback according to the active configuration
+   and input size. The benchmark reports separate columns with
+   ``VLLM_USE_NCCL_SYMM_MEM=1`` and ``VLLM_USE_NCCL_SYMM_MEM=0``.
 5. ``custom_no_multimem_e2e``: TorchTitan's custom all-reduce while simulating
    a platform without multicast support. It selects P2P one-shot through
    128 KiB, P2P two-shot through 16 MiB, and NCCL fallback above 16 MiB.
 
-Pass ``--force-vllm-all-sizes`` to bypass vLLM's production size cap and size
-its IPC workspaces to cover every requested message. This is an experimental
-kernel characterization mode, not vLLM's production dispatch policy.
+By default, ten operations from every path are captured in a separate CUDA
+Graph and replay latency is normalized per all-reduce. Capture-time allocation
+and setup are excluded consistently for all paths. Pass ``--no-cuda-graph``
+to measure eager execution instead.
 
 Example:
 
@@ -43,15 +45,28 @@ the maximum per-call CUDA-event latency across all ranks.
 """
 
 import argparse
+import contextlib
 import os
 import statistics
 from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    CustomAllreduce,
+import vllm
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+    get_tp_group,
+    init_distributed_environment,
+    initialize_model_parallel,
+    set_custom_all_reduce,
+    tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    should_nccl_symm_mem_allreduce,
+)
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 
 from torchtitan.distributed import comms
 
@@ -59,12 +74,25 @@ from torchtitan.distributed import comms
 BenchmarkFn = Callable[[], torch.Tensor]
 
 _SIZE_SUFFIXES = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
-_DEFAULT_SIZES = ("4k", "16k", "64k", "128k", "1m", "4m", "8m", "16m", "32m")
+_DEFAULT_SIZES = (
+    "4k",
+    "16k",
+    "64k",
+    "128k",
+    "1m",
+    "4m",
+    "8m",
+    "16m",
+    "32m",
+)
+_GRAPH_CAPTURE_CYCLES = 10
 _RESULT_HEADER = (
-    "bytes,custom_algo,vllm_custom_eligible,nccl_regular_e2e_us,"
-    "nccl_symk_e2e_us,custom_e2e_us,vllm_custom_e2e_us,"
+    "bytes,custom_algo,vllm_tp_backend,vllm_tp_no_nccl_symm_mem_backend,"
+    "nccl_regular_e2e_us,nccl_symk_e2e_us,custom_e2e_us,vllm_tp_e2e_us,"
+    "vllm_tp_no_nccl_symm_mem_e2e_us,"
     "symk/regular_e2e,custom/regular_e2e,custom/symk_e2e,"
-    "vllm/regular_e2e,vllm/custom_e2e,custom_no_multimem_algo,"
+    "vllm_tp/regular_e2e,vllm_tp/custom_e2e,"
+    "vllm_tp_no_nccl_symm_mem/custom_e2e,custom_no_multimem_algo,"
     "custom_no_multimem_e2e_us,custom_no_multimem/custom_e2e"
 )
 
@@ -106,6 +134,7 @@ def _time_cuda(
     iterations: int,
     repeats: int,
     device: torch.device,
+    work_per_call: int = 1,
 ) -> float:
     samples = []
     for _ in range(repeats):
@@ -119,7 +148,9 @@ def _time_cuda(
         end.record()
         end.synchronize()
 
-        elapsed_us = start.elapsed_time(end) * 1_000.0 / iterations
+        elapsed_us = (
+            start.elapsed_time(end) * 1_000.0 / iterations / work_per_call
+        )
         samples.append(_max_across_ranks(elapsed_us, device))
 
     return statistics.median(samples)
@@ -140,13 +171,16 @@ def _measure_methods(
     iterations: int,
     repeats: int,
     device: torch.device,
+    work_per_call: dict[str, int] | None = None,
 ) -> dict[str, float]:
+    work_per_call = work_per_call or {}
     return {
         name: _time_cuda(
             fn,
             iterations=iterations,
             repeats=repeats,
             device=device,
+            work_per_call=work_per_call.get(name, 1),
         )
         for name, fn in methods.items()
     }
@@ -156,14 +190,6 @@ def _check_results(results: dict[str, torch.Tensor], expected: float) -> None:
     for name, tensor in results.items():
         if not torch.all(tensor == expected):
             raise AssertionError(f"{name} correctness check failed")
-
-
-def _format_timing(timing: float | None) -> str:
-    return "nan" if timing is None else f"{timing:.3f}"
-
-
-def _format_ratio(numerator: float | None, denominator: float) -> str:
-    return "nan" if numerator is None else f"{numerator / denominator:.3f}"
 
 
 def _select_algo_without_multimem(
@@ -220,26 +246,188 @@ def _custom_all_reduce_without_multimem(
     return output
 
 
+@contextlib.contextmanager
+def _vllm_nccl_symm_mem_enabled(enabled: bool):
+    """Temporarily select whether vLLM may dispatch to NCCL SymK."""
+    name = "VLLM_USE_NCCL_SYMM_MEM"
+    previous = os.environ.get(name)
+    os.environ[name] = str(int(enabled))
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
+def _vllm_tp_backend(
+    input: torch.Tensor, *, use_nccl_symm_mem: bool
+) -> str:
+    """Mirror vLLM's dispatch predicates to report the selected TP backend."""
+    with _vllm_nccl_symm_mem_enabled(use_nccl_symm_mem):
+        device_comm = get_tp_group().device_communicator
+        if device_comm is None:
+            return "TORCH_NCCL"
+
+        pynccl_comm = getattr(device_comm, "pynccl_comm", None)
+        if (
+            pynccl_comm is not None
+            and not pynccl_comm.disabled
+            and should_nccl_symm_mem_allreduce(pynccl_comm.world_size, input)
+        ):
+            return "NCCL_SYMM_MEM"
+
+        qr_comm = getattr(device_comm, "qr_comm", None)
+        if (
+            qr_comm is not None
+            and not qr_comm.disabled
+            and qr_comm.should_quick_allreduce(input)
+        ):
+            return "QUICK_REDUCE"
+
+        fi_ar_comm = getattr(device_comm, "fi_ar_comm", None)
+        if (
+            fi_ar_comm is not None
+            and not fi_ar_comm.disabled
+            and fi_ar_comm.should_use_fi_ar(input)
+        ):
+            return "FLASHINFER"
+
+        aiter_ar_comm = getattr(device_comm, "aiter_ar_comm", None)
+        if (
+            aiter_ar_comm is not None
+            and not aiter_ar_comm.disabled
+            and aiter_ar_comm.should_custom_ar(input)
+        ):
+            return "AITER_CUSTOM"
+
+        ca_comm = getattr(device_comm, "ca_comm", None)
+        if (
+            ca_comm is not None
+            and not ca_comm.disabled
+            and ca_comm.should_custom_ar(input)
+        ):
+            return "VLLM_CUSTOM"
+
+        symm_mem_comm = getattr(device_comm, "symm_mem_comm", None)
+        if (
+            symm_mem_comm is not None
+            and not symm_mem_comm.disabled
+            and symm_mem_comm.should_use_symm_mem(input)
+        ):
+            return "PYTORCH_SYMM_MEM"
+
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            return "PYNCCL"
+        return "TORCH_NCCL"
+
+
+def _capture_cuda_graph(
+    fn: BenchmarkFn,
+    device: torch.device,
+    *,
+    capture_context: contextlib.AbstractContextManager | None = None,
+    prepare_graph_pool: Callable[[tuple[int, int]], None] | None = None,
+) -> BenchmarkFn:
+    """Capture repeated calls to ``fn`` and return a graph replay function."""
+    capture_context = capture_context or contextlib.nullcontext()
+
+    capture_stream = torch.cuda.Stream(device=device)
+    capture_stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(capture_stream):
+        for _ in range(3):
+            fn()
+
+        graph = torch.cuda.CUDAGraph()
+        graph_pool = torch.cuda.graph_pool_handle()
+        if prepare_graph_pool is not None:
+            prepare_graph_pool(graph_pool)
+
+        graph_output = None
+        with capture_context:
+            with torch.cuda.graph(graph, pool=graph_pool):
+                for _ in range(_GRAPH_CAPTURE_CYCLES):
+                    graph_output = fn()
+
+    capture_stream.synchronize()
+    if graph_output is None:
+        raise RuntimeError("CUDA Graph capture produced no output")
+
+    keepalive = (graph, graph_output)
+
+    def replay() -> torch.Tensor:
+        keepalive[0].replay()
+        return keepalive[1]
+
+    return replay
+
+
+def _capture_vllm_tp_graph(
+    input: torch.Tensor,
+    backend: str,
+    device: torch.device,
+    *,
+    use_nccl_symm_mem: bool,
+) -> BenchmarkFn:
+    """Capture vLLM TP all-reduce with its required graph setup."""
+    device_comm = get_tp_group().device_communicator
+    if device_comm is None:
+        raise RuntimeError("vLLM TP device communicator is not initialized")
+
+    capture_context = contextlib.nullcontext()
+    if backend == "VLLM_CUSTOM":
+        custom_comm = getattr(device_comm, "ca_comm", None)
+        if custom_comm is None or custom_comm.disabled:
+            raise RuntimeError("vLLM CustomAllreduce is unavailable for graph capture")
+        capture_context = custom_comm.capture()
+
+    graph_input = input.clone()
+
+    def vllm_tp_e2e() -> torch.Tensor:
+        with _vllm_nccl_symm_mem_enabled(use_nccl_symm_mem):
+            return tensor_model_parallel_all_reduce(graph_input)
+
+    replay = _capture_cuda_graph(
+        vllm_tp_e2e,
+        device,
+        capture_context=capture_context,
+        prepare_graph_pool=set_graph_pool_id,
+    )
+
+    # Keep graph_input alive for every replay.
+    keepalive = (graph_input, replay)
+
+    def replay_with_input() -> torch.Tensor:
+        return keepalive[1]()
+
+    return replay_with_input
+
+
 def _print_result(
     nbytes: int,
     algo: comms._Algo,
+    vllm_tp_backend: str,
+    vllm_tp_no_nccl_symm_mem_backend: str,
     no_multimem_algo: comms._Algo,
     timings: dict[str, float],
-    *,
-    vllm_custom_eligible: bool,
 ) -> None:
-    vllm_timing = timings.get("vllm_custom_e2e")
+    vllm_timing = timings["vllm_tp_e2e"]
+    vllm_no_symm_timing = timings["vllm_tp_no_nccl_symm_mem_e2e"]
     print(
-        f"{nbytes},{algo.name},{str(vllm_custom_eligible).lower()},"
+        f"{nbytes},{algo.name},{vllm_tp_backend},"
+        f"{vllm_tp_no_nccl_symm_mem_backend},"
         f"{timings['nccl_regular_e2e']:.3f},"
         f"{timings['nccl_symk_e2e']:.3f},"
         f"{timings['custom_e2e']:.3f},"
-        f"{_format_timing(vllm_timing)},"
+        f"{vllm_timing:.3f},"
+        f"{vllm_no_symm_timing:.3f},"
         f"{timings['nccl_symk_e2e'] / timings['nccl_regular_e2e']:.3f},"
         f"{timings['custom_e2e'] / timings['nccl_regular_e2e']:.3f},"
         f"{timings['custom_e2e'] / timings['nccl_symk_e2e']:.3f},"
-        f"{_format_ratio(vllm_timing, timings['nccl_regular_e2e'])},"
-        f"{_format_ratio(vllm_timing, timings['custom_e2e'])},"
+        f"{vllm_timing / timings['nccl_regular_e2e']:.3f},"
+        f"{vllm_timing / timings['custom_e2e']:.3f},"
+        f"{vllm_no_symm_timing / timings['custom_e2e']:.3f},"
         f"{no_multimem_algo.name},"
         f"{timings['custom_no_multimem_e2e']:.3f},"
         f"{timings['custom_no_multimem_e2e'] / timings['custom_e2e']:.3f}",
@@ -269,12 +457,13 @@ def _parse_args() -> argparse.Namespace:
         help="Override the adaptive number of iterations per measurement.",
     )
     parser.add_argument(
-        "--force-vllm-all-sizes",
-        action="store_true",
+        "--cuda-graph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Bypass vLLM's production size cap and allocate IPC workspaces "
-            "large enough for every requested size. This consumes roughly "
-            "twice the largest message size per GPU."
+            "Measure every path through CUDA Graph replay. Each path gets a "
+            f"separate graph containing {_GRAPH_CAPTURE_CYCLES} all-reduces, "
+            "and latency is normalized per all-reduce (enabled by default)."
         ),
     )
     return parser.parse_args()
@@ -304,10 +493,9 @@ def main() -> None:
     group_name = group.group_name
     nccl_backend = group._get_backend(device)
 
-    # Preallocate the SymK staging buffer. Every rank allocates from the NCCL
-    # pool in the same order. Merely using
-    # torch.distributed._symmetric_memory.empty() does not register this
-    # ProcessGroupNCCL communicator for SymK.
+    # Allocate one persistent buffer from ProcessGroupNCCL's allocator and
+    # register its pool as symmetric. NCCL operates in-place on a prefix view;
+    # returning that view preserves the regular input without a copy-out.
     max_numel = max(sizes) // dtype.itemsize
     nccl_pool = torch.cuda.MemPool(
         nccl_backend.mem_allocator,
@@ -315,44 +503,46 @@ def main() -> None:
         no_split=True,
     )
     with torch.cuda.use_mem_pool(nccl_pool):
-        symk_staging_storage = torch.empty(max_numel, dtype=dtype, device=device)
+        symk_output_storage = torch.empty(max_numel, dtype=dtype, device=device)
     nccl_backend.register_mem_pool(nccl_pool, symm=True)
 
-    # vLLM's custom all-reduce exchanges CUDA IPC handles over a CPU process
-    # group. Production mode enables the architecture/world-size cap used when
-    # vLLM's symmetric-memory backend is available. Force-all mode deliberately
-    # bypasses that cap and makes the strict ``size < max_size`` check accept the
-    # largest requested message. TorchTitan's RL integration forces this
-    # communicator onto registered=False, which includes one staging copy.
-    vllm_cpu_group = dist.new_group(backend="gloo")
-    vllm_max_size = (
-        max(sizes) + 16 if args.force_vllm_all_sizes else 8 * 1024 * 1024
-    )
-    vllm_custom_ar = CustomAllreduce(
-        group=vllm_cpu_group,
-        device=device,
-        max_size=vllm_max_size,
-        symm_mem_enabled=not args.force_vllm_all_sizes,
-    )
-    if vllm_custom_ar.disabled:
-        raise RuntimeError("vLLM CustomAllreduce is disabled on this topology")
+    # Initialize vLLM with NCCL symmetric memory available. The benchmark then
+    # captures separate vLLM graphs with its dispatch flag enabled and disabled.
+    os.environ["VLLM_USE_NCCL_SYMM_MEM"] = "1"
+    os.environ.setdefault("NCCL_NVLS_ENABLE", "1")
+    os.environ.setdefault("NCCL_CUMEM_ENABLE", "1")
+    set_custom_all_reduce(True)
+    with set_current_vllm_config(VllmConfig()):
+        init_distributed_environment(
+            world_size=world_size,
+            rank=rank,
+            local_rank=local_rank,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     if rank == 0:
         # Output columns:
         # - nccl_regular_e2e_us: clone + in-place regular NCCL.
-        # - nccl_symk_e2e_us: copy-in + in-place NCCL SymK + copy-out.
+        # - nccl_symk_e2e_us: copy into a symmetric-pool output, run
+        #   ProcessGroupNCCL in-place on it, and return it directly.
         # - custom_e2e_us: TorchTitan's custom out-of-place all-reduce.
-        # - vllm_custom_e2e_us: vLLM custom AR with internal copy-in and direct
-        #   output, or nan when vLLM rejects the message size.
+        # - vllm_tp_e2e_us: vLLM's full tensor-parallel all-reduce dispatcher.
+        #   vllm_tp_backend reports the backend selected for that message size.
+        # - vllm_tp_no_nccl_symm_mem_e2e_us: the same vLLM dispatcher captured
+        #   with VLLM_USE_NCCL_SYMM_MEM=0.
         # - custom_no_multimem_e2e_us: TorchTitan custom AR using only its P2P
         #   one-shot/two-shot kernels, with NCCL fallback above 16 MiB.
+        # With --cuda-graph, every column is graph replay time normalized per
+        # captured all-reduce; graph capture and setup are excluded.
         print(
             f"# world_size={world_size} gpu={torch.cuda.get_device_name(device)} "
             f"torch={torch.__version__} nccl={torch.cuda.nccl.version()} "
             f"dtype={dtype} multicast={comms._has_multicast(local_rank)} "
-            f"vllm_custom_mode="
-            f"{'forced' if args.force_vllm_all_sizes else 'production'} "
-            f"vllm_custom_max_bytes={vllm_custom_ar.max_size}",
+            "vllm_nccl_symm_mem_variants=1,0 "
+            f"cuda_graph={args.cuda_graph} "
+            f"graph_ops={_GRAPH_CAPTURE_CYCLES if args.cuda_graph else 1} "
+            f"vllm={vllm.__version__} vllm_source={vllm.__file__}",
             flush=True,
         )
         print(_RESULT_HEADER, flush=True)
@@ -363,7 +553,7 @@ def main() -> None:
             input_tensor = torch.full(
                 (numel,), rank + 1, dtype=dtype, device=device
             )
-            symk_staging_buffer = symk_staging_storage[:numel]
+            symk_output = symk_output_storage[:numel]
             algo = comms._select_algo(input_tensor, "sum", group_name)
 
             def nccl_regular_e2e() -> torch.Tensor:
@@ -372,17 +562,27 @@ def main() -> None:
                 return output
 
             def nccl_symk_e2e() -> torch.Tensor:
-                symk_staging_buffer.copy_(input_tensor)
-                dist.all_reduce(symk_staging_buffer, group=group)
-                output = torch.empty_like(input_tensor)
-                output.copy_(symk_staging_buffer)
-                return output
+                symk_output.copy_(input_tensor)
+                dist.all_reduce(symk_output, group=group)
+                return symk_output
 
             def custom_e2e() -> torch.Tensor:
                 return comms._custom_all_reduce(input_tensor, "sum", group_name)
 
-            def vllm_custom_e2e() -> torch.Tensor:
-                return vllm_custom_ar.all_reduce(input_tensor, registered=False)
+            vllm_tp_backend = _vllm_tp_backend(
+                input_tensor, use_nccl_symm_mem=True
+            )
+            vllm_tp_no_nccl_symm_mem_backend = _vllm_tp_backend(
+                input_tensor, use_nccl_symm_mem=False
+            )
+
+            def vllm_tp_e2e() -> torch.Tensor:
+                with _vllm_nccl_symm_mem_enabled(True):
+                    return tensor_model_parallel_all_reduce(input_tensor)
+
+            def vllm_tp_no_nccl_symm_mem_e2e() -> torch.Tensor:
+                with _vllm_nccl_symm_mem_enabled(False):
+                    return tensor_model_parallel_all_reduce(input_tensor)
 
             no_multimem_algo = _select_algo_without_multimem(
                 input_tensor, "sum", group_name
@@ -393,21 +593,55 @@ def main() -> None:
                     input_tensor, "sum", group_name
                 )
 
-            methods = {
+            eager_methods = {
                 "nccl_regular_e2e": nccl_regular_e2e,
                 "nccl_symk_e2e": nccl_symk_e2e,
                 "custom_e2e": custom_e2e,
                 "custom_no_multimem_e2e": custom_no_multimem_e2e,
+                "vllm_tp_e2e": vllm_tp_e2e,
+                "vllm_tp_no_nccl_symm_mem_e2e": (
+                    vllm_tp_no_nccl_symm_mem_e2e
+                ),
             }
-            vllm_custom_eligible = vllm_custom_ar.should_custom_ar(input_tensor)
-            if vllm_custom_eligible:
-                methods["vllm_custom_e2e"] = vllm_custom_e2e
 
-            # Verify every path once before measuring it.
+            # Verify every eager path before capture or measurement.
             expected = float(world_size * (world_size + 1) // 2)
-            correctness_results = {name: fn() for name, fn in methods.items()}
+            correctness_results = {
+                name: fn() for name, fn in eager_methods.items()
+            }
             _check_results(correctness_results, expected)
+            del correctness_results
             _synchronize_all_ranks(device)
+
+            if args.cuda_graph:
+                methods = {}
+                for name, fn in eager_methods.items():
+                    _synchronize_all_ranks(device)
+                    if name == "vllm_tp_e2e":
+                        methods[name] = _capture_vllm_tp_graph(
+                            input_tensor,
+                            vllm_tp_backend,
+                            device,
+                            use_nccl_symm_mem=True,
+                        )
+                    elif name == "vllm_tp_no_nccl_symm_mem_e2e":
+                        methods[name] = _capture_vllm_tp_graph(
+                            input_tensor,
+                            vllm_tp_no_nccl_symm_mem_backend,
+                            device,
+                            use_nccl_symm_mem=False,
+                        )
+                    else:
+                        methods[name] = _capture_cuda_graph(fn, device)
+
+                correctness_results = {
+                    name: fn() for name, fn in methods.items()
+                }
+                _check_results(correctness_results, expected)
+                del correctness_results
+                _synchronize_all_ranks(device)
+            else:
+                methods = eager_methods
 
             _warm_up(methods, args.warmup, device)
 
@@ -417,30 +651,35 @@ def main() -> None:
                 iterations=iterations,
                 repeats=args.repeats,
                 device=device,
+                work_per_call=(
+                    {name: _GRAPH_CAPTURE_CYCLES for name in methods}
+                    if args.cuda_graph
+                    else None
+                ),
             )
 
             if rank == 0:
                 _print_result(
                     nbytes,
                     algo,
+                    vllm_tp_backend,
+                    vllm_tp_no_nccl_symm_mem_backend,
                     no_multimem_algo,
                     timings,
-                    vllm_custom_eligible=vllm_custom_eligible,
                 )
 
-            del input_tensor, symk_staging_buffer
-            del correctness_results
+            del methods, eager_methods
+            del input_tensor, symk_output
             dist.barrier()
     finally:
         try:
-            vllm_custom_ar.close()
-            dist.destroy_process_group(vllm_cpu_group)
+            destroy_model_parallel()
         finally:
             try:
                 nccl_backend.deregister_mem_pool(nccl_pool)
-                del symk_staging_storage, nccl_pool
+                del symk_output_storage, nccl_pool
             finally:
-                dist.destroy_process_group()
+                destroy_distributed_environment()
 
 
 if __name__ == "__main__":
