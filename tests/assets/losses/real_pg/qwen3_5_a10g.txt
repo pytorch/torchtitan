@@ -1,4 +1,4 @@
-# config: qwen35_debugmodel_moe_fsdp4_tp2_ep4
+# config: qwen35_debugmodel_moe_fsdp4_tp2_ep4_no_router_recompute
 # ngpu: 8
 # parallelism: FSDP=4, TP=2, EP=4
 # step loss grad_norm

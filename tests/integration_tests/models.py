@@ -77,7 +77,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
-            configs=[recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8],
+            configs=[
+                recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8_no_router_recompute
+            ],
             test_descr="Qwen3 MoE FSDP+TP+CP+EP (param groups)",
             test_name="qwen3_moe_fsdp+tp+cp+ep_param_groups",
             ngpu=8,
@@ -121,7 +123,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4],
+            configs=[recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4_no_router_recompute],
             test_descr="Qwen3.5 MoE FSDP+TP+EP",
             test_name="qwen3_5_moe_fsdp+tp+ep",
             ngpu=8,

@@ -150,7 +150,9 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
+def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8_no_router_recompute() -> (
+    Trainer.Config
+):
     config = qwen3_debugmodel_moe_param_groups()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -217,7 +219,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
+def qwen35_debugmodel_moe_fsdp4_tp2_ep4_no_router_recompute() -> Trainer.Config:
     from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
 
     config = qwen35_debugmodel_moe()
