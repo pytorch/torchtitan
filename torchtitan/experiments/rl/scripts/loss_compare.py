@@ -99,9 +99,10 @@ def extract_losses_from_tensorboard(tb_dir: str) -> dict[int, float]:
     return losses
 
 
-# Reference-file I/O (``read_losses_from_file`` / ``export_losses_to_file``) is
-# reused from ``scripts/loss_compare.py`` -- imported lazily in ``main`` so this
-# module only needs the repo root on ``sys.path`` when actually run.
+# Reference-file I/O is reused from ``scripts/loss_compare.py`` -- imported
+# lazily in ``main`` so this module only needs the repo root on ``sys.path``
+# when actually run. The shared helpers support multiple metrics, while this
+# guard reads and writes only the ``loss`` metric.
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +269,7 @@ def main() -> None:
     )
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
-    from scripts.loss_compare import export_losses_to_file, read_losses_from_file
+    from scripts.loss_compare import export_metrics_to_file, read_metrics_from_file
 
     export_result = args.export_result or None
     import_result = args.import_result or None
@@ -294,11 +295,11 @@ def main() -> None:
 
     # Export if requested
     if export_result:
-        export_losses_to_file(actual_losses, export_result)
+        export_metrics_to_file({"loss": actual_losses}, export_result)
 
     # Compare if requested
     if args.assert_equal:
-        expected_losses = read_losses_from_file(import_result)
+        expected_losses = read_metrics_from_file(import_result)["loss"]
         assert_losses_equal(actual_losses, expected_losses)
 
 

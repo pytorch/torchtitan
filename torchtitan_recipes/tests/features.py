@@ -100,13 +100,19 @@ def llama3_debugmodel_hf_checkpoint_save() -> Trainer.Config:
 def llama3_debugmodel_hf_checkpoint_load() -> Trainer.Config:
     """Loads what ``llama3_debugmodel_hf_checkpoint_save`` wrote.
 
-    The load path points into the integration runner's output directory, which
-    is ``RUNNER_TEMP`` on GitHub Actions and a relative path elsewhere.
+    The integration runner supplies the per-test output directory to each run.
     """
     config = llama3_debugmodel_full_checkpoint_save()
+    test_output_dir = os.getenv(
+        "TORCHTITAN_TEST_OUTPUT_DIR",
+        os.path.join(
+            os.getenv("RUNNER_TEMP", ""),
+            "artifacts-to-be-uploaded/model_only_hf_checkpoint",
+        ),
+    )
     config.checkpoint.initial_load_path = os.path.join(
-        os.getenv("RUNNER_TEMP", ""),
-        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+        test_output_dir,
+        "hf_checkpoint/step-10/",
     )
     config.checkpoint.initial_load_model_only = True
     config.checkpoint.initial_load_in_hf = True
@@ -398,33 +404,6 @@ def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
-    return config
-
-
-def llama3_debugmodel_torchcomms_cp2_pp2_compile() -> Trainer.Config:
-    """Keeps the default SPMD backend: CP with compile hits an upstream symint
-    limitation under ``spmd_types``."""
-    config = llama3_debugmodel()
-    config.comm.mode = "torchcomms"
-    config.parallelism.context_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile.enable = True
-    config.training.disable_cuda_graphs = True
-    return config
-
-
-def llama3_debugmodel_torchcomms_tp2_pp2_compile() -> Trainer.Config:
-    config = llama3_debugmodel_ce_loss()
-    _use_spmd_types(config, typechecking=False)
-    config.comm.mode = "torchcomms"
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile.enable = True
     config.training.disable_cuda_graphs = True
     return config
 
