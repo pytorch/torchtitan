@@ -63,8 +63,7 @@ and uses its fixed initialization path.
   physical A10Gs with Real PG after merge, on schedule, or when triggered by
   the `ciflow/8gpu` label. Their golden paths can use `{execution_mode}` to
   select the `fake_pg/` or `real_pg/` directory.
-  Fake-PG numerical cases may select a separate FSDP-only or FSDP+EP config to
-  avoid treating sequence-parallel synthetic values as a numerical oracle.
+  Shared numerical cases use the same configuration in both modes.
 - Fake-PG goldens guard PyTorch FakeProcessGroup's deterministic synthetic
   numerical contract. They do not validate remote-rank values or EP load
   balance.
@@ -80,10 +79,10 @@ and uses its fixed initialization path.
 | --- | --- | --- |
 | Llama 3 | FSDP 2 x TP 2 x CP 2 | FSDP 2 x TP 2 x CP 2 |
 | Llama 3 SFT | FSDP 2 | FSDP 2 |
-| DeepSeek V3 | FSDP 8, EP 8 | FSDP 2 x TP 2 x CP 2, EP 8 |
+| DeepSeek V3 | FSDP 8, EP 8 | FSDP 8, EP 8 |
 | GPT-OSS | FSDP 4 x TP 2, EP 4 | FSDP 4 x TP 2, EP 4 |
 | Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 | FSDP 2 x TP 2 x CP 2, EP 8 |
-| Muse Glimmer text | FSDP 8 | FSDP 2 x TP 2 x CP 2 |
+| Muse Glimmer text | FSDP 8 | FSDP 8 |
 | Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 | FSDP 4 x TP 2, EP 4 |
 
 Kimi K2.5 continues to run as an FSDP 8, EP 8 integration case. Its multimodal
@@ -92,10 +91,11 @@ implementation, so the case does not carry a numerical golden. For manual
 comparisons, `loss_compare.py` can create the model-only seed checkpoint with a
 model-equivalent AdamW config while the measured run continues to use DistMuon.
 
-Additional A10G Real-PG-only cases exercise pipeline communication:
+Additional A10G Real-PG-only cases exercise CP and pipeline communication:
 
 | A10G model | Pipeline-parallel topology |
 | --- | --- |
+| DeepSeek V3 | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
 | Llama 3 | FSDP 2 x TP 2 x PP 2, 1F1B |
 | GPT-OSS | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
 

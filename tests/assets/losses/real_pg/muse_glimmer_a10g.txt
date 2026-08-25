@@ -1,6 +1,6 @@
-# config: muse_glimmer_debugmodel_fsdp2_tp2_cp2
+# config: muse_glimmer_debugmodel_fsdp8
 # ngpu: 8
-# parallelism: FSDP=2, TP=2, CP=2
+# parallelism: FSDP=8
 # step loss grad_norm
 1 7.624619007110596 0.057667944580316544
 2 7.624410629272461 0.057388924062252045
