@@ -5,11 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Shared setup + run for the H100 integration test suite. Both jobs in
-# integration_test_8gpu_h100.yaml call this -- the CUDA build-test on
-# linux_job_v3 and the ROCm build-test-rocm on linux_job_v2 -- with GPU_ARCH_TYPE
-# set accordingly. The only arch-specific step is the ROCm HIPBLASLT export
-# below, a no-op on CUDA.
+# Shared setup for the H100 integration suite.
 #
 # The calling workflow passes the matrix values as env vars:
 #   INDEX_URL      torch/torchao --index-url (required)
@@ -60,6 +56,9 @@ if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
 fi
 
 USE_CPP=0 PIP_EXTRA_INDEX_URL= python -m pip install --pre torchao --index-url "${INDEX_URL}"
+# GPT-OSS production configs use PyTorch's FA3 backend.
+python -m pip install flash-attn-3 \
+  --extra-index-url https://download.pytorch.org/whl/test/cu130
 
 # RUNNER_TEMP is owned by the host uid. The v2 ROCm runner's container user
 # can't write it, so create + chown via sudo (as the other ROCm workflows do);
@@ -71,15 +70,47 @@ else
   mkdir -p "${ARTIFACTS}"
 fi
 
-# Install DeepEP for the HybridEP integration test. DeepEP (NVSHMEM) is
-# CUDA-only, so skip it on ROCm.
-if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
-  bash /install_deepep.sh
-fi
-
 # Enable CPP stacktraces for debugging symmetric memory initialization errors.
 # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
 # NLVS according to several CI runs.
 # DeepEP needs CUDA_HOME specified to JIT kernels.
-CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 --gpu_arch_type "${GPU_ARCH_TYPE}" "${ARTIFACTS}" --ngpu 8
+STATUS=0
+if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
+  --test_suite h100 \
+  --execution_mode real_pg \
+  --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep+compile \
+  --gpu_arch_type "${GPU_ARCH_TYPE}" \
+  --ngpu 8 \
+  "${ARTIFACTS}/h100/base"; then
+  STATUS=1
+fi
+
+# DeepEP v2 and HybridEP currently live on incompatible DeepEP branches and
+# export different Python APIs. Install and test each backend sequentially.
+if [[ "${GPU_ARCH_TYPE}" != "rocm" ]]; then
+  bash .github/scripts/install_deepep_v2.sh
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 EP_DISABLE_GIN=1 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
+    --test_suite h100 \
+    --execution_mode real_pg \
+    --test_name qwen3_fsdp+deepep \
+    --gpu_arch_type "${GPU_ARCH_TYPE}" \
+    --ngpu 8 \
+    "${ARTIFACTS}/h100/deepep_v2"; then
+    STATUS=1
+  fi
+
+  # The H100 CI image provides the pinned hybrid-ep installer used by the
+  # existing HybridEP workflow.
+  bash /install_deepep.sh
+  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
+    --test_suite h100 \
+    --execution_mode real_pg \
+    --test_name deepseek_v3_fsdp+hybridep+compile \
+    --gpu_arch_type "${GPU_ARCH_TYPE}" \
+    --ngpu 8 \
+    "${ARTIFACTS}/h100/hybrid_ep"; then
+    STATUS=1
+  fi
+fi
 rm -rf "${ARTIFACTS}"/*/checkpoint
+exit "${STATUS}"
