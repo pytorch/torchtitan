@@ -284,6 +284,22 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     )
 
 
+# MoE layers per DistMuon bucket. A bucket is the communication unit and also
+# bounds local compute batching, so this single number trades reserved scratch
+# against both collective count and Newton-Schulz launches. Measured on
+# kimi_k2_5_debugmodel, 8 GPUs, FSDP 8 / EP 8, mean over 10 timed steps:
+#
+#   span  collectives  NS calls  optimizer step  reserved
+#      2            4        11        13.60 ms  10.5 MiB
+#      3            3         8        11.76 ms  13.8 MiB
+#      5            2         5         9.84 ms  19.1 MiB
+#
+# Widening past 5 keeps helping structurally but grows scratch superlinearly on
+# real layer counts; on moonlight_16b_a3b a span of 5 reserves 451 MiB against
+# 292 MiB at 2, while 13 reserves 925 MiB.
+_MUON_LAYERS_PER_BUCKET = 5
+
+
 def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
@@ -390,10 +406,20 @@ def _dist_muon_optimizer(
         for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
-    # collective launch overhead across pairs of MoE layers.
+    # collective launch overhead across spans of MoE layers. The span also sets
+    # how much local compute DistMuon can batch: same-shaped parameters from
+    # every layer in a bucket share one Newton-Schulz call, so widening the span
+    # cuts both collectives and kernel launches, at the cost of larger exchange
+    # and compute scratch. Five was measured as a good point on that curve; see
+    # _MUON_LAYERS_PER_BUCKET.
     bucket_layer_ids = ((0,),) + tuple(
-        tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
-        for first_layer_id in range(1, num_layers, 2)
+        tuple(
+            range(
+                first_layer_id,
+                min(first_layer_id + _MUON_LAYERS_PER_BUCKET, num_layers),
+            )
+        )
+        for first_layer_id in range(1, num_layers, _MUON_LAYERS_PER_BUCKET)
     )
     bucket_fqns = tuple(
         tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
