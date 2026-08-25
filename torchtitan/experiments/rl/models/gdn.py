@@ -230,8 +230,13 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         ssm_state[slot_indices] = final_state.transpose(-1, -2).to(ssm_state.dtype)
         return output
 
-    # The decorator makes this an eager graph-split point during breakable capture.
+    # Keep Dynamo from specializing on BreakableCUDAGraphCapture.current().
+    # vLLM warms this method with no active capture and later calls it while
+    # capturing; tracing the decorator would otherwise trigger a lazy Dynamo
+    # recompile inside CUDA graph capture. The outer disable preserves the
+    # runtime eager-break wrapper while compiling the surrounding layer.
     # The caller-owned output has a stable address across graph replays.
+    @torch.compiler.disable
     @eager_break_during_capture
     def _forward(
         self,
