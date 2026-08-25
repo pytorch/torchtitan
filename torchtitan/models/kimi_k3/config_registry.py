@@ -117,4 +117,16 @@ def kimi_k3_debugmodel_text_32l() -> Trainer.Config:
     return config
 
 
+def kimi_k3_debugmodel_text_32l_cache() -> Trainer.Config:
+    """The 32-layer text flavor with the delta block transport engaged.
+
+    The transport is off by default, so without a flavor that turns it on
+    the adapter is in the tree but never runs -- the matrix would measure
+    the naive transport and report it as the adapter's numbers.
+    """
+    config = kimi_k3_debugmodel_text_32l()
+    config.model_spec.model.attn_res_cache = True
+    return config
+
+
 
