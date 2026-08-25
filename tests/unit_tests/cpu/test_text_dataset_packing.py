@@ -13,7 +13,9 @@ from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLo
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import DATASETS
 
-_TOKENIZER_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "tokenizer")
+_TOKENIZER_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "assets", "tokenizer"
+)
 
 
 def _build_dataloader(max_context_length: int) -> GrainDataLoader:

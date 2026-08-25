@@ -16,6 +16,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
     AlphabetSortDataset,
     AlphabetSortRollouter,
     AlphabetSortSample,
+    AlphabetSortWorker,
     data as alphabet_data,
     RewardAlphabetSort,
 )
@@ -368,10 +369,24 @@ def test_env_walks_through_follow_up_turns() -> None:
 def test_rollouter_builds_one_env_per_group_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class _RendererConfig:
+        def build(self, *, tokenizer_path: str):
+            return None
+
     _patch_names(monkeypatch)
-    rollouter = AlphabetSortRollouter(AlphabetSortRollouter.Config())
+    config = AlphabetSortRollouter.Config()
+    rollouter = AlphabetSortRollouter(config)
+    worker = config.worker.build()
+    # The worker subclass is selected by its config type.
+    assert isinstance(worker, AlphabetSortWorker)
+    asyncio.run(
+        worker.setup_async(
+            renderer_config=_RendererConfig(),
+            hf_assets_path="hf_assets_path",
+        )
+    )
     sample = rollouter.get_training_sample()
-    envs = rollouter.make_env_group(sample=sample, group_size=3, renderer=None)
+    envs = worker.make_env_group(sample=sample, group_size=3)
     assert len(envs) == 3
 
 
@@ -379,6 +394,7 @@ def test_rollouter_config_wires_alphabet_sort() -> None:
     config = AlphabetSortRollouter.Config()
     assert isinstance(config.train_dataset, AlphabetSortDataset.Config)
     assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
-    assert isinstance(config.message_env, AlphabetSortEnv.Config)
-    assert len(config.rubric.reward_fns) == 1
-    assert isinstance(config.rubric.reward_fns[0], RewardAlphabetSort.Config)
+    assert isinstance(config.worker, AlphabetSortWorker.Config)
+    assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)
+    assert len(config.worker.rubric.reward_fns) == 1
+    assert isinstance(config.worker.rubric.reward_fns[0], RewardAlphabetSort.Config)
