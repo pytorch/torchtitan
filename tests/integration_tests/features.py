@@ -310,9 +310,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_text_pp2_vp2],
-            test_descr="Kimi K3 text decoder, pp2 with two virtual stages",
-            test_name="kimi_k3_text_pp2_vp2",
-            ngpu=2,
+            configs=[recipes.kimi_k3_debugmodel_text_pp8_vp4],
+            test_descr="Kimi K3 text decoder, pp8 with four virtual stages",
+            test_name="kimi_k3_text_pp8_vp4",
+            ngpu=8,
         ),
     ]

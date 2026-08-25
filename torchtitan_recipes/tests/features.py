@@ -436,15 +436,19 @@ def kimi_k3_debugmodel_text_pp2() -> Trainer.Config:
     return config
 
 
-def kimi_k3_debugmodel_text_pp2_vp2() -> Trainer.Config:
-    """The same split with two virtual stages per rank, on the interleaved schedule."""
+def kimi_k3_debugmodel_text_pp8_vp4() -> Trainer.Config:
+    """Eight stages, four virtual stages per rank, on the interleaved schedule.
+
+    The 32-layer flavor is what makes this expressible: one layer per stage over
+    32 stages, so the block residual crosses every boundary the schedule has.
+    """
     from torchtitan.models.kimi_k3.config_registry import (
         kimi_k3_debugmodel_text_32l,
     )
 
     config = kimi_k3_debugmodel_text_32l()
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_layers_per_stage = 8
+    config.parallelism.pipeline_parallel_degree = 8
+    config.parallelism.pipeline_parallel_layers_per_stage = 1
     config.parallelism.pipeline_parallel_first_stage_less_layers = 0
     config.parallelism.pipeline_parallel_last_stage_less_layers = 0
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
