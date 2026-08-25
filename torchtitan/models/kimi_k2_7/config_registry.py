@@ -5,9 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, replace
-from typing import Annotated, cast
-
-import tyro
+from typing import cast
 
 from torch.distributed.tensor import Shard
 
@@ -286,22 +284,6 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     )
 
 
-# MoE layers per DistMuon bucket. A bucket is the communication unit and also
-# bounds local compute batching, so this single number trades reserved scratch
-# against both collective count and Newton-Schulz launches. Measured on
-# kimi_k2_5_debugmodel, 8 GPUs, FSDP 8 / EP 8, mean over 10 timed steps:
-#
-#   span  collectives  NS calls  optimizer step  reserved
-#      2            4        11        13.60 ms  10.5 MiB
-#      3            3         8        11.76 ms  13.8 MiB
-#      5            2         5         9.84 ms  19.1 MiB
-#
-# Widening past 5 keeps helping structurally but grows scratch superlinearly on
-# real layer counts; on moonlight_16b_a3b a span of 5 reserves 451 MiB against
-# 292 MiB at 2, while 13 reserves 925 MiB.
-_MUON_LAYERS_PER_BUCKET = 5
-
-
 def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
@@ -408,20 +390,10 @@ def _dist_muon_optimizer(
         for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
     )
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
-    # collective launch overhead across spans of MoE layers. The span also sets
-    # how much local compute DistMuon can batch: same-shaped parameters from
-    # every layer in a bucket share one Newton-Schulz call, so widening the span
-    # cuts both collectives and kernel launches, at the cost of larger exchange
-    # and compute scratch. Five was measured as a good point on that curve; see
-    # _MUON_LAYERS_PER_BUCKET.
+    # collective launch overhead across pairs of MoE layers.
     bucket_layer_ids = ((0,),) + tuple(
-        tuple(
-            range(
-                first_layer_id,
-                min(first_layer_id + _MUON_LAYERS_PER_BUCKET, num_layers),
-            )
-        )
-        for first_layer_id in range(1, num_layers, _MUON_LAYERS_PER_BUCKET)
+        tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
+        for first_layer_id in range(1, num_layers, 2)
     )
     bucket_fqns = tuple(
         tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
@@ -536,114 +508,10 @@ def _align_dist_muon_expert_compute_layouts(
     )
 
 
-def _rebucket_dist_muon_by_layer_span(
-    optimizer_config: OptimizersContainer.Config,
-    *,
-    layers_per_bucket: int,
-) -> OptimizersContainer.Config:
-    """Regroup DistMuon buckets to span ``layers_per_bucket`` MoE layers.
-
-    Buckets are derived from ``muon_layers_per_bucket``, so they are rebuilt
-    whenever that field changes -- whether it was set on the recipe, replaced
-    with ``dataclasses.replace``, or assigned before the config is built. This
-    is deliberately not the same situation as
-    ``_align_dist_muon_expert_compute_layouts``, which exists only to undo a
-    CLI override and disappears with it; a declared field still needs deriving
-    once the CLI is gone.
-
-    Only the layer span changes: the dense layer-0 bucket stays on its own, and
-    the routed/non-routed split is preserved because those use different meshes
-    and cannot share a transport group.
-    """
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
-        return optimizer_config
-    bucket_configs = cast(
-        tuple[BucketConfig, ...], tuple(dist_muon_kwargs["bucket_configs"])
-    )
-
-    dense: list[BucketConfig] = []
-    # (is_routed, group index) -> layer id -> FQNs, so buckets keep layer order.
-    grouped: dict[tuple[bool, int], dict[int, list[str]]] = {}
-    for bucket_config in bucket_configs:
-        routed = bucket_config.name.endswith(".routed-experts")
-        for fqn in bucket_config.patterns:
-            parts = fqn.split(".")
-            layer_id = (
-                int(parts[1])
-                if len(parts) > 1 and parts[0] == "layers" and parts[1].isdigit()
-                else None
-            )
-            if layer_id is None or layer_id == 0:
-                dense.append(bucket_config)
-                break
-            group = (layer_id - 1) // layers_per_bucket
-            grouped.setdefault((routed, group), {}).setdefault(layer_id, []).append(fqn)
-
-    rebucketed = list(dense)
-    for group_index in sorted({group for _, group in grouped}):
-        for routed in (False, True):
-            fqns_by_layer = grouped.get((routed, group_index))
-            if not fqns_by_layer:
-                continue
-            name = "layers." + "-".join(str(i) for i in sorted(fqns_by_layer))
-            if routed:
-                name += ".routed-experts"
-            rebucketed.append(
-                BucketConfig(
-                    name=name,
-                    patterns=tuple(
-                        fqn
-                        for layer_id in sorted(fqns_by_layer)
-                        for fqn in fqns_by_layer[layer_id]
-                    ),
-                )
-            )
-
-    if tuple(rebucketed) == bucket_configs:
-        return optimizer_config
-    dist_muon_kwargs["bucket_configs"] = tuple(rebucketed)
-    return replace(
-        optimizer_config,
-        optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
-    )
-
-
 @dataclass(kw_only=True, slots=True)
 class _KimiTrainerConfig(Trainer.Config):
-    muon_layers_per_bucket: Annotated[int, tyro.conf.Suppress] = _MUON_LAYERS_PER_BUCKET
-    """MoE layers spanned by one DistMuon bucket.
-
-    A bucket is the communication unit and also bounds how much local compute
-    DistMuon batches, so this one number trades reserved scratch against both
-    collective count and Newton-Schulz launches. It is a declared field rather
-    than a constant because the right point on that curve depends on available
-    memory, which the recipe cannot know. See ``_MUON_LAYERS_PER_BUCKET`` for
-    measurements.
-
-    ``tyro.conf.Suppress`` keeps it off the command line, like ``model_spec``:
-    the command-line surface is frozen and on its way out, so a new option
-    would be surface to delete later. Overriding it is a config-as-code
-    operation, and ``__post_init__`` rederives the buckets either way.
-    """
-
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        if self.muon_layers_per_bucket < 1:
-            raise ValueError(
-                "muon_layers_per_bucket must be a positive integer; got "
-                f"{self.muon_layers_per_bucket}"
-            )
-        self.optimizer = _rebucket_dist_muon_by_layer_span(
-            self.optimizer,
-            layers_per_bucket=self.muon_layers_per_bucket,
-        )
         self.optimizer = _align_dist_muon_expert_compute_layouts(
             self.optimizer,
             parallelism=self.parallelism,
