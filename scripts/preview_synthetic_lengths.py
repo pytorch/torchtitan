@@ -14,7 +14,7 @@ Example spec files:
                  {"min_len": 2048, "max_len": 4096, "weight": 1}]}
 
 Usage:
-  python -m scripts.preview_synthetic_lengths --spec buckets.json \\
+  python -m scripts.preview_synthetic_lengths --spec buckets.json \
       --seed 0 --samples 100000 --dp 8 --per-rank-batch 4
 """
 
