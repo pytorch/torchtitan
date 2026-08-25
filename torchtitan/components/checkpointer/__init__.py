@@ -15,6 +15,7 @@ from .base import (
     TRAIN_STATE,
 )
 from .dcp import AsyncMode, CheckpointManager
+from .state_dict_adapter import DCPStateDictAdapter, PaddedDTensorStateDictAdapter
 
 __all__ = [
     "AsyncMode",
@@ -22,9 +23,11 @@ __all__ = [
     "CheckpointManager",
     "CheckpointStorage",
     "DATALOADER",
+    "DCPStateDictAdapter",
     "LR_SCHEDULER",
     "MODEL",
     "ModelWrapper",
     "OPTIMIZER",
+    "PaddedDTensorStateDictAdapter",
     "TRAIN_STATE",
 ]
