@@ -33,7 +33,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import get_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
@@ -311,40 +311,18 @@ class MuseGlimmerModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layers[0].attention, GQAttention.Config)
-            assert self.layers[0].attention.head_dim is not None
-            nparams, num_flops_per_token = get_dense_model_nparams_and_flops(
+            # Vision modules run per image rather than per text token.
+            return get_model_nparams_and_flops(
+                self,
                 model,
-                n_layers=len(self.layers),
-                n_heads=self.layers[0].attention.n_heads,
-                head_dims=2 * self.layers[0].attention.head_dim,
-                seq_len=seq_len,
-                enable_weight_tying=False,
-                layers=self.layers,
+                seq_len,
+                excluded_module_names=(
+                    "vision_encoder",
+                    "vision_adapter",
+                    "vision_projection",
+                    "perception_emb_norm",
+                ),
             )
-            # The dense helper's embedding exclusion only scans the model's
-            # immediate nn.Embedding children; Muse Glimmer nests tok_embeddings
-            # in EmbeddingWithNorm, so subtract its per-token FLOPs here (no
-            # weight tying). None on non-embedding pipeline stages.
-            tok_embeddings = getattr(model, "tok_embeddings", None)
-            if tok_embeddings is not None:
-                nparams_embedding = sum(p.numel() for p in tok_embeddings.parameters())
-                num_flops_per_token -= 6 * nparams_embedding
-            # The vision stack runs per-batch on image patches, not per text
-            # token, so drop it from the per-token term (mirrors the MoE helper
-            # bucketing vision out). None for text-only flavors.
-            # TODO: add a per-batch vision encoder FLOP term for accurate VLM MFU.
-            for vision_module_name in (
-                "vision_encoder",
-                "vision_adapter",
-                "vision_projection",
-                "perception_emb_norm",
-            ):
-                vision_module = getattr(model, vision_module_name, None)
-                if vision_module is not None:
-                    nparams_vision = sum(p.numel() for p in vision_module.parameters())
-                    num_flops_per_token -= 6 * nparams_vision
-            return nparams, num_flops_per_token
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

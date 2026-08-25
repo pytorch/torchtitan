@@ -23,7 +23,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import get_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .kda import KimiDeltaAttention
@@ -278,22 +278,11 @@ class KimiK3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            attention_config = self.first_attention
-            if not isinstance(attention_config, KimiMLAAttention.Config):
-                raise ValueError(
-                    "Kimi K3 requires at least one MLA layer for FLOP accounting."
-                )
-            # KDA and the vision encoder have no dedicated term here, so their
-            # parameters only contribute the dense 6*N estimate; reported MFU is
-            # approximate.
-            return get_moe_model_nparams_and_flops(
+            return get_model_nparams_and_flops(
                 self,
                 model,
-                attention_config.n_heads,
-                attention_config.qk_nope_head_dim
-                + attention_config.qk_rope_head_dim
-                + attention_config.v_head_dim,
                 seq_len,
+                excluded_module_names=("vision_encoder",),
             )
 
     def __init__(self, config: Config):

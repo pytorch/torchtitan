@@ -21,7 +21,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import get_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 
@@ -221,13 +221,8 @@ class DeepSeekV3Model(MTPDecoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
 
-            assert isinstance(self.layers[0].attention, Attention.Config)
-            return get_moe_model_nparams_and_flops(
+            return get_model_nparams_and_flops(
                 self,
                 model,
-                self.layers[0].attention.n_heads,
-                self.layers[0].attention.qk_nope_head_dim
-                + self.layers[0].attention.qk_rope_head_dim
-                + self.layers[0].attention.v_head_dim,
                 seq_len,
             )

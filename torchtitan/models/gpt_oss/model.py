@@ -27,7 +27,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import get_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 
@@ -214,12 +214,9 @@ class GptOssModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, float]:
-            assert isinstance(self.layers[0].attention, Attention.Config)
-            return get_moe_model_nparams_and_flops(
+            return get_model_nparams_and_flops(
                 self,
                 model,
-                self.layers[0].attention.n_heads,
-                2 * self.layers[0].attention.head_dim,
                 seq_len,
             )
 

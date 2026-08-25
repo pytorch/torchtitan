@@ -27,7 +27,7 @@ from torchtitan.models.common.multimodal import (
     multimodal_context,
     scatter_vision_embeds,
 )
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import get_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
 from .gdn import GatedDeltaNet
@@ -308,20 +308,13 @@ class Qwen35Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            # The shared helper excludes the vision encoder from the per-token
-            # FLOP term (ViT cost scales with patches, not seq_len), so this MFU
-            # is decoder-only. TODO: add a per-batch vision FLOP term for VLMs.
-            attn_cfg = self.first_attention
-            # pyrefly: ignore [missing-attribute]
-            n_heads = attn_cfg.n_heads
-            # pyrefly: ignore [missing-attribute]
-            head_dim = attn_cfg.head_dim
-            return get_moe_model_nparams_and_flops(
+            # The vision encoder cost scales with patches rather than text
+            # sequence length, so this remains a decoder-only MFU estimate.
+            return get_model_nparams_and_flops(
                 self,
                 model,
-                n_heads,
-                2 * head_dim,
                 seq_len,
+                excluded_module_names=("vision_encoder",),
             )
 
     def __init__(self, config: Config):

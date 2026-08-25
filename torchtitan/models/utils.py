@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Iterable
+from fractions import Fraction
+
 import torch
 import torch.nn as nn
-from collections.abc import Iterable
-from typing import Any
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -19,6 +20,7 @@ from torch.distributed.tensor.placement_types import (
 )
 
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from torchtitan.tools.logging import logger
 
@@ -412,173 +414,173 @@ class MoEStateDictAdapter(StateDictAdapter):
         return stacked_tensor
 
 
-def attention_flops_per_token(
-    layers: Iterable[Any],
-    n_heads: int,
-    head_dims: int,
+def full_attention_flops_per_token(
+    *,
+    num_heads: int,
+    qk_head_dim: int,
+    value_head_dim: int,
     seq_len: int,
+    sliding_window_size: int | None = None,
 ) -> int:
-    """Per-token self-attention FLOPs, accounting for per-layer sliding windows.
+    """Training FLOPs per token for full or sliding-window attention.
 
-    Each attention layer attends to at most ``min(seq_len, window)`` keys per
-    query, where ``window`` is the layer's ``sliding_window_size`` (``None`` =>
-    full attention over ``seq_len``). Layers whose config leaves
-    ``attention=None`` (e.g. linear-attention / hybrid blocks) contribute
-    nothing.
-
-    Follows the same convention as the matmul term: the factor of 6 counts the
-    two attention matmuls (scores + value aggregation, combined via
-    ``head_dims``) across forward + backward, and causal sparsity is ignored, so
-    ``min(seq_len, window)`` is an upper bound (the ramp-up at the start of the
-    sequence and document packing are not modeled).
+    ``qk_head_dim`` and ``value_head_dim`` describe the two attention
+    contractions. The factor of 6 accounts for multiply-adds in forward and
+    backward. As in the existing MFU convention, causal sparsity and backward
+    recomputation are not counted.
     """
+    attended_tokens = (
+        seq_len if sliding_window_size is None else min(seq_len, sliding_window_size)
+    )
+    return 6 * num_heads * (qk_head_dim + value_head_dim) * attended_tokens
+
+
+def delta_rule_flops_per_token(
+    *,
+    num_heads: int,
+    key_head_dim: int,
+    value_head_dim: int,
+) -> int:
+    """Training FLOPs per token for a recurrent delta-rule state update."""
+    # The parameter-free recurrence has three matrix-shaped contractions:
+    # state read, outer-product state update, and output read.
+    return 6 * 3 * num_heads * key_head_dim * value_head_dim
+
+
+def _sequence_mixing_flops_per_token(layers: Iterable[object], seq_len: int) -> int:
     total = 0
     for layer in layers:
-        attn = getattr(layer, "attention", None)
-        if attn is None:
+        attention = getattr(layer, "attention", None)
+        if attention is not None:
+            num_heads = attention.n_heads
+            if all(
+                hasattr(attention, name)
+                for name in (
+                    "qk_nope_head_dim",
+                    "qk_rope_head_dim",
+                    "v_head_dim",
+                )
+            ):
+                qk_head_dim = attention.qk_nope_head_dim + attention.qk_rope_head_dim
+                value_head_dim = attention.v_head_dim
+            elif hasattr(attention, "head_dim"):
+                qk_head_dim = attention.head_dim
+                if qk_head_dim is None:
+                    qk_head_dim = attention.dim // num_heads
+                value_head_dim = qk_head_dim
+            else:
+                raise ValueError(
+                    "Unsupported full-attention config for FLOP accounting: "
+                    f"{type(attention).__name__}."
+                )
+            total += full_attention_flops_per_token(
+                num_heads=num_heads,
+                qk_head_dim=qk_head_dim,
+                value_head_dim=value_head_dim,
+                seq_len=seq_len,
+                sliding_window_size=getattr(attention, "sliding_window_size", None),
+            )
             continue
-        window = getattr(attn, "sliding_window_size", None)
-        eff_len = seq_len if window is None else min(seq_len, window)
-        total += 6 * n_heads * head_dims * eff_len
+
+        linear_attention = getattr(layer, "delta_attention", None)
+        if linear_attention is None:
+            linear_attention = getattr(layer, "delta_net", None)
+        if linear_attention is None:
+            raise ValueError(
+                "Transformer layer does not define a supported sequence mixer: "
+                f"{type(layer).__name__}."
+            )
+
+        if all(
+            hasattr(linear_attention, name)
+            for name in ("key_head_dim", "value_head_dim", "in_proj_v")
+        ):
+            key_head_dim = linear_attention.key_head_dim
+            value_head_dim = linear_attention.value_head_dim
+            num_heads = linear_attention.in_proj_v.out_features // value_head_dim
+        elif all(hasattr(linear_attention, name) for name in ("num_heads", "head_dim")):
+            num_heads = linear_attention.num_heads
+            key_head_dim = linear_attention.head_dim
+            value_head_dim = linear_attention.head_dim
+        else:
+            raise ValueError(
+                "Unsupported linear-attention config for FLOP accounting: "
+                f"{type(linear_attention).__name__}."
+            )
+        total += delta_rule_flops_per_token(
+            num_heads=num_heads,
+            key_head_dim=key_head_dim,
+            value_head_dim=value_head_dim,
+        )
     return total
 
 
-def get_dense_model_nparams_and_flops(
-    model: nn.Module,
-    n_layers: int,
-    n_heads: int,
-    head_dims: int,
-    seq_len: int,
-    enable_weight_tying: bool = False,
-    layers: Iterable[Any] | None = None,
-) -> tuple[int, int]:
-    """
-    Args:
-        model: nn.Module representing the model.
-        n_layers: The number of transformer layers.
-        n_heads: The number of attention heads.
-        head_dims: The sum of qk and v head dimensions.
-        seq_len: The sequence length in training configs.
-        enable_weight_tying: Whether weight tying is enabled.
-        layers: Optional per-layer config objects (each exposing ``.attention``
-            with an optional ``sliding_window_size``). When provided, the
-            attention FLOPs term accounts for per-layer sliding windows; when
-            ``None``, every layer is counted at the full ``seq_len`` (previous
-            behavior).
-
-    Returns:
-        Tuple of (nparams, num_flops_per_token):
-            nparams: Total number of model parameters.
-            num_flops_per_token: Estimated number of floating point operations per token.
-    """
-    # model.parameters() de-duplicates shared parameters, so tied input/output
-    # embeddings are counted once.
-    nparams = sum(p.numel() for p in model.parameters())
-    nparams_embedding = sum(
-        sum(p.numel() for p in m.parameters())
-        for m in model.children()
-        if isinstance(m, nn.Embedding)
-    )
-
-    # Reasoning behind the factor of 6 for the self-attention part of the formula:
-    # 1. each self-attention has 2 matmul (attention scores and value aggregation,
-    #    combined in head_dims, counted as 1) in the forward and 4 (counted as 2)
-    #    in the backward                                                      (3)
-    # 2. the flash attention does 1 more matmul recomputation in the backward
-    #    but recomputation should not be counted in calculating MFU           (+0)
-    # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
-    # 4. we follow the convention and do not account for sparsity in causal attention
-    # With tied embeddings, PyTorch's parameter iterator already counts the
-    # shared input/output parameter once. That parameter still participates in
-    # the lm_head matmul, so do not subtract it for either size or FLOPs.
-    nparams_for_matmul = nparams if enable_weight_tying else nparams - nparams_embedding
-    if layers is None:
-        attn_flops = 6 * n_layers * n_heads * head_dims * seq_len
-    else:
-        attn_flops = attention_flops_per_token(layers, n_heads, head_dims, seq_len)
-    num_flops_per_token = 6 * nparams_for_matmul + attn_flops
-
-    return nparams, num_flops_per_token
-
-
-def get_moe_model_nparams_and_flops(
+def get_model_nparams_and_flops(
     model_config: Decoder.Config,
     model: nn.Module,
-    n_heads: int,
-    head_dims: int,
     seq_len: int,
+    *,
+    excluded_module_names: Iterable[str] = (),
 ) -> tuple[int, int]:
-    """
-    Calculate nparams and nflops for MoE models.
+    """Calculate total parameters and training FLOPs per token.
+
+    Parameterized operations use the conventional ``6 * active_parameters``
+    estimate. Routed-expert parameters are weighted by the owning MoE module's
+    active expert ratio. Untied token embeddings and explicitly excluded module
+    subtrees do not contribute to the per-token estimate.
+
+    Parameter-free sequence-mixing work is derived independently for every
+    layer in the final model config, so per-layer config overrides are reflected
+    without requiring model-specific callbacks.
 
     Args:
-        model_config: Decoder.Config object containing model configuration parameters including MoE settings.
-        model: nn.Module representing the MoE model.
-        n_heads: The number of attention heads.
-        head_dims: The sum of qk and v head dimensions.
-        seq_len: The sequence length in training configs.
+        model_config: Final model configuration after runtime overrides.
+        model: Built model whose parameters are counted.
+        seq_len: Training sequence length.
+        excluded_module_names: Names of module subtrees whose cost does not
+            scale per text token, such as a vision encoder.
 
     Returns:
-        Tuple of (nparams, num_flops_per_token):
-            nparams: Total number of model parameters including all experts.
-            num_flops_per_token: Estimated number of floating point operations per token
-                                based on active parameters only.
+        Total parameter count and estimated training FLOPs per token.
     """
-    nparams_embedding = 0
-    nparams_moe_router = 0
-    nparams_shared_experts = 0
-    nparams_experts = 0
-    nparams_dense = 0
-    # TODO: add a per-batch vision encoder FLOP term for accurate VLM MFU.
-    nparams_vision = 0
+    named_parameters = list(model.named_parameters())
+    nparams = sum(param.numel() for _, param in named_parameters)
+    parameter_weights = {id(param): Fraction(1) for _, param in named_parameters}
 
-    for name, p in model.named_parameters():
-        if "vision_encoder" in name:
-            nparams_vision += p.numel()
-        elif "embedding" in name:
-            nparams_embedding += p.numel()
-            nparams_dense += p.numel()
-        elif "moe.shared_experts" in name:
-            nparams_shared_experts += p.numel()
-        elif "moe.router" in name:
-            nparams_moe_router += p.numel()
-        elif "moe.routed_experts" in name:
-            nparams_experts += p.numel()
-        else:
-            nparams_dense += p.numel()
+    for module in model.modules():
+        if isinstance(module, MoE):
+            active_expert_ratio = Fraction(
+                module.router.top_k, module.router.num_experts
+            )
+            for param in module.routed_experts.parameters():
+                parameter_weights[id(param)] = active_expert_ratio
 
-    nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
-    nparams = nparams_dense + nparams_sparse + nparams_vision
+    if not model_config.enable_weight_tying:
+        for module in model.modules():
+            if isinstance(module, nn.Embedding):
+                for param in module.parameters(recurse=False):
+                    parameter_weights[id(param)] = Fraction(0)
 
-    moe_config = next((l.moe for l in model_config.layers if l.moe is not None), None)
-    if moe_config is not None:
-        nparams_sparse_active = (
-            nparams_moe_router
-            + nparams_shared_experts
-            + nparams_experts * moe_config.router.top_k // moe_config.num_experts
-        )
-    else:
-        nparams_sparse_active = 0
+    for module_name in excluded_module_names:
+        excluded_module = getattr(model, module_name)
+        if excluded_module is None:
+            continue
+        assert isinstance(excluded_module, nn.Module)
+        for param in excluded_module.parameters():
+            parameter_weights[id(param)] = Fraction(0)
+
+    nparams_for_matmul = sum(
+        param.numel() * parameter_weights[id(param)] for _, param in named_parameters
+    )
+    assert nparams_for_matmul.denominator == 1
+    active_nparams = nparams_for_matmul.numerator
+
+    num_sequence_mixing_flops_per_token = _sequence_mixing_flops_per_token(
+        model_config.layers, seq_len
+    )
+    num_flops_per_token = 6 * active_nparams + num_sequence_mixing_flops_per_token
 
     logger.info(
-        f"Total parameter count: dense {nparams_dense:,}, "
-        f"sparse {nparams_sparse:,}, vision {nparams_vision:,}, "
-        f"active {nparams_dense + nparams_sparse_active:,}"
+        f"Total parameter count: {nparams:,}, active parameters: {active_nparams:,}"
     )
-
-    # With tied embeddings, PyTorch's parameter iterator already counts the
-    # shared input/output parameter once. That parameter still participates in
-    # the lm_head matmul, so do not subtract it for either size or FLOPs.
-    if getattr(model_config, "enable_weight_tying", False):
-        nparams_for_matmul = nparams_dense + nparams_sparse_active
-    else:
-        nparams_for_matmul = nparams_dense - nparams_embedding + nparams_sparse_active
-    # Attention FLOPs account for per-layer sliding windows: each attention
-    # layer attends to min(seq_len, window) keys (window=None => full seq_len),
-    # and layers with attention=None (linear-attention / hybrid) contribute
-    # nothing.
-    num_flops_per_token = 6 * nparams_for_matmul + attention_flops_per_token(
-        model_config.layers, n_heads, head_dims, seq_len
-    )
-
     return nparams, num_flops_per_token

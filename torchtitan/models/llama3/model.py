@@ -13,7 +13,7 @@ from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import get_model_nparams_and_flops
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -82,11 +82,8 @@ class Llama3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            return get_dense_model_nparams_and_flops(
+            return get_model_nparams_and_flops(
+                self,
                 model,
-                n_layers=len(self.layers),
-                n_heads=self.layers[0].attention.n_heads,
-                head_dims=2 * (self.dim // self.layers[0].attention.n_heads),
-                seq_len=seq_len,
-                enable_weight_tying=self.enable_weight_tying,
+                seq_len,
             )

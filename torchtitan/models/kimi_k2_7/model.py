@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from torch import nn
 
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
@@ -22,6 +23,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+from torchtitan.models.utils import get_model_nparams_and_flops
 
 from .sharding import (
     annotate_multimodal_input_spmd_types,
@@ -74,6 +76,16 @@ class KimiK25Model(DeepSeekV3Model):
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            return get_model_nparams_and_flops(
+                self,
+                model,
+                seq_len,
+                excluded_module_names=("vision_encoder",),
             )
 
     def __init__(self, config: Config):
