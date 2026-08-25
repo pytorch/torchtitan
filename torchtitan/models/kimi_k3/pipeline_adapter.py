@@ -1132,27 +1132,31 @@ def pipeline_kimi_k3(model: nn.Module, **kwargs):
     num_stages = pp_size * len(stages)
     stage_to_rank = {s: s % pp_size for s in range(num_stages)}
 
-    # Detect AttnRes by Kimi-specific marker attributes on the wrapped model.
-    inner0 = getattr(stages[0], "submod", None)
-    num_blocks = getattr(inner0, "num_blocks", None)
-    layers_per_block = getattr(inner0, "layers_per_block", None)
-    if num_blocks is None or layers_per_block is None:
-        warnings.warn(
-            "Stage 0 model has no 'num_blocks'/'layers_per_block' -- "
-            "this is a baseline (non-AttnRes) Kimi Linear run; the "
-            "cross-stage cache adapter only applies to AttnRes variants. "
-            "Running without the adapter."
-        )
-        return passthrough
-
-    # Layout tables: same math as attn_res, just with Kimi's layer count.
+    # The block layout comes from the config, which is where it is defined:
+    # a block opens every attn_res_block_size layers (see the residual's
+    # opens_block test), so the layer count and that size give both numbers.
+    # They used to be read as marker attributes off the stage's module, which
+    # is how the reference tree distinguished its AttnRes model from its
+    # baseline one; this tree has one model and attn_res_block_size is a
+    # required config parameter, so the distinction -- and the silent
+    # passthrough when the attributes were absent -- no longer applies.
     model_config = kwargs.get("model_config")
-    n_layers_total = getattr(model_config, "num_hidden_layers", None)
-    if n_layers_total is None:
+    layer_cfgs = getattr(model_config, "layers", None)
+    if not layer_cfgs:
         warnings.warn(
-            "Cannot determine total layer count; cache adapter falls back to passthrough."
+            "Cannot determine the layer count from the model config; the "
+            "cross-stage cache adapter falls back to passthrough."
         )
         return passthrough
+    n_layers_total = len(layer_cfgs)
+    layers_per_block = getattr(layer_cfgs[0], "attn_res_block_size", None)
+    if not layers_per_block:
+        warnings.warn(
+            "Cannot determine attn_res_block_size from the model config; the "
+            "cross-stage cache adapter falls back to passthrough."
+        )
+        return passthrough
+    num_blocks = -(-n_layers_total // layers_per_block)
 
     try:
         layout_tables = _infer_block_layout_tables_from_stages(
