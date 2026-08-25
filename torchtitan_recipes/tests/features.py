@@ -421,3 +421,16 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config.checkpoint.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config
+
+def kimi_k3_debugmodel_text_ep2() -> Trainer.Config:
+    """Kimi K3 text decoder with expert parallel over two ranks.
+
+    Standard all-to-all dispatch; the routed experts shard on an
+    expert-data-parallel mesh that excludes the expert axis.
+    """
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_text
+
+    config = kimi_k3_debugmodel_text()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    return config
