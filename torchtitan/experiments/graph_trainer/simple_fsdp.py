@@ -9,9 +9,11 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from spmd_types.types import partition_spec_get_shard
 from torch.distributed._tensor import (
     distribute_tensor,
     DTensor,
@@ -24,6 +26,7 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 _active_parametrization = True
@@ -39,10 +42,45 @@ def disable_active_parametrization() -> Generator[None, None, None]:
         _active_parametrization = True
 
 
+def is_active_parametrization() -> bool:
+    return _active_parametrization
+
+
 @dataclass(frozen=True)
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
+
+
+def _spmd_local_tensor_to_dtensor(
+    tensor: torch.Tensor,
+    non_dp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    """Reconstruct model-parallel DTensor metadata from an SPMD local tensor."""
+    if (
+        get_spmd_backend() != "spmd_types"
+        or not spmd.has_local_type(tensor)
+        or non_dp_mesh is None
+    ):
+        return tensor
+
+    assert non_dp_mesh.mesh_dim_names is not None
+    partition_spec = spmd.get_partition_spec(tensor)
+    with spmd.set_current_mesh(non_dp_mesh):
+        placements = tuple(
+            spmd.spmd_type_to_dtensor_placement(
+                partition_spec_get_shard(partition_spec, axis_name)
+                or spmd.get_axis_local_type(tensor, axis_name)
+            )
+            for axis_name in non_dp_mesh.mesh_dim_names
+        )
+
+    return DTensor.from_local(
+        tensor,
+        non_dp_mesh,
+        placements,
+        run_check=False,
+    )
 
 
 def _distribute_dtensor(
@@ -142,9 +180,12 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
+    object.__setattr__(module, "_simple_fsdp_parametrization", parametrization)
     param_name_to_property = {
         param_name: property(
-            lambda self, pn=param_name: parametrization(self._parameters[pn])
+            lambda self, pn=param_name: self._simple_fsdp_parametrization(
+                self._parameters[pn], pn
+            )
         )
         for param_name in param_names
     }
@@ -219,8 +260,12 @@ class ReplicateComputation(Module):
             )
             non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
 
-            output = DTensor.from_local(
-                replicated_local_tensor, non_dp_mesh, non_dp_placements
+            output = (
+                replicated_local_tensor
+                if get_spmd_backend() == "spmd_types"
+                else DTensor.from_local(
+                    replicated_local_tensor, non_dp_mesh, non_dp_placements
+                )
             )
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
@@ -236,18 +281,16 @@ class ReplicateComputation(Module):
 
         return output
 
-    def forward(self, x: DTensor) -> torch.Tensor:
-        global _active_parametrization
+    def forward(self, x: DTensor, _param_name: str) -> torch.Tensor:
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
         # model initialization can be done now through
         # with disable_active_parametrization():
         #     model.init_states()
-        if not _active_parametrization:
+        if not is_active_parametrization():
             return x
 
-        output = self.replicate_compute(x)
-        return output
+        return self.replicate_compute(x)
 
 
 def data_parallel(
@@ -256,6 +299,7 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
+    non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
@@ -272,7 +316,6 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     modules = list(model.modules())
-
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
         # we shouldn't apply data parallel to the modules that are already
@@ -282,6 +325,7 @@ def data_parallel(
 
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                p = _spmd_local_tensor_to_dtensor(p, non_dp_mesh)
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )

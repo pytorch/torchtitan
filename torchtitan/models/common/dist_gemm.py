@@ -38,7 +38,7 @@ from torchtitan.distributed.linear import (
     LinearReduceScatter,
 )
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.spmd_types import current_spmd_mesh, get_mesh_pg
 from torchtitan.distributed.utils import get_spmd_backend
 
 from torchtitan.models.common.attention import FusedQKVLinear
@@ -81,7 +81,7 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
     mesh = current_spmd_mesh()
     if mesh is None or "tp" not in (mesh.mesh_dim_names or ()):
         return None
-    tp_group = mesh.get_group("tp")
+    tp_group = get_mesh_pg("tp")
     return tp_group if tp_group.size() > 1 else None
 
 

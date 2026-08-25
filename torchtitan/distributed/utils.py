@@ -413,7 +413,9 @@ def get_spmd_context(
 
                 set_spmd_meshes(
                     dense_mesh=parallel_dims.spmd_dense_mesh(),
+                    dense_storage_mesh=parallel_dims.spmd_dense_storage_mesh(),
                     sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                    sparse_storage_mesh=parallel_dims.spmd_sparse_storage_mesh(),
                 )
 
                 stack.enter_context(set_current_spmd_mesh(spmd_dense_mesh()))
@@ -459,7 +461,7 @@ def init_distributed(
 
     # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
     # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
-    # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
+    # cannot access the SPMD process groups needed for collectives.
     torch.autograd.set_multithreading_enabled(False)
 
     if comm_config.mode == "fake_backend":
@@ -565,6 +567,193 @@ def set_pg_timeouts(
     ] + [None]
     for group in groups:
         torch.distributed.set_timeout(timeout, group)
+
+
+def _param_spmd_mesh_and_shard_axes(
+    parameter: torch.Tensor,
+) -> tuple[DeviceMesh, tuple[str, ...]]:
+    """
+    Given a parameter with SPMD type annotations, returns the storage DeviceMesh
+    and mesh axis names that shard it. Used for grouping params in grad norm calculation.
+    """
+    import spmd_types as spmd
+    from spmd_types.types import partition_spec_get_shard
+
+    from torchtitan.distributed.spmd_types import (
+        device_mesh_from_spmd_axes,
+        get_mesh_pg,
+    )
+
+    if not spmd.has_local_type(parameter):
+        raise ValueError("SPMD local parameters must have type annotations.")
+
+    axis_types = spmd.get_local_type(parameter)
+    mesh = device_mesh_from_spmd_axes(axis_types, storage_mesh=True)
+    if mesh is None:
+        raise ValueError(
+            "SPMD parameter annotations do not match a registered storage mesh: "
+            f"{axis_types}"
+        )
+
+    assert mesh.mesh_dim_names is not None
+    partition_spec = spmd.get_partition_spec(parameter)
+    sharded_axes = []
+    for axis_name in mesh.mesh_dim_names:
+        axis = get_mesh_pg(axis_name, mesh=mesh)
+        shard = partition_spec_get_shard(partition_spec, axis)
+        axis_type = spmd.maybe_get_axis_local_type(parameter, axis)
+        if shard is not None:
+            sharded_axes.append(axis_name)
+        elif axis_type is spmd.V or axis_type is spmd.P:
+            raise ValueError(
+                f"Gradient norm does not support {axis_type!r} placement on "
+                f"mesh axis {axis_name!r}."
+            )
+
+    return mesh, tuple(sharded_axes)
+
+
+def _get_spmd_grad_norm_squared(
+    parameters: list[torch.Tensor],
+    foreach: bool | None,
+) -> torch.Tensor:
+    """
+    Compute the global squared L2 norm of local SPMD parameter gradients.
+
+    1) Group gradients by storage (dense/sparse) mesh, then by device, dtype,
+       and placement (sharded axes). For each grad group, the total sum-of-squares
+       (squared L2 norm) is computed per-param, then summed over the group.
+       This produces a scalar for each group, which is either replicated or Partial(sum)
+       on each axis.
+
+       In the general case, this results in each mesh (dense/sparse) having multiple
+       groups with their sum-of-squares scalar, with differing placements, e.g.
+       {fsdp: P, tp: R} for TP-replicated gradient, {fsdp: P, tp: P} for TP-sharded.
+
+    2) For each mesh (dense/sparse) and mesh axis, if any group exists that is Partial
+       on that axis, groups with Replicated sum-of-squares on that axis are normalized
+       to also be Partial for collective coalescing; dividing by mesh_size.
+
+       This mimics the Replicate -> NormPartial implicit conversion that happens in the
+       DTensor path; when `torch.stack()` is called over groups, a 1.0 / sqrt(mesh_size)
+       factor is contributed when necessary.
+
+       This results in all group sum-of-squares being in a "common partial placement".
+
+    3) For each mesh, the group sum-of-squares can be stacked, summed, and all-reduced
+       over partial axes. The results are summed over meshes and returned so the caller
+       can reduce over pipeline stages before applying the final square root.
+    """
+    from torch.utils._foreach_utils import (
+        _device_has_foreach_support,
+        _has_foreach_support,
+    )
+
+    from torchtitan.distributed.spmd_types import get_mesh_pg
+
+    # grad groups by mesh -> (device, dtype, sharded axes) -> list[grad]
+    mesh_groups: dict[
+        DeviceMesh,
+        dict[tuple[torch.device, torch.dtype, tuple[str, ...]], list[torch.Tensor]],
+    ] = {}
+    first_device: torch.device | None = None
+    for parameter in parameters:
+        grad = parameter.grad
+        if grad is None:
+            continue
+        mesh, sharded_axes = _param_spmd_mesh_and_shard_axes(parameter)
+        if first_device is None:
+            first_device = grad.device
+        per_mesh_per_placement_grouped_grads = mesh_groups.setdefault(mesh, {})
+        per_mesh_per_placement_grouped_grads.setdefault(
+            (grad.device, grad.dtype, sharded_axes), []
+        ).append(grad)
+
+    if first_device is None:
+        return torch.tensor(0.0)
+
+    per_mesh_powsums = []
+    for storage_mesh, per_mesh_per_placement_grouped_grads in mesh_groups.items():
+        assert storage_mesh.mesh_dim_names is not None
+        # mesh axes that shard any of the param groups, we need to normalize R->P to avoid multiple allreduces
+        partial_sum_axes = {
+            axis_name
+            for _, _, sharded_axes in per_mesh_per_placement_grouped_grads
+            for axis_name in sharded_axes
+        }
+        group_powsums = []  # sum-of-squares for each grad group
+        for (
+            device,
+            _,
+            sharded_axes,
+        ), grads in per_mesh_per_placement_grouped_grads.items():
+            use_foreach = (foreach is None and _has_foreach_support(grads, device)) or (
+                foreach is True and _device_has_foreach_support(device)
+            )
+            if use_foreach:
+                powsums = torch._foreach_powsum(grads, 2.0)
+            elif foreach:
+                raise RuntimeError(
+                    f"foreach=True was passed, but can't use the foreach API on "
+                    f"{device.type} tensors"
+                )
+            else:
+                powsums = [torch.linalg._powsum(grad, 2.0) for grad in grads]
+
+            # one sum-of-squares scalar for whole group, R->P normalize
+            group_powsum = torch.stack(powsums).sum()
+            for axis_name in partial_sum_axes:
+                if axis_name not in sharded_axes:
+                    group_powsum /= storage_mesh[axis_name].size()
+            group_powsums.append(group_powsum.to(first_device))
+
+        # stack across groups, produce mesh-wide sum-of-squares
+        per_mesh_powsum = torch.stack(group_powsums).sum()
+        for axis_name in storage_mesh.mesh_dim_names:
+            if axis_name in partial_sum_axes:
+                dist.all_reduce(
+                    per_mesh_powsum,
+                    op=dist.ReduceOp.SUM,
+                    group=get_mesh_pg(axis_name, mesh=storage_mesh),
+                )
+        per_mesh_powsums.append(per_mesh_powsum)
+
+    return torch.stack(per_mesh_powsums).sum()
+
+
+@torch.no_grad()
+def clip_grad_norm_spmd_(
+    parameters: torch.Tensor | Iterable[torch.Tensor],
+    max_norm: float,
+    error_if_nonfinite: bool = False,
+    foreach: bool | None = None,
+    pp_mesh: DeviceMesh | None = None,
+) -> torch.Tensor:
+    """Clip local SPMD gradients using their annotated storage layouts."""
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    else:
+        parameters = list(parameters)
+
+    grad_norm_squared = _get_spmd_grad_norm_squared(parameters, foreach)
+    if pp_mesh is not None:
+        from torchtitan.distributed.spmd_types import get_mesh_pg
+
+        dist.all_reduce(
+            grad_norm_squared,
+            op=dist.ReduceOp.SUM,
+            group=get_mesh_pg("pp", mesh=pp_mesh),
+        )
+    total_norm = grad_norm_squared.sqrt()
+
+    if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
+        raise RuntimeError(
+            "The total norm of order 2.0 for gradients from `parameters` is "
+            "non-finite."
+        )
+
+    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    return total_norm
 
 
 @torch.no_grad()
