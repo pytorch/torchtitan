@@ -567,8 +567,8 @@ class CrossStageCacheAdapter(nn.Module):
         """Dispatch to the wrapped model with the appropriate signature."""
         if self._has_blocks_signature(args):
             partial, new_blocks_tensor, *rest = args
-            return self.wrapped(partial, *rest, blocks=new_blocks_tensor, **kwargs)
-        return self.wrapped(*args, blocks=None, **kwargs)
+            return self.wrapped(partial, new_blocks_tensor, *rest, **kwargs)
+        return self.wrapped(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
         """Dispatch to delta-P2P, shape inference, or naive passthrough."""
@@ -605,9 +605,14 @@ class CrossStageCacheAdapter(nn.Module):
         # * requires_grad mirroring the runtime delta, since pipelining derives
         #   the recv-buffer and grad-send metadata from these tensors and a
         #   False placeholder drops the delta backward edge.
-        tokens_times_batch = partial_out.shape[0] * partial_out.shape[1]
+        # The carrier's token axis is whatever the hidden state's is: this
+        # model folds batch and sequence into one axis, so it is shape[0].
+        # Multiplying the first two dimensions -- correct when the hidden state
+        # carried a separate batch axis -- gives T * D here, and the recv buffer
+        # sized from it then fails the residual's concatenation.
+        num_tokens = partial_out.shape[0]
         return partial_out, partial_out.new_zeros(
-            (tokens_times_batch, expected_K, partial_out.shape[-1]),
+            (num_tokens, expected_K, partial_out.shape[-1]),
             requires_grad=partial_out.requires_grad,
         )
 
@@ -630,17 +635,18 @@ class CrossStageCacheAdapter(nn.Module):
         assert layout is not None, "_forward_delta called without layout tables"
 
         if self.stage_id == 0:
-            partial_out, new_blocks_tensor = self.wrapped(*args, blocks=None, **kwargs)
+            partial_out, new_blocks_tensor = self.wrapped(*args, **kwargs)
             return self._finish_forward(
                 mb,
                 partial_out,
                 new_blocks_tensor,
                 prev_recv_tensor=None,
                 incoming_block_indices=[],
+                carried_in=0,
             )
 
         if not self._has_blocks_signature(args):
-            return self.wrapped(*args, blocks=None, **kwargs)
+            return self.wrapped(*args, **kwargs)
         partial, recv_delta_tensor, *rest = args
 
         # Unstack incoming delta; wire order MUST match sender's layout.
@@ -689,7 +695,7 @@ class CrossStageCacheAdapter(nn.Module):
             torch.stack(ordered_blocks, dim=1) if ordered_blocks else recv_delta_tensor
         )
 
-        wrapped_ret = self.wrapped(partial, *rest, blocks=blocks_tensor, **kwargs)
+        wrapped_ret = self.wrapped(partial, blocks_tensor, *rest, **kwargs)
 
         if self.stage_id == self.num_stages - 1:
             # Last stage: keepalive keeps recv tensor on the autograd graph.
@@ -702,16 +708,18 @@ class CrossStageCacheAdapter(nn.Module):
             new_blocks_tensor,
             prev_recv_tensor=recv_delta_tensor,
             incoming_block_indices=incoming_block_indices,
+            carried_in=blocks_tensor.shape[1],
         )
 
     def _finish_forward(
         self,
         mb: int,
         partial_out: torch.Tensor,
-        new_blocks_tensor: torch.Tensor,
+        returned_blocks_tensor: torch.Tensor,
         *,
         prev_recv_tensor: torch.Tensor | None,
         incoming_block_indices: list[int],
+        carried_in: int,
     ):
         """Common tail for first + middle stages: append relayed and
         committed blocks to the shared rank cache, then stack the
@@ -720,9 +728,14 @@ class CrossStageCacheAdapter(nn.Module):
         layout = self._layout
         assert layout is not None
         my_commits = layout.commits_at(self.stage_id)
+        # The model returns the carrier it was handed with this stage's own
+        # commits appended, not the commits alone, so the new blocks are the
+        # tail past what went in.
+        new_blocks_tensor = returned_blocks_tensor[:, carried_in:]
         assert new_blocks_tensor.shape[1] == len(my_commits), (
-            f"Wrapped model returned {new_blocks_tensor.shape[1]} new "
-            f"blocks at stage {self.stage_id}, expected {len(my_commits)}."
+            f"Wrapped model returned {new_blocks_tensor.shape[1]} new blocks "
+            f"at stage {self.stage_id} (carrier {carried_in} -> "
+            f"{returned_blocks_tensor.shape[1]}), expected {len(my_commits)}."
         )
 
         # Append relayed blocks so later virtual stages on this rank see them;
@@ -800,7 +813,7 @@ class CrossStageCacheAdapter(nn.Module):
             torch.stack(send_pieces, dim=1)
             if send_pieces
             else partial_out.new_zeros(
-                (partial_out.shape[0] * partial_out.shape[1], 0, partial_out.shape[-1])
+                (partial_out.shape[0], 0, partial_out.shape[-1])
             )
         )
         partial_out = self._keepalive_touch(partial_out, prev_recv_tensor)
@@ -1192,8 +1205,14 @@ def pipeline_kimi_k3(model: nn.Module, **kwargs):
         stage.submod = adapter
         _install_mb_index_patch(stage, adapter)
         installed_adapters.append(adapter)
-        if i < len(model_parts):
-            model_parts[i] = adapter
+    # model_parts is deliberately left alone. The schedule runs what
+    # stage.submod points at, which is the adapter; model_parts is what the
+    # trainer reaches through for the real module -- it takes lm_head off the
+    # last part and sets _skip_lm_head on it, builds the optimizer from it and
+    # hands it to the checkpointer. Substituting the wrapper there sends
+    # _skip_lm_head to the wrapper instead of the model, so the last stage keeps
+    # applying lm_head and the loss applies it a second time; and it prefixes
+    # every checkpoint key with the wrapper's attribute name.
 
     _install_step_drop_patch(pp_schedule, installed_adapters)
 
