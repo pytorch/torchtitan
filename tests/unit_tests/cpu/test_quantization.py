@@ -7,6 +7,7 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint as dcp
+from spmd_types import SpmdType
 
 from torchtitan.components.data import (
     FirstFitPackingConfig,
@@ -209,7 +210,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(
     # Config.build() folds the stock colwise/rowwise sharding into the local
     # SPMD region for the opaque NVFP4 GEMM.
     NVFP4Linear = _nvfp4_linear_cls()
-    from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
+    from torchtitan.distributed.parallel_dims import MeshAxisName
     from torchtitan.models.common.decoder_sharding import dense_activation_placement
 
     module = NVFP4Linear.Config(
@@ -226,7 +227,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         dense_activation_placement(tp=input_grad_tp, cp=spmd.S(0)),
     )
     assert "weight" in sc.state_shardings
-    assert sc.state_shardings["_sr_seed"] == SpmdLayout(
+    assert sc.state_shardings["_sr_seed"] == SpmdType(
         {
             MeshAxisName.DP: spmd.V,
             MeshAxisName.CP: spmd.V,
