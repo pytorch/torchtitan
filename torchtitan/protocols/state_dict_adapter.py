@@ -8,10 +8,17 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
+from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import (
+    dtensor_to_plain_tensor_state_dict,
+    plain_tensor_to_dtensor_state_dict,
+)
 from torchtitan.tools.logging import logger
 from .model import BaseModel
 
@@ -37,7 +44,6 @@ class BaseStateDictAdapter(ABC):
     ):
         pass
 
-    @abstractmethod
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert from native model state dict to HuggingFace format.
 
@@ -47,9 +53,8 @@ class BaseStateDictAdapter(ABC):
         Returns:
             The converted HuggingFace format state dict
         """
-        pass
+        return self.convert_save_state_dict(state_dict)
 
-    @abstractmethod
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Obtain native model state dict from HuggingFace format.
 
@@ -59,9 +64,16 @@ class BaseStateDictAdapter(ABC):
         Returns:
             The converted native model state dict
         """
+        return self.convert_load_state_dict(hf_state_dict)
+
+    @abstractmethod
+    def convert_save_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         pass
 
     @abstractmethod
+    def convert_load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        pass
+
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:
@@ -74,7 +86,7 @@ class BaseStateDictAdapter(ABC):
             The HuggingFace storage reader to read from HF checkpoint
 
         """
-        pass
+        raise NotImplementedError
 
 
 class StateDictAdapter(BaseStateDictAdapter):
@@ -110,6 +122,20 @@ class StateDictAdapter(BaseStateDictAdapter):
         else:
             self.fqn_to_index_mapping = None
 
+    def convert_save_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return self.to_hf(state_dict)
+
+    def convert_load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return self.from_hf(state_dict)
+
+    @abstractmethod
+    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
+    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+        pass
+
     def _validate_hf_rope_config(
         self,
         expected_rope_cls: type,
@@ -131,3 +157,23 @@ class StateDictAdapter(BaseStateDictAdapter):
                 "Loading from quantized checkpoint format is not supported for this model."
             )
         return HuggingFaceStorageReader(path)
+
+
+class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
+    def __init__(
+        self,
+        state_dict_layouts: Mapping[str, SpmdType],
+        parallel_dims: ParallelDims,
+    ) -> None:
+        self.state_dict_layouts = state_dict_layouts
+        self.parallel_dims = parallel_dims
+
+    def convert_save_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return plain_tensor_to_dtensor_state_dict(
+            state_dict,
+            state_dict_layouts=self.state_dict_layouts,
+            parallel_dims=self.parallel_dims,
+        )
+
+    def convert_load_state_dict(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        return dtensor_to_plain_tensor_state_dict(state_dict)
