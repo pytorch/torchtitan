@@ -165,10 +165,9 @@ class BlockLayoutTables:
                 f"{len(self._producer_stage_of_block)}."
             )
 
-        # 2) Walk the mb forward stage-by-stage and track each rank's
-        # cache. Interleaved1F1B per-rank ordering: rank R owns stages
-        # R, R+P, R+2P, ..., R+(V-1)P. Forward order is stage 0 -> ... ->
-        # num_stages-1 (matches the autograd graph).
+        # 2) Walk the mb forward stage-by-stage and track each rank's cache.
+        # Interleaved1F1B: rank R owns stages R, R+P, ..., R+(V-1)P; forward
+        # runs stage 0 -> num_stages-1, matching the autograd graph.
         rank_cache: dict[int, set[int]] = {r: set() for r in range(self.P)}
         accumulated: set[int] = set()
         for r in range(self.P):
@@ -196,10 +195,9 @@ class BlockLayoutTables:
             else:
                 self._delta_to_send[stage_id] = []
 
-        # 3) cache_consumers_of_block: the later stages that read a block from
-        # their RANK CACHE rather than from the delta buffer. Each such read
-        # deposits one grad into the producer's slot, which is what
-        # expected_same_rank_captures counts.
+        # 3) cache_consumers_of_block: later stages reading a block from their
+        # RANK CACHE rather than the delta buffer. Each such read deposits one
+        # grad into the producer's slot; expected_same_rank_captures counts them.
         cache_consumers_of_block: dict[int, list[int]] = {
             b: [] for b in range(self.num_blocks)
         }

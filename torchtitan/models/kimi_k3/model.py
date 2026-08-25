@@ -30,8 +30,7 @@ from .kda import KimiDeltaAttention
 from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
-# Shape suffixes:
-# T = packed tokens, D = model dimension, H = heads,
+# Shape suffixes: T = packed tokens, D = model dimension, H = heads,
 # K = key head dimension, V = value head dimension,
 # N = attention-residual entries.
 
@@ -267,6 +266,13 @@ class KimiK3Model(Decoder):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
+
+        def _validate_cp_backend(self, parallelism) -> None:
+            """This model's CP is not ShardingConfig-driven -- the KDA kernels
+            are fla triton and never see a DTensor -- so the spmd_types
+            requirement does not apply; apply_cp_kimi_k3 checks its own
+            preconditions at wiring time."""
+
         def update_from_config(self, *, config, **kwargs) -> None:
             dataset = config.dataloader.dataset
             # TODO: Support sample packing by resetting the Q/K/V causal-convolution
@@ -389,13 +395,10 @@ class KimiK3Model(Decoder):
                 positions,
             )
 
-        # The final aggregation belongs to whichever stage owns the head. Under
-        # pipeline parallel the other stages have these set to None, the same
-        # way norm and lm_head are, and the block residual they accumulated has
-        # to travel to the next stage: a block attention residual is defined
-        # over the whole stack, so a stage that dropped it would train against
-        # a different model. Measured on the debug flavor at pp2, dropping it
-        # moved step 3 from 7.44679 to 9.30017.
+        # The final aggregation belongs to the head-owning stage; other stages
+        # have these None, like norm and lm_head. The accumulated block residual
+        # must travel on: a block residual is defined over the whole stack, and
+        # a stage that dropped it would train against a different model.
         if self.output_res_proj is None:
             return h_TD, block_residual_TND
         h_TD = _apply_attention_residual(
