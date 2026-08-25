@@ -75,15 +75,15 @@ and uses its fixed initialization path.
 - Golden directories identify the PG mode, filenames identify the model and
   hardware tier, and the exact parallelism plan is recorded in the header.
 
-| A10G model | Fake-PG topology | Real-PG topology |
-| --- | --- | --- |
-| Llama 3 | FSDP 2 x TP 2 x CP 2 | FSDP 2 x TP 2 x CP 2 |
-| Llama 3 SFT | FSDP 2 | FSDP 2 |
-| DeepSeek V3 | FSDP 8, EP 8 | FSDP 8, EP 8 |
-| GPT-OSS | FSDP 4 x TP 2, EP 4 | FSDP 4 x TP 2, EP 4 |
-| Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 | FSDP 2 x TP 2 x CP 2, EP 8 |
-| Muse Glimmer text | FSDP 8 | FSDP 8 |
-| Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 | FSDP 4 x TP 2, EP 4 |
+| A10G model | Topology (Fake-PG and Real-PG) |
+| --- | --- |
+| Llama 3 | FSDP 2 x TP 2 x CP 2 |
+| Llama 3 SFT | FSDP 2 |
+| DeepSeek V3 | FSDP 8, EP 8 |
+| GPT-OSS | FSDP 4 x TP 2, EP 4 |
+| Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 |
+| Muse Glimmer text | FSDP 8 |
+| Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 |
 
 Kimi K2.5 continues to run as an FSDP 8, EP 8 integration case. Its multimodal
 backward uses bicubic upsampling, whose CUDA backward has no deterministic
