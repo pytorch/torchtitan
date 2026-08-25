@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
-
 import spmd_types as spmd
+
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -277,41 +277,28 @@ class KimiK3Model(Decoder):
             # and KDA recurrent states at document boundaries.
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
-            parallelism = config.parallelism
             self._set_sharding_config(
-                enable_ep=parallelism.expert_parallel_degree > 1,
-                enable_tp=parallelism.tensor_parallel_degree > 1,
+                enable_ep=config.parallelism.expert_parallel_degree > 1,
             )
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
-        def _set_sharding_config(self, *, enable_ep: bool, enable_tp: bool) -> None:
-            """Declare the sharding the SPMD backends act on.
+        def _set_sharding_config(self, *, enable_ep: bool) -> None:
+            """Declare the sharding expert parallel acts on.
 
-            Only expert parallel is wired here: the routed experts shard on the
-            expert axis, and set_moe_sharding_config declares that layout. The
-            decoder-level distribution is set so the activations that reach the
-            MoE boundary are DTensors it can redistribute onto the expert mesh;
-            resolve_mesh drops the tensor-parallel axis when it is size 1.
-
-            Sequence parallel is not offered: the sequence is already the axis
-            context parallel would shard, and this model's CP is not
-            ShardingConfig-driven, so the two would describe the same axis from
-            two places.
+            * The routed experts shard on the expert axis; set_moe_sharding_config
+              declares that layout.
+            * The decoder-level distribution makes the activations reaching the
+              MoE boundary DTensors it can redistribute onto the expert mesh.
             """
-            if not (enable_ep or enable_tp):
+            if not enable_ep:
                 return
             set_decoder_sharding_config(self, enable_sp=False)
             for layer in self.layers:
                 if layer.moe is not None:
                     set_moe_sharding_config(
                         layer.moe,
-                        enable_ep=enable_ep,
-                        # With EP on, tp becomes a token axis inside the MoE
-                        # region -- the sparse mesh folds it into efsdp -- so
-                        # keying the desired layouts on enable_sp alone asks for
-                        # S(1) -> P(sum), which DTensor rejects. Declaring SP
-                        # when both are on makes source and destination agree.
-                        enable_sp=enable_ep and enable_tp,
+                        enable_ep=True,
+                        enable_sp=False,
                         expert_param_layout={
                             "w1_EFD": spmd.S(1),
                             "w2_EDF": spmd.S(2),

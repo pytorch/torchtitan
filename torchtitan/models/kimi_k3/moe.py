@@ -86,6 +86,7 @@ class KimiGroupedExperts(GroupedExperts):
             w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
+
         gate_RF = self._grouped_mm(
             A=x_RD.bfloat16(),
             B_t=w1_EFD.bfloat16().transpose(-2, -1),

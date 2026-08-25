@@ -245,17 +245,9 @@ def _latent_moe_config(
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
             ),
-            # core's factory, and "standard" unconditionally: it returns the
-            # all-to-all dispatcher and falls back to local dispatch when the
-            # ep mesh is None, so EP=1 is unchanged. Selecting the dispatcher
-            # by whether EP happens to be on splits one decision across two
-            # places and leaves the model's config depending on the topology.
-            # Standard all-to-all dispatch only. MoonEP (the report's
-            # perfectly-balanced EP with redundant experts) is out of scope for
-            # this model: it needs a separate dispatcher and the online expert
-            # planning/migration that live in a dedicated backend, none of which
-            # is present here. This is pinned to "standard" rather than left as
-            # a config choice so that no run silently believes it is on MoonEP.
+            # core's dispatcher factory, pinned to the standard all-to-all; it
+            # falls back to local dispatch when the ep mesh is None, so EP=1 is
+            # unchanged. MoonEP is out of scope and deliberately not a choice.
             token_dispatcher=make_token_dispatcher_config(
                 num_experts=num_experts,
                 top_k=top_k,
