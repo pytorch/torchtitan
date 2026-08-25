@@ -6,7 +6,7 @@
 
 """Benchmark NCCL all-reduce on an NCCL symmetric-memory pool.
 
-This benchmark compares three out-of-place, end-to-end paths. Each path starts
+This benchmark compares four out-of-place, end-to-end paths. Each path starts
 with a regular CUDA input, preserves it, and returns a regular CUDA output:
 
 1. ``nccl_regular_e2e``: clone the input, then run regular NCCL in-place on the
@@ -17,6 +17,17 @@ with a regular CUDA input, preserves it, and returns a regular CUDA output:
    implementation. It preserves the original input and returns a new tensor.
    The measurement includes any copies needed to stage data through the
    persistent symmetric-memory buffer.
+4. ``vllm_custom_e2e``: vLLM's ``CustomAllreduce`` with
+   ``registered=False``, matching the direct custom-AR leg used by TorchTitan's
+   RL integration. The vLLM op stages the regular input through its
+   pre-registered IPC buffer and writes directly to a new output. Sizes rejected
+   by vLLM's production eligibility check are reported as ``nan`` rather than
+   silently measuring a fallback. This isolates the custom kernel; vLLM's full
+   dispatcher may select NCCL symmetric memory before reaching it.
+
+Pass ``--force-vllm-all-sizes`` to bypass vLLM's production size cap and size
+its IPC workspaces to cover every requested message. This is an experimental
+kernel characterization mode, not vLLM's production dispatch policy.
 
 Example:
 
@@ -35,6 +46,9 @@ from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
+from vllm.distributed.device_communicators.custom_all_reduce import (
+    CustomAllreduce,
+)
 
 from torchtitan.distributed import comms
 
@@ -44,8 +58,10 @@ BenchmarkFn = Callable[[], torch.Tensor]
 _SIZE_SUFFIXES = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
 _DEFAULT_SIZES = ("4k", "16k", "64k", "128k", "1m", "4m", "8m", "16m", "32m")
 _RESULT_HEADER = (
-    "bytes,custom_algo,nccl_regular_e2e_us,nccl_symk_e2e_us,custom_e2e_us,"
-    "symk/regular_e2e,custom/regular_e2e,custom/symk_e2e"
+    "bytes,custom_algo,vllm_custom_eligible,nccl_regular_e2e_us,"
+    "nccl_symk_e2e_us,custom_e2e_us,vllm_custom_e2e_us,"
+    "symk/regular_e2e,custom/regular_e2e,custom/symk_e2e,"
+    "vllm/regular_e2e,vllm/custom_e2e"
 )
 
 
@@ -138,15 +154,33 @@ def _check_results(results: dict[str, torch.Tensor], expected: float) -> None:
             raise AssertionError(f"{name} correctness check failed")
 
 
-def _print_result(nbytes: int, algo: comms._Algo, timings: dict[str, float]) -> None:
+def _format_timing(timing: float | None) -> str:
+    return "nan" if timing is None else f"{timing:.3f}"
+
+
+def _format_ratio(numerator: float | None, denominator: float) -> str:
+    return "nan" if numerator is None else f"{numerator / denominator:.3f}"
+
+
+def _print_result(
+    nbytes: int,
+    algo: comms._Algo,
+    timings: dict[str, float],
+    *,
+    vllm_custom_eligible: bool,
+) -> None:
+    vllm_timing = timings.get("vllm_custom_e2e")
     print(
-        f"{nbytes},{algo.name},"
+        f"{nbytes},{algo.name},{str(vllm_custom_eligible).lower()},"
         f"{timings['nccl_regular_e2e']:.3f},"
         f"{timings['nccl_symk_e2e']:.3f},"
         f"{timings['custom_e2e']:.3f},"
+        f"{_format_timing(vllm_timing)},"
         f"{timings['nccl_symk_e2e'] / timings['nccl_regular_e2e']:.3f},"
         f"{timings['custom_e2e'] / timings['nccl_regular_e2e']:.3f},"
-        f"{timings['custom_e2e'] / timings['nccl_symk_e2e']:.3f}",
+        f"{timings['custom_e2e'] / timings['nccl_symk_e2e']:.3f},"
+        f"{_format_ratio(vllm_timing, timings['nccl_regular_e2e'])},"
+        f"{_format_ratio(vllm_timing, timings['custom_e2e'])}",
         flush=True,
     )
 
@@ -171,6 +205,15 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override the adaptive number of iterations per measurement.",
+    )
+    parser.add_argument(
+        "--force-vllm-all-sizes",
+        action="store_true",
+        help=(
+            "Bypass vLLM's production size cap and allocate IPC workspaces "
+            "large enough for every requested size. This consumes roughly "
+            "twice the largest message size per GPU."
+        ),
     )
     return parser.parse_args()
 
@@ -213,15 +256,39 @@ def main() -> None:
         symk_staging_storage = torch.empty(max_numel, dtype=dtype, device=device)
     nccl_backend.register_mem_pool(nccl_pool, symm=True)
 
+    # vLLM's custom all-reduce exchanges CUDA IPC handles over a CPU process
+    # group. Production mode enables the architecture/world-size cap used when
+    # vLLM's symmetric-memory backend is available. Force-all mode deliberately
+    # bypasses that cap and makes the strict ``size < max_size`` check accept the
+    # largest requested message. TorchTitan's RL integration forces this
+    # communicator onto registered=False, which includes one staging copy.
+    vllm_cpu_group = dist.new_group(backend="gloo")
+    vllm_max_size = (
+        max(sizes) + 16 if args.force_vllm_all_sizes else 8 * 1024 * 1024
+    )
+    vllm_custom_ar = CustomAllreduce(
+        group=vllm_cpu_group,
+        device=device,
+        max_size=vllm_max_size,
+        symm_mem_enabled=not args.force_vllm_all_sizes,
+    )
+    if vllm_custom_ar.disabled:
+        raise RuntimeError("vLLM CustomAllreduce is disabled on this topology")
+
     if rank == 0:
         # Output columns:
         # - nccl_regular_e2e_us: clone + in-place regular NCCL.
         # - nccl_symk_e2e_us: copy-in + in-place NCCL SymK + copy-out.
         # - custom_e2e_us: TorchTitan's custom out-of-place all-reduce.
+        # - vllm_custom_e2e_us: vLLM custom AR with internal copy-in and direct
+        #   output, or nan when vLLM rejects the message size.
         print(
             f"# world_size={world_size} gpu={torch.cuda.get_device_name(device)} "
             f"torch={torch.__version__} nccl={torch.cuda.nccl.version()} "
-            f"dtype={dtype} multicast={comms._has_multicast(local_rank)}",
+            f"dtype={dtype} multicast={comms._has_multicast(local_rank)} "
+            f"vllm_custom_mode="
+            f"{'forced' if args.force_vllm_all_sizes else 'production'} "
+            f"vllm_custom_max_bytes={vllm_custom_ar.max_size}",
             flush=True,
         )
         print(_RESULT_HEADER, flush=True)
@@ -250,11 +317,17 @@ def main() -> None:
             def custom_e2e() -> torch.Tensor:
                 return comms._custom_all_reduce(input_tensor, "sum", group_name)
 
+            def vllm_custom_e2e() -> torch.Tensor:
+                return vllm_custom_ar.all_reduce(input_tensor, registered=False)
+
             methods = {
                 "nccl_regular_e2e": nccl_regular_e2e,
                 "nccl_symk_e2e": nccl_symk_e2e,
                 "custom_e2e": custom_e2e,
             }
+            vllm_custom_eligible = vllm_custom_ar.should_custom_ar(input_tensor)
+            if vllm_custom_eligible:
+                methods["vllm_custom_e2e"] = vllm_custom_e2e
 
             # Verify every path once before measuring it.
             expected = float(world_size * (world_size + 1) // 2)
@@ -273,17 +346,26 @@ def main() -> None:
             )
 
             if rank == 0:
-                _print_result(nbytes, algo, timings)
+                _print_result(
+                    nbytes,
+                    algo,
+                    timings,
+                    vllm_custom_eligible=vllm_custom_eligible,
+                )
 
             del input_tensor, symk_staging_buffer
             del correctness_results
             dist.barrier()
     finally:
         try:
-            nccl_backend.deregister_mem_pool(nccl_pool)
-            del symk_staging_storage, nccl_pool
+            vllm_custom_ar.close()
+            dist.destroy_process_group(vllm_cpu_group)
         finally:
-            dist.destroy_process_group()
+            try:
+                nccl_backend.deregister_mem_pool(nccl_pool)
+                del symk_staging_storage, nccl_pool
+            finally:
+                dist.destroy_process_group()
 
 
 if __name__ == "__main__":
