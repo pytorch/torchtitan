@@ -70,7 +70,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
             return q_TNH
 
         with patch(
-            "torchtitan.models.common.attention.varlen_attn",
+            "torchtitan.models.common.attention._varlen_attn",
             side_effect=_identity_varlen,
         ):
             out_TD = attention(x_TD, metadata, positions_T)
@@ -115,7 +115,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
             return out_TNH
 
         with patch(
-            "torchtitan.models.common.attention.varlen_attn",
+            "torchtitan.models.common.attention._varlen_attn",
             side_effect=_varlen_with_lse,
         ):
             out_TNH = inner_attention(
@@ -142,7 +142,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
             return q_TNH
 
         with patch(
-            "torchtitan.models.common.attention.varlen_attn",
+            "torchtitan.models.common.attention._varlen_attn",
             side_effect=_identity_varlen,
         ):
             logits_TV = model(tokens_T, positions_T, metadata)

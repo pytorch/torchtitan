@@ -289,29 +289,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_torchcomms_cp2_pp2_compile],
-            test_descr="FSDP+CP+PP+compile with torchcomms",
-            test_name="torchcomms_3d_dp+cp+pp+compile",
-            ngpu=8,
-            skip_rocm_test=True,
-            # NotImplementedError: new_group cannot delegate to split_group
-            # with use_local_synchronization=True; split_group requires all
-            # ranks in the parent group to participate.
-            disabled=True,
-            use_real_pg=True,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_torchcomms_tp2_pp2_compile],
-            test_descr="FSDP+TP+PP+compile with torchcomms",
-            test_name="torchcomms_3d_dp+tp+pp+compile",
-            ngpu=8,
-            skip_rocm_test=True,
-            # torchcomms-managed TP PG not registered in c10d;
-            # resolve fails under compile
-            disabled=True,
-            use_real_pg=True,
-        ),
-        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_sft],
             test_descr="SFT ChatDataset integration and numerics test",
             test_name="sft",
