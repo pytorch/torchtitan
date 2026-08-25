@@ -29,7 +29,7 @@ __all__ = [
     "annotate_input_spmd_types",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
-    "layout_axes",
+    "spmd_axes",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
@@ -46,7 +46,7 @@ __all__ = [
 _MESH_TLS = local()
 
 
-def layout_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
+def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
     """Return and validate the named mesh axes used by an SPMD layout."""
     axes = []
     for axis in layout.local_type:
@@ -77,7 +77,7 @@ def plain_tensor_to_dtensor_state_dict(
             if layout is None:
                 raise KeyError(f"{name} is missing SPMD layout metadata")
 
-            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(layout_axes(layout)))
+            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(spmd_axes(layout)))
             if mesh is None:
                 continue
 
