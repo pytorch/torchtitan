@@ -6,7 +6,7 @@
 
 """Benchmark NCCL all-reduce on an NCCL symmetric-memory pool.
 
-This benchmark compares four out-of-place, end-to-end paths. Each path starts
+This benchmark compares five out-of-place, end-to-end paths. Each path starts
 with a regular CUDA input, preserves it, and returns a regular CUDA output:
 
 1. ``nccl_regular_e2e``: clone the input, then run regular NCCL in-place on the
@@ -24,6 +24,9 @@ with a regular CUDA input, preserves it, and returns a regular CUDA output:
    by vLLM's production eligibility check are reported as ``nan`` rather than
    silently measuring a fallback. This isolates the custom kernel; vLLM's full
    dispatcher may select NCCL symmetric memory before reaching it.
+5. ``custom_no_multimem_e2e``: TorchTitan's custom all-reduce while simulating
+   a platform without multicast support. It selects P2P one-shot through
+   128 KiB, P2P two-shot through 16 MiB, and NCCL fallback above 16 MiB.
 
 Pass ``--force-vllm-all-sizes`` to bypass vLLM's production size cap and size
 its IPC workspaces to cover every requested message. This is an experimental
@@ -61,7 +64,8 @@ _RESULT_HEADER = (
     "bytes,custom_algo,vllm_custom_eligible,nccl_regular_e2e_us,"
     "nccl_symk_e2e_us,custom_e2e_us,vllm_custom_e2e_us,"
     "symk/regular_e2e,custom/regular_e2e,custom/symk_e2e,"
-    "vllm/regular_e2e,vllm/custom_e2e"
+    "vllm/regular_e2e,vllm/custom_e2e,custom_no_multimem_algo,"
+    "custom_no_multimem_e2e_us,custom_no_multimem/custom_e2e"
 )
 
 
@@ -162,9 +166,64 @@ def _format_ratio(numerator: float | None, denominator: float) -> str:
     return "nan" if numerator is None else f"{numerator / denominator:.3f}"
 
 
+def _select_algo_without_multimem(
+    input: torch.Tensor, reduce_op: str, group_name: str
+) -> comms._Algo:
+    """Apply TorchTitan's selector as if multicast were unavailable."""
+    if reduce_op != "sum":
+        return comms._Algo.NCCL
+    if input.dtype not in comms._SUPPORTED_DTYPES or not input.is_contiguous():
+        return comms._Algo.NCCL
+    if torch.are_deterministic_algorithms_enabled():
+        return comms._Algo.NCCL
+
+    world_size = comms._group_world_size(group_name)
+    if (
+        world_size not in comms._SUPPORTED_WORLD_SIZES
+        or not comms._is_intra_node(group_name)
+    ):
+        return comms._Algo.NCCL
+
+    numel = input.numel()
+    if numel == 0:
+        return comms._Algo.NCCL
+    vec = 16 // input.element_size()
+    if numel % (world_size * vec) != 0:
+        return comms._Algo.NCCL
+
+    nbytes = input.numel() * input.element_size()
+    if nbytes > comms._TWO_SHOT_MAX_BYTES:
+        return comms._Algo.NCCL
+    if nbytes <= comms._ONE_SHOT_MAX_BYTES:
+        return comms._Algo.ONE_SHOT
+    return comms._Algo.TWO_SHOT
+
+
+def _custom_all_reduce_without_multimem(
+    input: torch.Tensor, reduce_op: str, group_name: str
+) -> torch.Tensor:
+    """Run TorchTitan custom AR while forcing its non-multimem algorithm tree."""
+    algo = _select_algo_without_multimem(input, reduce_op, group_name)
+    if algo is comms._Algo.NCCL:
+        return comms._nccl_fallback(input, reduce_op, group_name)
+
+    symm_buffer = comms._get_symm_buffer(group_name, input.dtype)
+    view = symm_buffer[: input.numel()].view_as(input)
+    output = torch.empty_like(input)
+    if algo is comms._Algo.ONE_SHOT:
+        torch.ops.symm_mem.one_shot_all_reduce_copy_out(
+            view, input, "sum", group_name, output
+        )
+    else:
+        view.copy_(input)
+        torch.ops.symm_mem.two_shot_all_reduce_out(view, "sum", group_name, output)
+    return output
+
+
 def _print_result(
     nbytes: int,
     algo: comms._Algo,
+    no_multimem_algo: comms._Algo,
     timings: dict[str, float],
     *,
     vllm_custom_eligible: bool,
@@ -180,7 +239,10 @@ def _print_result(
         f"{timings['custom_e2e'] / timings['nccl_regular_e2e']:.3f},"
         f"{timings['custom_e2e'] / timings['nccl_symk_e2e']:.3f},"
         f"{_format_ratio(vllm_timing, timings['nccl_regular_e2e'])},"
-        f"{_format_ratio(vllm_timing, timings['custom_e2e'])}",
+        f"{_format_ratio(vllm_timing, timings['custom_e2e'])},"
+        f"{no_multimem_algo.name},"
+        f"{timings['custom_no_multimem_e2e']:.3f},"
+        f"{timings['custom_no_multimem_e2e'] / timings['custom_e2e']:.3f}",
         flush=True,
     )
 
@@ -282,6 +344,8 @@ def main() -> None:
         # - custom_e2e_us: TorchTitan's custom out-of-place all-reduce.
         # - vllm_custom_e2e_us: vLLM custom AR with internal copy-in and direct
         #   output, or nan when vLLM rejects the message size.
+        # - custom_no_multimem_e2e_us: TorchTitan custom AR using only its P2P
+        #   one-shot/two-shot kernels, with NCCL fallback above 16 MiB.
         print(
             f"# world_size={world_size} gpu={torch.cuda.get_device_name(device)} "
             f"torch={torch.__version__} nccl={torch.cuda.nccl.version()} "
@@ -320,10 +384,20 @@ def main() -> None:
             def vllm_custom_e2e() -> torch.Tensor:
                 return vllm_custom_ar.all_reduce(input_tensor, registered=False)
 
+            no_multimem_algo = _select_algo_without_multimem(
+                input_tensor, "sum", group_name
+            )
+
+            def custom_no_multimem_e2e() -> torch.Tensor:
+                return _custom_all_reduce_without_multimem(
+                    input_tensor, "sum", group_name
+                )
+
             methods = {
                 "nccl_regular_e2e": nccl_regular_e2e,
                 "nccl_symk_e2e": nccl_symk_e2e,
                 "custom_e2e": custom_e2e,
+                "custom_no_multimem_e2e": custom_no_multimem_e2e,
             }
             vllm_custom_eligible = vllm_custom_ar.should_custom_ar(input_tensor)
             if vllm_custom_eligible:
@@ -349,6 +423,7 @@ def main() -> None:
                 _print_result(
                     nbytes,
                     algo,
+                    no_multimem_algo,
                     timings,
                     vllm_custom_eligible=vllm_custom_eligible,
                 )
