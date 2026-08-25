@@ -81,6 +81,7 @@ class Decoder(BaseModel):
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
+
         @property
         def first_attention(self) -> BaseAttention.Config | None:
             """Attention config of the first layer that has one, else None.
@@ -135,11 +136,12 @@ class Decoder(BaseModel):
                 )
             return rope_cfg.max_context_length
 
-
         def _validate_cp_backend(self, parallelism) -> None:
             """ShardingConfig-driven CP requires the spmd_types backend. A model
             whose CP is not ShardingConfig-driven overrides this and takes on
             its own preconditions."""
+            from torchtitan.distributed.context_parallel import validate_cp_backend
+
             validate_cp_backend(parallelism)
 
         def update_from_config(
@@ -158,7 +160,6 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (

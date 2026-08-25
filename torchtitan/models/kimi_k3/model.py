@@ -16,9 +16,7 @@ from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    create_attention_mask,
     FlexAttention,
-    get_causal_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
@@ -31,7 +29,7 @@ from torchtitan.protocols.module import Module
 
 from .kda import KimiDeltaAttention
 from .moe import KimiFeedForward, KimiLatentMoE
-from .sharding import cp_all_to_all_headseq, ULYSSES
+from .sharding import mla_ulysses_attention
 from .vision_encoder import KimiK3VisionEncoder
 
 # Shape suffixes:
@@ -132,7 +130,9 @@ class KimiMLAAttention(BaseAttention):
 
         cp_group = self._cp_group
         if cp_group is not None and dist.get_world_size(cp_group) > 1:
-            out_THV = self._ulysses_attention(q_THK, kv_THC, k_rope_TK, cp_group)
+            out_THV = mla_ulysses_attention(
+                self, q_THK, kv_THC, k_rope_TK, cp_group
+            )
         else:
             out_THV = self.inner_attention(
                 q_THK,
@@ -144,124 +144,6 @@ class KimiMLAAttention(BaseAttention):
         out_TD = out_THV.reshape(num_tokens, h_local * self.v_head_dim)
         out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
         return self.wo(out_TD)
-
-    def _full_sequence_causal_mask(self, num_tokens: int, device):
-        """Causal mask for the sequence Ulysses reassembles.
-
-        The mask the layer is handed has been sharded for context parallel by
-        ``cp_shard``, which cuts it the way ring attention wants: local queries
-        against global keys. Ulysses reassembles the whole sequence on every
-        rank instead, so it needs the whole causal mask. Rebuilding it is
-        correct here only because this model rejects sample packing, so the
-        sequence is one document and the mask carries no boundaries; a packed
-        sequence would need the global boundaries threaded down instead.
-
-        Cached per (length, device) because the shape is constant across layers
-        and steps, and create_block_mask is compiled.
-        """
-        # The mask the decoder builds at dp1 is causal AND packed-document
-        # (common/decoder._create_flex_attention_mask_for_document). This
-        # rebuild is causal only, which is equivalent exactly when the folded
-        # stream holds ONE document. Sample packing is already rejected in
-        # update_from_config, but a microbatch wider than the context window
-        # folds several documents into one stream as well, and then CP would
-        # let a sample attend to the previous one while dp1 would not --
-        # silently, since every shape stays valid. Caught here rather than
-        # documented.
-        limit = getattr(self, "_cp_max_context_length", None)
-        if limit is not None and num_tokens > limit:
-            raise NotImplementedError(
-                f"context parallel folds {num_tokens} tokens into one stream "
-                f"but the context window is {limit}, so the "
-                "stream holds more than one document. The CP path rebuilds a "
-                "causal-only mask and cannot see document boundaries; use a "
-                "microbatch no wider than the context window."
-            )
-        key = (num_tokens, device)
-        if self._cp_mask is None or self._cp_mask[0] != key:
-            mask = create_attention_mask(
-                get_causal_mask_mod(),
-                None,
-                None,
-                num_tokens,
-                num_tokens,
-                device=device,
-            )
-            self._cp_mask = (key, mask)
-        return self._cp_mask[1]
-
-    def _ulysses_attention(
-        self,
-        q_LHQ: torch.Tensor,
-        kv_LHC: torch.Tensor,
-        k_rope_LR: torch.Tensor,
-        cp_group,
-    ) -> torch.Tensor:
-        """Attention over the full sequence for this rank's head subset.
-
-        One fused all-to-all trades the sharded axis, sequence for heads, then
-        the backend runs unchanged, then a second trades back. The gate and the
-        output projection stay sequence-local, so they are outside this.
-
-        The rotary slice is deliberately not in the all-to-all. It is headless
-        -- one vector per token, shared by every head -- so it is all-gathered
-        along the sequence and expanded onto this rank's heads afterwards.
-        Packing the already-expanded key instead sends the same values once per
-        head and reassembles them against the wrong head subset, which shows up
-        as a forward that diverges from the same layer run without CP.
-
-        Shape suffixes beyond the file legend: L local sequence (T/cp), G this
-        rank's head count (H/cp), W the packed per-head channel width, R the
-        rotary width.
-        """
-        import torch.distributed.nn.functional as dist_nn
-
-        # Head divisibility is checked at wiring time; see apply_cp_kimi_k3.
-        cp_size = dist.get_world_size(cp_group)
-        t_loc = q_LHQ.shape[0]
-        t_full = t_loc * cp_size
-        # Local head count: q_LHQ already carries this rank's local heads, so
-        # the CP split is over that, not over the global n_heads.
-        h_cp = q_LHQ.shape[1] // cp_size
-
-        packed_LHW = torch.cat([q_LHQ, kv_LHC], dim=-1)
-        src_dim, dst_dim = ULYSSES.in_dims()
-        packed_TGW = cp_all_to_all_headseq(
-            packed_LHW, cp_group, src_dim=src_dim, dst_dim=dst_dim
-        )
-        q_TGQ, k_nope_TGN, v_TGV = torch.split(
-            packed_TGW,
-            [self.q_head_dim, self.qk_nope_head_dim, self.v_head_dim],
-            dim=-1,
-        )
-
-        # Differentiable all-gather: the backward is a reduce-scatter, which is
-        # what a value every rank consumed needs.
-        k_rope_TR = torch.cat(
-            dist_nn.all_gather(k_rope_LR.contiguous(), group=cp_group), dim=0
-        )
-        k_TGQ = torch.cat(
-            [
-                k_nope_TGN,
-                k_rope_TR.view(t_full, 1, self.qk_rope_head_dim).expand(
-                    t_full, h_cp, self.qk_rope_head_dim
-                ),
-            ],
-            dim=-1,
-        )
-
-        out_TGV = self.inner_attention(
-            q_TGQ,
-            k_TGQ,
-            v_TGV,
-            attention_masks=self._full_sequence_causal_mask(t_full, q_TGQ.device),
-            scale=self.scale,
-        )
-        out_src_dim, out_dst_dim = ULYSSES.out_dims()
-        return cp_all_to_all_headseq(
-            out_TGV.contiguous(), cp_group, src_dim=out_src_dim, dst_dim=out_dst_dim
-        )
-
 
 def _apply_attention_residual(
     prefix_sum_TD: torch.Tensor,
