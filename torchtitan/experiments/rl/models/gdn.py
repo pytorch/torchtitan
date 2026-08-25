@@ -23,6 +23,7 @@ mode because vLLM generation must support prefix continuation. SSM cache precisi
 and prefill kernel selection differ by mode.
 """
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -107,6 +108,23 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         self.local_num_k_heads = self.num_k_heads // self.tensor_parallel_size
         self.local_num_v_heads = self.num_v_heads // self.tensor_parallel_size
         self.local_key_dim = self.local_num_k_heads * self.head_k_dim
+        self.use_vllm_fused_gdn = (
+            os.environ.get("TORCHTITAN_USE_VLLM_FUSED_GDN", "0") == "1"
+        )
+
+        if self.use_vllm_fused_gdn:
+            if is_in_batch_invariant_mode():
+                raise ValueError(
+                    "TORCHTITAN_USE_VLLM_FUSED_GDN=1 is incompatible with "
+                    "batch-invariant mode: the native vLLM kernels optimize "
+                    "inference throughput rather than trainer-bitwise replay."
+                )
+            from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+                ChunkGatedDeltaRule,
+            )
+
+            self._vllm_chunk_gated_delta_rule = ChunkGatedDeltaRule()
+            self._vllm_prefill_kernels_warmed_up = False
 
         if is_in_batch_invariant_mode():
             # The recurrent state accumulates in float32 inside FLA, so preserving
@@ -230,6 +248,281 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         ssm_state[slot_indices] = final_state.transpose(-1, -2).to(ssm_state.dtype)
         return output
 
+    def _split_qkv_vllm(
+        self, mixed_qkv: torch.Tensor | None
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Use vLLM's native grouped-head layout without expanding Q/K heads."""
+        if mixed_qkv is None:
+            return None, None, None
+
+        num_tokens = mixed_qkv.shape[0]
+        query, key, value = torch.split(
+            mixed_qkv,
+            [
+                self.local_key_dim,
+                self.local_key_dim,
+                self.local_num_v_heads * self.head_v_dim,
+            ],
+            dim=-1,
+        )
+        return (
+            query.contiguous().view(
+                1, num_tokens, self.local_num_k_heads, self.head_k_dim
+            ),
+            key.contiguous().view(
+                1, num_tokens, self.local_num_k_heads, self.head_k_dim
+            ),
+            value.contiguous().view(
+                1, num_tokens, self.local_num_v_heads, self.head_v_dim
+            ),
+        )
+
+    def _warmup_vllm_prefill_kernels(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+    ) -> None:
+        """Warm native vLLM prefill kernels before KV-cache allocation.
+
+        vLLM profiles the model before allocating most of the remaining GPU
+        memory.  Running the JIT/autotuner here mirrors native Qwen3.5 and
+        avoids first-real-prefill compilation after the cache has consumed it.
+        """
+        if self._vllm_prefill_kernels_warmed_up:
+            return
+        self._vllm_prefill_kernels_warmed_up = True
+
+        from vllm.third_party.flash_linear_attention.ops import fused_post_conv_prep
+        from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+        num_tokens = FLA_CHUNK_SIZE
+        dummy_qkv = torch.randn(
+            num_tokens,
+            mixed_qkv.shape[-1],
+            device=mixed_qkv.device,
+            dtype=mixed_qkv.dtype,
+        )
+        dummy_a = torch.randn(
+            num_tokens,
+            self.local_num_v_heads,
+            device=a.device,
+            dtype=a.dtype,
+        )
+        dummy_b = torch.randn_like(dummy_a, dtype=b.dtype, device=b.device)
+        query, key, value, decay, beta = fused_post_conv_prep(
+            conv_output=dummy_qkv,
+            a=dummy_a,
+            b=dummy_b,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            num_k_heads=self.local_num_k_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            apply_l2norm=True,
+            output_g_exp=False,
+        )
+        cu_seqlens = torch.tensor(
+            [0, num_tokens], device=mixed_qkv.device, dtype=torch.int32
+        )
+        state_dtype = self.get_state_dtype()[1]
+        initial_state = torch.zeros(
+            1,
+            self.local_num_v_heads,
+            self.head_v_dim,
+            self.head_k_dim,
+            device=mixed_qkv.device,
+            dtype=state_dtype,
+        )
+        self._vllm_chunk_gated_delta_rule(
+            q=query.unsqueeze(0),
+            k=key.unsqueeze(0),
+            v=value.unsqueeze(0),
+            g=decay.unsqueeze(0),
+            beta=beta.unsqueeze(0),
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=None,
+            chunk_offsets=None,
+            use_qk_l2norm_in_kernel=False,
+        )
+        del (
+            dummy_qkv,
+            dummy_a,
+            dummy_b,
+            query,
+            key,
+            value,
+            decay,
+            beta,
+            cu_seqlens,
+            initial_state,
+        )
+        torch.accelerator.empty_cache()
+
+    def _forward_vllm_fused(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        conv_weight: torch.Tensor,
+        conv_bias: torch.Tensor | None,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Run the same conv/recurrent CUDA kernels as native vLLM Qwen3.5."""
+        from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+            causal_conv1d_fn,
+            causal_conv1d_update,
+        )
+        from vllm.third_party.flash_linear_attention.ops import (
+            fused_post_conv_prep,
+            fused_recurrent_gated_delta_rule_packed_decode,
+            fused_sigmoid_gating_delta_rule_update,
+        )
+
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            self._warmup_vllm_prefill_kernels(mixed_qkv, a, b, A_log, dt_bias)
+            return
+        assert isinstance(attn_metadata, dict)
+        gdn_metadata = attn_metadata[self.prefix]
+        assert isinstance(gdn_metadata, GDNAttentionMetadata)
+        assert gdn_metadata.spec_sequence_masks is None, (
+            "TorchTitan's native-vLLM GDN path does not support speculative decoding"
+        )
+
+        num_actual_tokens = gdn_metadata.num_actual_tokens
+        if num_actual_tokens == 0:
+            return
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+
+        state_indices = gdn_metadata.non_spec_state_indices_tensor
+        assert state_indices is not None
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        ssm_state = self.kv_cache[1]
+        num_decodes = gdn_metadata.num_decodes
+        num_prefills = gdn_metadata.num_prefills
+        num_decode_tokens = gdn_metadata.num_decode_tokens
+
+        # The dominant decode path exactly matches native vLLM: paged causal
+        # conv followed by one packed kernel that performs Q/K normalization,
+        # gate preparation, recurrence, output, and in-place state update.
+        if num_prefills == 0 and num_decodes > 0:
+            conv_output = causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                conv_weight,
+                conv_bias,
+                "silu",
+                conv_state_indices=state_indices[:num_actual_tokens],
+                validate_data=False,
+            )
+            fused_recurrent_gated_delta_rule_packed_decode(
+                mixed_qkv=conv_output,
+                a=a,
+                b=b,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                scale=self.head_k_dim**-0.5,
+                initial_state=ssm_state,
+                out=output[:num_actual_tokens].unsqueeze(1),
+                ssm_state_indices=state_indices[:num_actual_tokens],
+                use_qk_l2norm_in_kernel=True,
+            )
+            return
+
+        # vLLM orders non-speculative mixed batches decode-first, then prefill.
+        conv_output = causal_conv1d_fn(
+            mixed_qkv.transpose(0, 1),
+            conv_weight,
+            conv_bias,
+            activation="silu",
+            conv_states=conv_state,
+            has_initial_state=gdn_metadata.has_initial_state,
+            cache_indices=state_indices,
+            query_start_loc=gdn_metadata.non_spec_query_start_loc,
+            metadata=gdn_metadata,
+        ).transpose(0, 1)
+
+        core_decode = None
+        if num_decodes > 0:
+            query, key, value = self._split_qkv_vllm(conv_output[:num_decode_tokens])
+            assert query is not None and key is not None and value is not None
+            core_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=A_log,
+                a=a[:num_decode_tokens],
+                b=b[:num_decode_tokens],
+                dt_bias=dt_bias,
+                q=query,
+                k=key,
+                v=value,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=gdn_metadata.non_spec_query_start_loc[: num_decodes + 1],
+                ssm_state_indices=state_indices,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        core_prefill = None
+        if num_prefills > 0:
+            prefill_state_indices = gdn_metadata.prefill_state_indices
+            prefill_has_initial_state = gdn_metadata.prefill_has_initial_state
+            prefill_query_start_loc = gdn_metadata.prefill_query_start_loc
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            assert prefill_query_start_loc is not None
+
+            prefill_start = num_decode_tokens if num_decodes > 0 else 0
+            query, key, value, decay, beta = fused_post_conv_prep(
+                conv_output=conv_output[prefill_start:],
+                a=a[prefill_start:],
+                b=b[prefill_start:],
+                A_log=A_log,
+                dt_bias=dt_bias,
+                num_k_heads=self.local_num_k_heads,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
+            initial_state = ssm_state[prefill_state_indices]
+            initial_state[~prefill_has_initial_state] = 0
+            core_prefill, final_state = self._vllm_chunk_gated_delta_rule(
+                q=query.unsqueeze(0),
+                k=key.unsqueeze(0),
+                v=value.unsqueeze(0),
+                g=decay.unsqueeze(0),
+                beta=beta.unsqueeze(0),
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=prefill_query_start_loc,
+                chunk_indices=gdn_metadata.chunk_indices,
+                chunk_offsets=gdn_metadata.chunk_offsets,
+                use_qk_l2norm_in_kernel=False,
+            )
+            ssm_state[prefill_state_indices] = final_state.to(ssm_state.dtype)
+
+        if core_decode is not None and core_prefill is not None:
+            core_output = torch.cat([core_decode, core_prefill], dim=1)
+        elif core_decode is not None:
+            core_output = core_decode
+        else:
+            assert core_prefill is not None
+            core_output = core_prefill
+        output[:num_actual_tokens] = core_output.squeeze(0).to(output.dtype)
+
     # Keep Dynamo from specializing on BreakableCUDAGraphCapture.current().
     # vLLM warms this method with no active capture and later calls it while
     # capturing; tracing the decorator would otherwise trigger a lazy Dynamo
@@ -250,6 +543,19 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         output: torch.Tensor,
     ) -> None:
         """Run convolution and recurrence against vLLM's paged state in place."""
+        if self.use_vllm_fused_gdn:
+            self._forward_vllm_fused(
+                mixed_qkv,
+                a,
+                b,
+                conv_weight,
+                conv_bias,
+                A_log,
+                dt_bias,
+                output,
+            )
+            return
+
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         # vLLM's profiling/warmup runs have no attention metadata; leave the
@@ -259,9 +565,9 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         assert isinstance(attn_metadata, dict)
         gdn_metadata = attn_metadata[self.prefix]
         assert isinstance(gdn_metadata, GDNAttentionMetadata)
-        assert (
-            gdn_metadata.spec_sequence_masks is None
-        ), "VLLMInnerGatedDeltaNet does not support speculative decoding"
+        assert gdn_metadata.spec_sequence_masks is None, (
+            "VLLMInnerGatedDeltaNet does not support speculative decoding"
+        )
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
         if num_actual_tokens == 0:
