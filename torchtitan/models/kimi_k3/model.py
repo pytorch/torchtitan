@@ -216,8 +216,6 @@ class KimiMLAAttention(BaseAttention):
         """
         import torch.distributed.nn.functional as dist_nn
 
-        from torchtitan.models.kimi_k3.dtensor_ops import to_local_partial_grad
-
         # Head divisibility is checked at wiring time; see apply_cp_kimi_k3.
         cp_size = dist.get_world_size(cp_group)
         t_loc = q_LHQ.shape[0]
@@ -236,12 +234,6 @@ class KimiMLAAttention(BaseAttention):
             [self.q_head_dim, self.qk_nope_head_dim, self.v_head_dim],
             dim=-1,
         )
-
-        # k_rope is produced by a module every rank of the head-splitting axis
-        # ran on the same input, so its gradient is the SUM across those ranks,
-        # i.e. Partial. A no-op when the input is a plain tensor, which is the
-        # CP-only case, so the reachable path here is unchanged.
-        k_rope_LR = to_local_partial_grad(k_rope_LR)
 
         # Differentiable all-gather: the backward is a reduce-scatter, which is
         # what a value every rank consumed needs.
@@ -409,11 +401,12 @@ class KimiK3Model(Decoder):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
-        # KDA runs on fla triton kernels, which do not dispatch through
-        # DTensor, so no ShardingConfig can drive its context parallel -- the
-        # layer implements both CP modes itself, and the preconditions that
-        # replaces the backend check with are enforced below.
-        cp_via_sharding_config: bool = False
+
+        def _validate_cp_backend(self, parallelism) -> None:
+            """This model's CP is not ShardingConfig-driven -- the KDA kernels
+            are fla triton and never see a DTensor -- so the spmd_types
+            requirement does not apply; apply_cp_kimi_k3 checks its own
+            preconditions at wiring time."""
 
         def update_from_config(self, *, config, **kwargs) -> None:
             dataset = config.dataloader.dataset

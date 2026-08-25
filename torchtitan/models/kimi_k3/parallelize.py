@@ -22,7 +22,6 @@ from torchtitan.tools.logging import logger
 
 from .kda import KimiDeltaAttention
 from .model import KimiK3Model, KimiMLAAttention
-from .sharding import contract_for_mode, ULYSSES
 
 
 def parallelize_kimi_k3(
@@ -103,19 +102,6 @@ def parallelize_kimi_k3(
     return model
 
 
-def _check_head_divisibility(
-    contract, num_heads: int, divisor: int, divisor_expr: str, kind: str, field: str
-) -> None:
-    """Enforce the head split a contract asks for, if it asks for one."""
-    if not contract.head_sharded:
-        return
-    if num_heads % divisor != 0:
-        raise ValueError(
-            f"{kind} {field}={num_heads} must be divisible by "
-            f"{divisor_expr}={divisor} for {contract.name} CP head sharding"
-        )
-
-
 def apply_cp_kimi_k3(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -123,73 +109,44 @@ def apply_cp_kimi_k3(
 ) -> None:
     """Wire context parallelism: KCP on the KDA layers, Ulysses on the MLA layers.
 
-    Both at once, on disjoint layer kinds. KCP decomposes the delta-rule
-    recurrence and says nothing about softmax attention, so it does not replace
-    Ulysses; ``cp_mode="ulysses"`` runs the KDA layers the second way and is
-    kept as an A/B.
-
-    Imperative rather than declared because KDA's kernels are fla triton and
-    never see a DTensor; see ``cp_via_sharding_config`` on the model config for
-    why the declarative path cannot serve them.
+    Both at once, on disjoint layer kinds. Imperative rather than declared:
+    KDA's kernels are fla triton and never see a DTensor, so no ShardingConfig
+    can drive them (the model config overrides ``_validate_cp_backend`` for the
+    same reason).
     """
     cp_group = parallel_dims.get_mesh("cp").get_group()
-    cp_degree, tp_degree = parallel_dims.cp, parallel_dims.tp
+    cp_degree = parallel_dims.cp
     model._cp_group = cp_group
-    # The CP mask rebuild is causal-only; hand the layers the context window
-    # so they can reject a folded stream that holds several documents.
-    # The window comes from the training config: K3's MLA is nope, so the
-    # decoder's RoPE-derived max_context_length raises rather than returning
-    # one. A folded stream longer than this holds more than one document, which
-    # the causal-only CP mask cannot represent.
-    max_ctx = max_context_length
 
     num_mla = 0
     kda_modules = []
     for module in model.modules():
         if isinstance(module, KimiMLAAttention):
-            module._cp_max_context_length = max_ctx
-            # The head axis may already be split by another parallelism, so
-            # Ulysses splits what is left: heads must divide by tp*cp.
-            _check_head_divisibility(
-                ULYSSES,
-                module.n_heads,
-                tp_degree * cp_degree,
-                "tp*cp",
-                "MLA",
-                "n_heads",
-            )
+            # The CP mask rebuild is causal-only; the layer uses the context
+            # window to reject a folded stream holding several documents.
+            module._cp_max_context_length = max_context_length
+            if module.n_heads % cp_degree != 0:
+                raise ValueError(
+                    f"MLA n_heads={module.n_heads} must be divisible by "
+                    f"cp={cp_degree} for Ulysses head sharding"
+                )
             module._cp_group = cp_group
             num_mla += 1
         elif isinstance(module, KimiDeltaAttention):
             kda_modules.append(module)
 
-    modes = {m.cp_mode for m in kda_modules}
-    for mode in modes:
-        contract = contract_for_mode(mode)
-        for module in kda_modules:
-            if module.cp_mode == mode:
-                _check_head_divisibility(
-                    contract,
-                    module.num_heads,
-                    tp_degree * cp_degree,
-                    "tp*cp",
-                    "KDA",
-                    "num_heads",
-                )
-    if "kcp" in modes:
-        # Checked here rather than at the first forward: the message is
-        # actionable at wiring time and the failure is otherwise an ImportError
-        # from inside a layer.
+    if kda_modules:
+        # Checked at wiring time so the message is actionable, rather than an
+        # ImportError from inside a layer's first forward.
         try:
             from fla.modules.conv.cp.ops import causal_conv1d_cp  # noqa: F401
             from fla.ops.cp.context import build_cp_context  # noqa: F401
         except ImportError as err:
             raise ValueError(
-                "cp_mode='kcp' needs fla-core's CP ops "
+                "KDA context parallelism needs fla-core's CP ops "
                 "(fla.ops.cp.context.build_cp_context and "
                 "fla.modules.conv.cp.ops.causal_conv1d_cp), which ship in "
-                f"fla-core >= 0.5.1; import failed with: {err}. Install a "
-                "newer fla-core or use cp_mode='ulysses'."
+                f"fla-core >= 0.5.1; import failed with: {err}."
             ) from err
 
     for module in kda_modules:
@@ -200,8 +157,7 @@ def apply_cp_kimi_k3(
             "wire it onto."
         )
     logger.info(
-        "Applied context parallel to %d MLA and %d KDA layer(s), modes=%s.",
+        "Applied context parallel to %d MLA and %d KDA layer(s).",
         num_mla,
         len(kda_modules),
-        sorted(modes) or ["-"],
     )
