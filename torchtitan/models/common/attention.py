@@ -35,7 +35,10 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
     flex_attention,
 )
-from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
+from torch.nn.attention.varlen import (
+    AuxRequest as VarlenAuxRequest,
+    varlen_attn as _varlen_attn,
+)
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
@@ -87,8 +90,8 @@ AttentionMasksType = (
 
 
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
-def varlen_attn_fn(*args, **kwargs):
-    return varlen_attn(*args, **kwargs)
+def varlen_attn(*args, **kwargs):
+    return _varlen_attn(*args, **kwargs)
 
 
 @spmd.no_typecheck(
@@ -98,7 +101,7 @@ def varlen_attn_fn(*args, **kwargs):
     )
 )
 def varlen_attn_with_lse(*args, **kwargs):
-    return varlen_attn(*args, return_aux=VarlenAuxRequest(lse=True), **kwargs)
+    return _varlen_attn(*args, return_aux=VarlenAuxRequest(lse=True), **kwargs)
 
 
 def local_head_split(
@@ -189,9 +192,7 @@ class VarlenAttention(Module):
         if kwargs.get("enable_gqa", False):
             varlen_kwargs["enable_gqa"] = True
 
-        run_varlen_attn = (
-            varlen_attn_fn if out_transform is None else varlen_attn_with_lse
-        )
+        run_varlen_attn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
         result = run_varlen_attn(
             q_TNH.to(torch.bfloat16),
