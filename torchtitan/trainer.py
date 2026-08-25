@@ -20,7 +20,11 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
+from torchtitan.components.checkpointer import (
+    BaseCheckpointManager,
+    CheckpointManager,
+    PaddedDTensorStateDictAdapter,
+)
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -565,6 +569,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build checkpointer
+        checkpoint_kwargs = {}
+        if (
+            isinstance(config.checkpoint, CheckpointManager.Config)
+            and config.checkpoint.enable
+            and config.parallelism.spmd_backend == "spmd_types"
+        ):
+            state_dict_adapter = PaddedDTensorStateDictAdapter(
+                self.model_parts,
+                self.optimizers,
+            )
+            if state_dict_adapter.is_needed:
+                checkpoint_kwargs["state_dict_adapter"] = state_dict_adapter
+
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
@@ -577,6 +594,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else None
             ),
             base_folder=config.dump_folder,
+            **checkpoint_kwargs,
         )
 
         self.train_context = dist_utils.get_spmd_context(
