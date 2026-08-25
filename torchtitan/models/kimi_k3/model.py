@@ -266,10 +266,13 @@ class KimiK3Model(Decoder):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
         # Ship only the blocks a receiver does not already hold on each
-        # pipeline hop, instead of the whole stack. Changes the order the block
-        # gradients are summed, so it is not bitwise against the naive
-        # transport, and it needs an even split under Interleaved1F1B.
-        attn_res_cache: bool = False
+        # pipeline hop, instead of the whole stack. On by default: under
+        # pipeline parallelism this is the transport, and the naive one is
+        # the fallback, not the other way round. It changes the order the
+        # block gradients are summed, so it is not bitwise against that
+        # fallback. Engages only on Interleaved1F1B with an even split;
+        # anything else warns and passes through.
+        attn_res_cache: bool = True
 
 
         def _validate_cp_backend(self, parallelism) -> None:
