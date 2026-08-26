@@ -74,8 +74,7 @@ def _kda_recurrent_reference(
     k_BLHK = k_BLHK * torch.rsqrt(k_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
     v_BLHV = v_BLHV.float()
     log_decay_BLHK = lower_bound * torch.sigmoid(
-        torch.exp(A_log_H.float()).view(1, 1, -1, 1)
-        * (gate_BLHK.float() + dt_bias_HK.float())
+        torch.exp(A_log_H).view(1, 1, -1, 1) * (gate_BLHK.float() + dt_bias_HK.float())
     )
     decay_BLHK = torch.exp(log_decay_BLHK)
     beta_BLH = torch.sigmoid(beta_BLH.float())
