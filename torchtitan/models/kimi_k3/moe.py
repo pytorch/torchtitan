@@ -37,6 +37,9 @@ def _situ_glu(
     return (gate * up).to(input_dtype)
 
 
+_compiled_situ_glu = torch.compile(_situ_glu, fullgraph=True)
+
+
 class KimiFeedForward(FeedForward):
     """FeedForward with Kimi's SiTU activation."""
 
@@ -52,7 +55,12 @@ class KimiFeedForward(FeedForward):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(
-            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
+            _compiled_situ_glu(
+                self.w1(x),
+                self.w3(x),
+                self.beta,
+                self.linear_beta,
+            ),
         )
 
 
@@ -98,7 +106,12 @@ class KimiGroupedExperts(GroupedExperts):
             offs=offsets_E,
         )
 
-        h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
+        h_RF = _compiled_situ_glu(
+            gate_RF,
+            up_RF,
+            self.beta,
+            self.linear_beta,
+        )
 
         return self._grouped_mm(
             A=h_RF,

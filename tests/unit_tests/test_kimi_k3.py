@@ -25,6 +25,7 @@ from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 from torchtitan.models.kimi_k3.data import KimiK3MultiModalCollator
 from torchtitan.models.kimi_k3.kda import KimiDeltaAttention, KimiKDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
+from torchtitan.models.kimi_k3.moe import _compiled_situ_glu, _situ_glu
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
 
@@ -130,6 +131,42 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    @unittest.skipIf(not torch.cuda.is_available(), "SiTU test requires CUDA.")
+    def test_compiled_situ_glu_matches_eager(self):
+        torch.manual_seed(5)
+        gate_RF = torch.randn(
+            128,
+            256,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        up_RF = torch.randn_like(gate_RF, requires_grad=True)
+        expected_gate_RF = gate_RF.detach().clone().requires_grad_()
+        expected_up_RF = up_RF.detach().clone().requires_grad_()
+
+        actual_RF = _compiled_situ_glu(gate_RF, up_RF, 4.0, 25.0)
+        expected_RF = _situ_glu(expected_gate_RF, expected_up_RF, 4.0, 25.0)
+        torch.testing.assert_close(actual_RF, expected_RF)
+
+        output_grad_RF = torch.randn_like(actual_RF)
+        actual_grads = torch.autograd.grad(
+            actual_RF,
+            (gate_RF, up_RF),
+            grad_outputs=output_grad_RF,
+        )
+        expected_grads = torch.autograd.grad(
+            expected_RF,
+            (expected_gate_RF, expected_up_RF),
+            grad_outputs=output_grad_RF,
+        )
+        for actual_grad, expected_grad in zip(
+            actual_grads,
+            expected_grads,
+            strict=True,
+        ):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
     def test_collator_batches_equal_length_rows(self):
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         collator = KimiK3MultiModalCollator.Config().build(
