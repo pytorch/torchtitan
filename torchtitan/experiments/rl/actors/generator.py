@@ -766,7 +766,7 @@ class VLLMGenerator(Actor, Configurable):
         vllm_stat_loggers: list[type[VllmOtelStatLogger]] = field(
             default_factory=lambda: [VllmOtelStatLogger]
         )
-        """Loggers used by vLLM engines to export metrics."""
+        """Loggers instantiated on TP rank 0 to export vLLM metrics."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -933,19 +933,21 @@ class VLLMGenerator(Actor, Configurable):
 
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
-            logger_context = StatLoggerContext(
-                rank=self._rank,
-                tp_rank=self._tp_rank,
-                dp_rank=self._dp_rank,
-                generator_name=context().actor_instance.actor_id.actor_name,
-                output_dir=output_dir,
-            )
-            stat_loggers = [
-                functools.partial(cls, context=logger_context)
-                for cls in config.vllm_stat_loggers
-            ]
+            stat_loggers = None
+            if self._tp_rank == 0 and config.vllm_stat_loggers:
+                logger_context = StatLoggerContext(
+                    rank=self._rank,
+                    tp_rank=self._tp_rank,
+                    dp_rank=self._dp_rank,
+                    generator_name=context().actor_instance.actor_id.actor_name,
+                    output_dir=output_dir,
+                )
+                stat_loggers = [
+                    functools.partial(cls, context=logger_context)
+                    for cls in config.vllm_stat_loggers
+                ]
             self._engine = LLMEngine.from_engine_args(
-                engine_args, stat_loggers=stat_loggers or None
+                engine_args, stat_loggers=stat_loggers
             )
             logger.info("vLLM rollout engine initialized")
 

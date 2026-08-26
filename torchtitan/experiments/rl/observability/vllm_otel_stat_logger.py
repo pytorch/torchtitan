@@ -160,8 +160,6 @@ class VllmOtelStatLogger(StatLoggerBase):
             "tp_rank": context.tp_rank,
             "generator_name": context.generator_name,
         }
-        # All TP ranks in a DP replica see identical engine-aggregate stats.
-        self._should_log = context.tp_rank == 0
         self._enabled = False
 
         self._kv_cache_usage_last = 0.0
@@ -169,8 +167,7 @@ class VllmOtelStatLogger(StatLoggerBase):
         self._num_waiting_last = 0
 
         self._provider = None
-        if self._should_log:
-            self._init_otel(self._attributes)
+        self._init_otel(self._attributes)
 
     def _init_otel(self, resource_attrs: dict[str, str | int]) -> None:
         """Initialize the OTLP export pipeline."""

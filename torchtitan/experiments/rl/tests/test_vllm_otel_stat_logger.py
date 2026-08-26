@@ -138,27 +138,25 @@ def test_extract_step_stats_prefix_cache_none():
     assert step.kv_cache_usage == 0.1
 
 
-def test_inert_on_dp_head_without_endpoint(no_otel_env):
+def test_inert_without_exporter(no_otel_env):
     log = VllmOtelStatLogger(
         _vllm_config(), 0, context=_context(rank=0, tp_rank=0, dp_rank=0)
     )
-    assert log._should_log is True  # tp_rank==0
-    assert log._enabled is False  # ...but no endpoint -> inert
+    assert log._enabled is False
     # No-ops that must never raise and never touch (uncreated) instruments.
     log.record(None, None)
     log.log()
 
 
-def test_disabled_off_dp_head(no_otel_env):
+def test_logger_does_not_gate_on_tp_rank(no_otel_env, monkeypatch, tmp_path):
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
     log = VllmOtelStatLogger(
         _vllm_config(tp_size=2),
         0,
-        context=_context(rank=1, tp_rank=1, dp_rank=0),
+        context=_context(rank=1, tp_rank=1, dp_rank=0, output_dir=str(tmp_path)),
     )
-    assert log._should_log is False
-    assert log._enabled is False
-    log.record(None, None)
-    log.log()
+    assert log._enabled is True
+    log._provider.shutdown(timeout_millis=1000)
 
 
 def test_exporter_none_is_inert(monkeypatch):
