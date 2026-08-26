@@ -747,14 +747,6 @@ class VLLMGenerator(Actor, Configurable):
         TorchStore directly into views of native vLLM's packed parameters.
         """
 
-        native_vllm_disable_custom_all_reduce: bool = True
-        """Disable native vLLM's CUDA-IPC custom TP all-reduce.
-
-        Keep the safe default for one DP=2 engine under Monarch's external
-        launcher. Independent DP=1/TP=4 engines may disable this flag to match
-        Prime-RL's custom-all-reduce setting.
-        """
-
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -940,9 +932,7 @@ class VLLMGenerator(Actor, Configurable):
             # The current vLLM nightly's CUDA-IPC custom all-reduce fails during
             # CUDA graph profiling under Monarch's external launcher. Use its
             # NCCL fallback; this remains GPU-to-GPU TP communication.
-            engine_kwargs["disable_custom_all_reduce"] = (
-                config.native_vllm_disable_custom_all_reduce
-            )
+            engine_kwargs["disable_custom_all_reduce"] = True
         else:
             engine_kwargs["config_format"] = TORCHTITAN_CONFIG_FORMAT
             engine_kwargs["worker_cls"] = TORCHTITAN_WORKER_CLS

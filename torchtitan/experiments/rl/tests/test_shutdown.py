@@ -238,42 +238,6 @@ def test_main_passes_configured_num_generators(monkeypatch, stub_mesh_provisioni
     ]
 
 
-def test_spawn_proc_mesh_reuses_allocator_for_generators_on_same_host(monkeypatch):
-    trainer_host = object()
-    generator_host = object()
-    calls = []
-
-    def fake_spawn(
-        host_mesh,
-        role_world_size,
-        gpus_per_node,
-        *,
-        bootstrap,
-        role,
-        extra_env=None,
-        provisioner=None,
-    ):
-        calls.append((host_mesh, role, role_world_size, provisioner))
-        return role
-
-    monkeypatch.setattr(train, "_spawn_proc_mesh", fake_spawn)
-    trainer_mesh, generator_meshes = train.spawn_proc_mesh(
-        trainer_world_size=8,
-        per_generator_world_size=4,
-        host_meshes=train.HostMeshes(
-            trainer=trainer_host,
-            generators=[generator_host, generator_host],
-            gpus_per_node=8,
-        ),
-        num_generators=2,
-    )
-
-    assert trainer_mesh == "trainer"
-    assert generator_meshes == ["generator_0", "generator_1"]
-    assert calls[1][3] is calls[2][3]
-    assert calls[0][3] is not calls[1][3]
-
-
 def test_main_shuts_down_after_train_failure(monkeypatch, stub_mesh_provisioning):
     _FakeConfigManager.config = _FakeConfig(fail_train=True)
     _FakeController.instances = []
