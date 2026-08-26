@@ -189,6 +189,7 @@ def _spawn_proc_mesh(
     bootstrap: Callable[[], None],
     role: str,
     extra_env: dict[str, str] | None = None,
+    provisioner: PerHostProvisioner | None = None,
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
     evenly across the mesh's hosts. ``extra_env`` is applied in each proc's bootstrap.
@@ -199,7 +200,9 @@ def _spawn_proc_mesh(
         f"host count ({nodes})"
     )
     role_gpus_per_node = role_world_size // nodes
-    provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
+    # Reuse a caller-owned provisioner when multiple role meshes share one
+    # physical host so each mesh receives a disjoint GPU range.
+    provisioner = provisioner or PerHostProvisioner(total_gpus=gpus_per_node)
     role_env = {**(extra_env or {}), "TORCHTITAN_RL_ROLE": role}
     env = provisioner.allocate(role_gpus_per_node, extra_env=role_env)
     return host_mesh.spawn_procs(
@@ -248,12 +251,22 @@ def spawn_proc_mesh(
             f"got {len(generator_host_meshes)}"
         )
 
+        # A HostMesh may intentionally appear more than once, e.g. two
+        # independent TP=4 vLLM instances colocated on one eight-GPU node.
+        provisioners: dict[int, PerHostProvisioner] = {}
+
+        def provisioner_for(host_mesh: HostMesh) -> PerHostProvisioner:
+            return provisioners.setdefault(
+                id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
+            )
+
         trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh,
             trainer_world_size,
             gpus_per_node,
             bootstrap=_preimport_torch,
             role="trainer",
+            provisioner=provisioner_for(trainer_host_mesh),
         )
         generator_meshes = [
             _spawn_proc_mesh(
@@ -261,10 +274,11 @@ def spawn_proc_mesh(
                 per_generator_world_size,
                 gpus_per_node,
                 bootstrap=_bootstrap_generator,
-                role="generator",
+                role=f"generator_{idx}",
                 extra_env=generator_env,
+                provisioner=provisioner_for(gen_host_mesh),
             )
-            for gen_host_mesh in generator_host_meshes
+            for idx, gen_host_mesh in enumerate(generator_host_meshes)
         ]
     else:
         # Single-node mode: partition GPUs on this_host() via
