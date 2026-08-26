@@ -39,7 +39,6 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
@@ -320,7 +319,7 @@ class MuseGlimmerModel(Decoder):
             muse_model = cast("MuseGlimmerModel", model)
             nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                excluded_modules=(
+                modules_excluded_from_active_params=(
                     muse_model.vision_encoder,
                     muse_model.vision_adapter,
                     muse_model.vision_projection,
@@ -330,12 +329,6 @@ class MuseGlimmerModel(Decoder):
             attention_flops = 0
             for layer in self.layers:
                 attention = layer.attention
-                if not isinstance(attention, Attention.Config):
-                    logger.warning(
-                        "Skipping FLOP accounting for unsupported Muse Glimmer "
-                        f"attention config {type(attention).__name__}."
-                    )
-                    continue
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None
@@ -344,7 +337,7 @@ class MuseGlimmerModel(Decoder):
                 attention_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=head_dim,
-                    value_head_dim=head_dim,
+                    v_head_dim=head_dim,
                     seq_len=seq_len,
                     sliding_window_size=attention.window_size,
                 )

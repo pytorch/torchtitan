@@ -186,129 +186,6 @@ def _uses_dsa(config) -> bool:
     return getattr(config, "index_topk", None) is not None
 
 
-def _get_hf_model_nparams_and_flops(
-    config,
-    model: "HFTransformerModel",
-    seq_len: int,
-) -> tuple[int, int]:
-    """HF-specific adapter for the shared MFU counting convention."""
-    named_parameters = list(model.named_parameters())
-    nparams = sum(param.numel() for _, param in named_parameters)
-    parameter_weights = {id(param): Fraction(1) for _, param in named_parameters}
-
-    lm_head = getattr(model, "lm_head", None)
-    lm_head_parameter_ids = (
-        {id(param) for param in lm_head.parameters()}
-        if isinstance(lm_head, nn.Module)
-        else set()
-    )
-    for module in model.modules():
-        if isinstance(module, nn.Embedding):
-            for param in module.parameters(recurse=False):
-                if id(param) not in lm_head_parameter_ids:
-                    parameter_weights[id(param)] = Fraction(0)
-
-    for layer in model.layers.values():
-        moe_config = getattr(layer, "_native_moe_config", None)
-        if moe_config is None:
-            continue
-        active_expert_ratio = Fraction(moe_config.router.top_k, moe_config.num_experts)
-        if getattr(layer, "_layer_level_moe", False):
-            moe_block = layer
-        else:
-            moe_attr = _get_moe_attr_name(layer)
-            if moe_attr is None:
-                logger.warning(
-                    "HF MFU calculation could not identify the MoE block; "
-                    "counting all expert parameters as active."
-                )
-                continue
-            moe_block = getattr(layer, moe_attr)
-        for param in moe_block.experts.parameters():
-            parameter_weights[id(param)] = active_expert_ratio
-
-    nparams_for_matmul = sum(
-        param.numel() * parameter_weights[id(param)] for _, param in named_parameters
-    )
-    assert nparams_for_matmul.denominator == 1
-    active_nparams = nparams_for_matmul.numerator
-
-    if all(
-        hasattr(config, name)
-        for name in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
-    ):
-        qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
-        value_head_dim = config.v_head_dim
-    else:
-        qk_head_dim = config.head_dim
-        value_head_dim = config.head_dim
-
-    layer_types = getattr(config, "layer_types", None)
-    if layer_types is None:
-        default_layer_type = (
-            "sliding_attention"
-            if getattr(config, "sliding_window", None) is not None
-            else "full_attention"
-        )
-        layer_types = [default_layer_type] * len(model.layers)
-    else:
-        # Debug flavors can override num_hidden_layers while retaining the full
-        # architecture's layer_types list. Count only the layers that were built.
-        layer_types = list(layer_types[: len(model.layers)])
-        if len(layer_types) < len(model.layers):
-            logger.warning(
-                "HF config defines fewer layer_types than built layers; "
-                "approximating the remaining layers as full attention."
-            )
-            layer_types.extend(
-                ["full_attention"] * (len(model.layers) - len(layer_types))
-            )
-
-    num_sequence_mixing_flops_per_token = 0
-    unsupported_layer_types = set()
-    for layer_type in layer_types:
-        if layer_type in ("attention", "full_attention"):
-            sliding_window_size = None
-        elif layer_type == "sliding_attention":
-            sliding_window_size = getattr(config, "sliding_window", None)
-        elif layer_type == "chunked_attention":
-            sliding_window_size = getattr(config, "attention_chunk_size", None)
-        else:
-            unsupported_layer_types.add(str(layer_type))
-            sliding_window_size = None
-
-        layer_qk_head_dim = qk_head_dim
-        layer_value_head_dim = value_head_dim
-        if getattr(config, "model_type", None) == "gemma4_text" and layer_type in (
-            "attention",
-            "full_attention",
-        ):
-            global_head_dim = getattr(config, "global_head_dim", None)
-            if global_head_dim is not None:
-                layer_qk_head_dim = global_head_dim
-                layer_value_head_dim = global_head_dim
-
-        num_sequence_mixing_flops_per_token += quadratic_attention_flops_per_token(
-            num_heads=config.n_heads,
-            qk_head_dim=layer_qk_head_dim,
-            value_head_dim=layer_value_head_dim,
-            seq_len=seq_len,
-            sliding_window_size=sliding_window_size,
-        )
-
-    if unsupported_layer_types:
-        logger.warning(
-            "HF MFU calculation does not recognize layer types "
-            f"{sorted(unsupported_layer_types)}; approximating them as full attention."
-        )
-
-    num_flops_per_token = 6 * active_nparams + num_sequence_mixing_flops_per_token
-    logger.info(
-        f"Total parameter count: {nparams:,}, active parameters: {active_nparams:,}"
-    )
-    return nparams, num_flops_per_token
-
-
 class HFTransformerModel(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
     _skip_lm_head: bool = False
@@ -642,7 +519,131 @@ class HFTransformerModel(BaseModel):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             assert isinstance(model, HFTransformerModel)
-            return _get_hf_model_nparams_and_flops(self, model, seq_len)
+            named_parameters = list(model.named_parameters())
+            nparams = sum(param.numel() for _, param in named_parameters)
+            parameter_weights = {
+                id(param): Fraction(1) for _, param in named_parameters
+            }
+
+            lm_head = getattr(model, "lm_head", None)
+            lm_head_parameter_ids = (
+                {id(param) for param in lm_head.parameters()}
+                if isinstance(lm_head, nn.Module)
+                else set()
+            )
+            for module in model.modules():
+                if isinstance(module, nn.Embedding):
+                    for param in module.parameters(recurse=False):
+                        if id(param) not in lm_head_parameter_ids:
+                            parameter_weights[id(param)] = Fraction(0)
+
+            for layer in model.layers.values():
+                moe_config = getattr(layer, "_native_moe_config", None)
+                if moe_config is None:
+                    continue
+                active_expert_ratio = Fraction(
+                    moe_config.router.top_k, moe_config.num_experts
+                )
+                if getattr(layer, "_layer_level_moe", False):
+                    moe_block = layer
+                else:
+                    moe_attr = _get_moe_attr_name(layer)
+                    if moe_attr is None:
+                        logger.warning(
+                            "HF MFU calculation could not identify the MoE block; "
+                            "counting all expert parameters as active."
+                        )
+                        continue
+                    moe_block = getattr(layer, moe_attr)
+                for param in moe_block.experts.parameters():
+                    parameter_weights[id(param)] = active_expert_ratio
+
+            nparams_for_matmul = sum(
+                param.numel() * parameter_weights[id(param)]
+                for _, param in named_parameters
+            )
+            assert nparams_for_matmul.denominator == 1
+            active_nparams = nparams_for_matmul.numerator
+
+            if all(
+                hasattr(self, name)
+                for name in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+            ):
+                qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+                v_head_dim = self.v_head_dim
+            else:
+                qk_head_dim = self.head_dim
+                v_head_dim = self.head_dim
+
+            layer_types = getattr(self, "layer_types", None)
+            if layer_types is None:
+                default_layer_type = (
+                    "sliding_attention"
+                    if getattr(self, "sliding_window", None) is not None
+                    else "full_attention"
+                )
+                layer_types = [default_layer_type] * len(model.layers)
+            else:
+                # Debug flavors can override num_hidden_layers while retaining the full
+                # architecture's layer_types list. Count only the layers that were
+                # built.
+                layer_types = list(layer_types[: len(model.layers)])
+                if len(layer_types) < len(model.layers):
+                    logger.warning(
+                        "HF config defines fewer layer_types than built layers; "
+                        "approximating the remaining layers as full attention."
+                    )
+                    layer_types.extend(
+                        ["full_attention"] * (len(model.layers) - len(layer_types))
+                    )
+
+            additional_flops = 0
+            unsupported_layer_types = set()
+            for layer_type in layer_types:
+                if layer_type in ("attention", "full_attention"):
+                    sliding_window_size = None
+                elif layer_type == "sliding_attention":
+                    sliding_window_size = getattr(self, "sliding_window", None)
+                elif layer_type == "chunked_attention":
+                    sliding_window_size = getattr(self, "attention_chunk_size", None)
+                else:
+                    unsupported_layer_types.add(str(layer_type))
+                    sliding_window_size = None
+
+                layer_qk_head_dim = qk_head_dim
+                layer_v_head_dim = v_head_dim
+                if getattr(
+                    self, "model_type", None
+                ) == "gemma4_text" and layer_type in (
+                    "attention",
+                    "full_attention",
+                ):
+                    global_head_dim = getattr(self, "global_head_dim", None)
+                    if global_head_dim is not None:
+                        layer_qk_head_dim = global_head_dim
+                        layer_v_head_dim = global_head_dim
+
+                additional_flops += quadratic_attention_flops_per_token(
+                    num_heads=self.n_heads,
+                    qk_head_dim=layer_qk_head_dim,
+                    v_head_dim=layer_v_head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=sliding_window_size,
+                )
+
+            if unsupported_layer_types:
+                logger.warning(
+                    "HF MFU calculation does not recognize layer types "
+                    f"{sorted(unsupported_layer_types)}; "
+                    "approximating them as full attention."
+                )
+
+            num_flops_per_token = 6 * active_nparams + additional_flops
+            logger.info(
+                f"Total parameter count: {nparams:,}, "
+                f"active parameters: {active_nparams:,}"
+            )
+            return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()

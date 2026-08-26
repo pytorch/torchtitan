@@ -11,17 +11,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    GQAttention,
-    VarlenAttention,
-)
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
-from torchtitan.tools.logging import logger
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -115,12 +110,6 @@ class Qwen3Model(Decoder):
             attention_flops = 0
             for layer in self.layers:
                 attention = layer.attention
-                if not isinstance(attention, GQAttention.Config):
-                    logger.warning(
-                        "Skipping FLOP accounting for unsupported Qwen 3 "
-                        f"attention config {type(attention).__name__}."
-                    )
-                    continue
                 head_dim = (
                     attention.head_dim
                     if attention.head_dim is not None
@@ -129,7 +118,7 @@ class Qwen3Model(Decoder):
                 attention_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=head_dim,
-                    value_head_dim=head_dim,
+                    v_head_dim=head_dim,
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_flops

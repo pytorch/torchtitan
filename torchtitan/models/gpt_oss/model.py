@@ -32,7 +32,6 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 
 def apply_attention_sink_rescale(
@@ -221,16 +220,10 @@ class GptOssModel(Decoder):
             attention_flops = 0
             for layer in self.layers:
                 attention = layer.attention
-                if not isinstance(attention, Attention.Config):
-                    logger.warning(
-                        "Skipping FLOP accounting for unsupported GPT-OSS "
-                        f"attention config {type(attention).__name__}."
-                    )
-                    continue
                 attention_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=attention.head_dim,
-                    value_head_dim=attention.head_dim,
+                    v_head_dim=attention.head_dim,
                     seq_len=seq_len,
                     sliding_window_size=attention.sliding_window_size,
                 )
