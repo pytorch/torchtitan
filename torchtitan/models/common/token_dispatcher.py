@@ -512,11 +512,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 routed_input_RD,
                 num_global_tokens_per_local_expert_E,
             )
-            routed_scores_R = (
-                routed_scores_rank_major_R[permuted_indices]
-                if routed_scores_rank_major_R is not None
-                else None
-            )
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
@@ -527,7 +522,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
             output_splits=output_splits_list,
-            routed_scores_R=routed_scores_R,
+            routed_scores_R=(routed_scores_rank_major_R[permuted_indices] if routed_scores_rank_major_R is not None else None),
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
