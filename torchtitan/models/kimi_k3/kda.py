@@ -85,6 +85,8 @@ class KDAKernel(Module):
 
         gate_BTNK = bound_gate(
             raw_gate_BTNK,
+            # TODO: The long-term solution is to specify mixed precision per FQN
+            # instead of per layer. https://github.com/pytorch/pytorch/issues/156784
             A_log_N.float(),
             dt_bias_NK.float(),
             lower_bound=self.lower_bound,
