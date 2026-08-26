@@ -32,15 +32,15 @@ class KimiRMSNormGated(Module):
         self.eps = config.eps
         self.weight = nn.Parameter(torch.empty(config.dim))
 
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        normalized = F.rms_norm(
-            x.float(),
-            (x.shape[-1],),
+    def forward(self, x_TNV: torch.Tensor, gate_TNV: torch.Tensor) -> torch.Tensor:
+        input_dtype = x_TNV.dtype
+        normalized_TNV = F.rms_norm(
+            x_TNV.float(),
+            (x_TNV.shape[-1],),
             self.weight.float(),
             self.eps,
         )
-        return (normalized * gate.float().sigmoid()).to(input_dtype)
+        return (normalized_TNV * gate_TNV.float().sigmoid()).to(input_dtype)
 
 
 class KDAKernel(Module):
@@ -70,35 +70,35 @@ class KDAKernel(Module):
 
     def forward(
         self,
-        q_BLNK: torch.Tensor,
-        k_BLNK: torch.Tensor,
-        v_BLNK: torch.Tensor,
-        raw_gate_BLNK: torch.Tensor,
-        raw_beta_BLN: torch.Tensor,
+        q_BTNK: torch.Tensor,
+        k_BTNK: torch.Tensor,
+        v_BTNV: torch.Tensor,
+        raw_gate_BTNK: torch.Tensor,
+        raw_beta_BTN: torch.Tensor,
         A_log_N: torch.Tensor,
         dt_bias_NK: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if not q_BLNK.is_cuda:
+        if not q_BTNK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
 
-        gate_BLNK = bound_gate(
-            raw_gate_BLNK,
+        gate_BTNK = bound_gate(
+            raw_gate_BTNK,
             A_log_N.float(),
             dt_bias_NK.float(),
             lower_bound=self.lower_bound,
             impl="fused",
         )
-        output_BLNK, _ = chunk_kda(
-            l2norm(q_BLNK),
-            l2norm(k_BLNK),
-            v_BLNK,
-            gate_BLNK,
-            raw_beta_BLN.float().sigmoid(),
+        output_BTNV, _ = chunk_kda(
+            l2norm(q_BTNK),
+            l2norm(k_BTNK),
+            v_BTNV,
+            gate_BTNK,
+            raw_beta_BTN.float().sigmoid(),
             cu_seqlens=cu_seqlens,
         )
-        return output_BLNK
+        return output_BTNV
 
 
 class InnerKDA(Module):
@@ -134,8 +134,8 @@ class InnerKDA(Module):
         dt_bias_NK: torch.Tensor,
         cu_seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
-        raw_gate_BLNK = raw_gate_TNK.unsqueeze(0)
-        raw_beta_BLN = raw_beta_TN.unsqueeze(0)
+        raw_gate_BTNK = raw_gate_TNK.unsqueeze(0)
+        raw_beta_BTN = raw_beta_TN.unsqueeze(0)
         mixed_qkv_BTC = torch.cat(
             (query_TC, key_TC, value_TC),
             dim=-1,
@@ -152,21 +152,21 @@ class InnerKDA(Module):
         )
 
         q_BTC, k_BTC, v_BTC = conv_output_BTC.chunk(3, dim=-1)
-        q_BTNK, k_BTNK, v_BTNK = (
+        q_BTNK, k_BTNK, v_BTNV = (
             tensor.unflatten(-1, (-1, self.head_dim))
             for tensor in (q_BTC, k_BTC, v_BTC)
         )
-        output_BTNK = self.kernel(
+        output_BTNV = self.kernel(
             q_BTNK,
             k_BTNK,
-            v_BTNK,
-            raw_gate_BLNK,
-            raw_beta_BLN,
+            v_BTNV,
+            raw_gate_BTNK,
+            raw_beta_BTN,
             A_log_N,
             dt_bias_NK,
             cu_seqlens=cu_seqlens,
         )
-        return output_BTNK.squeeze(0)
+        return output_BTNV.squeeze(0)
 
 
 class KDA(Module):
@@ -251,7 +251,7 @@ class KDA(Module):
             num_tokens, self.num_heads, self.head_dim
         )
         raw_beta_TN = self.beta(x_TD).reshape(num_tokens, self.num_heads)
-        out_TNK = self.inner_kda(
+        out_TNV = self.inner_kda(
             self.q_proj(x_TD),
             self.k_proj(x_TD),
             self.v_proj(x_TD),
@@ -265,5 +265,5 @@ class KDA(Module):
             cu_seqlens,
         )
 
-        output_gate_TNK = self.output_gate(x_TD).view_as(out_TNK)
-        return self.output_proj(self.output_norm(out_TNK, output_gate_TNK).flatten(-2))
+        output_gate_TNV = self.output_gate(x_TD).view_as(out_TNV)
+        return self.output_proj(self.output_norm(out_TNV, output_gate_TNV).flatten(-2))
