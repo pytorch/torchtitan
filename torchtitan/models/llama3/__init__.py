@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
+from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -112,7 +113,9 @@ def _build_llama3_layers(
 
 
 def _debugmodel(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    seq_len: int = 131072,
 ) -> Llama3Model.Config:
     dim = 256
     n_heads = 16
@@ -135,7 +138,7 @@ def _debugmodel(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -146,7 +149,9 @@ def _debugmodel(
 
 
 def _1b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    seq_len: int = 131072,
 ) -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
@@ -179,7 +184,7 @@ def _1b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -190,7 +195,9 @@ def _1b(
 
 
 def _3b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    seq_len: int = 131072,
 ) -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
@@ -223,7 +230,7 @@ def _3b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -234,7 +241,9 @@ def _3b(
 
 
 def _8b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    seq_len: int = 131072,
 ) -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
@@ -264,7 +273,7 @@ def _8b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -275,7 +284,9 @@ def _8b(
 
 
 def _70b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    seq_len: int = 131072,
 ) -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
@@ -305,7 +316,7 @@ def _70b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -316,7 +327,9 @@ def _70b(
 
 
 def _405b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    seq_len: int = 131072,
 ) -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
@@ -346,7 +359,7 @@ def _405b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -368,12 +381,19 @@ llama3_configs = {
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
+    # seq_len is forwarded only when the caller sets it, so each flavor
+    # builder keeps its architecture's full context as the default.
+    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
     config = llama3_configs[flavor](
-        attn_backend=attn_backend, tp_gemm_backend=tp_gemm_backend
+        attn_backend=attn_backend,
+        tp_gemm_backend=tp_gemm_backend,
+        **seq_len_kwarg,
     )
     if converters is not None:
         validate_converter_order(converters)

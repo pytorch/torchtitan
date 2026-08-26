@@ -35,8 +35,8 @@ from . import model_registry
 from .model import Llama3Model
 
 
-def llama3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def llama3_debugmodel(seq_len: int = 2048) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -54,8 +54,8 @@ def llama3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -80,14 +80,16 @@ def llama3_debugmodel() -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_varlen_attn() -> Trainer.Config:
-    config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+def llama3_debugmodel_varlen_attn(seq_len: int = 2048) -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
     config.training.disable_cuda_graphs = True
     return config
 
 
-def llama3_debugmodel_dist_gemm() -> Trainer.Config:
+def llama3_debugmodel_dist_gemm(seq_len: int = 2048) -> Trainer.Config:
     """Async-TP: the attention TP collectives are folded into their GEMMs.
 
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
@@ -97,19 +99,22 @@ def llama3_debugmodel_dist_gemm() -> Trainer.Config:
     plain local tensors, which is that backend's contract. The DTensor backends
     are being deprecated and are not supported here.
     """
-    config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
+    config = llama3_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, tp_gemm_backend="dist_gemm"
+    )
     config.parallelism.spmd_backend = "spmd_types"
     return config
 
 
-def llama3_debugmodel_float8() -> Trainer.Config:
-    config = llama3_debugmodel()
+def llama3_debugmodel_float8(seq_len: int = 2048) -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=seq_len)
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
     )
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             Float8LinearConverter.Config(model_compile_enabled=model_compile_enabled),
         ],
@@ -117,8 +122,8 @@ def llama3_debugmodel_float8() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_nvfp4() -> Trainer.Config:
-    config = llama3_debugmodel()
+def llama3_debugmodel_nvfp4(seq_len: int = 2048) -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -128,6 +133,7 @@ def llama3_debugmodel_nvfp4() -> Trainer.Config:
     # 128, which the vocab projection does not satisfy.
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=["layers"],
@@ -138,8 +144,8 @@ def llama3_debugmodel_nvfp4() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
-    config = llama3_debugmodel()
+def llama3_debugmodel_first_85_pct_layers_nvfp4(seq_len: int = 2048) -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     model_compile_enabled = (
@@ -152,6 +158,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=fqns,
@@ -162,12 +169,13 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
+def llama3_debugmodel_float8_emulate_lora(seq_len: int = 2048) -> Trainer.Config:
     from torchtitan.components.lora import LoRAConverter
 
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             Float8LinearConverter.Config(
                 emulate=True,
@@ -179,9 +187,9 @@ def llama3_debugmodel_float8_emulate_lora() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_ce_loss() -> Trainer.Config:
+def llama3_debugmodel_ce_loss(seq_len: int = 2048) -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=seq_len)
     assert config.model_spec is not None
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model_spec),
@@ -189,8 +197,8 @@ def llama3_debugmodel_ce_loss() -> Trainer.Config:
     return config
 
 
-def llama3_8b() -> Trainer.Config:
-    model_spec = model_registry("8B")
+def llama3_8b(seq_len: int = 8192) -> Trainer.Config:
+    model_spec = model_registry("8B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -208,8 +216,8 @@ def llama3_8b() -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
+            max_context_length=seq_len,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -224,8 +232,8 @@ def llama3_8b() -> Trainer.Config:
     )
 
 
-def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
-    config = llama3_8b()
+def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int = 8192) -> Trainer.Config:
+    config = llama3_8b(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
@@ -237,6 +245,7 @@ def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
     config.model_spec = model_registry(
         "8B",
+        seq_len=seq_len,
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=fqns,
@@ -247,14 +256,15 @@ def llama3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     return config
 
 
-def llama3_8b_mxfp8() -> Trainer.Config:
-    config = llama3_8b()
+def llama3_8b_mxfp8(seq_len: int = 8192) -> Trainer.Config:
+    config = llama3_8b(seq_len=seq_len)
     # Swap dense Linear layers for MXFP8Linear. compile is enabled so the
     # converter's compile requirement is satisfied. This is the regular-Trainer
     # (torch.compile) baseline counterpart to graph_trainer_llama3_8b_mxfp8.
     config.compile = CompileConfig(enable=True, components=["model"])
     config.model_spec = model_registry(
         "8B",
+        seq_len=seq_len,
         converters=[
             MXFP8LinearConverter.Config(model_compile_enabled=True),
         ],
@@ -262,8 +272,8 @@ def llama3_8b_mxfp8() -> Trainer.Config:
     return config
 
 
-def llama3_70b() -> Trainer.Config:
-    model_spec = model_registry("70B")
+def llama3_70b(seq_len: int = 8192) -> Trainer.Config:
+    model_spec = model_registry("70B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -281,8 +291,8 @@ def llama3_70b() -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1.5e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
+            max_context_length=seq_len,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -300,13 +310,14 @@ def llama3_70b() -> Trainer.Config:
     )
 
 
-def llama3_405b() -> Trainer.Config:
+def llama3_405b(seq_len: int = 8192) -> Trainer.Config:
     compile_config = CompileConfig(
         enable=True,
         enable_async_tensor_parallel=True,
     )
     model_spec = model_registry(
         "405B",
+        seq_len=seq_len,
         converters=[
             Float8LinearConverter.Config(
                 filter_fqns=["lm_head"],
@@ -334,8 +345,8 @@ def llama3_405b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-5),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+            max_context_length=seq_len,
             steps=3000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -354,7 +365,7 @@ def llama3_405b() -> Trainer.Config:
     )
 
 
-def sft_debugmodel() -> Trainer.Config:
+def sft_debugmodel(seq_len: int = 2048) -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
 
     def process_sample(sample):
@@ -363,7 +374,7 @@ def sft_debugmodel() -> Trainer.Config:
             {"role": "assistant", "content": sample["answer"]},
         ]
 
-    model_spec = model_registry("debugmodel", attn_backend="flex")
+    model_spec = model_registry("debugmodel", seq_len=seq_len, attn_backend="flex")
 
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -381,8 +392,8 @@ def sft_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(

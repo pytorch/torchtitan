@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
+from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -220,6 +221,7 @@ def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    seq_len: int = 16384,
 ) -> KimiK25Model.Config:
     dim = 256
     n_layers = 6
@@ -254,7 +256,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -358,6 +360,7 @@ def _moonlight_16b_a3b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    seq_len: int = 8192,
 ) -> KimiK25Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
@@ -365,7 +368,7 @@ def _moonlight_16b_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=50000.0,
-        max_context_length=8192,
+        max_context_length=seq_len,
         vision_encoder=None,
     )
 
@@ -374,6 +377,7 @@ def _kimi_vl_a3b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    seq_len: int = 131072,
 ) -> KimiK25Model.Config:
     """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
 
@@ -386,7 +390,7 @@ def _kimi_vl_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=800000.0,
-        max_context_length=131072,
+        max_context_length=seq_len,
         vision_encoder=_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
@@ -405,6 +409,7 @@ def _kimi_k2_5(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    seq_len: int = 262144,
 ) -> KimiK25Model.Config:
     """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
     ~32B-active DeepSeekV3-style text tower (384 routed experts, top-8) plus a
@@ -452,7 +457,7 @@ def _kimi_k2_5(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=262144,
+            max_context_length=seq_len,
             theta=50000.0,
             scaling="yarn",
             rope_factor=64.0,
@@ -497,15 +502,21 @@ kimi_k2_5_configs = {
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
+    # seq_len is forwarded only when the caller sets it, so each flavor
+    # builder keeps its architecture's full context as the default.
+    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
     config = kimi_k2_5_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        **seq_len_kwarg,
     )
     if converters is not None:
         validate_converter_order(converters)

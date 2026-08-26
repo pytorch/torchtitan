@@ -6,6 +6,7 @@
 
 import dataclasses
 from collections.abc import Callable
+from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -249,6 +250,7 @@ def _build_gptoss_layers(
 def _debugmodel(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
+    seq_len: int = 131072,
 ) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
@@ -277,7 +279,7 @@ def _debugmodel(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -293,6 +295,7 @@ def _debugmodel(
 def _20b(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
+    seq_len: int = 131072,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -321,7 +324,7 @@ def _20b(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -337,6 +340,7 @@ def _20b(
 def _120b(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
+    seq_len: int = 131072,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -365,7 +369,7 @@ def _120b(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -387,13 +391,19 @@ gptoss_configs = {
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     moe_comm_backend: str = "standard",
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
+    # seq_len is forwarded only when the caller sets it, so each flavor
+    # builder keeps its architecture's full context as the default.
+    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
     config = gptoss_configs[flavor](
         moe_comm_backend=moe_comm_backend,
         attn_backend=attn_backend,
+        **seq_len_kwarg,
     )
     if converters is not None:
         validate_converter_order(converters)

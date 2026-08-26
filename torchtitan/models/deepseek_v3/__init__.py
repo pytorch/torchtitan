@@ -8,7 +8,7 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
+from typing import Any, Literal
 
 import torch.nn as nn
 
@@ -325,6 +325,7 @@ def _debugmodel(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    seq_len: int = 16384,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -359,7 +360,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -395,6 +396,7 @@ def _16b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    seq_len: int = 16384,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -429,7 +431,7 @@ def _16b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -465,6 +467,7 @@ def _236b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    seq_len: int = 16384,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -503,7 +506,7 @@ def _236b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -539,6 +542,7 @@ def _671b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    seq_len: int = 16384,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -578,7 +582,7 @@ def _671b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -619,17 +623,23 @@ deepseekv3_configs = {
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> ModelSpec:
+    # seq_len is forwarded only when the caller sets it, so each flavor
+    # builder keeps its architecture's full context as the default.
+    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
     config = deepseekv3_configs[flavor](
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
+        **seq_len_kwarg,
     )
     if converters is not None:
         validate_converter_order(converters)

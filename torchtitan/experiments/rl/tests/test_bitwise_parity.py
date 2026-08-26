@@ -260,6 +260,12 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
+    # TODO: model_spec.model.max_context_length is the RoPE cache size, which
+    # core config_registry functions now build from their seq_len parameter
+    # rather than from the architecture's full context. Once a model registry
+    # in torchtitan/models is used here, this reads the training sequence
+    # length, not the model's generation capacity. Give ModelSpec a dedicated
+    # capacity field and read that instead.
     engine_kwargs["max_model_len"] = config.model_spec.model.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).

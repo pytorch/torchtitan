@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib
+import inspect
 import os
 import sys
 import warnings
@@ -14,6 +15,10 @@ from typing import Any
 import tyro
 
 from torchtitan.tools.logging import logger
+
+# Spellings tyro accepts for TrainingConfig.max_context_length. Kept in argv
+# after peeking so tyro stays the authority on the field itself.
+_SEQ_LEN_FLAGS = ("--training.max-context-length", "--training.max_context_length")
 
 
 class ConfigManager:
@@ -155,8 +160,48 @@ class ConfigManager:
                 f"Available config functions: {available}"
             )
 
-        loaded_config = config_fn()
+        seq_len = self._peek_seq_len(filtered_args)
+        if seq_len is None:
+            loaded_config = config_fn()
+        elif "seq_len" in inspect.signature(config_fn).parameters:
+            loaded_config = config_fn(seq_len=seq_len)
+        else:
+            logger.warning(
+                f"{module_path}.{config_name} does not accept 'seq_len', so "
+                f"training.max_context_length={seq_len} does not reach "
+                "model_registry. The model config is built at the config "
+                "function's own sequence length; RoPE, if any, is resized "
+                "later by update_from_config."
+            )
+            loaded_config = config_fn()
         return loaded_config, filtered_args
+
+    @staticmethod
+    def _peek_seq_len(args: list[str]) -> int | None:
+        """Read training.max_context_length from args without consuming it.
+
+        config_registry functions run before tyro parses args, so a config
+        function that sizes its model config from the sequence length needs
+        the value up front. The flag is left in args so tyro still applies it
+        to training.max_context_length. The last occurrence wins, matching
+        tyro's own handling of a repeated flag.
+        """
+        seq_len = None
+        for i, arg in enumerate(args):
+            for flag in _SEQ_LEN_FLAGS:
+                if arg.startswith(f"{flag}="):
+                    raw = arg.split("=", 1)[1]
+                elif arg == flag and i + 1 < len(args):
+                    raw = args[i + 1]
+                else:
+                    continue
+                try:
+                    seq_len = int(raw)
+                except ValueError:
+                    raise ValueError(
+                        f"{flag} must be an integer, got {raw!r}."
+                    ) from None
+        return seq_len
 
     @staticmethod
     def _merge_configs(base, custom) -> type:

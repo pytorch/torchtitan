@@ -7,6 +7,7 @@
 import dataclasses
 import math
 from collections.abc import Callable
+from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -426,7 +427,7 @@ def _muse_glimmer_config(
     )
 
 
-def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
+def _debugmodel(attn_backend: str, seq_len: int = 4096) -> MuseGlimmerModel.Config:
     return _muse_glimmer_config(
         dim=256,
         n_layers=8,
@@ -434,7 +435,7 @@ def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
         n_kv_heads=2,
         head_dim=64,
         vocab_size=2048,
-        max_context_length=4096,
+        max_context_length=seq_len,
         window_pattern=[128, 128, 128, 0],
         output_multiplier=1.0,
         attn_backend=attn_backend,
@@ -442,7 +443,10 @@ def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
 
 
 def _muse_glimmer_30b(
-    attn_backend: str, *, with_vision: bool = False
+    attn_backend: str,
+    *,
+    with_vision: bool = False,
+    seq_len: int = 16384,
 ) -> MuseGlimmerModel.Config:
     vision_adapter_dim = None
     vision_encoder = None
@@ -459,7 +463,7 @@ def _muse_glimmer_30b(
         n_kv_heads=2,
         head_dim=128,
         vocab_size=202048,
-        max_context_length=16384,
+        max_context_length=seq_len,
         window_pattern=[2048, 2048, 2048, 0],
         output_multiplier=0.19611613513,
         attn_backend=attn_backend,
@@ -469,7 +473,9 @@ def _muse_glimmer_30b(
     )
 
 
-def _muse_glimmer_debugmodel_mm(attn_backend: str) -> MuseGlimmerModel.Config:
+def _muse_glimmer_debugmodel_mm(
+    attn_backend: str, seq_len: int = 4096
+) -> MuseGlimmerModel.Config:
     """Multimodal debug flavor: the debug text decoder that *owns* a scaled-down
     vision encoder + adapter and runs them inside ``forward``.
 
@@ -499,7 +505,7 @@ def _muse_glimmer_debugmodel_mm(attn_backend: str) -> MuseGlimmerModel.Config:
         n_kv_heads=2,
         head_dim=64,
         vocab_size=2048,
-        max_context_length=4096,
+        max_context_length=seq_len,
         window_pattern=[128, 128, 128, 0],
         output_multiplier=1.0,
         attn_backend=attn_backend,
@@ -519,10 +525,15 @@ muse_glimmer_configs = {
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = muse_glimmer_configs[flavor](attn_backend=attn_backend)
+    # seq_len is forwarded only when the caller sets it, so each flavor
+    # builder keeps its architecture's full context as the default.
+    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
+    config = muse_glimmer_configs[flavor](attn_backend=attn_backend, **seq_len_kwarg)
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
