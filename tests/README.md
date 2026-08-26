@@ -74,6 +74,9 @@ and uses its fixed initialization path.
   representative.
 - Golden directories identify the PG mode, filenames identify the model and
   hardware tier, and the exact parallelism plan is recorded in the header.
+- Qwen3.5 MoE FSDP 4 x TP 2, EP 4 does not have a numerical golden. Its A10G
+  Real-PG results are not bitwise deterministic, so the case provides
+  end-to-end coverage only.
 
 | A10G model | Topology (Fake-PG and Real-PG) |
 | --- | --- |

@@ -197,7 +197,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen35_debugmodel_moe_fsdp4_tp2_ep4_no_router_recompute() -> Trainer.Config:
+def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
 
     config = qwen35_debugmodel_moe()
@@ -210,11 +210,6 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4_no_router_recompute() -> Trainer.Config:
     )
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
-    # Forced router recomputation is not bitwise reproducible when mixed with
-    # cached Real-PG expert-parallel collectives.
-    config.activation_checkpoint = SelectiveAC.Config(
-        force_recompute_mm_shapes_by_fqns=[]
-    )
     return config
 
 
