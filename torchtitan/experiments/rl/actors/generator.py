@@ -929,10 +929,6 @@ class VLLMGenerator(Actor, Configurable):
             # Read the checkpoint's real Qwen3.5 config and let vLLM select its
             # native model, attention backend, and standard GPU worker.
             engine_kwargs["config_format"] = "auto"
-            # The current vLLM nightly's CUDA-IPC custom all-reduce fails during
-            # CUDA graph profiling under Monarch's external launcher. Use its
-            # NCCL fallback; this remains GPU-to-GPU TP communication.
-            engine_kwargs["disable_custom_all_reduce"] = True
         else:
             engine_kwargs["config_format"] = TORCHTITAN_CONFIG_FORMAT
             engine_kwargs["worker_cls"] = TORCHTITAN_WORKER_CLS
