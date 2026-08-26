@@ -60,9 +60,7 @@ def _spmd_local_tensor_to_dtensor(
     assert non_dp_mesh.mesh_dim_names is not None
     placements = tuple(
         spmd.spmd_type_to_dtensor_placement(
-            non_dp_mesh_types[
-                spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))
-            ]
+            non_dp_mesh_types[spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))]
         )
         for axis_name in non_dp_mesh.mesh_dim_names
     )
@@ -255,9 +253,7 @@ class ReplicateComputation(Module):
 
             if self.param_non_dp_mesh_types is not None:
                 output = replicated_local_tensor
-                for axis, axis_type in self.param_non_dp_mesh_types[
-                    param_name
-                ].items():
+                for axis, axis_type in self.param_non_dp_mesh_types[param_name].items():
                     if axis_type is spmd.R:
                         # params replicated on non-FSDP-axes that require BWD all-reduce
                         # (e.g. TP RMSNorm w/ SP on) are annotated as spmd.R;
@@ -336,9 +332,7 @@ def data_parallel(
 
         param_non_dp_mesh_types: dict[
             str, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
-        ] | None = (
-            {} if get_spmd_backend() == "spmd_types" else None
-        )
+        ] | None = ({} if get_spmd_backend() == "spmd_types" else None)
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
                 non_dp_mesh_types = None
