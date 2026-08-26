@@ -14,7 +14,7 @@ from typing import Any, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
-from torch.fx.traceback import annotate_fn
+from torch.fx.traceback import annotate, annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
@@ -159,11 +159,39 @@ def ensure_boxed_graph_module(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 
 
 _MODULE_FQN = "module_fqn"
+# Tuple of unique parameter FQNs naming one gradient value. Consumers must
+# treat it as a set: tied parameters can associate multiple FQNs with one node.
+PARAMETER_GRADIENT_FQNS_META = "parameter_gradient_fqns"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def compute_parameter_gradients(
+    loss: torch.Tensor,
+    named_parameters: Iterable[tuple[str, torch.Tensor]],
+) -> tuple[torch.Tensor, ...]:
+    """Compute and identify parameter gradients in the traced graph.
+
+    Each gradient is passed through an annotated ``aten.alias`` immediately
+    after ``torch.autograd.grad`` establishes its parameter correspondence.
+    The alias is a view of the same storage, not a copy or device computation,
+    and keeps the identity available even when an optimizer consumes the
+    gradient inside the graph instead of returning it as a graph output.
+    GraphTrainer moves the FQN set onto the underlying gradient node and
+    erases the markers before later graph passes and backend compilation.
+    """
+    named_parameters = tuple(named_parameters)
+    gradients = torch.autograd.grad(
+        loss, tuple(parameter for _, parameter in named_parameters)
+    )
+    tagged_gradients = []
+    for (parameter_fqn, _), gradient in zip(named_parameters, gradients, strict=True):
+        with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
+            tagged_gradients.append(torch.ops.aten.alias.default(gradient))
+    return tuple(tagged_gradients)
 
 
 def compute_annotated_loss(
