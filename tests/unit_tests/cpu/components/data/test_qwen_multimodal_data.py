@@ -20,7 +20,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MMSamplePackingConfig,
     MultiModalProcessor,
 )
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
+from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
 from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
 
@@ -108,13 +108,13 @@ def test_multimodal_processor_forwards_resize_config():
 
     processor = MultiModalProcessor.Config(
         sample_processor=process_sample,
-        resize_fn=resize_to_patch_budget,
+        resize_fn=resize_to_navit_patch_grid,
         max_patches=123,
         max_patches_per_side=45,
     ).build(context=CONTEXT)
 
     assert processor({}, np.random.default_rng(0)) is None
-    assert captured["resize_fn"] is resize_to_patch_budget
+    assert captured["resize_fn"] is resize_to_navit_patch_grid
     assert captured["max_patches"] == 123
     assert captured["max_patches_per_side"] == 45
 
@@ -140,7 +140,7 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
     assert dataset is not base_dataset
     assert isinstance(dataset.processor, MultiModalProcessor.Config)
     assert dataset.processor is not base_processor
-    assert dataset.processor.resize_fn is resize_to_patch_budget
+    assert dataset.processor.resize_fn is resize_to_navit_patch_grid
     assert dataset.processor.max_patches == 16_384
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_order == "raster"

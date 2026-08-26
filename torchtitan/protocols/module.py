@@ -22,8 +22,9 @@ from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
+    _per_axis_types,
     current_spmd_mesh,
     set_current_spmd_mesh,
     spmd_axes,
@@ -323,6 +324,45 @@ class Module(nn.Module, Configurable):
         with set_current_spmd_mesh(mesh):
             spmd.assert_type(registered, layout)
 
+    def _validate_even_model_parallel_param_sharding(
+        self,
+        name: str,
+        param: nn.Parameter,
+        layout: SpmdType,
+        parallel_dims: ParallelDims,
+    ) -> None:
+        """Reject parameter layouts that produce uneven TP or EP local shards."""
+        axis_types = _per_axis_types(layout)
+        axis_sizes = {
+            MeshAxisName.TP: parallel_dims.tp,
+            MeshAxisName.EP: parallel_dims.ep,
+        }
+        for axis_name, axis_size in axis_sizes.items():
+            axis_type = axis_types.get(axis_name)
+            if axis_size == 1 or not isinstance(axis_type, spmd.Shard):
+                continue
+
+            tensor_dim = axis_type.dim
+            if tensor_dim < 0:
+                tensor_dim += param.ndim
+            if tensor_dim < 0 or tensor_dim >= param.ndim:
+                raise ValueError(
+                    f"{type(self).__name__}.{name} has invalid tensor dimension "
+                    f"{axis_type.dim} in its {axis_name.value.upper()} sharding "
+                    f"for parameter shape {tuple(param.shape)}."
+                )
+            if param.shape[tensor_dim] % axis_size == 0:
+                continue
+
+            raise ValueError(
+                "spmd_types does not support uneven model-parallel parameter "
+                f"sharding: {type(self).__name__}.{name} with shape "
+                f"{tuple(param.shape)} "
+                f"cannot be evenly sharded on tensor dimension {tensor_dim} "
+                f"across model-parallel mesh axis {axis_name.value} with size "
+                f"{axis_size}."
+            )
+
     def _distribute_states(self, parallel_dims: ParallelDims) -> None:
         """Distribute params and buffers per ``state_shardings``.
 
@@ -342,6 +382,12 @@ class Module(nn.Module, Configurable):
                     "in sharding_config.state_shardings."
                 )
             if parallel_dims.spmd_backend == "spmd_types":
+                self._validate_even_model_parallel_param_sharding(
+                    name,
+                    param,
+                    spmd_layout,
+                    parallel_dims,
+                )
                 self._spmd_distribute_state(
                     parallel_dims,
                     name,
@@ -519,7 +565,7 @@ class Module(nn.Module, Configurable):
         """Redistribute inputs to desired placements.
 
         Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
-        resolve a mesh from that input's SpmdLayouts, then:
+        resolve a mesh from that input's SpmdTypes, then:
         1. If plain tensor and ``in_src_shardings`` declared, wrap as
            DTensor via ``DTensor.from_local`` on that mesh.
         2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
