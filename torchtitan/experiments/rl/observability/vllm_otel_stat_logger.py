@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
+    from opentelemetry.util.types import AttributeValue
     from vllm.config import VllmConfig
     from vllm.v1.metrics.stats import (
         IterationStats,
@@ -149,28 +150,12 @@ class VllmOtelStatLogger(StatLoggerBase):
         *,
         context: StatLoggerContext,
     ) -> None:
-        self._output_dir = context.output_dir
-        self._attributes: dict[str, str | int] = {
-            "model_name": vllm_config.model_config.model,
-            "hostname": socket.gethostname(),
-            "rank": context.rank,
-            "local_rank": int(os.environ.get("LOCAL_RANK", 0)),
-            "world_size": int(os.environ.get("WORLD_SIZE", 1)),
-            "dp_rank": context.dp_rank,
-            "tp_rank": context.tp_rank,
-            "generator_name": context.generator_name,
-        }
         self._enabled = False
 
         self._kv_cache_usage_last = 0.0
         self._num_running_last = 0
         self._num_waiting_last = 0
 
-        self._provider = None
-        self._init_otel(self._attributes)
-
-    def _init_otel(self, resource_attrs: dict[str, str | int]) -> None:
-        """Initialize the OTLP export pipeline."""
         configured_exporter = os.environ.get("OTEL_METRICS_EXPORTER", "none")
         exporter_kind = configured_exporter.strip().lower()
         if exporter_kind == "none":
@@ -191,7 +176,7 @@ class VllmOtelStatLogger(StatLoggerBase):
                 "VllmOtelStatLogger inactive: OTEL_SDK_DISABLED is set to true"
             )
             return
-        if exporter_kind == "jsonl" and not self._output_dir:
+        if exporter_kind == "jsonl" and not context.output_dir:
             logger.warning(
                 "VllmOtelStatLogger inactive: OTEL_METRICS_EXPORTER=jsonl "
                 "requires an output directory"
@@ -236,13 +221,11 @@ class VllmOtelStatLogger(StatLoggerBase):
 
                 # Save metrics to ``<output_dir>/vllm_metrics/``. Useful for
                 # local development where a collector is not available.
-                rank = self._attributes.get("rank", 0)
-                label = str(self._attributes.get("generator_name", "gen"))
-                safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+                safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", context.generator_name)
                 path = os.path.join(
-                    self._output_dir,
+                    context.output_dir,
                     "vllm_metrics",
-                    f"{safe_label}.rank{rank}.jsonl",
+                    f"{safe_label}.rank{context.rank}.jsonl",
                 )
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 out = open(path, "a", buffering=1)
@@ -260,11 +243,13 @@ class VllmOtelStatLogger(StatLoggerBase):
                 exporter,
                 export_interval_millis=envs.VLLM_LOG_STATS_INTERVAL * 1000,
             )
-            self._provider = MeterProvider(
+            provider = MeterProvider(
                 metric_readers=[reader],
-                resource=Resource.create(resource_attrs),
+                resource=Resource.create(
+                    self._build_resource_attributes(vllm_config, context)
+                ),
             )
-            meter = self._provider.get_meter("torchtitan.experiments.rl.vllm")
+            meter = provider.get_meter("torchtitan.experiments.rl.vllm")
             self._create_counters(meter)
             self._create_histograms(meter)
             self._create_gauges(meter, Observation)
@@ -272,6 +257,21 @@ class VllmOtelStatLogger(StatLoggerBase):
         except Exception as e:
             logger.warning("VllmOtelStatLogger disabled: metrics setup failed: %s", e)
             self._enabled = False
+
+    def _build_resource_attributes(
+        self, vllm_config: VllmConfig, context: StatLoggerContext
+    ) -> dict[str, AttributeValue]:
+        """Build resource attributes, allowing subclasses to add backend tags."""
+        return {
+            "model_name": vllm_config.model_config.model,
+            "hostname": socket.gethostname(),
+            "rank": context.rank,
+            "local_rank": int(os.environ.get("LOCAL_RANK", 0)),
+            "world_size": int(os.environ.get("WORLD_SIZE", 1)),
+            "dp_rank": context.dp_rank,
+            "tp_rank": context.tp_rank,
+            "generator_name": context.generator_name,
+        }
 
     def _create_counters(self, meter: Meter) -> None:
         """Monotonic counters; the backend derives throughput/rates via rate()."""
