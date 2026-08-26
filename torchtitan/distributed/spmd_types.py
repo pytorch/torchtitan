@@ -28,7 +28,7 @@ from torchtitan.distributed.utils import get_spmd_backend
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
 # PartitionSpec is immutable, so sharing it across a model deepcopy is safe.
-setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)
+setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
 
 __all__ = [
     "annotate_input_spmd_types",
