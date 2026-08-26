@@ -26,7 +26,7 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 
-from .kda import KimiDeltaAttention
+from .kda import KDA
 from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
@@ -159,7 +159,7 @@ class KimiK3TransformerBlock(Module):
         layer_id: int
         attn_res_block_size: int
         attention: KimiMLAAttention.Config | None
-        delta_attention: KimiDeltaAttention.Config | None
+        delta_attention: KDA.Config | None
         feed_forward: KimiFeedForward.Config | None
         moe: KimiLatentMoE.Config | None
         attention_norm: RMSNorm.Config

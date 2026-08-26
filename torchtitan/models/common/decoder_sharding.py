@@ -7,6 +7,7 @@
 import spmd_types as spmd
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
+
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedFeedForward,
@@ -155,19 +156,6 @@ def norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def head_parallel_norm_config(*input_names: str) -> ShardingConfig:
-    """Sharding for a norm over head-sharded ``(T, N, H)`` activations."""
-    activation = attention_activation_placement()
-    input_shardings = {name: activation for name in input_names}
-    return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings=dict(input_shardings),
-        in_dst_shardings=dict(input_shardings),
-        out_src_shardings=activation,
-        out_dst_shardings=activation,
-    )
-
-
 def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
 
@@ -311,110 +299,6 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
         local_map=LocalMapConfig(
             in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
         ),
-    )
-
-
-def set_linear_attention_inner_sharding(
-    inner_attention_cfg,
-    *,
-    input_shardings: dict[str, SpmdLayout],
-) -> None:
-    """Configure a head-sharded linear-attention local kernel boundary.
-
-    ``input_shardings`` must follow the inner module's positional argument order;
-    that order also defines the input-gradient placements for ``local_map``.
-    """
-    output_sharding = attention_activation_placement()
-    inner_attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings=dict(input_shardings),
-        in_dst_shardings=dict(input_shardings),
-        out_src_shardings=output_sharding,
-        out_dst_shardings=output_sharding,
-        local_map=LocalMapConfig(
-            in_grad_placements=tuple(input_shardings.values()),
-        ),
-    )
-
-
-def set_kda_sharding(
-    kda_cfg,
-    *,
-    attention_input_layout: SpmdLayout,
-    enable_sp: bool,
-    cp_enabled: bool,
-) -> None:
-    """Configure head-sharded TP for KDA with folded token tensors.
-
-    Projections use ``(T, C)``, while the gate and recurrence use
-    ``(T, N, K)``. The inner KDA boundary converts head-sharded DTensors
-    to rank-local tensors before adding the singleton kernel batch dimension.
-    """
-    if cp_enabled:
-        raise NotImplementedError("Context parallel is not yet supported for KDA")
-
-    for name in ("q_proj", "k_proj", "v_proj", "forget_b", "beta", "output_gate"):
-        getattr(kda_cfg, name).sharding_config = colwise_config()
-
-    replicated_placement = dense_param_placement(tp=spmd.R)
-    kda_cfg.forget_a.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": replicated_placement,
-            "bias": replicated_placement,
-        },
-        out_src_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-    )
-
-    conv_sharding = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-    )
-    kda_cfg.q_conv.sharding_config = conv_sharding
-    kda_cfg.k_conv.sharding_config = conv_sharding
-    kda_cfg.v_conv.sharding_config = conv_sharding
-
-    kda_cfg.output_norm.sharding_config = head_parallel_norm_config("x", "gate")
-    kda_cfg.output_proj.sharding_config = rowwise_config(output_sp=enable_sp)
-
-    projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    head_placement = attention_activation_placement()
-    parameter_placement = dense_param_placement(tp=spmd.S(0))
-    cu_seqlens_placement = SpmdLayout(
-        {
-            DP: spmd.V,
-            CP: spmd.R,
-            TP: spmd.R,
-        }
-    )
-    set_linear_attention_inner_sharding(
-        kda_cfg.inner_kda,
-        input_shardings={
-            "query_TC": projected_placement,
-            "key_TC": projected_placement,
-            "value_TC": projected_placement,
-            "raw_gate_TNK": head_placement,
-            "raw_beta_TN": projected_placement,
-            "conv_q_weight_C1W": parameter_placement,
-            "conv_k_weight_C1W": parameter_placement,
-            "conv_v_weight_C1W": parameter_placement,
-            "A_log_N": parameter_placement,
-            "dt_bias_NK": parameter_placement,
-            "cu_seqlens": cu_seqlens_placement,
-        },
-    )
-
-    output_placement = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    )
-    kda_cfg.sharding_config = ShardingConfig(
-        state_shardings={
-            "A_log": parameter_placement,
-            "dt_bias": parameter_placement,
-        },
-        in_src_shardings={"x_TD": attention_input_layout},
-        in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
-        out_src_shardings=output_placement,
-        out_dst_shardings=output_placement,
     )
 
 
