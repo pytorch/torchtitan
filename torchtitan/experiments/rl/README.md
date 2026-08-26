@@ -186,8 +186,6 @@ Together these answer four different debugging questions: what the distributed s
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
 
-This config sets `DebugConfig(batch_invariant=True, deterministic=True)`. The trainer must compute its forward in bfloat16 to match the generator. This is achieved with FSDP mixed precision: the trainer keeps fp32 master weights and FSDP casts them to bfloat16 (`training.mixed_precision_param="bfloat16"`, the default) for the forward, which is bitwise identical to the generator's bfloat16 forward. The trainer always wraps the model in FSDP, so this cast happens even at `data_parallel_shard_degree=1` (where FSDP acts purely as a mixed-precision boundary) -- no extra GPUs are needed.
-
 ## Monarch specifics
 
 ### Actor endpoints use `@concurrent_endpoint`
