@@ -165,6 +165,30 @@ def apply_fsdp_to_vision_encoder(
     )
 
 
+def add_zero_valued_dependency(
+    output: torch.Tensor,
+    unused_output: torch.Tensor,
+) -> torch.Tensor:
+    """Keep a partly consumed FSDP module in the autograd graph.
+
+    FSDP2 issues a module's all-gather from its pre-forward hook and its
+    reduce-scatter from the autograd hooks on that module's output. A rank that
+    consumes none of that output -- or only part of it -- would otherwise leave
+    the unconsumed rows outside the graph, so the collectives are issued by a
+    subset of the process group and the step deadlocks.
+
+    Scaling by zero leaves ``output`` numerically unchanged while preserving the
+    graph edge, so every rank issues the same collectives and the module
+    receives zero gradients for the rows nobody used -- which is also their
+    correct contribution to the data-parallel average.
+
+    Args:
+        output: the tensor the caller actually wants to return.
+        unused_output: a tensor produced by the module being kept alive.
+    """
+    return output + unused_output.sum().to(output.dtype) * 0.0
+
+
 def apply_fsdp_to_decoder(
     model: "Decoder",
     dp_mesh: DeviceMesh,

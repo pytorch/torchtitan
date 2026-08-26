@@ -12,6 +12,7 @@ from torch import nn
 
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
+from torchtitan.distributed.fsdp import add_zero_valued_dependency
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -375,6 +376,22 @@ class KimiK3Model(Decoder):
         num_tokens_per_item = (grid_thw[:, 1] // kernel_h) * (
             grid_thw[:, 2] // kernel_w
         )
+        if self._cp_group is not None and dist.get_world_size(self._cp_group) > 1:
+            # This rank holds a sequence shard but encoded every image: take the
+            # feature slice its placeholders correspond to and scatter that.
+            # get_vision_positions needs whole visual items, which a shard does
+            # not have -- it raises "found N contiguous run(s) ... but received M
+            # visual item(s)" as soon as a shard splits or omits an item.
+            local_mask = tokens == special_tokens["image_id"]
+            counts = self._exchange_sentinel_counts(int(local_mask.sum().item()))
+            mine = self._select_cp_shard(vision_embeds, counts)
+            embeddings_TD = embeddings_TD.masked_scatter(
+                local_mask.unsqueeze(-1), mine.to(embeddings_TD.dtype)
+            )
+            # Rows this rank did not consume still have to reach the graph, or
+            # the tower's reduce-scatter is issued by a subset of the group.
+            return add_zero_valued_dependency(embeddings_TD, vision_embeds)
+
         vision_positions = get_vision_positions(
             tokens,
             num_tokens_per_item,
@@ -385,6 +402,50 @@ class KimiK3Model(Decoder):
             vision_embeds=vision_embeds,
             vision_positions=vision_positions,
         )
+
+    def _exchange_sentinel_counts(self, local: int) -> torch.Tensor:
+        """Per-rank vision-placeholder counts across the CP group.
+
+        Called whenever CP is on, including on ranks holding no placeholders:
+        the collective's participants are decided by the mesh, never by the data.
+        """
+        group = self._cp_group
+        counts = torch.zeros(
+            dist.get_world_size(group),
+            dtype=torch.long,
+            device=torch.cuda.current_device(),
+        )
+        counts[dist.get_rank(group)] = local
+        dist.all_reduce(counts, group=group)
+        return counts
+
+    def _select_cp_shard(
+        self, vision_embeds: torch.Tensor, counts: torch.Tensor
+    ) -> torch.Tensor:
+        """Keep only the visual features belonging to this CP rank's shard.
+
+        ``prepare_context_parallel_input`` shards inputs, labels and positions
+        along the sequence but leaves ``pixel_values`` whole, so every rank
+        encodes every image while holding only a slice of the placeholders. The
+        features are ordered by sequence position and the shards are contiguous
+        and equal -- the config rejects a load balancer under CP precisely
+        because a permuting one would break that -- so this rank's slice starts
+        after however many placeholders the lower ranks hold.
+
+        This is correctness, not an optimization: the encoder still runs
+        redundantly on every CP rank.
+        """
+        num_rows = vision_embeds.shape[0]
+        if int(counts.sum().item()) != num_rows:
+            raise ValueError(
+                f"CP ranks hold {int(counts.sum().item())} vision "
+                f"placeholder(s) in total but {num_rows} visual token(s) were "
+                "encoded; the sequence shard and the image batch disagree"
+            )
+        rank = dist.get_rank(self._cp_group)
+        start = int(counts[:rank].sum().item())
+        local = int(counts[rank].item())
+        return vision_embeds[start : start + local]
 
     def forward(  # pyrefly: ignore [bad-override]
         self,
