@@ -116,12 +116,14 @@ def test_native_qwen35_weight_views_cover_packed_full_and_gdn_layers():
     assert views["layers.1.attn.in_proj_a.weight"].shape == (3, 4)
     assert views["layers.1.attn.conv_v.weight"].shape == (6, 2)
 
-    views["layers.0.attn.wk.weight"].fill_(7)
+    with torch.no_grad():
+        views["layers.0.attn.wk.weight"].fill_(7)
     assert torch.equal(
         full_native.self_attn.qkv_proj.weight[4:6],
         torch.full((2, 4), 7.0),
     )
-    views["layers.1.attn.in_proj_a.weight"].fill_(5)
+    with torch.no_grad():
+        views["layers.1.attn.in_proj_a.weight"].fill_(5)
     assert torch.equal(
         gdn_native.linear_attn.in_proj_ba.weight[3:6],
         torch.full((3, 4), 5.0),

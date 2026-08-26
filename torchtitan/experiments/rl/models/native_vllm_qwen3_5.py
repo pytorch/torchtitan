@@ -106,12 +106,6 @@ def build_qwen35_native_weight_views(
     def add(name: str, tensor: torch.Tensor, layout: SpmdLayout) -> None:
         if name in views:
             raise ValueError(f"Duplicate native vLLM weight view for {name}")
-        # vLLM initializes model parameters under no_grad. Packed-parameter
-        # slices inherit the resulting view metadata, which rejects a later
-        # TorchStore copy_ in grad-enabled async code. detach() keeps the same
-        # storage and pointer while making the synchronization target explicitly
-        # inference-only.
-        tensor = tensor.detach()
         if not tensor.is_contiguous():
             raise ValueError(
                 f"Native vLLM destination view for {name} is not contiguous: "
