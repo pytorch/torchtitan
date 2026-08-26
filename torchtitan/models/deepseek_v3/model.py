@@ -205,11 +205,11 @@ def get_deepseek_v3_nparams_and_flops(
         modules_excluded_from_active_params=modules_excluded_from_active_params,
     )
 
-    attention_flops = 0
+    attention_op_flops = 0
     for layers in (model_config.layers, model_config.mtp_layers):
         for layer in layers:
             attention = layer.attention
-            attention_flops += quadratic_attention_flops_per_token(
+            attention_op_flops += quadratic_attention_flops_per_token(
                 num_heads=attention.n_heads,
                 qk_head_dim=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
                 v_head_dim=attention.v_head_dim,
@@ -224,7 +224,7 @@ def get_deepseek_v3_nparams_and_flops(
             param.numel() for param in lm_head.parameters()
         )
 
-    return nparams, 6 * active_nparams + attention_flops
+    return nparams, 6 * active_nparams + attention_op_flops
 
 
 class DeepSeekV3Model(MTPDecoder):

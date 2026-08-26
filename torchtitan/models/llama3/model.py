@@ -86,7 +86,7 @@ class Llama3Model(Decoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             nparams, active_nparams = get_nparams_and_active_nparams(model)
-            attention_flops = 0
+            attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
                 head_dim = (
@@ -94,10 +94,10 @@ class Llama3Model(Decoder):
                     if attention.head_dim is not None
                     else attention.dim // attention.n_heads
                 )
-                attention_flops += quadratic_attention_flops_per_token(
+                attention_op_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=head_dim,
                     v_head_dim=head_dim,
                     seq_len=seq_len,
                 )
-            return nparams, 6 * active_nparams + attention_flops
+            return nparams, 6 * active_nparams + attention_op_flops

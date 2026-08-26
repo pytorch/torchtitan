@@ -597,7 +597,7 @@ class HFTransformerModel(BaseModel):
                         ["full_attention"] * (len(model.layers) - len(layer_types))
                     )
 
-            additional_flops = 0
+            attention_op_flops = 0
             unsupported_layer_types = set()
             for layer_type in layer_types:
                 if layer_type in ("attention", "full_attention"):
@@ -623,7 +623,7 @@ class HFTransformerModel(BaseModel):
                         layer_qk_head_dim = global_head_dim
                         layer_v_head_dim = global_head_dim
 
-                additional_flops += quadratic_attention_flops_per_token(
+                attention_op_flops += quadratic_attention_flops_per_token(
                     num_heads=self.n_heads,
                     qk_head_dim=layer_qk_head_dim,
                     v_head_dim=layer_v_head_dim,
@@ -638,7 +638,7 @@ class HFTransformerModel(BaseModel):
                     "approximating them as full attention."
                 )
 
-            num_flops_per_token = 6 * active_nparams + additional_flops
+            num_flops_per_token = 6 * active_nparams + attention_op_flops
             logger.info(
                 f"Total parameter count: {nparams:,}, "
                 f"active parameters: {active_nparams:,}"

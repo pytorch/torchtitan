@@ -320,11 +320,11 @@ class Qwen35Model(Decoder):
                 model,
                 modules_excluded_from_active_params=(qwen_model.vision_encoder,),
             )
-            additional_flops = 0
+            attention_op_flops = 0
             for layer in self.layers:
                 if isinstance(layer.attention, Qwen35Attention.Config):
                     attention = layer.attention
-                    additional_flops += quadratic_attention_flops_per_token(
+                    attention_op_flops += quadratic_attention_flops_per_token(
                         num_heads=attention.n_heads,
                         qk_head_dim=attention.head_dim,
                         v_head_dim=attention.head_dim,
@@ -335,12 +335,12 @@ class Qwen35Model(Decoder):
                     num_value_heads = (
                         delta_net.in_proj_v.out_features // delta_net.value_head_dim
                     )
-                    additional_flops += delta_rule_flops_per_token(
+                    attention_op_flops += delta_rule_flops_per_token(
                         num_heads=num_value_heads,
                         key_head_dim=delta_net.key_head_dim,
                         v_head_dim=delta_net.value_head_dim,
                     )
-            return nparams, 6 * active_nparams + additional_flops
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

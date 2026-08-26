@@ -326,7 +326,7 @@ class MuseGlimmerModel(Decoder):
                     muse_model.perception_emb_norm,
                 ),
             )
-            attention_flops = 0
+            attention_op_flops = 0
             for layer in self.layers:
                 attention = layer.attention
                 head_dim = (
@@ -334,14 +334,14 @@ class MuseGlimmerModel(Decoder):
                     if attention.head_dim is not None
                     else attention.dim // attention.n_heads
                 )
-                attention_flops += quadratic_attention_flops_per_token(
+                attention_op_flops += quadratic_attention_flops_per_token(
                     num_heads=attention.n_heads,
                     qk_head_dim=head_dim,
                     v_head_dim=head_dim,
                     seq_len=seq_len,
                     sliding_window_size=attention.window_size,
                 )
-            return nparams, 6 * active_nparams + attention_flops
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

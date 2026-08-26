@@ -287,11 +287,11 @@ class KimiK3Model(Decoder):
                 model,
                 modules_excluded_from_active_params=(kimi_model.vision_encoder,),
             )
-            additional_flops = 0
+            attention_op_flops = 0
             for layer in self.layers:
                 if isinstance(layer.attention, KimiMLAAttention.Config):
                     attention = layer.attention
-                    additional_flops += quadratic_attention_flops_per_token(
+                    attention_op_flops += quadratic_attention_flops_per_token(
                         num_heads=attention.n_heads,
                         qk_head_dim=(
                             attention.qk_nope_head_dim + attention.qk_rope_head_dim
@@ -301,12 +301,12 @@ class KimiK3Model(Decoder):
                     )
                 elif isinstance(layer.delta_attention, KimiDeltaAttention.Config):
                     delta_attention = layer.delta_attention
-                    additional_flops += delta_rule_flops_per_token(
+                    attention_op_flops += delta_rule_flops_per_token(
                         num_heads=delta_attention.num_heads,
                         key_head_dim=delta_attention.head_dim,
                         v_head_dim=delta_attention.head_dim,
                     )
-            return nparams, 6 * active_nparams + additional_flops
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)
