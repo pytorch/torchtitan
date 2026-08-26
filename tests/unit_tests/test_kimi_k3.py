@@ -30,7 +30,6 @@ from torchtitan.models.kimi_k3.kda import (
     KimiKDAKernel,
 )
 from torchtitan.models.kimi_k3.model import (
-    _attention_residual,
     _compiled_attention_residual,
     KimiK3Model,
     KimiMLAAttention,
@@ -77,6 +76,23 @@ def _small_model_config() -> KimiK3Model.Config:
         ),
         attn_backend="flex",
     )
+
+
+def _attention_residual_matmul_reference(
+    prefix_sum_TD: torch.Tensor,
+    block_residual_TND: torch.Tensor,
+    projection_weight_D: torch.Tensor,
+    norm_weight_D: torch.Tensor,
+    norm_eps: float,
+) -> torch.Tensor:
+    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
+    values_float = values_TND.float()
+    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
+    keys_TND = values_float * torch.rsqrt(variance + norm_eps)
+    score_weight_D = norm_weight_D.float() * projection_weight_D.float()
+    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
+    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
+    return torch.matmul(probs_T1N, values_float).squeeze(1).to(values_TND.dtype)
 
 
 def _kda_recurrent_reference(
@@ -216,7 +232,7 @@ class TestKimiK3(unittest.TestCase):
         )
 
         actual_TD = _compiled_attention_residual(*actual_inputs, 1e-5)
-        expected_TD = _attention_residual(*expected_inputs, 1e-5)
+        expected_TD = _attention_residual_matmul_reference(*expected_inputs, 1e-5)
         torch.testing.assert_close(
             actual_TD,
             expected_TD,

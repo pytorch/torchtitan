@@ -174,8 +174,8 @@ def _attention_residual(
     keys_TND = values_float * torch.rsqrt(variance + norm_eps)
     score_weight_D = norm_weight_D.float() * projection_weight_D.float()
     scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
+    probs_TN = torch.softmax(scores_TN, dim=-1)
+    output_TD = (probs_TN.unsqueeze(-1) * values_float).sum(dim=1)
     return output_TD.to(values_TND.dtype)
 
 
