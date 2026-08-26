@@ -17,6 +17,7 @@ import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
@@ -355,12 +356,16 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
             src_axes = (
                 ()
                 if src_entry is None
-                else src_entry if isinstance(src_entry, tuple) else (src_entry,)
+                else src_entry
+                if isinstance(src_entry, tuple)
+                else (src_entry,)
             )
             dst_axes = (
                 ()
                 if dst_entry is None
-                else dst_entry if isinstance(dst_entry, tuple) else (dst_entry,)
+                else dst_entry
+                if isinstance(dst_entry, tuple)
+                else (dst_entry,)
             )
             if src_axes == dst_axes:
                 continue

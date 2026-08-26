@@ -17,6 +17,11 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn import init
 from torch.nn.attention.flex_attention import and_masks
+from transformers import AutoConfig
+from transformers.configuration_utils import PretrainedConfig
+from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_utils import AttentionInterface, PreTrainedModel
+
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
@@ -29,10 +34,6 @@ from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.logging import logger
-from transformers import AutoConfig
-from transformers.configuration_utils import PretrainedConfig
-from transformers.integrations.flex_attention import flex_attention_forward
-from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 
 class HFFlexKernel(Module):
@@ -340,12 +341,12 @@ class HFTransformerModel(BaseModel):
             needed. The custom impl name only exists to bypass HF's per-model
             ``_supports_flex_attn`` gate.
             """
-            AttentionInterface._global_mapping[_ATTN_IMPLEMENTATION] = (
-                _flex_attention_torchtitan
-            )
-            self._titan_injected_model_args["attn_implementation"] = (
+            AttentionInterface._global_mapping[
                 _ATTN_IMPLEMENTATION
-            )
+            ] = _flex_attention_torchtitan
+            self._titan_injected_model_args[
+                "attn_implementation"
+            ] = _ATTN_IMPLEMENTATION
             self.attn_implementation = _ATTN_IMPLEMENTATION
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
@@ -1194,6 +1195,19 @@ class HFTransformerModel(BaseModel):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
+        if parallelism.spmd_backend == "spmd_types":
+            from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+            from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+
+            input_sharding = decoder_input_sharding()
+            # DSA attention masks are dense tensors but are not decoder inputs;
+            # preserve the old trainer behavior by annotating only declared names.
+            annotated = annotate_input_spmd_types(
+                parallel_dims,
+                {name: batch[name] for name in input_sharding if name in batch},
+                input_sharding,
+            )
+            batch.update(annotated)
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch

@@ -7,8 +7,8 @@
 from typing import Any, cast, TYPE_CHECKING
 
 import spmd_types as spmd
-from spmd_types import SpmdType
 import torch
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._attention import (
     _context_parallel_shard,

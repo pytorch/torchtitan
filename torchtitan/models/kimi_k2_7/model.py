@@ -14,6 +14,7 @@ from typing import Any, cast
 import spmd_types as spmd
 import torch
 from torch import nn
+
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types

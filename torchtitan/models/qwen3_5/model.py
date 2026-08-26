@@ -13,6 +13,7 @@ import torch
 from spmd_types import SpmdType
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
+
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -471,7 +472,7 @@ class Qwen35Model(Decoder):
             quadratic_attention = super().get_attention_masks(positions)
         # pyrefly: ignore [bad-return]
         return {
-            "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
+            "quadratic_attention": quadratic_attention,
             "deltanet": deltanet_metadata,
         }
 
