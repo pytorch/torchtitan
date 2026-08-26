@@ -14,6 +14,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
@@ -54,9 +55,6 @@ def parallelize_kimi_k3(
             "Kimi K3 FSDP2 currently supports the partial_dtensor SPMD backend "
             "only; the config registry pins it."
         )
-    if compile_config.enable and "model" in compile_config.components:
-        raise NotImplementedError("Kimi K3 does not support model compilation yet.")
-
     if parallel_dims.ep_enabled:
         model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
 
@@ -85,6 +83,14 @@ def parallelize_kimi_k3(
         ac_policy.apply(model)
         if model.vision_encoder is not None:
             ac_policy.apply(model.vision_encoder)
+
+    if compile_config.enable and "model" in compile_config.components:
+        apply_compile(
+            model,
+            compile_config=compile_config,
+            parallel_dims=parallel_dims,
+            fullgraph=False,
+        )
 
     vision_encoder = model.vision_encoder
     if vision_encoder is not None:

@@ -41,6 +41,7 @@ def apply_compile(
     *,
     compile_config: CompileConfig,
     parallel_dims: ParallelDims,
+    fullgraph: bool = True,
 ) -> None:
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
@@ -67,7 +68,7 @@ def apply_compile(
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block.compile(backend=backend, fullgraph=True)
+        transformer_block.compile(backend=backend, fullgraph=fullgraph)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
 

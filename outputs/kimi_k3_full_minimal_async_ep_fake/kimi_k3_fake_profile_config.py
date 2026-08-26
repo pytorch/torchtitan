@@ -37,7 +37,7 @@ def kimi_k3_full_minimal_async_ep_fake_profile() -> Trainer.Config:
         spmd_backend="partial_dtensor",
     )
     config.activation_checkpoint = FullAC.Config()
-    config.compile.enable = False
+    config.compile.enable = True
     config.debug.moe_force_load_balance = True
     config.metrics.log_freq = 1
     config.checkpoint.enable = False
