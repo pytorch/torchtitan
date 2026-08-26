@@ -19,7 +19,7 @@ from torchtitan.models.kimi_k3 import (
     model_registry,
 )
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
-from torchtitan.models.kimi_k3.kda import KimiKDAKernel
+from torchtitan.models.kimi_k3.kda import KimiDeltaAttention, KimiKDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -160,6 +160,48 @@ class TestKimiK3(unittest.TestCase):
         positions = torch.arange(4, dtype=torch.int32)
         attention_masks = model.get_attention_masks(positions)
         self.assertIsInstance(attention_masks, BlockMask)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
+    def test_fla_causal_conv_matches_torch(self):
+        torch.manual_seed(1)
+        config = _small_model_config().layers[0].delta_attention
+        assert config is not None
+        attention = KimiDeltaAttention(config).cuda().bfloat16()
+        attention.q_conv.weight.data.normal_(std=0.02)
+        input_TC = torch.randn(
+            64,
+            attention.q_conv.in_channels,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        expected_input_TC = input_TC.detach().clone().requires_grad_()
+
+        actual_TC = attention._causal_conv(input_TC, attention.q_conv)
+        expected_1CT = F.pad(
+            expected_input_TC.T.unsqueeze(0),
+            (attention.conv_kernel_size - 1, 0),
+        )
+        expected_TC = F.silu(attention.q_conv(expected_1CT)).squeeze(0).T
+        torch.testing.assert_close(actual_TC, expected_TC, atol=2e-3, rtol=2e-3)
+
+        output_grad_TC = torch.randn_like(actual_TC)
+        actual_grad_TC = torch.autograd.grad(
+            actual_TC,
+            input_TC,
+            grad_outputs=output_grad_TC,
+        )[0]
+        expected_grad_TC = torch.autograd.grad(
+            expected_TC,
+            expected_input_TC,
+            grad_outputs=output_grad_TC,
+        )[0]
+        torch.testing.assert_close(
+            actual_grad_TC,
+            expected_grad_TC,
+            atol=2e-2,
+            rtol=2e-2,
+        )
 
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):

@@ -9,7 +9,7 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
+from fla.modules.convolution import causal_conv1d
 from fla.ops.kda import chunk_kda
 from torch import nn
 
@@ -129,8 +129,13 @@ class KimiDeltaAttention(Module):
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
     def _causal_conv(self, x_TC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
-        x_1CT = F.pad(x_TC.T.unsqueeze(0), (self.conv_kernel_size - 1, 0))
-        return F.silu(conv(x_1CT)).squeeze(0).T
+        out_1TC, _ = causal_conv1d(
+            x=x_TC.unsqueeze(0),
+            weight=conv.weight.squeeze(1),
+            bias=conv.bias,
+            activation="silu",
+        )
+        return out_1TC.squeeze(0)
 
     def forward(
         self,
