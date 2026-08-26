@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +20,7 @@ from torchtitan.models.kimi_k3 import (
     model_registry,
 )
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+from torchtitan.models.kimi_k3.data import KimiK3MultiModalCollator
 from torchtitan.models.kimi_k3.kda import KimiDeltaAttention, KimiKDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
@@ -126,6 +128,43 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_collator_batches_equal_length_rows(self):
+        tokenizer = type("Tokenizer", (), {"pad_id": 99})()
+        collator = KimiK3MultiModalCollator.Config().build(
+            context=SimpleNamespace(
+                tokenizer=tokenizer,
+                num_tokens_per_batch=8,
+                max_context_length=4,
+            )
+        )
+        batch = [
+            {
+                "input_ids": torch.tensor([1, 2, 3]),
+                "labels": torch.tensor([2, 3, 4]),
+                "positions": torch.tensor([0, 1, 2]),
+            },
+            {
+                "input_ids": torch.tensor([5, 6]),
+                "labels": torch.tensor([6, 7]),
+                "positions": torch.tensor([0, 1]),
+            },
+        ]
+
+        input_ids, labels, positions = collator.collate_text(batch)
+
+        torch.testing.assert_close(
+            input_ids,
+            torch.tensor([1, 2, 3, 99, 5, 6, 99, 99]),
+        )
+        torch.testing.assert_close(
+            labels,
+            torch.tensor([2, 3, 4, -100, 6, 7, -100, -100]),
+        )
+        torch.testing.assert_close(
+            positions,
+            torch.tensor([0, 1, 2, 0, 0, 1, 0, 1]),
+        )
+
     def test_minimal_async_ep_uses_latent_expert_dim(self):
         trainer_config = kimi_k3_debugmodel()
         trainer_config.model_spec = model_registry(
@@ -177,7 +216,11 @@ class TestKimiK3(unittest.TestCase):
         )
         expected_input_TC = input_TC.detach().clone().requires_grad_()
 
-        actual_TC = attention._causal_conv(input_TC, attention.q_conv)
+        actual_TC = attention._causal_conv(
+            input_TC,
+            attention.q_conv,
+            num_sequences=1,
+        )
         expected_1CT = F.pad(
             expected_input_TC.T.unsqueeze(0),
             (attention.conv_kernel_size - 1, 0),
@@ -202,6 +245,29 @@ class TestKimiK3(unittest.TestCase):
             atol=2e-2,
             rtol=2e-2,
         )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
+    def test_kda_batch_matches_independent_sequences(self):
+        torch.manual_seed(3)
+        config = _small_model_config().layers[0].delta_attention
+        assert config is not None
+        attention = KimiDeltaAttention(config).cuda().bfloat16()
+        for parameter in attention.parameters():
+            parameter.data.normal_(std=0.02)
+        input_TD = torch.randn(
+            128,
+            config.dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+
+        actual_TD = attention(
+            input_TD,
+            sequence_offsets=torch.tensor([0, 64, 128], device="cuda"),
+        )
+        expected_TD = torch.cat([attention(input_TD[:64]), attention(input_TD[64:])])
+
+        torch.testing.assert_close(actual_TD, expected_TD, atol=2e-3, rtol=2e-3)
 
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):

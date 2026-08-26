@@ -128,20 +128,29 @@ class KimiDeltaAttention(Module):
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
-    def _causal_conv(self, x_TC: torch.Tensor, conv: Conv1d) -> torch.Tensor:
-        out_1TC, _ = causal_conv1d(
-            x=x_TC.unsqueeze(0),
+    def _causal_conv(
+        self,
+        x_TC: torch.Tensor,
+        conv: Conv1d,
+        *,
+        num_sequences: int,
+    ) -> torch.Tensor:
+        num_tokens, channels = x_TC.shape
+        assert num_tokens % num_sequences == 0
+        out_BLC, _ = causal_conv1d(
+            x=x_TC.view(num_sequences, num_tokens // num_sequences, channels),
             weight=conv.weight.squeeze(1),
             bias=conv.bias,
             activation="silu",
         )
-        return out_1TC.squeeze(0)
+        return out_BLC.flatten(0, 1)
 
     def forward(
         self,
         x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        sequence_offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
         if attention_masks is not None:
@@ -150,29 +159,40 @@ class KimiDeltaAttention(Module):
             )
 
         num_tokens = x_TD.shape[0]
-        q_THK = self._causal_conv(self.q_proj(x_TD), self.q_conv).view(
-            num_tokens, self.num_heads, self.head_dim
+        num_sequences = 1 if sequence_offsets is None else sequence_offsets.numel() - 1
+        sequence_length = num_tokens // num_sequences
+        q_BLHK = self._causal_conv(
+            self.q_proj(x_TD),
+            self.q_conv,
+            num_sequences=num_sequences,
+        ).view(num_sequences, sequence_length, self.num_heads, self.head_dim)
+        k_BLHK = self._causal_conv(
+            self.k_proj(x_TD),
+            self.k_conv,
+            num_sequences=num_sequences,
+        ).view(num_sequences, sequence_length, self.num_heads, self.head_dim)
+        v_BLHV = self._causal_conv(
+            self.v_proj(x_TD),
+            self.v_conv,
+            num_sequences=num_sequences,
+        ).view(num_sequences, sequence_length, self.num_heads, self.head_dim)
+        forget_BLHK = self.forget_b(self.forget_a(x_TD)).view(
+            num_sequences, sequence_length, self.num_heads, self.head_dim
         )
-        k_THK = self._causal_conv(self.k_proj(x_TD), self.k_conv).view(
-            num_tokens, self.num_heads, self.head_dim
+        beta_BLH = (
+            self.beta(x_TD).view(num_sequences, sequence_length, self.num_heads).float()
         )
-        v_THV = self._causal_conv(self.v_proj(x_TD), self.v_conv).view(
-            num_tokens, self.num_heads, self.head_dim
-        )
-        forget_THK = self.forget_b(self.forget_a(x_TD)).view(
-            num_tokens, self.num_heads, self.head_dim
-        )
-        beta_TH = self.beta(x_TD).float()
 
-        out_THV = self.kernel(
-            q_THK.unsqueeze(0),
-            k_THK.unsqueeze(0),
-            v_THV.unsqueeze(0),
-            forget_THK.unsqueeze(0),
-            beta_TH.unsqueeze(0),
+        out_BLHV = self.kernel(
+            q_BLHK,
+            k_BLHK,
+            v_BLHV,
+            forget_BLHK,
+            beta_BLH,
             self.A_log,
             self.dt_bias,
-        ).squeeze(0)
+        )
+        out_THV = out_BLHV.flatten(0, 1)
         output_gate_THV = self.output_gate(x_TD).view(
             num_tokens, self.num_heads, self.head_dim
         )

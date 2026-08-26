@@ -213,6 +213,7 @@ class KimiK3TransformerBlock(Module):
         block_residual_TND: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        sequence_offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum_TD = x_TD
 
@@ -241,7 +242,12 @@ class KimiK3TransformerBlock(Module):
             h_TD = self.attention(h_TD, attention_masks, positions)
         else:
             assert self.delta_attention is not None
-            h_TD = self.delta_attention(h_TD, None, positions)
+            h_TD = self.delta_attention(
+                h_TD,
+                None,
+                positions,
+                sequence_offsets,
+            )
         prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
 
         h_TD = _apply_attention_residual(
@@ -360,6 +366,7 @@ class KimiK3Model(Decoder):
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        sequence_offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -381,6 +388,7 @@ class KimiK3Model(Decoder):
                 block_residual_TND,
                 attention_masks,
                 positions,
+                sequence_offsets,
             )
 
         h_TD = _apply_attention_residual(

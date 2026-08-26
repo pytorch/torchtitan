@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 proof_root="${repo_root}/outputs/kimi_k3_full_minimal_async_ep_fake"
 benchmark_steps="${BENCHMARK_STEPS:-20}"
 sequence_length="${SEQ_LEN:-4096}"
+local_batch_size="${LOCAL_BATCH_SIZE:-2}"
 profile_warmup_steps="${PROFILE_WARMUP_STEPS:-2}"
 profile_active_steps="${PROFILE_ACTIVE_STEPS:-1}"
 run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -25,6 +26,11 @@ if [[ ! "${sequence_length}" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
+if [[ ! "${local_batch_size}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "LOCAL_BATCH_SIZE must be a positive integer" >&2
+    exit 1
+fi
+
 if [[ ! "${profile_warmup_steps}" =~ ^[0-9]+$ ]]; then
     echo "PROFILE_WARMUP_STEPS must be a non-negative integer" >&2
     exit 1
@@ -40,7 +46,8 @@ if ((profile_warmup_steps + profile_active_steps > benchmark_steps)); then
     exit 1
 fi
 
-global_tokens=$((sequence_length * 256))
+tokens_per_rank=$((sequence_length * local_batch_size))
+global_tokens=$((tokens_per_rank * 256))
 
 mkdir -p "${run_dir}"
 cd "${repo_root}"
@@ -56,13 +63,13 @@ export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
 
 echo "Benchmark output: ${run_dir}"
 echo "Configuration: Kimi-K3 BF16, fake world size 256, FSDP256, EP64"
-echo "Batch: 1 sequence x ${sequence_length} tokens per rank (${global_tokens} global tokens)"
+echo "Batch: ${local_batch_size} sequences x ${sequence_length} tokens per rank (${global_tokens} global tokens)"
 echo "Steps: ${benchmark_steps}; final profiler window: ${profile_warmup_steps} warmup + ${profile_active_steps} active"
 
 ./run_train.sh \
     --dump-folder "${run_dir}" \
     --training.steps "${benchmark_steps}" \
-    --training.num-tokens-per-microbatch-per-dp-rank "${sequence_length}" \
+    --training.num-tokens-per-microbatch-per-dp-rank "${tokens_per_rank}" \
     --training.num-tokens-per-train-step "${global_tokens}" \
     --training.max-context-length "${sequence_length}" \
     --profiler.enable-profiling \

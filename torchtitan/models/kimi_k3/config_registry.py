@@ -14,7 +14,6 @@ from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MultiModalProcessor,
@@ -24,6 +23,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
+from .data import KimiK3MultiModalCollator
 
 
 def _kimi_k3_multimodal_dataloader(
@@ -48,7 +48,7 @@ def _kimi_k3_multimodal_dataloader(
     )
     return GrainDataLoader.Config(
         dataset=replace(dataset, processor=processor),
-        collator=MultiModalCollator.Config(
+        collator=KimiK3MultiModalCollator.Config(
             max_images_per_batch=8,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
