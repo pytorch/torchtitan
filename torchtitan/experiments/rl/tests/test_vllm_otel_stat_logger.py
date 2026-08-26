@@ -12,9 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.experiments.rl.observability.vllm_otel_stat_logger import (
+    _extract_step_stats,
+    StatLoggerContext,
     VllmOtelStatLogger,
 )
-from torchtitan.experiments.rl.observability.vllm_stat_common import StatLoggerContext
 
 
 def _vllm_config(*, tp_size=1, dp_rank=0, model="test-model"):
@@ -42,6 +43,99 @@ def no_otel_env(monkeypatch):
         if key.startswith("OTEL_"):
             monkeypatch.delenv(key)
     monkeypatch.delenv("VLLM_LOG_STATS_INTERVAL", raising=False)
+
+
+def test_context_populates_attributes(no_otel_env):
+    log = VllmOtelStatLogger(
+        _vllm_config(model="m"),
+        3,
+        context=_context(rank=5, tp_rank=0, dp_rank=2, generator_name="gen-a"),
+    )
+
+    assert log._attributes["rank"] == 5
+    assert log._attributes["tp_rank"] == 0
+    assert log._attributes["dp_rank"] == 2
+    assert log._attributes["model_name"] == "m"
+    assert log._attributes["generator_name"] == "gen-a"
+
+
+def test_context_reads_distributed_env_tags(no_otel_env, monkeypatch):
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+
+    log = VllmOtelStatLogger(
+        _vllm_config(),
+        context=_context(rank=3, tp_rank=1, dp_rank=1),
+    )
+
+    assert log._attributes["local_rank"] == 1
+    assert log._attributes["world_size"] == 8
+
+
+def test_extract_step_stats_both_none():
+    step = _extract_step_stats(None, None)
+
+    assert step.kv_cache_usage is None
+    assert step.num_running_reqs is None
+    assert step.num_waiting_reqs is None
+    assert step.prefix_queries == 0
+    assert step.prefix_hits == 0
+    assert step.num_generation_tokens == 0
+    assert step.ttft_ms == []
+    assert step.itl_ms == []
+    assert step.finished == []
+
+
+def test_extract_step_stats_populated_converts_seconds_to_ms():
+    scheduler = SimpleNamespace(
+        kv_cache_usage=0.5,
+        num_running_reqs=4,
+        num_waiting_reqs=2,
+        prefix_cache_stats=SimpleNamespace(queries=10, hits=7),
+    )
+    iteration = SimpleNamespace(
+        num_generation_tokens=12,
+        prompt_token_stats=SimpleNamespace(total=100, cached_tokens=30),
+        num_preempted_reqs=1,
+        time_to_first_tokens_iter=[0.012],
+        inter_token_latencies_iter=[0.01, 0.02],
+        finished_requests=[
+            SimpleNamespace(decode_time=0.03, queued_time=0.005, e2e_latency=0.05)
+        ],
+    )
+
+    step = _extract_step_stats(scheduler, iteration)
+
+    assert step.kv_cache_usage == 0.5
+    assert step.num_running_reqs == 4
+    assert step.num_waiting_reqs == 2
+    assert step.prefix_queries == 10
+    assert step.prefix_hits == 7
+    assert step.num_generation_tokens == 12
+    assert step.num_prompt_tokens == 100
+    assert step.num_cached_prompt_tokens == 30
+    assert step.num_preempted_reqs == 1
+    assert step.ttft_ms == pytest.approx([12.0])
+    assert step.itl_ms == pytest.approx([10.0, 20.0])
+    assert len(step.finished) == 1
+    assert step.finished[0].decode_time_ms == pytest.approx(30.0)
+    assert step.finished[0].queue_time_ms == pytest.approx(5.0)
+    assert step.finished[0].e2e_latency_ms == pytest.approx(50.0)
+
+
+def test_extract_step_stats_prefix_cache_none():
+    scheduler = SimpleNamespace(
+        kv_cache_usage=0.1,
+        num_running_reqs=1,
+        num_waiting_reqs=0,
+        prefix_cache_stats=None,
+    )
+
+    step = _extract_step_stats(scheduler, None)
+
+    assert step.prefix_queries == 0
+    assert step.prefix_hits == 0
+    assert step.kv_cache_usage == 0.1
 
 
 def test_inert_on_dp_head_without_endpoint(no_otel_env):
@@ -155,3 +249,29 @@ def test_jsonl_export_is_asynchronous(no_otel_env, monkeypatch, tmp_path, caplog
     )
     log.log()
     log._provider.shutdown(timeout_millis=1000)
+
+
+def test_record_disables_on_instrument_failure(no_otel_env, caplog):
+    log = VllmOtelStatLogger(_vllm_config(), context=_context())
+
+    class FailingCounter:
+        def add(self, _value):
+            raise ValueError("simulated metrics failure")
+
+    log._c_gen_tokens = FailingCounter()
+    log._enabled = True
+
+    with caplog.at_level(logging.WARNING):
+        log.record(None, None)
+
+    assert log._enabled is False
+    assert "record() failed" in caplog.text
+
+
+def test_record_disables_on_extract_failure(no_otel_env):
+    log = VllmOtelStatLogger(_vllm_config(), context=_context())
+    log._enabled = True
+
+    log.record(None, SimpleNamespace())
+
+    assert log._enabled is False

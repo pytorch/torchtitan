@@ -16,23 +16,121 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vllm import envs
-
-from torchtitan.experiments.rl.observability.vllm_stat_common import (
-    StatLoggerContext,
-    StepStats,
-    VllmStatLoggerBase,
-)
+from vllm.v1.metrics.loggers import StatLoggerBase
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
     from vllm.config import VllmConfig
+    from vllm.v1.metrics.stats import (
+        IterationStats,
+        MultiModalCacheStats,
+        SchedulerStats,
+    )
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StatLoggerContext:
+    """Per-engine context the generator injects into its stat loggers."""
+
+    rank: int
+    tp_rank: int
+    dp_rank: int
+    generator_name: str
+    output_dir: str
+
+
+@dataclass
+class _FinishedRequestStats:
+    """Per-finished-request latencies for one engine step (milliseconds)."""
+
+    decode_time_ms: float
+    queue_time_ms: float
+    e2e_latency_ms: float
+
+
+@dataclass
+class _StepStats:
+    """Snapshot of one vLLM engine step."""
+
+    kv_cache_usage: float | None
+    num_running_reqs: int | None
+    num_waiting_reqs: int | None
+    prefix_queries: int
+    prefix_hits: int
+    num_generation_tokens: int
+    num_prompt_tokens: int
+    num_cached_prompt_tokens: int
+    num_preempted_reqs: int
+    ttft_ms: list[float] = field(default_factory=list)
+    itl_ms: list[float] = field(default_factory=list)
+    finished: list[_FinishedRequestStats] = field(default_factory=list)
+
+
+def _extract_step_stats(
+    scheduler_stats: SchedulerStats | None,
+    iteration_stats: IterationStats | None,
+) -> _StepStats:
+    """Read one engine step's vLLM stats."""
+    kv_cache_usage: float | None = None
+    num_running: int | None = None
+    num_waiting: int | None = None
+    prefix_queries = 0
+    prefix_hits = 0
+    if scheduler_stats is not None:
+        kv_cache_usage = scheduler_stats.kv_cache_usage
+        num_running = scheduler_stats.num_running_reqs
+        num_waiting = scheduler_stats.num_waiting_reqs
+        prefix = scheduler_stats.prefix_cache_stats
+        if prefix is not None:
+            prefix_queries = prefix.queries
+            prefix_hits = prefix.hits
+
+    gen_tokens = 0
+    prompt_tokens = 0
+    cached_prompt_tokens = 0
+    num_preempted = 0
+    ttft_ms: list[float] = []
+    itl_ms: list[float] = []
+    finished: list[_FinishedRequestStats] = []
+    if iteration_stats is not None:
+        gen_tokens = iteration_stats.num_generation_tokens
+        prompt_tokens = iteration_stats.prompt_token_stats.total
+        cached_prompt_tokens = iteration_stats.prompt_token_stats.cached_tokens
+        num_preempted = iteration_stats.num_preempted_reqs
+        ttft_ms = [t * 1000 for t in iteration_stats.time_to_first_tokens_iter]
+        itl_ms = [t * 1000 for t in iteration_stats.inter_token_latencies_iter]
+        finished = [
+            _FinishedRequestStats(
+                decode_time_ms=request.decode_time * 1000,
+                queue_time_ms=request.queued_time * 1000,
+                e2e_latency_ms=request.e2e_latency * 1000,
+            )
+            for request in iteration_stats.finished_requests
+        ]
+
+    return _StepStats(
+        kv_cache_usage=kv_cache_usage,
+        num_running_reqs=num_running,
+        num_waiting_reqs=num_waiting,
+        prefix_queries=prefix_queries,
+        prefix_hits=prefix_hits,
+        num_generation_tokens=gen_tokens,
+        num_prompt_tokens=prompt_tokens,
+        num_cached_prompt_tokens=cached_prompt_tokens,
+        num_preempted_reqs=num_preempted,
+        ttft_ms=ttft_ms,
+        itl_ms=itl_ms,
+        finished=finished,
+    )
 
 
 def _compact_json(metrics_data) -> str:
@@ -41,7 +139,7 @@ def _compact_json(metrics_data) -> str:
     return metrics_data.to_json(indent=None) + "\n"
 
 
-class VllmOtelStatLogger(VllmStatLoggerBase):
+class VllmOtelStatLogger(StatLoggerBase):
     """Per-engine vLLM stat logger that exports OTLP metrics to a collector."""
 
     def __init__(
@@ -51,7 +149,20 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
         *,
         context: StatLoggerContext,
     ) -> None:
-        super().__init__(vllm_config, engine_index, context=context)
+        self._output_dir = context.output_dir
+        self._attributes: dict[str, str | int] = {
+            "model_name": vllm_config.model_config.model,
+            "hostname": socket.gethostname(),
+            "rank": context.rank,
+            "local_rank": int(os.environ.get("LOCAL_RANK", 0)),
+            "world_size": int(os.environ.get("WORLD_SIZE", 1)),
+            "dp_rank": context.dp_rank,
+            "tp_rank": context.tp_rank,
+            "generator_name": context.generator_name,
+        }
+        # All TP ranks in a DP replica see identical engine-aggregate stats.
+        self._should_log = context.tp_rank == 0
+        self._enabled = False
 
         self._kv_cache_usage_last = 0.0
         self._num_running_last = 0
@@ -212,32 +323,51 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
             "vllm.num_waiting_requests", callbacks=[waiting_cb], unit="request"
         )
 
-    def _accumulate(self, step: StepStats) -> None:
-        if step.kv_cache_usage is not None:
-            self._kv_cache_usage_last = step.kv_cache_usage
-        if step.num_running_reqs is not None:
-            self._num_running_last = step.num_running_reqs
-        if step.num_waiting_reqs is not None:
-            self._num_waiting_last = step.num_waiting_reqs
+    def record(
+        self,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_idx: int = 0,
+    ) -> None:
+        """Record one vLLM engine step without propagating telemetry errors."""
+        if not self._enabled:
+            return
+        try:
+            step = _extract_step_stats(scheduler_stats, iteration_stats)
+            if step.kv_cache_usage is not None:
+                self._kv_cache_usage_last = step.kv_cache_usage
+            if step.num_running_reqs is not None:
+                self._num_running_last = step.num_running_reqs
+            if step.num_waiting_reqs is not None:
+                self._num_waiting_last = step.num_waiting_reqs
 
-        if step.prefix_queries:
-            self._c_prefix_queries.add(step.prefix_queries)
-        if step.prefix_hits:
-            self._c_prefix_hits.add(step.prefix_hits)
+            if step.prefix_queries:
+                self._c_prefix_queries.add(step.prefix_queries)
+            if step.prefix_hits:
+                self._c_prefix_hits.add(step.prefix_hits)
 
-        self._c_gen_tokens.add(step.num_generation_tokens)
-        self._c_prompt_tokens.add(step.num_prompt_tokens)
-        self._c_cached_prompt_tokens.add(step.num_cached_prompt_tokens)
-        self._c_preempted.add(step.num_preempted_reqs)
-        for ttft in step.ttft_ms:
-            self._h_ttft.record(ttft)
-        for itl in step.itl_ms:
-            self._h_itl.record(itl)
-        for finished in step.finished:
-            self._c_finished.add(1)
-            self._h_decode.record(finished.decode_time_ms)
-            self._h_queue.record(finished.queue_time_ms)
-            self._h_e2e.record(finished.e2e_latency_ms)
+            self._c_gen_tokens.add(step.num_generation_tokens)
+            self._c_prompt_tokens.add(step.num_prompt_tokens)
+            self._c_cached_prompt_tokens.add(step.num_cached_prompt_tokens)
+            self._c_preempted.add(step.num_preempted_reqs)
+            for ttft in step.ttft_ms:
+                self._h_ttft.record(ttft)
+            for itl in step.itl_ms:
+                self._h_itl.record(itl)
+            for finished in step.finished:
+                self._c_finished.add(1)
+                self._h_decode.record(finished.decode_time_ms)
+                self._h_queue.record(finished.queue_time_ms)
+                self._h_e2e.record(finished.e2e_latency_ms)
+        except Exception as e:
+            logger.warning(
+                "%s disabled for the rest of the run: record() failed "
+                "(vLLM stats schema drift?): %s",
+                type(self).__name__,
+                e,
+            )
+            self._enabled = False
 
     def log(self) -> None:
         """Leave vLLM's synchronous logging hook empty.
@@ -250,9 +380,7 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
         """Log the active export cadence after vLLM initializes the engine."""
         if self._enabled:
             logger.info(
-                "%s active: engine_index=%d "
-                "(export cadence: VLLM_LOG_STATS_INTERVAL=%gs)",
+                "%s active (export cadence: VLLM_LOG_STATS_INTERVAL=%gs)",
                 type(self).__name__,
-                self._engine_index,
                 envs.VLLM_LOG_STATS_INTERVAL,
             )

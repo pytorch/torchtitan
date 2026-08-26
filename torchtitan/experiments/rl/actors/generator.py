@@ -48,11 +48,8 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.observability.vllm_otel_stat_logger import (
-    VllmOtelStatLogger,
-)
-from torchtitan.experiments.rl.observability.vllm_stat_common import (
     StatLoggerContext,
-    VllmStatLoggerBase,
+    VllmOtelStatLogger,
 )
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
@@ -766,7 +763,7 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
-        vllm_stat_loggers: list[type[VllmStatLoggerBase]] = field(
+        vllm_stat_loggers: list[type[VllmOtelStatLogger]] = field(
             default_factory=lambda: [VllmOtelStatLogger]
         )
         """Loggers used by vLLM engines to export metrics."""
