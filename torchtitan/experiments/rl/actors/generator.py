@@ -731,11 +731,6 @@ class VLLMGenerator(Actor, Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
-        use_vllm_fused_gdn: bool = False
-        """Use vLLM's native fused convolution and gated-delta recurrence
-        kernels for TorchTitan Qwen3.5/3.6 generation. The model parameters,
-        projections, output norm, and RL loop remain TorchTitan-owned."""
-
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -827,12 +822,6 @@ class VLLMGenerator(Actor, Configurable):
         # set before register_to_vllm imports that module (#3709).
         if config.cudagraph.enable and config.cudagraph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-
-        os.environ["TORCHTITAN_USE_VLLM_FUSED_GDN"] = (
-            "1" if config.use_vllm_fused_gdn else "0"
-        )
-        if config.use_vllm_fused_gdn:
-            logger.info("TorchTitan generator is using vLLM native fused GDN kernels")
 
         # Register TorchTitan model + parser with vLLM
         register_to_vllm(
