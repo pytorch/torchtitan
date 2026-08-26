@@ -42,6 +42,9 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
 )
+from torchtitan.experiments.graph_trainer.min_cut_rematerialization import (
+    apply_min_cut_policy,
+)
 from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
@@ -388,6 +391,16 @@ def _eager_memory_policy_pass(
     return gm
 
 
+@register_memory_policy("min_cut")
+def _min_cut_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config | None" = None,
+) -> torch.fx.GraphModule:
+    """Choose saved activations with the min-cut partitioner."""
+    return apply_min_cut_policy(gm)
+
+
 @register_memory_policy("sac_and_offload")
 def _sac_and_offload_memory_policy_pass(
     gm: torch.fx.GraphModule,
@@ -407,7 +420,10 @@ def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    config: "GraphTrainer.Config",
+    config: "GraphTrainer.Config | None" = None,
+    memory_policy: str | None = None,
+    recurse: bool = False,
+    apply_to_root: bool = True,
 ) -> torch.fx.GraphModule:
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
@@ -415,17 +431,42 @@ def tag_with_memory_policy_pass(
         default: SAC with all compute-intensive ops saved.
         full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.
+        min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload within budget.
+
+    ``memory_policy`` may be passed directly by integrations that do not use a
+    ``GraphTrainer.Config``.
 
     Other memory policies combining SAC and CPU offload can be added
     via ``register_memory_policy`` without modifying this function.
+
+    Args:
+        recurse: If ``True``, apply the pass to all nested FX ``GraphModule``
+            submodules. The root graph is controlled separately by
+            ``apply_to_root``.
     """
-    memory_policy = config.compile.memory_policy
+    if memory_policy is None:
+        if config is None:
+            raise ValueError("memory_policy or config must be specified")
+        memory_policy = config.compile.memory_policy
     if memory_policy not in MEMORY_POLICY_REGISTRY:
         raise ValueError(
             f"Unknown memory_policy: {memory_policy!r}. "
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
-    gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
-    log_activation_memory_policy(gm)
+
+    modules = []
+    if apply_to_root:
+        modules.append(gm)
+    if recurse:
+        modules.extend(
+            module
+            for name, module in gm.named_modules()
+            if name and isinstance(module, torch.fx.GraphModule)
+        )
+    for module in modules:
+        updated = MEMORY_POLICY_REGISTRY[memory_policy](module, config=config)
+        if updated is not module:
+            raise AssertionError("memory policy passes must update graphs in place")
+        log_activation_memory_policy(module)
     return gm
