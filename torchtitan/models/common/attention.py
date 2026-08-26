@@ -192,9 +192,9 @@ class VarlenAttention(Module):
         if kwargs.get("enable_gqa", False):
             varlen_kwargs["enable_gqa"] = True
 
-        run_varlen_attn = varlen_attn if out_transform is None else varlen_attn_with_lse
+        varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        result = run_varlen_attn(
+        result = varlen_attn_fn(
             q_TNH.to(torch.bfloat16),
             k_TNH.to(torch.bfloat16),
             v_TNH.to(torch.bfloat16),

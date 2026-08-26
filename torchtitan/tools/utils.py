@@ -187,7 +187,7 @@ def get_peak_flops(device_name: str) -> float:
         # GB300 data from https://www.nvidia.com/en-us/data-center/dgx-gb300
         return 2.5e15
     elif "B300" in device_name or "B200" in device_name:
-        # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+        # data from https://resources.nvidia.com/en-us-blackwell-architecture
         # Checked after GB300 to avoid false match on "GB300"
         return 2.25e15
     elif "MI355X" in device_name:
