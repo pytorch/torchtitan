@@ -165,17 +165,11 @@ class RoutedExperts(Module):
         )
         routed_scores_R = getattr(metadata, "routed_scores_R", None)
         with maybe_set_sparse_mesh():
-            if routed_scores_R is None:
-                routed_output_RD = self.inner_experts(
-                    routed_input_RD,
-                    num_global_tokens_per_local_expert_e,
-                )
-            else:
-                routed_output_RD = self.inner_experts(
-                    routed_input_RD,
-                    num_global_tokens_per_local_expert_e,
-                    routed_scores_R=routed_scores_R,
-                )
+            routed_output_RD = self.inner_experts(
+                routed_input_RD,
+                num_global_tokens_per_local_expert_e,
+                routed_scores_R=routed_scores_R,
+            )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
