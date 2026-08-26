@@ -46,6 +46,7 @@ from torchtitan.experiments.graph_trainer.cudagraph import (
 )
 from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
     _chunk_copied_meta,
+    _local_packed_causal_mask_mod,
     _materialize_symint_arg,
     _Region,
     _rewrite_chunk_symint,
@@ -97,6 +98,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
+    final_inductor_compile_passes,
     selective_activation_remat_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -3526,6 +3528,15 @@ class TestChunkPasses(TestCase):
             names.index("full_inductor_compilation_pass"),
         )
 
+    def test_full_inductor_ep_overlap_disables_pointwise_autotuning(self):
+        _traced_result, config = self._compile_config_for_ep_overlap_test()
+        compile_pass = final_inductor_compile_passes(config.compile)[0]
+
+        self.assertEqual(
+            compile_pass.keywords["inductor_configs"],
+            {"triton.autotune_pointwise": False},
+        )
+
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
             ("seq", "layers.*.moe"),
@@ -3635,6 +3646,25 @@ class TestChunkPasses(TestCase):
         self.assertIn(0, positions._dynamo_unbacked_indices)
         self.assertEqual(x._dynamo_unbacked_bounds[0], (4, 8))
 
+    def test_prepare_ep_overlap_trace_inputs_rejects_mid_document_split(self):
+        _traced_result, config = self._compile_config_for_ep_overlap_test()
+        positions = torch.arange(8)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "can only split at a packed-document boundary",
+        ):
+            prepare_ep_overlap_trace_inputs(
+                config.compile,
+                (
+                    torch.randn(8, 4),
+                    torch.ones(8),
+                    torch.tensor(8),
+                    {"positions": positions},
+                ),
+                {},
+            )
+
     def test_prepare_ep_overlap_trace_inputs_marks_seq_dims(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
         config.compile.ep_overlap.chunk_dim = "seq"
@@ -3737,6 +3767,80 @@ class TestChunkPasses(TestCase):
         seq_len = positions.shape[0]
         self.assertEqual(rebound_mask.seq_lengths[0].node.expr, seq_len.node.expr)
         self.assertEqual(rebound_mask.seq_lengths[1].node.expr, seq_len.node.expr)
+
+    def test_prepare_ep_overlap_trace_call_inputs_localizes_transformer_mask(self):
+        from torch._dynamo.source import LocalSource
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import (
+            DimDynamic,
+            StatelessSymbolicContext,
+        )
+        from torch.nn.attention.flex_attention import create_block_mask
+
+        _traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.ep_overlap.chunk_dim = "batch"
+        config.compile.ep_overlap.module_fqn = "layers.*"
+
+        fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
+        positions = fake_mode.from_tensor(
+            torch.arange(128).repeat(2),
+            source=LocalSource("positions", is_input=True),
+            symbolic_context=StatelessSymbolicContext(
+                dynamic_sizes=[DimDynamic.UNBACKED],
+                shape_ids={0: "torchtitan_chunk_batch"},
+            ),
+        )
+        block_mask = create_block_mask(
+            lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
+            B=1,
+            H=None,
+            Q_LEN=256,
+            KV_LEN=256,
+            device="cpu",
+        )
+
+        prepared = prepare_ep_overlap_trace_call_inputs(
+            config.compile,
+            (
+                torch.empty(256, 4),
+                torch.empty(256),
+                torch.tensor(256),
+                {"positions": positions, "attention_masks": block_mask},
+            ),
+            {},
+        )
+
+        self.assertIsNotNone(prepared)
+        prepared_args, _ = prepared
+        chunk_mask = prepared_args[3]["attention_masks"]
+        self.assertEqual(tuple(chunk_mask.kv_num_blocks.shape), (1, 1, 2))
+        self.assertEqual(tuple(chunk_mask.kv_indices.shape), (1, 1, 2, 1))
+        self.assertEqual(
+            chunk_mask.kv_num_blocks,
+            torch.ones_like(chunk_mask.kv_num_blocks),
+        )
+        self.assertEqual(
+            chunk_mask.kv_indices,
+            torch.zeros_like(chunk_mask.kv_indices),
+        )
+        self.assertIsNone(chunk_mask.full_kv_num_blocks)
+        self.assertIsNone(chunk_mask.full_kv_indices)
+
+    def test_local_packed_causal_mask_uses_chunk_coordinates(self):
+        positions = torch.arange(64).repeat(2)
+        q_idx = torch.arange(positions.numel()).view(-1, 1)
+        kv_idx = torch.arange(positions.numel()).view(1, -1)
+        mask = _local_packed_causal_mask_mod(positions)(
+            torch.tensor(0),
+            torch.tensor(0),
+            q_idx,
+            kv_idx,
+        )
+
+        doc_ids = torch.cumsum((positions == 0).int(), dim=0) - 1
+        expected = (q_idx >= kv_idx) & (doc_ids[q_idx] == doc_ids[kv_idx])
+        self.assertEqual(mask, expected)
+        self.assertTrue(mask.any(dim=1).all())
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
         from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher

@@ -370,10 +370,20 @@ def final_inductor_compile_passes(
     if inductor_compilation == "full":
         # Compile the entire graph into optimized Triton kernels. Must be
         # terminal; the FX graph is no longer authoritative after this pass.
+        # EP-overlap graphs contain data-dependent MoE routing permutations.
+        # Pointwise autotuning benchmarks fused kernels with synthetic inputs,
+        # which do not preserve the permutation's index bounds and can trigger
+        # a device-side assert before the real graph runs.
+        inductor_configs = (
+            {"triton.autotune_pointwise": False}
+            if compile_config.ep_overlap.enabled
+            else None
+        )
         passes.append(
             functools.partial(
                 full_inductor_compilation_pass,
                 boxed_codegen=boxed_codegen,
+                inductor_configs=inductor_configs,
             )
         )
     elif inductor_compilation == "regional":

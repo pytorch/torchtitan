@@ -77,7 +77,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
 )
-from torchtitan.experiments.graph_trainer.configs import validate_ep_overlap_config
+from torchtitan.experiments.graph_trainer.configs import (
+    TRANSFORMER_BLOCK_FQN,
+    validate_ep_overlap_config,
+)
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     _eval_hint,
     chunk_symbol_hints_for_mode,
@@ -623,6 +626,22 @@ def mark_chunk_dynamic_dims(tensor: torch.Tensor, *, mode: ChunkMode) -> None:
     )
 
 
+def _local_packed_causal_mask_mod(positions: torch.Tensor):
+    """Return a packed-causal mask expressed only in local token coordinates."""
+
+    def mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        del b, h
+        document_start = q_idx - positions[q_idx]
+        return (q_idx >= kv_idx) & (kv_idx >= document_start)
+
+    return mask_mod
+
+
 @register_trace_input_preparer("ep_overlap")
 def prepare_ep_overlap_trace_inputs(
     compile_config: Any,
@@ -632,13 +651,34 @@ def prepare_ep_overlap_trace_inputs(
     """Step 1: prepare trace inputs for graph chunking when EP overlap is enabled."""
     if not compile_config.ep_overlap.enabled:
         return
-    mode, chunk_strategy, _ = validate_ep_overlap_config(compile_config.ep_overlap)
+    mode, chunk_strategy, module_fqn = validate_ep_overlap_config(
+        compile_config.ep_overlap
+    )
     if chunk_strategy == "eager":
         return
     dim = 0
     if not args or not isinstance(args[0], torch.Tensor):
         raise ValueError("ep_overlap tracing expects first user input to be a Tensor")
     hint = int(args[0].shape[dim])
+
+    if mode == "batch" and module_fqn == TRANSFORMER_BLOCK_FQN:
+        extra_kwargs = args[3] if len(args) > 3 else None
+        positions = (
+            extra_kwargs.get("positions") if isinstance(extra_kwargs, dict) else None
+        )
+        if isinstance(positions, torch.Tensor):
+            midpoint = hint // 2
+            if positions.dim() != 1 or int(positions.shape[0]) != hint:
+                raise ValueError(
+                    "Folded-token transformer EP overlap expects positions[T] "
+                    f"matching the input token extent {hint}, got "
+                    f"{tuple(positions.shape)}"
+                )
+            if int(positions[midpoint].item()) != 0:
+                raise ValueError(
+                    "Folded-token transformer EP overlap can only split at a "
+                    "packed-document boundary; expected positions[T // 2] == 0"
+                )
 
     def mark_leaf(value: object) -> None:
         if (
@@ -675,7 +715,9 @@ def prepare_ep_overlap_trace_call_inputs(
     """Bind FlexAttention mask lengths to fake token-grid dims during tracing."""
     if not compile_config.ep_overlap.enabled:
         return None
-    _, chunk_strategy, _ = validate_ep_overlap_config(compile_config.ep_overlap)
+    mode, chunk_strategy, module_fqn = validate_ep_overlap_config(
+        compile_config.ep_overlap
+    )
     if chunk_strategy == "eager" or len(args) <= 3 or not isinstance(args[3], dict):
         return None
 
@@ -691,9 +733,100 @@ def prepare_ep_overlap_trace_call_inputs(
 
     seq_len = positions.shape[0]
 
+    def make_token_chunk_safe(mask: BlockMask) -> BlockMask:
+        """Build metadata and a mask predicate in per-chunk token coordinates.
+
+        Folded-token transformer chunking runs each half with local query/key
+        indices.  Reusing the original packed-document mask is invalid because
+        its captured document offsets are full-sequence coordinates.  Build a
+        conservative block table shared by both halves and derive each query's
+        local document start directly from its chunked ``positions`` tensor.
+
+        All blocks in the local half are represented as partial blocks.  This
+        is intentionally conservative: the mask predicate preserves exact
+        packed-document semantics, while avoiding chunk-specific sparse tables
+        until BlockMask exposes a first-class sequence-splitting API.
+        """
+        if mask.kv_num_blocks.size(0) != 1:
+            raise ValueError(
+                "Folded-token EP overlap expects a broadcast BlockMask with B=1"
+            )
+        if mask.q_num_blocks is None or mask.q_indices is None:
+            raise ValueError(
+                "Folded-token EP overlap requires BlockMask query metadata"
+            )
+
+        full_q_blocks = mask.kv_num_blocks.shape[-1]
+        full_kv_blocks = mask.q_num_blocks.shape[-1]
+        if full_q_blocks % 2 or full_kv_blocks % 2:
+            raise ValueError(
+                "Folded-token EP overlap requires even BlockMask query/key "
+                f"block counts, got {full_q_blocks} and {full_kv_blocks}"
+            )
+        chunk_q_blocks = full_q_blocks // 2
+        chunk_kv_blocks = full_kv_blocks // 2
+
+        kv_prefix = tuple(mask.kv_num_blocks.shape[:-1])
+        kv_num_blocks = torch.full(
+            (*kv_prefix, full_q_blocks),
+            chunk_kv_blocks,
+            dtype=mask.kv_num_blocks.dtype,
+            device=mask.kv_num_blocks.device,
+        )
+        kv_indices = (
+            torch.arange(
+                chunk_kv_blocks,
+                dtype=mask.kv_indices.dtype,
+                device=mask.kv_indices.device,
+            )
+            .view(*(1 for _ in kv_prefix), 1, chunk_kv_blocks)
+            .expand(*kv_prefix, full_q_blocks, chunk_kv_blocks)
+            .contiguous()
+        )
+
+        q_prefix = tuple(mask.q_num_blocks.shape[:-1])
+        q_num_blocks = torch.full(
+            (*q_prefix, full_kv_blocks),
+            chunk_q_blocks,
+            dtype=mask.q_num_blocks.dtype,
+            device=mask.q_num_blocks.device,
+        )
+        q_indices = (
+            torch.arange(
+                chunk_q_blocks,
+                dtype=mask.q_indices.dtype,
+                device=mask.q_indices.device,
+            )
+            .view(*(1 for _ in q_prefix), 1, chunk_q_blocks)
+            .expand(*q_prefix, full_kv_blocks, chunk_q_blocks)
+            .contiguous()
+        )
+
+        return BlockMask(
+            seq_lengths=(seq_len, seq_len),
+            kv_num_blocks=kv_num_blocks,
+            kv_indices=kv_indices,
+            full_kv_num_blocks=None,
+            full_kv_indices=None,
+            q_num_blocks=q_num_blocks,
+            q_indices=q_indices,
+            full_q_num_blocks=None,
+            full_q_indices=None,
+            BLOCK_SIZE=mask.BLOCK_SIZE,
+            # ``positions`` is split with the activation, so q_idx and the
+            # derived document start are both local to the selected chunk.
+            mask_mod=_local_packed_causal_mask_mod(positions),
+            dq_write_order=None,
+            dq_write_order_full=None,
+            dq_kv_order=None,
+            dq_kv_order_spt=None,
+        )
+
     def rebind(mask: object) -> object:
         if not isinstance(mask, BlockMask):
             return mask
+        if mode == "batch" and module_fqn == TRANSFORMER_BLOCK_FQN:
+            return make_token_chunk_safe(mask)
         return BlockMask(
             seq_lengths=(seq_len, seq_len),
             kv_num_blocks=mask.kv_num_blocks,
