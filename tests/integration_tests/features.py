@@ -218,6 +218,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_ulysses_cp2_varlen],
+            test_descr="CP ulysses with varlen attention",
+            test_name="cp_ulysses_varlen",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_ddp2_cp2],
             test_descr="HSDP+CP (without dp_shard)",
             test_name="hsdp+cp_without_dp_shard",

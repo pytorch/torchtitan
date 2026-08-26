@@ -20,7 +20,11 @@ import torch.distributed as dist
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 
-from torchtitan.models.common.attention import BaseAttention, FlexAttention
+from torchtitan.models.common.attention import (
+    BaseAttention,
+    FlexAttention,
+    VarlenAttention,
+)
 from torchtitan.protocols.module import Module
 
 if TYPE_CHECKING:
@@ -29,7 +33,9 @@ if TYPE_CHECKING:
 __all__ = [
     "ContextParallelKernel",
     "AllGatherCPFlexAttention",
+    "UlyssesCPKernel",
     "UlyssesCPFlexAttention",
+    "UlyssesCPVarlenAttention",
     "use_cp_kernel",
 ]
 
@@ -115,13 +121,8 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
         return super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
 
 
-class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
+class UlyssesCPKernel(ContextParallelKernel):
     """DeepSpeed-Ulysses style CP: an all-to-all trades sequence for heads."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
-        shard_attention_mask: ClassVar[bool] = False
-        """The kernel sees the whole sequence, so its mask must stay global."""
 
     @staticmethod
     def _reshard(
@@ -148,6 +149,27 @@ class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
             self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)
             for x in (q_TNH, k_TNH, v_TNH)
         )
+        # The wrapped kernel supplies forward through the MRO of the concrete
+        # subclass, which this mixin cannot see on its own.
+        # pyrefly: ignore [missing-attribute]
         out_TNH = super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
         # (T, N/cp, H) -> (T/cp, N, H)
         return self._reshard(out_TNH, cp_group, src=_HEAD_DIM, dst=_SEQ_DIM)
+
+
+class UlyssesCPFlexAttention(UlyssesCPKernel, FlexAttention):
+    """FlexAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexAttention.Config):
+        shard_attention_mask: ClassVar[bool] = False
+        """The kernel sees the whole sequence, so its mask must stay global."""
+
+
+class UlyssesCPVarlenAttention(UlyssesCPKernel, VarlenAttention):
+    """VarlenAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenAttention.Config):
+        shard_attention_mask: ClassVar[bool] = False
+        """The kernel sees the whole sequence, so its mask must stay global."""

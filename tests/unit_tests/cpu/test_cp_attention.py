@@ -15,12 +15,13 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     AllGatherCPFlexAttention,
     ContextParallelKernel,
     UlyssesCPFlexAttention,
+    UlyssesCPVarlenAttention,
 )
 
 
@@ -234,6 +235,22 @@ class TestUlysses(unittest.TestCase):
 
     def test_keeps_its_mask_global(self):
         self.assertFalse(UlyssesCPFlexAttention.Config().shard_attention_mask)
+
+
+class TestUlyssesVarlen(unittest.TestCase):
+    def test_is_still_a_varlen_kernel(self):
+        self.assertIsInstance(UlyssesCPVarlenAttention.Config(), VarlenAttention.Config)
+
+    def test_keeps_its_mask_global(self):
+        self.assertFalse(UlyssesCPVarlenAttention.Config().shard_attention_mask)
+
+    def test_reuses_the_shared_ulysses_forward(self):
+        """Both Ulysses kernels reshard through one implementation."""
+        self.assertIs(UlyssesCPVarlenAttention.forward, UlyssesCPFlexAttention.forward)
+
+    def test_does_not_select_visible_kv(self):
+        """The global metadata already describes what this rank attends to."""
+        self.assertNotIn("_select_visible_kv", UlyssesCPVarlenAttention.__dict__)
 
 
 if __name__ == "__main__":

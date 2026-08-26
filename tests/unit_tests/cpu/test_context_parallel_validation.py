@@ -226,6 +226,49 @@ class TestHeadDivisibility(unittest.TestCase):
         config.model_spec.model.update_from_config(config=config)
 
 
+class TestGptOssRejectsUlysses(unittest.TestCase):
+    """GPT-OSS shards its per-head sinks on TP only, so Ulysses cannot run.
+
+    The gate keys on the shared ``UlyssesCPKernel`` mixin, so it must cover
+    every Ulysses kernel. The default GPT-OSS kernel is varlen, so the Flex
+    case is only reachable from the flex configuration.
+    """
+
+    @staticmethod
+    def _parallelize(base_config, kernel) -> None:
+        from types import SimpleNamespace
+
+        from torchtitan.models.common.cp_attention import use_cp_kernel
+        from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
+
+        config = base_config()
+        use_cp_kernel(config, kernel)
+        # The gate runs first, so the unused arguments are never reached.
+        parallelize_gptoss(
+            SimpleNamespace(config=config.model_spec.model),
+            parallel_dims=SimpleNamespace(cp_enabled=True),
+            training=None,
+            parallelism=None,
+            compile_config=None,
+            ac_config=None,
+            dump_folder="",
+        )
+
+    def test_rejects_ulysses_flex(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+
+        with self.assertRaisesRegex(NotImplementedError, "Ulysses context parallel"):
+            self._parallelize(gpt_oss_debugmodel_flex, UlyssesCPFlexAttention)
+
+    def test_rejects_ulysses_varlen(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPVarlenAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel
+
+        with self.assertRaisesRegex(NotImplementedError, "Ulysses context parallel"):
+            self._parallelize(gpt_oss_debugmodel, UlyssesCPVarlenAttention)
+
+
 class TestShippedCpRecipe(unittest.TestCase):
     def test_ulysses_recipe_passes_the_gate(self):
         from torchtitan_recipes.tests.features import llama3_debugmodel_ulysses_cp2
