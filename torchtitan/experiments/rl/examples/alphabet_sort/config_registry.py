@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+import math
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -813,8 +814,8 @@ def _qwen3_30b_a3b_varlen_pg(
     mxfp8_experts: bool = False,
     tp1: bool = False,
     deepep: bool = False,
-    sync: bool = False,
     gen_gpus: int | None = None,
+    max_offpolicy_steps: int = 3,
 ) -> Controller.Config:
     """``rl_grpo_qwen3_30b_a3b_varlen`` with an overridden rollout batch size (P, G)
     and, optionally, MXFP8 QAT on the MoE grouped experts only, TP=1, and/or the
@@ -845,24 +846,15 @@ def _qwen3_30b_a3b_varlen_pg(
     rank (``num_experts / gen_gpus``), so the grouped-GEMM token groups get thinner
     for the same total decode concurrency. Applied after ``tp1`` so it wins.
 
-    When ``sync`` is set, ``max_offpolicy_steps`` is forced to 0 (fully on-policy):
-    the generator and trainer alternate in lockstep instead of the generator
-    running up to ``max_offpolicy_steps`` train-steps ahead. Everything else is
-    identical to the async variant.
-
     ``deepep`` + ``mxfp8_experts`` compose: the mxfp8 converter swaps the DeepEP
     token dispatcher's ``pad_multiple`` so each expert's token group is padded to
-    a multiple of 32 for the mxfp8 grouped GEMM -- the compact (training) path pads
+    a multiple of 128 for the mxfp8 grouped GEMM -- the compact (training) path pads
     in Python, the expand (generator) path uses DeepEP's native ``expert_alignment``.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
     config.async_loop.num_prompts_per_train_step = num_prompts_per_train_step
     config.async_loop.num_samples_per_prompt = num_samples_per_prompt
-    if sync:
-        # 0 off-policy steps = fully on-policy: generator and trainer alternate in
-        # lockstep (see AsyncLoopConfig.max_offpolicy_steps). Everything else stays
-        # identical to the async variant.
-        config.async_loop.max_offpolicy_steps = 0
+    config.async_loop.max_offpolicy_steps = max_offpolicy_steps
     if tp1:
         train_par = config.trainer.parallelism
         train_par.data_parallel_shard_degree = 4
@@ -899,10 +891,24 @@ def _qwen3_30b_a3b_varlen_pg(
             converters=converters,
         )
     if deepep:
-        # seq_len is 2048 (async_loop.batcher). With SP disabled in the generator,
-        # a rank feeds the full budget into the EXPAND dispatch -> dropless.
+        # Predict the max_num_seqs the Controller will derive so the generator's
+        # token budget can be sized against it.
+        gen_dp_shards = max(config.generator.parallelism.data_parallel_degree, 1)
+        max_num_seqs = min(
+            math.ceil(
+                (max_offpolicy_steps + 1)
+                * num_prompts_per_train_step
+                * num_samples_per_prompt
+                / gen_dp_shards
+            ),
+            8192,
+        )
+        # Each decode costs one token of budget and decodes are scheduled first, so
+        # leave one full prompt (seq_len 2048) of headroom or prefill never admits.
         _apply_deepep_cudagraph_generator(
-            config, max_num_batched_tokens=2048, mxfp8_experts=mxfp8_experts
+            config,
+            max_num_batched_tokens=max_num_seqs + 2048,
+            mxfp8_experts=mxfp8_experts,
         )
     return config
 
@@ -1020,29 +1026,99 @@ def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts() -> Controller
     return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True, mxfp8_experts=True)
 
 
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_tp1_deepep() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=64/G=32, TP=1, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32, tp1=True, deepep=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_tp1_deepep_mxfp8_experts() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=64/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32, tp1=True, deepep=True, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_tp1_deepep_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs, P=64/G=32, TP=1, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(64, 32, tp1=True, deepep=True, gen_gpus=2)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p64g32_tp1_deepep_mxfp8_experts_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs, P=64/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(
+        64, 32, tp1=True, deepep=True, mxfp8_experts=True, gen_gpus=2
+    )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p96g32_tp1_deepep() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=96/G=32, TP=1, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(96, 32, tp1=True, deepep=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p96g32_tp1_deepep_mxfp8_experts() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=96/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(96, 32, tp1=True, deepep=True, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p96g32_tp1_deepep_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs, P=96/G=32, TP=1, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(96, 32, tp1=True, deepep=True, gen_gpus=2)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p96g32_tp1_deepep_mxfp8_experts_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs, P=96/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(
+        96, 32, tp1=True, deepep=True, mxfp8_experts=True, gen_gpus=2
+    )
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p128g32_tp1_deepep() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=128/G=32, TP=1, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(128, 32, tp1=True, deepep=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p128g32_tp1_deepep_mxfp8_experts() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=128/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(128, 32, tp1=True, deepep=True, mxfp8_experts=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p128g32_tp1_deepep_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs, P=128/G=32, TP=1, bf16."""
+    return _qwen3_30b_a3b_varlen_pg(128, 32, tp1=True, deepep=True, gen_gpus=2)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p128g32_tp1_deepep_mxfp8_experts_gen2() -> Controller.Config:
+    """DeepEP + cudagraph generator on 2 GPUs, P=128/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _qwen3_30b_a3b_varlen_pg(
+        128, 32, tp1=True, deepep=True, mxfp8_experts=True, gen_gpus=2
+    )
+
+
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_sync() -> Controller.Config:
     """Sync (on-policy, max_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1``; otherwise identical."""
-    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, sync=True)
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, max_offpolicy_steps=0)
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts_sync() -> Controller.Config:
     """Sync (on-policy, max_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts``; otherwise identical."""
-    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, mxfp8_experts=True, sync=True)
+    return _qwen3_30b_a3b_varlen_pg(
+        32, 32, tp1=True, mxfp8_experts=True, max_offpolicy_steps=0
+    )
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_sync() -> Controller.Config:
     """Sync (on-policy, max_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep``; otherwise identical."""
-    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, deepep=True, sync=True)
+    return _qwen3_30b_a3b_varlen_pg(
+        32, 32, tp1=True, deepep=True, max_offpolicy_steps=0
+    )
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts_sync() -> Controller.Config:
     """Sync (on-policy, max_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts``; otherwise identical."""
     return _qwen3_30b_a3b_varlen_pg(
-        32, 32, tp1=True, deepep=True, mxfp8_experts=True, sync=True
+        32, 32, tp1=True, deepep=True, mxfp8_experts=True, max_offpolicy_steps=0
     )
 
 
