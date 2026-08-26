@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -55,6 +55,8 @@ def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
 
 def _build_batcher(*, num_prompts_per_train_step: int) -> Batcher:
     return Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=16384,
+        max_context_length=2048,
         num_prompts_per_train_step=num_prompts_per_train_step,
         dp_degree=1,
         pad_id=0,
@@ -94,10 +96,12 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.num_global_valid_tokens > 0
 
 
-def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
-    # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
-    # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
-    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
+def test_microbatch_grid_spreads_samples_across_cells() -> None:
+    # Five 2-token samples need three 4-token per-rank microbatches. With DP=2,
+    # redistribute samples so no (microbatch, rank) cell is all-pad.
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=4,
+        max_context_length=2,
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
@@ -111,6 +115,68 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     assert len(cells) == 4  # 2 microbatches x 2 ranks
     for cell in cells:
         assert cell.loss_mask.any()
+
+
+def test_batcher_allows_non_context_aligned_token_budget() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=5,
+        max_context_length=3,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_trainable_group(0, num_samples=2)
+    )
+    assert batch is not None
+    assert len(batch.microbatches) == 1
+    microbatch = batch.microbatches[0][0]
+    assert microbatch.token_ids.numel() == 5
+    assert microbatch.positions.tolist() == [0, 1, 0, 1, 0]
+
+
+def test_flat_packing_uses_full_token_budget_across_context_boundaries() -> None:
+    def training_sample(rollout_id: int, num_tokens_to_pack: int) -> TrainingSample:
+        raw_num_tokens = num_tokens_to_pack + 1
+        return TrainingSample(
+            min_policy_version=0,
+            max_policy_version=0,
+            rollout_id=RolloutTurnID(group_id=0, rollout_id=rollout_id, turn_id=0),
+            token_ids=list(range(1, raw_num_tokens + 1)),
+            loss_mask=[False, *([True] * num_tokens_to_pack)],
+            logprobs=[0.0] * raw_num_tokens,
+            advantage=[0.0, *([1.0] * num_tokens_to_pack)],
+        )
+
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=20,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    training_sample_group = TrainingSampleGroup(
+        group_id=0,
+        training_samples=[
+            training_sample(rollout_id=0, num_tokens_to_pack=7),
+            training_sample(rollout_id=1, num_tokens_to_pack=7),
+            training_sample(rollout_id=2, num_tokens_to_pack=6),
+        ],
+        metrics=[],
+    )
+
+    batch, _ = batcher.add_training_samples(training_sample_group=training_sample_group)
+
+    assert batch is not None
+    assert len(batch.microbatches) == 1
+    microbatch = batch.microbatches[0][0]
+    assert microbatch.token_ids.numel() == 20
+    assert microbatch.loss_mask.all()
+    assert microbatch.positions.tolist() == [
+        *range(7),
+        *range(7),
+        *range(6),
+    ]
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
@@ -185,6 +251,8 @@ def test_untrainable_group_releases_before_training() -> None:
     async def run() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
         batcher = Batcher.Config().build(
+            num_tokens_per_microbatch_per_dp_rank=16384,
+            max_context_length=2048,
             num_prompts_per_train_step=1,
             dp_degree=1,
             pad_id=0,
