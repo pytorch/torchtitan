@@ -373,6 +373,7 @@ def full_inductor_compilation_pass(
         # standalone_compile reorders fwd/bwd unless Inductor restores the
         # peak-memory schedule.
         "reorder_for_peak_memory": True,
+        "fusion_memory_timeline_peak_allowed_increase_mb": 0,
         **dict(inductor_configs or {}),
     }
     _migrate_cpu_get_attrs_to_cuda(gm)

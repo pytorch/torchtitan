@@ -6227,6 +6227,42 @@ class TestCanonicalizeGraphPass(TestCase):
         self.assertEqual(gm(x), x.reshape(2, 8))
 
 
+class TestFullInductorCompilationPass(TestCase):
+    def test_uses_minimal_peak_memory_config(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            full_inductor_compilation_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        result = graph.call_function(torch.ops.aten.sin.default, args=(x,))
+        graph.output(result)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        with (
+            patch(
+                "torchtitan.experiments.graph_trainer.cudagraph.is_cudagraph_compatible",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.experiments.graph_trainer.inductor_passes.regional_inductor_pass",
+                side_effect=lambda gm, *_args, **_kwargs: gm,
+            ),
+        ):
+            full_inductor_compilation_pass(gm, (torch.ones(4),))
+
+        config = result.meta["custom"]["compile_with_inductor"][
+            "inductor_configs"
+        ]
+        self.assertEqual(
+            config,
+            {
+                "reorder_for_peak_memory": True,
+                "fusion_memory_timeline_peak_allowed_increase_mb": 0,
+            },
+        )
+
+
 class TestStandaloneInductorCompilationPass(TestCase):
     def test_prunes_unused_placeholders_and_restores_outer_signature(self):
         from torchtitan.experiments.graph_trainer.inductor_passes import (
