@@ -164,7 +164,6 @@ class LocalTokenDispatcher(Configurable):
         out_TD = torch.zeros_like(x_TD)
 
         if metadata.routed_scores_R is None:
-            assert metadata.topk_scores_experts_sorted_N is not None
             routed_output_RD = (
                 routed_output_RD.to(torch.float32)
                 * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
@@ -522,7 +521,11 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             permuted_indices=permuted_indices,
             input_splits=input_splits_list,
             output_splits=output_splits_list,
-            routed_scores_R=(routed_scores_rank_major_R[permuted_indices] if routed_scores_rank_major_R is not None else None),
+            routed_scores_R=(
+                routed_scores_rank_major_R[permuted_indices]
+                if routed_scores_rank_major_R is not None
+                else None
+            ),
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
@@ -642,7 +645,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         out_TD = torch.zeros_like(x_TD)
 
         if metadata.routed_scores_R is None:
-            assert metadata.topk_scores_experts_sorted_N is not None
             routed_output_RD = (
                 routed_output_RD.to(torch.float32)
                 * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
