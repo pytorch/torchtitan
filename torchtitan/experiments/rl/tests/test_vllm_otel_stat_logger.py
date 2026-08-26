@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import json
 import logging
 import os
 from types import SimpleNamespace
@@ -302,6 +303,81 @@ def test_jsonl_export_is_asynchronous(
         lambda *args, **kwargs: pytest.fail("force_flush called from log()"),
     )
     log.log()
+
+
+def test_jsonl_export_writes_recorded_metrics(
+    no_otel_env, monkeypatch, tmp_path, meter_providers
+):
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
+    monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "600")
+    log = VllmOtelStatLogger(
+        _vllm_config(model="test-model"),
+        context=_context(
+            rank=5,
+            tp_rank=0,
+            dp_rank=2,
+            generator_name="gen-a",
+            output_dir=str(tmp_path),
+        ),
+    )
+    scheduler = SimpleNamespace(
+        kv_cache_usage=0.5,
+        num_running_reqs=4,
+        num_waiting_reqs=2,
+        prefix_cache_stats=SimpleNamespace(queries=10, hits=7),
+    )
+    iteration = SimpleNamespace(
+        num_generation_tokens=12,
+        prompt_token_stats=SimpleNamespace(total=100, cached_tokens=30),
+        num_preempted_reqs=1,
+        time_to_first_tokens_iter=[0.012],
+        inter_token_latencies_iter=[0.01, 0.02],
+        finished_requests=[
+            SimpleNamespace(decode_time=0.03, queued_time=0.005, e2e_latency=0.05)
+        ],
+    )
+
+    log.record(scheduler, iteration)
+    meter_providers[0].force_flush(timeout_millis=1000)
+
+    output_path = tmp_path / "vllm_metrics" / "gen-a.rank5.jsonl"
+    rows = output_path.read_text().splitlines()
+    assert len(rows) == 1
+    resource_metrics = json.loads(rows[0])["resource_metrics"][0]
+    resource_attributes = resource_metrics["resource"]["attributes"]
+    assert resource_attributes["model_name"] == "test-model"
+    assert resource_attributes["rank"] == 5
+    assert resource_attributes["dp_rank"] == 2
+
+    metrics = {
+        metric["name"]: metric["data"]["data_points"][0]
+        for metric in resource_metrics["scope_metrics"][0]["metrics"]
+    }
+    expected_values = {
+        "vllm.generation_tokens": 12,
+        "vllm.prompt_tokens": 100,
+        "vllm.cached_prompt_tokens": 30,
+        "vllm.preempted_requests": 1,
+        "vllm.finished_requests": 1,
+        "vllm.prefix_cache_queries": 10,
+        "vllm.prefix_cache_hits": 7,
+        "vllm.kv_cache_usage": 0.5,
+        "vllm.num_running_requests": 4,
+        "vllm.num_waiting_requests": 2,
+    }
+    expected_histograms = {
+        "vllm.time_to_first_token": (1, 12.0),
+        "vllm.inter_token_latency": (2, 30.0),
+        "vllm.decode_time": (1, 30.0),
+        "vllm.queue_time": (1, 5.0),
+        "vllm.e2e_latency": (1, 50.0),
+    }
+    assert set(metrics) == expected_values.keys() | expected_histograms.keys()
+    for name, expected_value in expected_values.items():
+        assert metrics[name]["value"] == pytest.approx(expected_value)
+    for name, (expected_count, expected_sum) in expected_histograms.items():
+        assert metrics[name]["count"] == expected_count
+        assert metrics[name]["sum"] == pytest.approx(expected_sum)
 
 
 def test_record_disables_on_instrument_failure(no_otel_env, caplog):
