@@ -102,7 +102,6 @@ from typing import Annotated
 import torch  # noqa: F401
 import torchstore as ts
 import tyro
-
 from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
@@ -119,11 +118,11 @@ from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.experiments.rl.controller_metrics import (
+    MetricsTimer,
     combine_microbatch_metrics,
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
-    MetricsTimer,
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
@@ -651,6 +650,7 @@ class Controller(Configurable):
                 model_spec=config.model_spec,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
+                native_vllm_generator=config.generator.use_native_vllm_model,
                 compile_config=config.compile,
                 output_dir=config.dump_folder,
             )

@@ -75,6 +75,7 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
         cg is not None
         and getattr(cg, "enable", False)
         and getattr(cg, "mode", "") == "FULL_AND_PIECEWISE"
+        and not getattr(generator_cfg, "use_native_vllm_model", False)
     ):
         return {"VLLM_USE_BREAKABLE_CUDAGRAPH": "1"}
     return {}

@@ -308,6 +308,15 @@ def test_reset_running_requests_requires_prefix_cache_reset():
         )
 
 
+def test_native_vllm_rejects_wrapper_fused_gdn():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        VLLMGenerator.Config(
+            parallelism=_PARALLELISM,
+            use_native_vllm_model=True,
+            use_vllm_fused_gdn=True,
+        )
+
+
 def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
     import dataclasses

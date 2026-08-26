@@ -13,28 +13,33 @@ from typing import Any
 import torch
 import torchstore as ts
 from monarch.actor import Actor, concurrent_endpoint, current_rank
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
-    apply_overrides,
+    TORCH_DTYPE_MAP,
     CommConfig,
     CompileConfig,
     Configurable,
     DebugConfig,
     OverrideConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
+    apply_overrides,
 )
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.models.native_vllm_qwen3_5 import (
+    qwen35_text_state_dict,
+)
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
@@ -107,6 +112,7 @@ class PolicyTrainer(Actor, Configurable):
         compile_config: CompileConfig,
         hf_assets_path: str = "",
         generator_dtype: str = "",
+        native_vllm_generator: bool = False,
         output_dir: str,
     ):
         init_logger()
@@ -138,6 +144,12 @@ class PolicyTrainer(Actor, Configurable):
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
+        self._native_vllm_generator = native_vllm_generator
+        if native_vllm_generator and model_spec.name != "qwen3_5":
+            raise ValueError(
+                "native_vllm_generator currently supports only qwen3_5, got "
+                f"{model_spec.name!r}"
+            )
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -683,6 +695,12 @@ class PolicyTrainer(Actor, Configurable):
         this returns and any number of generators can read the staged copy.
         """
         state_dict = self.model.state_dict()
+        if self._native_vllm_generator:
+            # Native vLLM loads the vision tower once from the original HF
+            # checkpoint. SWE-rebench is text-only, so only publish the trained
+            # language-model weights. Keeping TorchTitan names lets TorchStore
+            # reshard directly into native packed-parameter views.
+            state_dict = qwen35_text_state_dict(state_dict)
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
