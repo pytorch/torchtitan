@@ -29,13 +29,11 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    head_parallel_norm_config,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
-    set_linear_attention_inner_sharding,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -357,7 +355,9 @@ def _set_deltanet_sharding(
     # The projections are 2D [T, C], while the norm and recurrence output are
     # 3D [T, N, H]. Both shard the feature/head axis on TP.
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
+    head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
+    replicated_placement = dense_param_placement(tp=spmd.R)
     cu_seqlens_placement = SpmdLayout(
         {
             DP: spmd.V,
@@ -366,14 +366,25 @@ def _set_deltanet_sharding(
         }
     )
 
-    deltanet_cfg.norm.sharding_config = head_parallel_norm_config("x", "gate")
+    deltanet_cfg.norm.sharding_config = ShardingConfig(
+        state_shardings={"weight": replicated_placement},
+        in_src_shardings={
+            "x": head_placement,
+            "gate": head_placement,
+        },
+        in_dst_shardings={
+            "x": head_placement,
+            "gate": head_placement,
+        },
+        out_src_shardings=head_placement,
+        out_dst_shardings=head_placement,
+    )
 
     # The inner GDN is the DTensor-to-local boundary for the head-parallel
     # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
     # and intentionally remains outside local_map's positional placements.
-    set_linear_attention_inner_sharding(
-        deltanet_cfg.inner_gated_delta_net,
-        input_shardings={
+    deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
+        in_src_shardings={
             "query_TC": projected_placement,
             "key_TC": projected_placement,
             "value_TC": projected_placement,
@@ -386,6 +397,38 @@ def _set_deltanet_sharding(
             "dt_bias_N": parameter_placement,
             "cu_seqlens": cu_seqlens_placement,
         },
+        in_dst_shardings={
+            "query_TC": projected_placement,
+            "key_TC": projected_placement,
+            "value_TC": projected_placement,
+            "a_TN": projected_placement,
+            "b_TN": projected_placement,
+            "conv_q_weight_C1W": parameter_placement,
+            "conv_k_weight_C1W": parameter_placement,
+            "conv_v_weight_C1W": parameter_placement,
+            "A_log_N": parameter_placement,
+            "dt_bias_N": parameter_placement,
+            "cu_seqlens": cu_seqlens_placement,
+        },
+        out_src_shardings=head_placement,
+        out_dst_shardings=head_placement,
+        local_map=LocalMapConfig(
+            # cu_seqlens varies across DP ranks and is replicated across TP.
+            # It has no gradient, but local_map still requires its placement.
+            in_grad_placements=(
+                projected_placement,
+                projected_placement,
+                projected_placement,
+                projected_placement,
+                projected_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                parameter_placement,
+                cu_seqlens_placement,
+            ),
+        ),
     )
 
     deltanet_cfg.sharding_config = ShardingConfig(
