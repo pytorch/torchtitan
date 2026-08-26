@@ -217,13 +217,10 @@ class VllmStatLoggerBase(StatLoggerBase):
             self._enabled = False
 
     def log_engine_initialized(self) -> None:
-        """Overrides ``StatLoggerBase.log_engine_initialized``.
-
-        vLLM calls this once per engine after construction.
-        """
+        """Log that this stat logger is active after vLLM initializes the engine."""
         if self._enabled:
             logger.info(
-                "%s active: engine_index=%d (flush cadence: VLLM_LOG_STATS_INTERVAL)",
+                "%s active: engine_index=%d",
                 type(self).__name__,
                 self._engine_index,
             )
@@ -231,10 +228,7 @@ class VllmStatLoggerBase(StatLoggerBase):
     def _accumulate(self, step: StepStats) -> None:
         """Fold one step's ``StepStats`` into the subclass's window / instruments.
 
-        Called from ``record()`` on every engine step; it only buffers in memory and
-        never writes to the backend. The accumulated window is flushed by ``log()``,
-        which vLLM calls on the ``VLLM_LOG_STATS_INTERVAL`` cadence (time-based,
-        default 10s) -- so the backend write rate is one flush per interval,
-        independent of the per-step ``_accumulate`` rate.
+        Called from ``record()`` on every engine step. Implementations must keep
+        this hot path non-blocking and export outside the engine thread.
         """
         raise NotImplementedError

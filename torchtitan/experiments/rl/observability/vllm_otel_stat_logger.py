@@ -7,18 +7,18 @@
 """OpenTelemetry (OTLP) ``StatLoggerBase`` for the RL generator's vLLM engine.
 
 The logger stays inert unless:
-  - ``OTEL_METRICS_EXPORTER`` is set to ``console``; or
-  - ``OTEL_EXPORTER_OTLP_ENDPOINT`` or ``OTEL_EXPORTER_OTLP_METRICS_ENDPOINT``
-    is set.
+  - ``OTEL_METRICS_EXPORTER`` is set to ``jsonl``; or
+  - ``OTEL_METRICS_EXPORTER`` is set to ``otlp`` and an OTLP endpoint is set.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import os
 import re
 from typing import TYPE_CHECKING
+
+from vllm import envs
 
 from torchtitan.experiments.rl.observability.vllm_stat_common import (
     StatLoggerContext,
@@ -63,16 +63,59 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
 
     def _init_otel(self, resource_attrs: dict[str, str | int]) -> None:
         """Initialize the OTLP export pipeline."""
-        exporter_kind = os.environ.get("OTEL_METRICS_EXPORTER", "otlp").strip().lower()
-        endpoint = os.environ.get(
-            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-        ) or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        if exporter_kind == "none" or (exporter_kind == "otlp" and not endpoint):
+        configured_exporter = os.environ.get("OTEL_METRICS_EXPORTER", "none")
+        exporter_kind = configured_exporter.strip().lower()
+        if exporter_kind == "none":
             logger.info(
-                "VllmOtelStatLogger inactive: set OTEL_EXPORTER_OTLP_ENDPOINT, or "
-                "OTEL_METRICS_EXPORTER=console to print to logs"
+                "VllmOtelStatLogger inactive: set OTEL_METRICS_EXPORTER to "
+                "jsonl or otlp"
             )
             return
+        if exporter_kind not in ("jsonl", "otlp"):
+            logger.warning(
+                "VllmOtelStatLogger inactive: unsupported "
+                "OTEL_METRICS_EXPORTER=%r; expected one of: jsonl, none, otlp",
+                configured_exporter,
+            )
+            return
+        if os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true":
+            logger.warning(
+                "VllmOtelStatLogger inactive: OTEL_SDK_DISABLED is set to true"
+            )
+            return
+        if exporter_kind == "jsonl" and not self._output_dir:
+            logger.warning(
+                "VllmOtelStatLogger inactive: OTEL_METRICS_EXPORTER=jsonl "
+                "requires an output directory"
+            )
+            return
+        if exporter_kind == "otlp":
+            endpoint = os.environ.get(
+                "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+            ) or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            if not endpoint:
+                logger.warning(
+                    "VllmOtelStatLogger inactive: OTEL_METRICS_EXPORTER=otlp "
+                    "requires OTEL_EXPORTER_OTLP_ENDPOINT or "
+                    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+                )
+                return
+            protocol = (
+                os.environ.get(
+                    "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+                    os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+                )
+                .strip()
+                .lower()
+            )
+            if protocol != "http/protobuf":
+                logger.warning(
+                    "VllmOtelStatLogger inactive: configured OTLP protocol %r is "
+                    "unsupported; this logger uses the OTLP HTTP/protobuf exporter "
+                    "and requires http/protobuf",
+                    protocol,
+                )
+                return
 
         try:
             from opentelemetry.metrics import Observation
@@ -80,25 +123,22 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
             from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
             from opentelemetry.sdk.resources import Resource
 
-            if exporter_kind == "console":
+            if exporter_kind == "jsonl":
                 from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
 
                 # Save metrics to ``<output_dir>/vllm_metrics/``. Useful for
                 # local development where a collector is not available.
-                if self._output_dir:
-                    rank = self._attributes.get("rank", 0)
-                    label = str(self._attributes.get("generator_name", "gen"))
-                    safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
-                    path = os.path.join(
-                        self._output_dir,
-                        "vllm_metrics",
-                        f"{safe_label}.rank{rank}.jsonl",
-                    )
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    out = open(path, "a", buffering=1)
-                    exporter = ConsoleMetricExporter(out=out, formatter=_compact_json)
-                else:
-                    exporter = ConsoleMetricExporter(formatter=_compact_json)
+                rank = self._attributes.get("rank", 0)
+                label = str(self._attributes.get("generator_name", "gen"))
+                safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+                path = os.path.join(
+                    self._output_dir,
+                    "vllm_metrics",
+                    f"{safe_label}.rank{rank}.jsonl",
+                )
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                out = open(path, "a", buffering=1)
+                exporter = ConsoleMetricExporter(out=out, formatter=_compact_json)
             else:
                 from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
                     OTLPMetricExporter,
@@ -106,10 +146,11 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
 
                 exporter = OTLPMetricExporter()
 
-            # vLLM drives exports through log(), so use an infinite periodic interval
-            # and export only through explicit force_flush() calls.
+            # Export on the OpenTelemetry SDK's background thread. In particular,
+            # never perform network I/O from vLLM's synchronous log() callback.
             reader = PeriodicExportingMetricReader(
-                exporter, export_interval_millis=math.inf
+                exporter,
+                export_interval_millis=envs.VLLM_LOG_STATS_INTERVAL * 1000,
             )
             self._provider = MeterProvider(
                 metric_readers=[reader],
@@ -121,7 +162,7 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
             self._create_gauges(meter, Observation)
             self._enabled = True
         except Exception as e:
-            logger.warning("VllmOtelStatLogger disabled: OTLP setup failed: %s", e)
+            logger.warning("VllmOtelStatLogger disabled: metrics setup failed: %s", e)
             self._enabled = False
 
     def _create_counters(self, meter: Meter) -> None:
@@ -199,21 +240,19 @@ class VllmOtelStatLogger(VllmStatLoggerBase):
             self._h_e2e.record(finished.e2e_latency_ms)
 
     def log(self) -> None:
-        """Overrides ``StatLoggerBase.log``. Flush the accumulated metrics over
-        OTLP, then let vLLM continue.
+        """Leave vLLM's synchronous logging hook empty.
 
-        Called by vLLM's ``LLMEngine.do_log_stats_with_interval`` on the
-        ``VLLM_LOG_STATS_INTERVAL`` cadence (time-based, default 10s) -- not every
-        step. ``record`` only accumulates; this is the single write point, so the
-        write rate is one row per interval per DP head, independent of step
-        rate.
-
-        Tune the cadence with the ``VLLM_LOG_STATS_INTERVAL`` env var.
+        The OpenTelemetry metric reader exports on its background thread.
         """
-        if not self._enabled or self._provider is None:
-            return
-        try:
-            self._provider.force_flush()
-        except Exception as e:
-            # Observability must never take down the engine loop.
-            logger.warning("VllmOtelStatLogger flush failed: %s", e)
+        pass
+
+    def log_engine_initialized(self) -> None:
+        """Log the active export cadence after vLLM initializes the engine."""
+        if self._enabled:
+            logger.info(
+                "%s active: engine_index=%d "
+                "(export cadence: VLLM_LOG_STATS_INTERVAL=%gs)",
+                type(self).__name__,
+                self._engine_index,
+                envs.VLLM_LOG_STATS_INTERVAL,
+            )
