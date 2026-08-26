@@ -16,6 +16,7 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexAttention,
+    ScaledDotProductAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
@@ -87,6 +88,7 @@ class KimiMLAAttention(BaseAttention):
         x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        sequence_offsets: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
 
@@ -116,13 +118,40 @@ class KimiMLAAttention(BaseAttention):
         )
         k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
 
-        out_THV = self.inner_attention(
-            q_THK,
-            k_THK,
-            v_THV,
-            attention_masks=attention_masks,
-            scale=self.scale,
-        )
+        if isinstance(self.inner_attention, ScaledDotProductAttention):
+            num_sequences = (
+                1 if sequence_offsets is None else sequence_offsets.numel() - 1
+            )
+            sequence_length = num_tokens // num_sequences
+            out_THV = self.inner_attention(
+                q_THK.view(
+                    num_sequences,
+                    sequence_length,
+                    self.n_heads,
+                    self.q_head_dim,
+                ),
+                k_THK.view(
+                    num_sequences,
+                    sequence_length,
+                    self.n_heads,
+                    self.q_head_dim,
+                ),
+                v_THV.view(
+                    num_sequences,
+                    sequence_length,
+                    self.n_heads,
+                    self.v_head_dim,
+                ),
+                scale=self.scale,
+            ).flatten(0, 1)
+        else:
+            out_THV = self.inner_attention(
+                q_THK,
+                k_THK,
+                v_THV,
+                attention_masks=attention_masks,
+                scale=self.scale,
+            )
         out_TD = out_THV.reshape(num_tokens, self.n_heads * self.v_head_dim)
         out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
         return self.wo(out_TD)
@@ -239,7 +268,12 @@ class KimiK3TransformerBlock(Module):
 
         h_TD = self.attention_norm(x_TD)
         if self.attention is not None:
-            h_TD = self.attention(h_TD, attention_masks, positions)
+            h_TD = self.attention(
+                h_TD,
+                attention_masks,
+                positions,
+                sequence_offsets,
+            )
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(

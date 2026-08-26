@@ -15,7 +15,7 @@ def kimi_k3_full_minimal_async_ep_fake_profile() -> Trainer.Config:
     config = kimi_k3_debugmodel()
     config.model_spec = model_registry(
         "Kimi-K3",
-        attn_backend="flex",
+        attn_backend="sdpa",
         moe_comm_backend="minimal_async_ep",
     )
     config.hf_assets_path = "./tests/assets/tokenizer"

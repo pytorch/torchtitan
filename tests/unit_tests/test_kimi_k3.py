@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
@@ -13,6 +14,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 from torchtitan.models.kimi_k3 import (
     _kimi_k3_config,
@@ -22,7 +24,7 @@ from torchtitan.models.kimi_k3 import (
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 from torchtitan.models.kimi_k3.data import KimiK3MultiModalCollator
 from torchtitan.models.kimi_k3.kda import KimiDeltaAttention, KimiKDAKernel
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
 
@@ -268,6 +270,61 @@ class TestKimiK3(unittest.TestCase):
         expected_TD = torch.cat([attention(input_TD[:64]), attention(input_TD[64:])])
 
         torch.testing.assert_close(actual_TD, expected_TD, atol=2e-3, rtol=2e-3)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "Attention test requires CUDA.")
+    def test_batched_sdpa_matches_document_masked_flex_attention(self):
+        torch.manual_seed(4)
+        model_config = _small_model_config()
+        flex_config = model_config.layers[1].attention
+        assert flex_config is not None
+        sdpa_config = replace(
+            flex_config,
+            inner_attention=ScaledDotProductAttention.Config(),
+        )
+        flex_attention = KimiMLAAttention(flex_config).cuda().bfloat16()
+        sdpa_attention = KimiMLAAttention(sdpa_config).cuda().bfloat16()
+        for parameter in flex_attention.parameters():
+            parameter.data.normal_(std=0.02)
+        sdpa_attention.load_state_dict(flex_attention.state_dict())
+
+        input_TD = torch.randn(
+            128,
+            flex_config.dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        expected_input_TD = input_TD.detach().clone().requires_grad_()
+        positions = torch.arange(64, device="cuda").repeat(2)
+        attention_masks = model_config.build().get_attention_masks(positions)
+
+        actual_TD = sdpa_attention(
+            input_TD,
+            sequence_offsets=torch.tensor([0, 64, 128], device="cuda"),
+        )
+        expected_TD = flex_attention(
+            expected_input_TD,
+            attention_masks=attention_masks,
+        )
+        torch.testing.assert_close(actual_TD, expected_TD, atol=2e-2, rtol=2e-2)
+
+        output_grad_TD = torch.randn_like(actual_TD)
+        actual_grad_TD = torch.autograd.grad(
+            actual_TD,
+            input_TD,
+            grad_outputs=output_grad_TD,
+        )[0]
+        expected_grad_TD = torch.autograd.grad(
+            expected_TD,
+            expected_input_TD,
+            grad_outputs=output_grad_TD,
+        )[0]
+        torch.testing.assert_close(
+            actual_grad_TD,
+            expected_grad_TD,
+            atol=2e-2,
+            rtol=2e-2,
+        )
 
     @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
     def test_fla_kda_kernel_matches_recurrent_reference(self):

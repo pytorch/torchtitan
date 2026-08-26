@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
+from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
@@ -142,7 +143,11 @@ def _mla_config(
     v_head_dim: int,
     attn_backend: str,
 ) -> KimiMLAAttention.Config:
-    inner_attention = get_attention_config(attn_backend)
+    inner_attention = (
+        ScaledDotProductAttention.Config()
+        if attn_backend == "sdpa"
+        else get_attention_config(attn_backend)
+    )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
     return KimiMLAAttention.Config(
