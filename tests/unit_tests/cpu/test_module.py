@@ -12,13 +12,14 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
+from spmd_types import SpmdType
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.protocols.sharding import ShardingConfig
@@ -388,11 +389,9 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
         module = self.Identity()
         module._sharding_config = ShardingConfig()
         module._sharding_config.in_src_shardings = {
-            "x": SpmdLayout({MeshAxisName.TP: spmd.R})
+            "x": SpmdType({MeshAxisName.TP: spmd.R})
         }
-        module._sharding_config.out_src_shardings = SpmdLayout(
-            {MeshAxisName.TP: spmd.R}
-        )
+        module._sharding_config.out_src_shardings = SpmdType({MeshAxisName.TP: spmd.R})
         module._cache_pos_arg_names()
         x = distribute_tensor(
             torch.randn(4, 4, device=self.device_type),
