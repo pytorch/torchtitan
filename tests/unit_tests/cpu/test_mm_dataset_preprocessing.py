@@ -6,9 +6,9 @@
 
 """CPU unit tests for the multimodal dataset image preprocessing.
 
-``resize_to_patch_budget`` is the NaViT patch-budget protocol: cap raw patches
-at the total and per-side limits, then pad to a ``patch_size * merge_size``
-multiple. These pin that pure-geometry behavior.
+``resize_to_navit_patch_grid`` follows Kimi's NaViT image geometry: apply total
+and per-side patch limits before padding to a ``patch_size * merge_size`` grid.
+These tests pin that pure-geometry behavior.
 """
 
 import math
@@ -19,13 +19,13 @@ from PIL import Image
 
 from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
-    resize_to_patch_budget,
+    resize_to_navit_patch_grid,
     vision_to_patches,
 )
 
 
-def _patch_budget_geometry(h, w, *, patch_size, merge_size, max_patches):
-    """Reference geometry for the patch-budget resize: the final padded (H, W)
+def _navit_patch_grid_geometry(h, w, *, patch_size, merge_size, max_patches):
+    """Reference geometry for the NaViT resize: the final padded (H, W)
     in pixels."""
     nh, nw = h, w
     if (nw // patch_size) * (nh // patch_size) > max_patches:
@@ -37,11 +37,11 @@ def _patch_budget_geometry(h, w, *, patch_size, merge_size, max_patches):
     return nh + pad_h, nw + pad_w
 
 
-class TestResizeToPatchBudget(unittest.TestCase):
+class TestResizeToNavitPatchGrid(unittest.TestCase):
     PS, MERGE, LIMIT, SIDE = 14, 2, 4096, 512
 
     def _final(self, h, w):
-        rh, rw, ph, pw = resize_to_patch_budget(
+        rh, rw, ph, pw = resize_to_navit_patch_grid(
             h,
             w,
             patch_size=self.PS,
@@ -51,10 +51,10 @@ class TestResizeToPatchBudget(unittest.TestCase):
         )
         return rh + ph, rw + pw
 
-    def test_matches_patch_budget_geometry(self):
+    def test_matches_navit_patch_grid_geometry(self):
         for h, w in [(600, 800), (336, 336), (224, 448), (1000, 500), (101, 173)]:
             got = self._final(h, w)
-            want = _patch_budget_geometry(
+            want = _navit_patch_grid_geometry(
                 h,
                 w,
                 patch_size=self.PS,
@@ -79,9 +79,16 @@ class TestResizeToPatchBudget(unittest.TestCase):
         self.assertEqual(fh % (self.PS * self.MERGE), 0)
         self.assertLessEqual((fh // self.PS) * (fw // self.PS), self.LIMIT)
 
+    def test_padding_can_exceed_pre_padding_patch_budget(self):
+        # The 4096-patch budget produces a 901x901 resize before padding.
+        # NaViT then pads to 924x924, which contains 66*66=4356 patches.
+        fh, fw = self._final(1000, 1000)
+        self.assertEqual((fh, fw), (924, 924))
+        self.assertGreater((fh // self.PS) * (fw // self.PS), self.LIMIT)
+
     def test_small_image_not_upscaled(self):
         # below the cap -> only padded, never scaled up.
-        rh, rw, ph, pw = resize_to_patch_budget(
+        rh, rw, ph, pw = resize_to_navit_patch_grid(
             30,
             30,
             patch_size=self.PS,
@@ -99,7 +106,7 @@ class TestResizeToPatchBudget(unittest.TestCase):
 
     def test_per_side_cap_is_inclusive(self):
         height, width = self.PS * self.SIDE, self.PS * self.MERGE
-        rh, rw, ph, pw = resize_to_patch_budget(
+        rh, rw, ph, pw = resize_to_navit_patch_grid(
             height,
             width,
             patch_size=self.PS,
@@ -110,7 +117,7 @@ class TestResizeToPatchBudget(unittest.TestCase):
         self.assertEqual((rh, rw, ph, pw), (height, width, 0, 0))
 
 
-class TestProcessImagePatchBudget(unittest.TestCase):
+class TestProcessImageNavitPatchGrid(unittest.TestCase):
     def test_navit_pads_to_factor_multiple(self):
         ps, merge = 14, 2
         factor = ps * merge
@@ -120,7 +127,7 @@ class TestProcessImagePatchBudget(unittest.TestCase):
             img,
             patch_size=ps,
             merge_size=merge,
-            resize_fn=resize_to_patch_budget,
+            resize_fn=resize_to_navit_patch_grid,
             max_patches=4096,
             image_mean=(0.5, 0.5, 0.5),
             image_std=(0.5, 0.5, 0.5),
@@ -131,7 +138,7 @@ class TestProcessImagePatchBudget(unittest.TestCase):
         self.assertEqual(C, 3)
         self.assertEqual(H % factor, 0)
         self.assertEqual(W % factor, 0)
-        want_h, want_w = _patch_budget_geometry(
+        want_h, want_w = _navit_patch_grid_geometry(
             100, 173, patch_size=ps, merge_size=merge, max_patches=4096
         )
         self.assertEqual((H, W), (want_h, want_w))
