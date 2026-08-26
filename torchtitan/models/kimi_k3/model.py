@@ -157,27 +157,45 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
+def _attention_residual(
+    prefix_sum_TD: torch.Tensor,
+    block_residual_TND: torch.Tensor,
+    projection_weight_D: torch.Tensor,
+    norm_weight_D: torch.Tensor,
+    norm_eps: float,
+) -> torch.Tensor:
+    """Apply Kimi's block-level attention residual in FP32.
+
+    TODO: Add TP Support. The current implementation assumes that the input tensors are on a single device.
+    """
+    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
+    values_float = values_TND.float()
+    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
+    keys_TND = values_float * torch.rsqrt(variance + norm_eps)
+    score_weight_D = norm_weight_D.float() * projection_weight_D.float()
+    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
+    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
+    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
+    return output_TD.to(values_TND.dtype)
+
+
+_compiled_attention_residual = torch.compile(_attention_residual, fullgraph=True)
+
+
 def _apply_attention_residual(
     prefix_sum_TD: torch.Tensor,
     block_residual_TND: torch.Tensor,
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
-    """Apply Kimi's block-level attention residual in FP32.
-
-    TODO: Add TP Support. The current implementation assumes that the input tensors are on a single device.
-    """
     assert norm.eps is not None
-
-    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
-    values_float = values_TND.float()
-    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
-    score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
-    return output_TD.to(values_TND.dtype)
+    return _compiled_attention_residual(
+        prefix_sum_TD,
+        block_residual_TND,
+        projection.weight.squeeze(0),
+        norm.weight,
+        norm.eps,
+    )
 
 
 class KimiK3TransformerBlock(Module):

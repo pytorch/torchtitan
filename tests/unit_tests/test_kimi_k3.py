@@ -24,7 +24,12 @@ from torchtitan.models.kimi_k3 import (
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 from torchtitan.models.kimi_k3.data import KimiK3MultiModalCollator
 from torchtitan.models.kimi_k3.kda import KimiDeltaAttention, KimiKDAKernel
-from torchtitan.models.kimi_k3.model import KimiK3Model, KimiMLAAttention
+from torchtitan.models.kimi_k3.model import (
+    _attention_residual,
+    _compiled_attention_residual,
+    KimiK3Model,
+    KimiMLAAttention,
+)
 from torchtitan.models.kimi_k3.moe import _compiled_situ_glu, _situ_glu
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -131,6 +136,65 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    @unittest.skipIf(not torch.cuda.is_available(), "Residual test requires CUDA.")
+    def test_compiled_attention_residual_matches_eager(self):
+        torch.manual_seed(4)
+        actual_inputs = (
+            torch.randn(
+                128,
+                256,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            ),
+            torch.randn(
+                128,
+                5,
+                256,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            ),
+            torch.randn(256, device="cuda", requires_grad=True),
+            torch.randn(256, device="cuda", requires_grad=True),
+        )
+        expected_inputs = tuple(
+            value.detach().clone().requires_grad_() for value in actual_inputs
+        )
+
+        actual_TD = _compiled_attention_residual(*actual_inputs, 1e-5)
+        expected_TD = _attention_residual(*expected_inputs, 1e-5)
+        torch.testing.assert_close(
+            actual_TD,
+            expected_TD,
+            rtol=2e-2,
+            atol=4e-3,
+        )
+
+        output_grad_TD = torch.randn_like(actual_TD)
+        actual_grads = torch.autograd.grad(
+            actual_TD,
+            actual_inputs,
+            grad_outputs=output_grad_TD,
+        )
+        expected_grads = torch.autograd.grad(
+            expected_TD,
+            expected_inputs,
+            grad_outputs=output_grad_TD,
+        )
+        for actual_grad, expected_grad in zip(
+            actual_grads,
+            expected_grads,
+            strict=True,
+        ):
+            tolerance = 2e-2 if actual_grad.dtype == torch.bfloat16 else 2e-4
+            torch.testing.assert_close(
+                actual_grad,
+                expected_grad,
+                rtol=tolerance,
+                atol=tolerance,
+            )
+
     @unittest.skipIf(not torch.cuda.is_available(), "SiTU test requires CUDA.")
     def test_compiled_situ_glu_matches_eager(self):
         torch.manual_seed(5)
