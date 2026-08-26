@@ -10,7 +10,15 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+from torchtitan.models.kimi_k3 import (
+    _kimi_k3_config,
+    _vision_encoder_config,
+    model_registry,
+)
+from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 from torchtitan.models.kimi_k3.kda import KimiKDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
@@ -118,6 +126,34 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_minimal_async_ep_uses_latent_expert_dim(self):
+        trainer_config = kimi_k3_debugmodel()
+        trainer_config.model_spec = model_registry(
+            "debugmodel",
+            moe_comm_backend="minimal_async_ep",
+        )
+        trainer_config.parallelism = ParallelismConfig(
+            data_parallel_shard_degree=4,
+            expert_parallel_degree=4,
+            spmd_backend="partial_dtensor",
+        )
+        trainer_config.activation_checkpoint = FullAC.Config()
+        trainer_config.debug.moe_force_load_balance = True
+
+        model_config = trainer_config.model_spec.model
+        model_config.update_from_config(config=trainer_config)
+
+        for layer_config in model_config.layers:
+            if layer_config.moe is None:
+                continue
+            routed_experts = layer_config.moe.routed_experts
+            dispatcher = routed_experts.token_dispatcher
+            self.assertIsInstance(dispatcher, MinimalAsyncEPTokenDispatcher.Config)
+            self.assertEqual(dispatcher.hidden_dim, routed_experts.inner_experts.dim)
+            self.assertEqual(dispatcher.hidden_dim, 512)
+            self.assertEqual(dispatcher.receive_capacity, 1024)
+            self.assertIsNotNone(routed_experts.inner_experts.sharding_config)
+
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()

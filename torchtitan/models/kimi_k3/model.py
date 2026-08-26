@@ -274,6 +274,10 @@ class KimiK3Model(Decoder):
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
             Decoder.Config.update_from_config(self, config=config, **kwargs)
+            if config.parallelism.expert_parallel_degree > 1:
+                from .sharding import set_kimi_k3_ep_sharding_config
+
+                set_kimi_k3_ep_sharding_config(self)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

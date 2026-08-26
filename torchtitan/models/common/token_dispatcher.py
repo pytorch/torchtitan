@@ -1223,7 +1223,9 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             ),
         ):
             continue
-        dispatcher_cfgs.append(token_dispatcher_cfg)
+        dispatcher_cfgs.append(
+            (token_dispatcher_cfg, moe_cfg.routed_experts.inner_experts.dim)
+        )
 
     required_num_max_tokens_per_rank = None
     if dispatcher_cfgs:
@@ -1246,7 +1248,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             )
         required_num_max_tokens_per_rank = num_tokens_per_microbatch // num_token_shards
 
-    for token_dispatcher_cfg in dispatcher_cfgs:
+    for token_dispatcher_cfg, routed_hidden_dim in dispatcher_cfgs:
         assert required_num_max_tokens_per_rank is not None
         if parallelism.expert_parallel_degree == 1:
             raise ValueError(
@@ -1254,7 +1256,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
                 "parallelism (expert_parallel_degree > 1)."
             )
 
-        token_dispatcher_cfg.hidden_dim = model_config.dim
+        token_dispatcher_cfg.hidden_dim = routed_hidden_dim
         configured_capacity = token_dispatcher_cfg.num_max_tokens_per_rank
         if configured_capacity is not None and configured_capacity <= 0:
             raise ValueError(

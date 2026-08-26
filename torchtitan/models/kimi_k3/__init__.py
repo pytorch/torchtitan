@@ -12,7 +12,10 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
-from torchtitan.models.common.config_utils import get_attention_config
+from torchtitan.models.common.config_utils import (
+    get_attention_config,
+    make_token_dispatcher_config,
+)
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
@@ -220,6 +223,7 @@ def _latent_moe_config(
     num_experts: int,
     top_k: int,
     num_shared_experts: int,
+    moe_comm_backend: str,
 ) -> KimiLatentMoE.Config:
     return KimiLatentMoE.Config(
         num_experts=num_experts,
@@ -245,9 +249,18 @@ def _latent_moe_config(
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
             ),
-            token_dispatcher=LocalTokenDispatcher.Config(
-                num_experts=num_experts,
-                top_k=top_k,
+            token_dispatcher=(
+                LocalTokenDispatcher.Config(
+                    num_experts=num_experts,
+                    top_k=top_k,
+                )
+                if moe_comm_backend == "local"
+                else make_token_dispatcher_config(
+                    num_experts=num_experts,
+                    top_k=top_k,
+                    comm_backend=moe_comm_backend,
+                    hidden_dim=latent_dim,
+                )
             ),
         ),
         routed_norm=_norm(latent_dim),
@@ -367,6 +380,7 @@ def _kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config,
     attn_backend: str,
+    moe_comm_backend: str = "local",
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
@@ -420,6 +434,7 @@ def _kimi_k3_config(
                         num_experts=num_experts,
                         top_k=top_k,
                         num_shared_experts=num_shared_experts,
+                        moe_comm_backend=moe_comm_backend,
                     )
                 ),
                 attention_norm=_norm(dim),
@@ -452,7 +467,10 @@ def _kimi_k3_config(
     )
 
 
-def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
+def _debugmodel(
+    attn_backend: str,
+    moe_comm_backend: str = "local",
+) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
         dim=dim,
@@ -485,10 +503,14 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
             init_pos_emb_width=32,
         ),
         attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
 
 
-def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
+def _kimi_k3(
+    attn_backend: str,
+    moe_comm_backend: str = "local",
+) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
         dim=dim,
@@ -521,6 +543,7 @@ def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
             init_pos_emb_width=64,
         ),
         attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
     )
 
 
@@ -533,9 +556,13 @@ kimi_k3_configs = {
 def model_registry(
     flavor: str,
     attn_backend: str = "flex",
+    moe_comm_backend: str = "local",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = kimi_k3_configs[flavor](attn_backend=attn_backend)
+    config = kimi_k3_configs[flavor](
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
+    )
     if converters is not None:
         validate_converter_order(converters)
         for converter in converters:
