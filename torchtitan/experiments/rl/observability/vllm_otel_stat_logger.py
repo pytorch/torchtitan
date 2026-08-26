@@ -369,7 +369,8 @@ class VllmOtelStatLogger(StatLoggerBase):
     def log(self) -> None:
         """Leave vLLM's synchronous logging hook empty.
 
-        The OpenTelemetry metric reader exports on its background thread.
+        The OpenTelemetry metric reader exports on a background thread so exporter
+        I/O does not block vLLM's generation path.
         """
         pass
 
