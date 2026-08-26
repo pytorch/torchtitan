@@ -22,6 +22,23 @@ from torchtitan.protocols.module import Module
 # K = key head dimension, V = value head dimension, C = projection channels.
 
 
+def _rms_norm_gated(
+    x: torch.Tensor,
+    gate: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    input_dtype = x.dtype
+    x_float = x.float()
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_float = x_float * torch.rsqrt(variance + eps)
+    x_float = weight.float() * x_float
+    return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
+
+
+_compiled_rms_norm_gated = torch.compile(_rms_norm_gated, fullgraph=True)
+
+
 class KimiRMSNormGated(Module):
     """Per-head RMSNorm followed by a sigmoid output gate."""
 
@@ -36,12 +53,7 @@ class KimiRMSNormGated(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        x_float = x.float()
-        variance = x_float.pow(2).mean(dim=-1, keepdim=True)
-        x_float = x_float * torch.rsqrt(variance + self.eps)
-        x_float = self.weight.float() * x_float
-        return (x_float * torch.sigmoid(gate.float())).to(input_dtype)
+        return _compiled_rms_norm_gated(x, gate, self.weight, self.eps)
 
 
 class KimiKDAKernel(Module):

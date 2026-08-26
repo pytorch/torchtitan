@@ -23,7 +23,12 @@ from torchtitan.models.kimi_k3 import (
 )
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 from torchtitan.models.kimi_k3.data import KimiK3MultiModalCollator
-from torchtitan.models.kimi_k3.kda import KimiDeltaAttention, KimiKDAKernel
+from torchtitan.models.kimi_k3.kda import (
+    _compiled_rms_norm_gated,
+    _rms_norm_gated,
+    KimiDeltaAttention,
+    KimiKDAKernel,
+)
 from torchtitan.models.kimi_k3.model import (
     _attention_residual,
     _compiled_attention_residual,
@@ -136,6 +141,54 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    @unittest.skipIf(not torch.cuda.is_available(), "Gated norm test requires CUDA.")
+    def test_compiled_rms_norm_gated_matches_eager(self):
+        torch.manual_seed(3)
+        actual_inputs = (
+            torch.randn(
+                8,
+                128,
+                64,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            ),
+            torch.randn(
+                8,
+                128,
+                64,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            ),
+            torch.randn(64, device="cuda", requires_grad=True),
+        )
+        expected_inputs = tuple(
+            value.detach().clone().requires_grad_() for value in actual_inputs
+        )
+
+        actual = _compiled_rms_norm_gated(*actual_inputs, 1e-5)
+        expected = _rms_norm_gated(*expected_inputs, 1e-5)
+        torch.testing.assert_close(actual, expected)
+
+        output_grad = torch.randn_like(actual)
+        actual_grads = torch.autograd.grad(
+            actual,
+            actual_inputs,
+            grad_outputs=output_grad,
+        )
+        expected_grads = torch.autograd.grad(
+            expected,
+            expected_inputs,
+            grad_outputs=output_grad,
+        )
+        for actual_grad, expected_grad in zip(
+            actual_grads,
+            expected_grads,
+            strict=True,
+        ):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
     @unittest.skipIf(not torch.cuda.is_available(), "Residual test requires CUDA.")
     def test_compiled_attention_residual_matches_eager(self):
         torch.manual_seed(4)
