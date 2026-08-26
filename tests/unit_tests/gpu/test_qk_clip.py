@@ -6,6 +6,7 @@
 
 # @lint-ignore-every CITRINE
 
+import pytest
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -120,6 +121,7 @@ class QKClipTest(unittest.TestCase):
         )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class QKClipDistributedTest(DTensorTestBase):
     @property
