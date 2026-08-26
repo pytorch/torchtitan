@@ -6,6 +6,7 @@
 
 
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -27,7 +28,11 @@ from torchtitan.models.common.multimodal import (
     multimodal_context,
     scatter_vision_embeds,
 )
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import (
+    delta_rule_flops_per_token,
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
 
 from .gdn import GatedDeltaNet
@@ -308,21 +313,34 @@ class Qwen35Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            # The shared helper excludes the vision encoder from the per-token
-            # FLOP term (ViT cost scales with patches, not seq_len), so this MFU
-            # is decoder-only. TODO: add a per-batch vision FLOP term for VLMs.
-            attn_cfg = self.first_attention
-            # pyrefly: ignore [missing-attribute]
-            n_heads = attn_cfg.n_heads
-            # pyrefly: ignore [missing-attribute]
-            head_dim = attn_cfg.head_dim
-            return get_moe_model_nparams_and_flops(
-                self,
+            # The vision encoder cost scales with patches rather than text
+            # sequence length, so this remains a decoder-only MFU estimate.
+            qwen_model = cast("Qwen35Model", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                n_heads,
-                2 * head_dim,
-                seq_len,
+                modules_excluded_from_active_params=(qwen_model.vision_encoder,),
             )
+            attention_op_flops = 0
+            for layer in self.layers:
+                if isinstance(layer.attention, Qwen35Attention.Config):
+                    attention = layer.attention
+                    attention_op_flops += quadratic_attention_flops_per_token(
+                        num_heads=attention.n_heads,
+                        qk_head_dim=attention.head_dim,
+                        v_head_dim=attention.head_dim,
+                        seq_len=seq_len,
+                    )
+                elif isinstance(layer.delta_net, GatedDeltaNet.Config):
+                    delta_net = layer.delta_net
+                    num_value_heads = (
+                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
+                    )
+                    attention_op_flops += delta_rule_flops_per_token(
+                        num_heads=num_value_heads,
+                        key_head_dim=delta_net.key_head_dim,
+                        v_head_dim=delta_net.value_head_dim,
+                    )
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

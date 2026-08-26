@@ -9,9 +9,11 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 """
 
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
+from torch import nn
 
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
@@ -21,7 +23,10 @@ from torchtitan.models.common.multimodal import (
     multimodal_context,
     scatter_vision_embeds,
 )
-from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
+from torchtitan.models.deepseek_v3.model import (
+    DeepSeekV3Model,
+    get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
+)
 
 from .sharding import (
     annotate_multimodal_input_spmd_types,
@@ -74,6 +79,17 @@ class KimiK25Model(DeepSeekV3Model):
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            kimi_model = cast("KimiK25Model", model)
+            return get_kimi_k2_7_nparams_and_flops(
+                self,
+                model,
+                seq_len,
+                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
             )
 
     def __init__(self, config: Config):
