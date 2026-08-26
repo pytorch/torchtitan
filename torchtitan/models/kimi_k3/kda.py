@@ -62,10 +62,12 @@ class KimiKDAKernel(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         lower_bound: float | None = -5.0
+        disable_recompute: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
         self.lower_bound = config.lower_bound
+        self.disable_recompute = config.disable_recompute
         if self.lower_bound is not None and not (-5.0 <= self.lower_bound < 0.0):
             raise ValueError("KDA lower_bound must be in the safe range [-5, 0).")
 
@@ -92,6 +94,7 @@ class KimiKDAKernel(Module):
             use_beta_sigmoid_in_kernel=True,
             safe_gate=self.lower_bound is not None,
             lower_bound=self.lower_bound,
+            disable_recompute=self.disable_recompute,
         )
         return out_BLHV
 
