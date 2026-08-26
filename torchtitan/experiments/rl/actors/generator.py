@@ -881,6 +881,10 @@ class VLLMGenerator(Actor, Configurable):
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
+            # vLLM's CUDA-IPC custom all-reduce is incompatible with the
+            # Monarch external-launcher process layout during CUDA-graph
+            # capture. Keep TP communication on GPU through NCCL instead.
+            disable_custom_all_reduce=True,
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
