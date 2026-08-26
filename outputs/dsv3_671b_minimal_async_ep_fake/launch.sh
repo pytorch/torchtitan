@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+proof_root="${repo_root}/outputs/dsv3_671b_minimal_async_ep_fake"
+benchmark_steps="${BENCHMARK_STEPS:-20}"
+sequence_length="${SEQ_LEN:-4096}"
+local_batch_size="${LOCAL_BATCH_SIZE:-8}"
+trainer_backend="${TRAINER_BACKEND:-eager}"
+profile_warmup_steps="${PROFILE_WARMUP_STEPS:-2}"
+profile_active_steps="${PROFILE_ACTIVE_STEPS:-1}"
+run_id="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+run_dir="${proof_root}/benchmark_runs/${run_id}"
+
+if [[ ! "${benchmark_steps}" =~ ^[0-9]+$ ]]; then
+    echo "BENCHMARK_STEPS must be an integer, got ${benchmark_steps}" >&2
+    exit 1
+fi
+
+if ((benchmark_steps < 10)); then
+    echo "BENCHMARK_STEPS must be at least 10, got ${benchmark_steps}" >&2
+    exit 1
+fi
+
+if [[ ! "${sequence_length}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SEQ_LEN must be a positive integer" >&2
+    exit 1
+fi
+
+if [[ ! "${local_batch_size}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "LOCAL_BATCH_SIZE must be a positive integer" >&2
+    exit 1
+fi
+
+case "${trainer_backend}" in
+    eager)
+        trainer_config=dsv3_671b_minimal_async_ep_fake_profile
+        ;;
+    graph)
+        trainer_config=dsv3_671b_minimal_async_ep_fake_graph_profile
+        ;;
+    *)
+        echo "TRAINER_BACKEND must be eager or graph, got ${trainer_backend}" >&2
+        exit 1
+        ;;
+esac
+
+if [[ ! "${profile_warmup_steps}" =~ ^[0-9]+$ ]]; then
+    echo "PROFILE_WARMUP_STEPS must be a non-negative integer" >&2
+    exit 1
+fi
+
+tokens_per_rank=$((sequence_length * local_batch_size))
+
+if [[ ! "${profile_active_steps}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "PROFILE_ACTIVE_STEPS must be a positive integer" >&2
+    exit 1
+fi
+
+if ((profile_warmup_steps + profile_active_steps > benchmark_steps)); then
+    echo "Profiler warmup and active steps must fit within BENCHMARK_STEPS" >&2
+    exit 1
+fi
+
+mkdir -p "${run_dir}"
+cd "${repo_root}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export NGPU=256
+export LOG_RANK=0
+export COMM_MODE=fake_backend
+export MODULE=dsv3_671b_fake_profile_config
+export CONFIG="${trainer_config}"
+export PYTHONPATH="${proof_root}:${repo_root}:${PYTHONPATH:-}"
+export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
+
+echo "Benchmark output: ${run_dir}"
+echo "Configuration: DSV3-671B BF16, FA4, fused MLA/SwiGLU, fake world size 256, FSDP256, EP64"
+echo "Trainer backend: ${trainer_backend}"
+echo "Batch: ${local_batch_size} sequences x ${sequence_length} tokens per rank (${tokens_per_rank} tokens per rank)"
+echo "Steps: ${benchmark_steps}; final profiler window: ${profile_warmup_steps} warmup + ${profile_active_steps} active"
+
+./run_train.sh \
+    --dump-folder "${run_dir}" \
+    --training.steps "${benchmark_steps}" \
+    --training.num-tokens-per-microbatch-per-dp-rank "${tokens_per_rank}" \
+    --training.max-context-length "${sequence_length}" \
+    --profiler.enable-profiling \
+    --profiler.save-traces-folder gpu_trace \
+    --profiler.profile-freq "${benchmark_steps}" \
+    --profiler.profiler-warmup "${profile_warmup_steps}" \
+    --profiler.profiler-active "${profile_active_steps}" \
+    2>&1 | tee "${run_dir}/console.log"

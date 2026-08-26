@@ -102,14 +102,14 @@ def _silu_and_mul_forward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Compute ``silu(gate) * up`` for optionally offset-limited rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
         if row_start >= row_limit:
             return
 
-    rows = row_start + tl.arange(0, BLOCK_M)
+    rows = row_start + tl.arange(0, BLOCK_M).to(tl.int64)
     cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = (rows[:, None] < row_limit) & (cols[None, :] < NUM_COLS)
 
@@ -157,14 +157,14 @@ def _silu_and_mul_backward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Backward for ``_silu_and_mul_forward_kernel`` over defined rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
         if row_start >= row_limit:
             return
 
-    rows = row_start + tl.arange(0, BLOCK_M)
+    rows = row_start + tl.arange(0, BLOCK_M).to(tl.int64)
     cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = (rows[:, None] < row_limit) & (cols[None, :] < NUM_COLS)
 

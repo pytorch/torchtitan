@@ -233,6 +233,32 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         torch.testing.assert_close(gate.grad, ref_gate.grad)
         torch.testing.assert_close(up.grad, ref_up.grad)
 
+    def test_silu_and_mul_kernels_use_int64_for_row_stride_arithmetic(self):
+        row_stride = 2**31
+        storage_numel = row_stride + 1
+        free_bytes, _ = torch.cuda.mem_get_info()
+        required_bytes = storage_numel + 512 * 1024**2
+        if free_bytes < required_bytes:
+            self.skipTest(
+                f"need at least {required_bytes} free CUDA bytes, got {free_bytes}"
+            )
+
+        storage = torch.empty(storage_numel, device="cuda", dtype=torch.uint8)
+        gate = torch.as_strided(storage, size=(2, 1), stride=(row_stride, 1))
+        up = torch.as_strided(storage, size=(2, 1), stride=(row_stride, 1))
+        gate.copy_(torch.tensor([[2], [3]], device="cuda", dtype=torch.uint8))
+
+        expected = (torch.nn.functional.silu(gate.float()) * up.float()).to(torch.uint8)
+        out = silu_and_mul_forward_kernel(gate, up)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out, expected)
+
+        grad_out = torch.ones_like(out)
+        grad_gate, grad_up = silu_and_mul_backward_kernel(grad_out, gate, up)
+        torch.cuda.synchronize()
+        self.assertEqual(grad_gate.shape, gate.shape)
+        self.assertEqual(grad_up.shape, up.shape)
+
     def test_silu_and_mul_kernels_match_reference_with_offsets(self):
         gate = torch.tensor(
             [

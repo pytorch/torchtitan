@@ -5,12 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 
 import torchtitan.distributed.minimal_async_ep.api as minimal_async_ep_api
 import triton.language as tl
+from torch.testing._internal.distributed import fake_pg  # noqa: F401
 from torchtitan.distributed.minimal_async_ep.kernels import (
     _copy_rows_to_peer_ptrs_kernel,
     copy_full_counts_to_peers_kernel,
@@ -128,6 +131,116 @@ def test_receive_capacity_rejects_global_routing_overflow():
             torch.tensor([[2, 1], [1, 0]]),
             capacity=2,
         )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestMinimalAsyncEPFakeSymmetricMemory(unittest.TestCase):
+    def tearDown(self) -> None:
+        minimal_async_ep_api._buffer_state = None
+        minimal_async_ep_api._buffer_key = None
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+    def test_init_buffer_skips_rendezvous_for_fake_process_group(self):
+        dist.init_process_group(
+            "fake",
+            store=dist.HashStore(),
+            rank=0,
+            world_size=2,
+        )
+        with patch.object(
+            minimal_async_ep_api.symm_mem,
+            "rendezvous",
+            side_effect=AssertionError("fake groups must not rendezvous"),
+        ):
+            minimal_async_ep_api.init_buffer(
+                dist.group.WORLD,
+                hidden_dim=8,
+                num_max_tokens_per_rank=4,
+                num_local_experts=2,
+                top_k=2,
+                dtype=torch.bfloat16,
+                device=torch.device("cuda", torch.cuda.current_device()),
+            )
+
+        state = minimal_async_ep_api._buffer_state
+        assert state is not None
+        self.assertTrue(state.is_fake_group)
+        self.assertTrue(
+            torch.equal(
+                state.counts_recv_buffer, torch.zeros_like(state.counts_recv_buffer)
+            )
+        )
+        for handle, buffer in zip(
+            state.hidden_recv_handles,
+            state.hidden_recv_buffers,
+            strict=True,
+        ):
+            peer_buffer = handle.get_buffer(1, buffer.shape, buffer.dtype)
+            self.assertEqual(peer_buffer.data_ptr(), buffer.data_ptr())
+            handle.barrier()
+
+    def test_fake_process_group_forward_and_backward(self):
+        dist.init_process_group(
+            "fake",
+            store=dist.HashStore(),
+            rank=0,
+            world_size=2,
+        )
+        device = torch.device("cuda", torch.cuda.current_device())
+        minimal_async_ep_api.init_buffer(
+            dist.group.WORLD,
+            hidden_dim=8,
+            num_max_tokens_per_rank=4,
+            num_local_experts=2,
+            top_k=2,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+
+        x_TD = torch.arange(32, device=device, dtype=torch.bfloat16).view(4, 8)
+        x_TD.requires_grad_()
+        topk_expert_ids_TK = torch.tensor(
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            device=device,
+        )
+        topk_scores_TK = torch.ones(4, 2, device=device)
+        num_local_tokens_per_expert_E = torch.bincount(
+            topk_expert_ids_TK.flatten(),
+            minlength=4,
+        )
+        dispatched = minimal_async_ep_api.dispatch_op(
+            x_TD,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+            16,
+            2,
+        )
+        combined_TD, _ = minimal_async_ep_api.combine_op(
+            dispatched[0] * 1.25,
+            dispatched[1],
+            dispatched[2],
+            dispatched[3],
+            dispatched[4],
+            dispatched[5],
+            dispatched[7],
+            dispatched[6],
+            topk_scores_TK.flatten(),
+            4,
+            2,
+        )
+
+        num_local_routes_T = torch.tensor(
+            [2, 0, 1, 1],
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        expected_TD = x_TD.detach() * 1.25 * num_local_routes_T[:, None]
+        torch.testing.assert_close(combined_TD, expected_TD)
+
+        combined_TD.float().sum().backward()
+        expected_grad_TD = 1.25 * num_local_routes_T[:, None].expand_as(x_TD)
+        torch.testing.assert_close(x_TD.grad, expected_grad_TD)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -497,6 +610,8 @@ class TestMinimalAsyncEPKernels(unittest.TestCase):
             DST_DTYPE=tl.uint8,
             HAS_NUM_VALID_ROWS=True,
             HAS_SRC_ROWS=False,
+            LOCAL_RANK=0,
+            ONLY_LOCAL_RANK=False,
             BLOCK_M=1,
             BLOCK_N=1,
         )

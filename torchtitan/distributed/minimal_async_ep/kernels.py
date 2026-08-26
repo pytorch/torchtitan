@@ -31,6 +31,8 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     EP_SIZE: tl.constexpr,
     NUM_EXPERTS: tl.constexpr,
     DST_ROW_STRIDE: tl.constexpr,
+    LOCAL_RANK: tl.constexpr,
+    ONLY_LOCAL_RANK: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ) -> None:
     """Copy this rank's global expert counts into every peer count buffer.
@@ -45,6 +47,8 @@ def _copy_full_counts_to_peer_ptrs_kernel(
     peer = tl.program_id(0)
     offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = (peer < EP_SIZE) & (offsets < NUM_EXPERTS)
+    if ONLY_LOCAL_RANK:
+        mask &= peer == LOCAL_RANK
     base = tl.load(dst_ptrs + peer, mask=peer < EP_SIZE, other=0)
     dst = base.to(tl.pointer_type(tl.int64)) + rank * DST_ROW_STRIDE + offsets
     values = tl.load(counts + offsets, mask=mask, other=0)
@@ -304,6 +308,8 @@ def _copy_rows_to_peer_ptrs_kernel(
     DST_DTYPE: tl.constexpr,
     HAS_NUM_VALID_ROWS: tl.constexpr,
     HAS_SRC_ROWS: tl.constexpr,
+    LOCAL_RANK: tl.constexpr,
+    ONLY_LOCAL_RANK: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
@@ -335,6 +341,8 @@ def _copy_rows_to_peer_ptrs_kernel(
     dst_rank = tl.load(dst_ranks + row, mask=row_mask, other=-1)
     dst_row = tl.load(dst_rows + row, mask=row_mask, other=0).to(tl.int64)
     dst_rank_mask = row_mask & (dst_rank >= 0)
+    if ONLY_LOCAL_RANK:
+        dst_rank_mask &= dst_rank == LOCAL_RANK
     values = tl.load(
         src + src_row[:, None] * SRC_ROW_STRIDE + col[None, :] * SRC_COL_STRIDE,
         mask=mask,
@@ -356,6 +364,7 @@ def copy_full_counts_to_peers_kernel(
     ep_size: int,
     num_experts: int,
     dst_ptrs: torch.Tensor,
+    local_rank: int | None = None,
 ) -> None:
     if counts.dtype != torch.int64:
         raise ValueError(f"counts must be torch.int64, got {counts.dtype}.")
@@ -375,6 +384,8 @@ def copy_full_counts_to_peers_kernel(
         EP_SIZE=ep_size,
         NUM_EXPERTS=num_experts,
         DST_ROW_STRIDE=dsts[0].stride(0),
+        LOCAL_RANK=0 if local_rank is None else local_rank,
+        ONLY_LOCAL_RANK=local_rank is not None,
         BLOCK_SIZE=block_size,
     )
 
@@ -393,6 +404,7 @@ def copy_rows_to_peers_kernel(
     num_warps: int = 4,
     src_rows: torch.Tensor | None = None,
     num_valid_rows: torch.Tensor | None = None,
+    local_rank: int | None = None,
 ) -> None:
     if len(dsts) != ep_size:
         raise ValueError(f"expected {ep_size} destination buffers, got {len(dsts)}.")
@@ -417,6 +429,8 @@ def copy_rows_to_peers_kernel(
         DST_DTYPE=dst_dtype,
         HAS_NUM_VALID_ROWS=num_valid_rows is not None,
         HAS_SRC_ROWS=src_rows is not None,
+        LOCAL_RANK=0 if local_rank is None else local_rank,
+        ONLY_LOCAL_RANK=local_rank is not None,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=num_warps,

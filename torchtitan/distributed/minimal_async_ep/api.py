@@ -21,6 +21,7 @@ Shape symbols used by the API entrypoints:
 """
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,6 +48,69 @@ _HIDDEN_READY_CHANNEL = 0
 _COUNTS_READY_CHANNEL = 0
 
 
+def _is_fake_process_group(group: dist.ProcessGroup) -> bool:
+    return dist.get_backend(group) == "fake"
+
+
+class _FakeSymmetricMemory:
+    """Local symmetric-memory handle for fake process groups.
+
+    Every peer buffer aliases the local allocation. Communication kernels only
+    write rows for the simulated rank, so the aliasing preserves shapes and
+    local memory accounting without modeling remote-rank values.
+    """
+
+    def __init__(
+        self,
+        buffer: torch.Tensor,
+        *,
+        rank: int,
+        world_size: int,
+    ) -> None:
+        self._buffer = buffer.view(torch.uint8).flatten()
+        self.rank = rank
+        self.world_size = world_size
+        self.buffer_size = self._buffer.numel()
+
+    def get_buffer(
+        self,
+        rank: int,
+        sizes: Sequence[int],
+        dtype: torch.dtype,
+        storage_offset: int = 0,
+    ) -> torch.Tensor:
+        if not 0 <= rank < self.world_size:
+            raise ValueError(
+                f"fake symmetric-memory rank {rank} is outside "
+                f"[0, {self.world_size})"
+            )
+        numel = math.prod(sizes)
+        start = storage_offset * dtype.itemsize
+        end = start + numel * dtype.itemsize
+        if end > self.buffer_size:
+            raise ValueError(
+                f"requested {end} payload bytes from a "
+                f"{self.buffer_size}-byte buffer"
+            )
+        return self._buffer[start:end].view(dtype).view(tuple(sizes))
+
+    def barrier(self, channel: int = 0, timeout_ms: int = 0) -> None:
+        del channel, timeout_ms
+
+
+def _rendezvous(
+    buffer: torch.Tensor,
+    group: dist.ProcessGroup,
+) -> Any:
+    if _is_fake_process_group(group):
+        return _FakeSymmetricMemory(
+            buffer,
+            rank=group.rank(),
+            world_size=group.size(),
+        )
+    return symm_mem.rendezvous(buffer, group)
+
+
 @dataclass
 class _MinimalAsyncEPBufferState:
     """Process-local symmetric-memory state initialized as one unit."""
@@ -62,6 +126,7 @@ class _MinimalAsyncEPBufferState:
     counts_recv_peer_buffers: list[torch.Tensor]
     counts_recv_peer_ptrs: torch.Tensor
     check_receive_capacity: bool
+    is_fake_group: bool
     hidden_recv_buffer_index: int = 0
 
 
@@ -332,11 +397,14 @@ def init_buffer(
         dtype=torch.int64,
         device=device,
     )
+    is_fake_group = _is_fake_process_group(group)
+    if is_fake_group:
+        counts_recv_buffer.zero_()
     hidden_recv_handles = [
-        symm_mem.rendezvous(hidden_recv_buffer, group)
+        _rendezvous(hidden_recv_buffer, group)
         for hidden_recv_buffer in hidden_recv_buffers
     ]
-    counts_recv_handle = symm_mem.rendezvous(counts_recv_buffer, group)
+    counts_recv_handle = _rendezvous(counts_recv_buffer, group)
     hidden_recv_peer_buffers = [
         [
             hidden_recv_handle.get_buffer(
@@ -387,6 +455,7 @@ def init_buffer(
         check_receive_capacity=(
             receive_capacity_factor is not None and not force_load_balance
         ),
+        is_fake_group=is_fake_group,
     )
     _buffer_key = buffer_key
 
@@ -419,6 +488,8 @@ def _copy_rows_to_peers_and_wait_cuda(
     hidden_recv_handle = _buffer_state.hidden_recv_handles[buffer_index]
     hidden_recv_peer_buffers = _buffer_state.hidden_recv_peer_buffers[buffer_index]
     hidden_recv_peer_ptrs = _buffer_state.hidden_recv_peer_ptrs[buffer_index]
+    if _buffer_state.is_fake_group:
+        hidden_recv_buffer.zero_()
 
     copy_rows_to_peers_kernel(
         x,
@@ -433,6 +504,9 @@ def _copy_rows_to_peers_and_wait_cuda(
         src_rows=src_rows,
         dst_ptrs=hidden_recv_peer_ptrs,
         num_valid_rows=num_valid_rows,
+        local_rank=(
+            _buffer_state.group.rank() if _buffer_state.is_fake_group else None
+        ),
     )
     _wait_hidden_ready(hidden_recv_handle)
     return hidden_recv_buffer
@@ -476,6 +550,9 @@ def _copy_all_counts_to_peers_and_wait_cuda(
         ep_size=ep_size,
         num_experts=num_experts,
         dst_ptrs=_buffer_state.counts_recv_peer_ptrs,
+        local_rank=(
+            _buffer_state.group.rank() if _buffer_state.is_fake_group else None
+        ),
     )
     _wait_counts_ready()
     return _buffer_state.counts_recv_buffer
