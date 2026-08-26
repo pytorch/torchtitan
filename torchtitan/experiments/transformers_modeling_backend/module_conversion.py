@@ -15,8 +15,11 @@ forward behavior, or state_dict keys. After conversion,
 ``model.parallelize()`` distributes parameters and wraps forwards.
 """
 
+from typing import cast
+
 import torch.nn as nn
 
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
@@ -47,7 +50,10 @@ def convert_hf_to_module(model: nn.Module) -> None:
     ``HFTransformerModel`` itself) are skipped.
     """
     for child in model.children():
-        if not isinstance(child, Module):
+        if type(child) is nn.Embedding:
+            child.__class__ = Embedding
+            cast(Embedding, child).tp_group = None
+        elif not isinstance(child, Module):
             cls = type(child)
             if any("__slots__" in k.__dict__ for k in cls.__mro__[:-1]):
                 logger.warning(

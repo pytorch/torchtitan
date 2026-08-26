@@ -12,13 +12,14 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 from expecttest import assert_expected_inline
+from spmd_types import SpmdType
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.protocols.sharding import ShardingConfig
@@ -357,7 +358,7 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
 
 class TestModuleRedistributionDTensor(DTensorTestBase):
     class WeightModule(Module):
-        def __init__(self, shape: tuple[int, ...], layout: SpmdLayout):
+        def __init__(self, shape: tuple[int, ...], layout: SpmdType):
             super().__init__()
             self.weight = nn.Parameter(torch.empty(shape))
             self._sharding_config = ShardingConfig(state_shardings={"weight": layout})
@@ -390,9 +391,9 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
     def test_rejects_uneven_tp_parameter_sharding(self):
         module = self.WeightModule(
             (4, 5),
-            SpmdLayout(
+            SpmdType(
                 {MeshAxisName.TP: spmd.V},
-                partition_spec=(None, MeshAxisName.TP),
+                partition_spec=spmd.PartitionSpec(None, MeshAxisName.TP),
             ),
         )
         parallel_dims = ParallelDims(
@@ -415,7 +416,7 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
     def test_rejects_uneven_ep_parameter_sharding(self):
         module = self.WeightModule(
             (3, 4),
-            SpmdLayout({MeshAxisName.EP: spmd.S(0)}),
+            SpmdType({MeshAxisName.EP: spmd.S(0)}),
         )
         parallel_dims = ParallelDims(
             dp_replicate=1,
@@ -441,11 +442,9 @@ class TestModuleRedistributionDTensor(DTensorTestBase):
         module = self.Identity()
         module._sharding_config = ShardingConfig()
         module._sharding_config.in_src_shardings = {
-            "x": SpmdLayout({MeshAxisName.TP: spmd.R})
+            "x": SpmdType({MeshAxisName.TP: spmd.R})
         }
-        module._sharding_config.out_src_shardings = SpmdLayout(
-            {MeshAxisName.TP: spmd.R}
-        )
+        module._sharding_config.out_src_shardings = SpmdType({MeshAxisName.TP: spmd.R})
         module._cache_pos_arg_names()
         x = distribute_tensor(
             torch.randn(4, 4, device=self.device_type),
