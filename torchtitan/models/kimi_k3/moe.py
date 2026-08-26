@@ -136,11 +136,19 @@ class KimiLatentMoE(MoE):
         self.routed_up = config.routed_up.build()
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        weights_TK, expert_ids_TK, scores_TE = self.router(x_TD, self.expert_bias_E)
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1, expert_ids_TK, True
-        )
-        num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+        if self.router._debug_force_load_balance:
+            weights_TK, expert_ids_TK = self.router.forward_forced_load_balance(x_TD)
+            num_routed_tokens = x_TD.shape[0] * self.router.top_k
+            num_tokens_per_expert_E = num_routed_tokens // self.router.num_experts + (
+                torch.arange(self.router.num_experts, device=x_TD.device)
+                < num_routed_tokens % self.router.num_experts
+            )
+        else:
+            weights_TK, expert_ids_TK, scores_TE = self.router(x_TD, self.expert_bias_E)
+            routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+                -1, expert_ids_TK, True
+            )
+            num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
         if self.training:
             with torch.no_grad():
                 self.tokens_per_expert_E.add_(num_tokens_per_expert_E)

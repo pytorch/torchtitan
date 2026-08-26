@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -231,6 +232,55 @@ class TokenChoiceTopKRouter(Module):
         )
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
         return topk_expert_ids_TK, topk_scores_TK
+
+    def forward_forced_load_balance(
+        self,
+        x_TD: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute only the logits selected by round-robin debug routing."""
+        if not self._debug_force_load_balance:
+            raise ValueError(
+                "forward_forced_load_balance requires debug force load balance."
+            )
+        if self.score_func != "sigmoid":
+            topk_scores_TK, topk_expert_ids_TK, _ = self(x_TD)
+            return topk_scores_TK, topk_expert_ids_TK
+
+        num_tokens, model_dim = x_TD.shape
+        token_period = self.num_experts // math.gcd(self.num_experts, self.top_k)
+        num_cycles = (num_tokens + token_period - 1) // token_period
+        num_padding = num_cycles * token_period - num_tokens
+        if num_padding:
+            x_TD = F.pad(x_TD, (0, 0, 0, num_padding))
+
+        expert_ids_GK = (
+            torch.arange(
+                token_period * self.top_k,
+                device=x_TD.device,
+                dtype=torch.int64,
+            ).reshape(token_period, self.top_k)
+            % self.num_experts
+        )
+        grouped_weight_GKD = self.gate.weight[expert_ids_GK]
+        grouped_input_GCD = x_TD.view(num_cycles, token_period, model_dim).transpose(
+            0, 1
+        )
+        with torch.autocast(device_type=x_TD.device.type, dtype=torch.float32):
+            scores_GCK = torch.bmm(
+                grouped_input_GCD,
+                grouped_weight_GKD.transpose(1, 2),
+            )
+            if self.gate.bias is not None:
+                scores_GCK = scores_GCK + self.gate.bias[expert_ids_GK].unsqueeze(1)
+
+        topk_scores_TK = torch.sigmoid(
+            scores_GCK.transpose(0, 1).reshape(-1, self.top_k)[:num_tokens]
+        )
+        topk_expert_ids_TK = expert_ids_GK.repeat(num_cycles, 1)[:num_tokens]
+        if self.route_norm:
+            denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
+            topk_scores_TK = topk_scores_TK / denominator
+        return topk_scores_TK * self.route_scale, topk_expert_ids_TK
 
     def _get_node_limited_routing_scores(
         self,

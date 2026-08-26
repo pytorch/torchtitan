@@ -14,6 +14,8 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -44,6 +46,62 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_forced_load_balance_selected_logits_match_full_router(self):
+        config = TokenChoiceTopKRouter.Config(
+            num_experts=56,
+            top_k=8,
+            gate=Linear.Config(in_features=128, out_features=56, bias=True),
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.5,
+            _debug_force_load_balance=True,
+        )
+        expected_router = config.build()
+        actual_router = config.build()
+        expected_router.gate.weight.data.normal_()
+        assert expected_router.gate.bias is not None
+        expected_router.gate.bias.data.normal_()
+        actual_router.load_state_dict(expected_router.state_dict())
+
+        expected_input_TD = torch.randn(113, 128, requires_grad=True)
+        actual_input_TD = expected_input_TD.detach().clone().requires_grad_()
+        expected_scores_TK, expected_expert_ids_TK, _ = expected_router(
+            expected_input_TD
+        )
+        (
+            actual_scores_TK,
+            actual_expert_ids_TK,
+        ) = actual_router.forward_forced_load_balance(actual_input_TD)
+        torch.testing.assert_close(actual_scores_TK, expected_scores_TK, rtol=0, atol=0)
+        torch.testing.assert_close(actual_expert_ids_TK, expected_expert_ids_TK)
+
+        output_grad_TK = torch.randn_like(actual_scores_TK)
+        actual_grads = torch.autograd.grad(
+            actual_scores_TK,
+            (actual_input_TD, actual_router.gate.weight, actual_router.gate.bias),
+            grad_outputs=output_grad_TK,
+        )
+        expected_grads = torch.autograd.grad(
+            expected_scores_TK,
+            (
+                expected_input_TD,
+                expected_router.gate.weight,
+                expected_router.gate.bias,
+            ),
+            grad_outputs=output_grad_TK,
+        )
+        for actual_grad, expected_grad in zip(
+            actual_grads,
+            expected_grads,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_grad,
+                expected_grad,
+                rtol=1e-6,
+                atol=1e-7,
+            )
+
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
         dim = 4
