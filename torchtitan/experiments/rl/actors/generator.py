@@ -22,18 +22,11 @@ import torchstore as ts
 from monarch.actor import (
     Actor,
     Channel,
-    Port,
-    PortReceiver,
     concurrent_endpoint,
     current_rank,
+    Port,
+    PortReceiver,
 )
-from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig, CompilationConfig, ParallelConfig
-from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
-from vllm.outputs import RequestOutput
-from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.spmd_types import (
@@ -45,14 +38,11 @@ from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
 )
-from torchtitan.experiments.rl.models.native_vllm_qwen3_5 import (
-    NativeQwen35WeightBridge,
-)
 from torchtitan.experiments.rl.models.vllm_registry import (
-    TORCHTITAN_CONFIG_FORMAT,
-    TORCHTITAN_WORKER_CLS,
     InferenceParallelismConfig,
     register_to_vllm,
+    TORCHTITAN_CONFIG_FORMAT,
+    TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
@@ -64,6 +54,12 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
+from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.config import AttentionConfig, CompilationConfig, ParallelConfig
+from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.outputs import RequestOutput
+from vllm.sampling_params import RequestOutputKind
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -740,13 +736,6 @@ class VLLMGenerator(Actor, Configurable):
         kernels for TorchTitan Qwen3.5/3.6 generation. The model parameters,
         projections, output norm, and RL loop remain TorchTitan-owned."""
 
-        use_native_vllm_model: bool = False
-        """Use vLLM's native Qwen3.5/3.6 model instead of TorchTitanCausalLM.
-
-        The trainer remains TorchTitan. Live weights are resharded by
-        TorchStore directly into views of native vLLM's packed parameters.
-        """
-
         cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -805,11 +794,6 @@ class VLLMGenerator(Actor, Configurable):
                     "reset_running_requests_on_weight_sync requires "
                     "reset_prefix_cache_on_weight_sync=True (it only matters as part of resetting the cache)"
                 )
-            if self.use_native_vllm_model and self.use_vllm_fused_gdn:
-                raise ValueError(
-                    "use_native_vllm_model and use_vllm_fused_gdn are mutually "
-                    "exclusive; the native model already owns the fused GDN path"
-                )
 
     def __init__(
         self,
@@ -841,17 +825,8 @@ class VLLMGenerator(Actor, Configurable):
         # @eager_break_during_capture decorator in rl/models/attention.py, which
         # reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time -- so the env must be
         # set before register_to_vllm imports that module (#3709).
-        if (
-            not config.use_native_vllm_model
-            and config.cudagraph.enable
-            and config.cudagraph.mode == "FULL_AND_PIECEWISE"
-        ):
+        if config.cudagraph.enable and config.cudagraph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-        elif config.use_native_vllm_model:
-            # vLLM forces CompilationMode.NONE when this wrapper-specific
-            # environment variable is present. Native Qwen3.5 uses its own
-            # compiled full-and-piecewise graph path instead.
-            os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
 
         os.environ["TORCHTITAN_USE_VLLM_FUSED_GDN"] = (
             "1" if config.use_vllm_fused_gdn else "0"
@@ -859,22 +834,14 @@ class VLLMGenerator(Actor, Configurable):
         if config.use_vllm_fused_gdn:
             logger.info("TorchTitan generator is using vLLM native fused GDN kernels")
 
-        if config.use_native_vllm_model:
-            if model_spec.name != "qwen3_5":
-                raise ValueError(
-                    "use_native_vllm_model currently supports only qwen3_5, got "
-                    f"{model_spec.name!r}"
-                )
-            logger.info("TorchTitan generator is using native vLLM Qwen3.5/3.6")
-        else:
-            # Register TorchTitan model + parser with vLLM.
-            register_to_vllm(
-                model_spec,
-                parallelism=config.parallelism,
-                compile_config=compile_config,
-                checkpoint_config=config.checkpoint,
-                override=config.override,
-            )
+        # Register TorchTitan model + parser with vLLM
+        register_to_vllm(
+            model_spec,
+            parallelism=config.parallelism,
+            compile_config=compile_config,
+            checkpoint_config=config.checkpoint,
+            override=config.override,
+        )
 
         # Set vLLM environment variables from config before any vLLM initialization
         attention_backend = model_spec.model.first_full_attention_backend
@@ -907,7 +874,11 @@ class VLLMGenerator(Actor, Configurable):
             # read), but vLLM still uses this path to locate the
             # tokenizer assets and the safetensors weight shards.
             model=model_path,
-            trust_remote_code=not config.use_native_vllm_model,
+            trust_remote_code=True,
+            # Use the torchtitan custom config parser (registered by
+            # register_to_vllm above). It builds PretrainedConfig from
+            # ModelSpec instead of reading config.json from disk.
+            config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             data_parallel_size=config.parallelism.data_parallel_degree,
@@ -917,28 +888,22 @@ class VLLMGenerator(Actor, Configurable):
             # explicit EP degree: when this boolean is set, it converts all
             # DP * TP ranks into the expert-parallel group for MoE layers.
             enable_expert_parallel=enable_ep,
+            worker_cls=TORCHTITAN_WORKER_CLS,
             # Monarch already spawned TP workers via proc mesh. "external_launcher"
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
-            # Enables RequestOutput.metrics, so generator metrics can be returned
-            disable_log_stats=False,
-        )
-        if config.use_native_vllm_model:
-            # Read the checkpoint's real Qwen3.5 config and let vLLM select its
-            # native model, attention backend, and standard GPU worker.
-            engine_kwargs["config_format"] = "auto"
-        else:
-            engine_kwargs["config_format"] = TORCHTITAN_CONFIG_FORMAT
-            engine_kwargs["worker_cls"] = TORCHTITAN_WORKER_CLS
-            engine_kwargs["attention_config"] = AttentionConfig(
+            attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
                     if isinstance(attention_backend, FlexAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
-            )
+            ),
+            # Enables RequestOutput.metrics, so generator metrics can be returned
+            disable_log_stats=False,
+        )
         engine_kwargs["max_model_len"] = model_spec.model.max_seq_len
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
@@ -956,8 +921,6 @@ class VLLMGenerator(Actor, Configurable):
             expert_sequence_parallel_size=expert_sequence_parallel_size,
             enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
         )
-        if config.use_native_vllm_model:
-            vllm_compilation_config.mode = CompilationMode.VLLM_COMPILE
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
@@ -970,18 +933,6 @@ class VLLMGenerator(Actor, Configurable):
             #   prefix-cache hit rate) via a `StatLoggerBase` in `from_engine_args`;
             self._engine = LLMEngine.from_engine_args(engine_args)
             logger.info("vLLM rollout engine initialized")
-
-        self._native_weight_bridge = None
-        if config.use_native_vllm_model:
-            self._native_weight_bridge = NativeQwen35WeightBridge(
-                self._get_model(),
-                model_spec,
-                config.parallelism,
-            )
-            logger.info(
-                "Native vLLM weight bridge initialized with %d TorchTitan tensors",
-                len(self._native_weight_bridge.state_dict),
-            )
 
         self.policy_version = 0
 
@@ -1333,31 +1284,23 @@ class VLLMGenerator(Actor, Configurable):
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
-        if self._native_weight_bridge is not None:
+        model_sd = model.model.state_dict()
+        if get_spmd_backend() == "spmd_types":
+            await self._get_spmd_state_dict(model_sd, model=model)
+        else:
             await ts.get_state_dict(
                 "model_state_dict",
-                user_state_dict=self._native_weight_bridge.state_dict,
-                strict=True,
+                user_state_dict=model_sd,
+                strict=False,
                 direct_rdma=False,
             )
-        else:
-            model_sd = model.model.state_dict()
-            if get_spmd_backend() == "spmd_types":
-                await self._get_spmd_state_dict(model_sd, model=model)
-            else:
-                await ts.get_state_dict(
-                    "model_state_dict",
-                    user_state_dict=model_sd,
-                    strict=False,
-                    direct_rdma=False,
-                )
-            # state_dict() returns hook-produced copies for fused modules (e.g.
-            # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
-            # reaches the real param. Re-apply via load_state_dict to run the merge hook.
-            # Non-fused params share storage with model_sd, so reloading them is a
-            # harmless self-copy; only the fused wqkv is actually rebuilt.
-            # TODO: investigate can we avoid the copy and properly load fused qkv weights
-            model.model.load_state_dict(model_sd, strict=False)
+        # state_dict() returns hook-produced copies for fused modules (e.g.
+        # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
+        # reaches the real param. Re-apply via load_state_dict to run the merge hook.
+        # Non-fused params share storage with model_sd, so reloading them is a
+        # harmless self-copy; only the fused wqkv is actually rebuilt.
+        # TODO: investigate can we avoid the copy and properly load fused qkv weights
+        model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps

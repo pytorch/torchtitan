@@ -34,12 +34,3 @@ def test_configure_local_compile_cache(monkeypatch) -> None:
     }
     assert {name: train.os.environ[name] for name in expected} == expected
     assert created_dirs == [(path, True) for path in expected.values()]
-
-
-def test_native_vllm_does_not_enable_wrapper_breakable_cudagraph() -> None:
-    generator_config = SimpleNamespace(
-        use_native_vllm_model=True,
-        cudagraph=SimpleNamespace(enable=True, mode="FULL_AND_PIECEWISE"),
-    )
-
-    assert train.breakable_cudagraph_env(generator_config) == {}
