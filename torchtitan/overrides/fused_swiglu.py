@@ -19,14 +19,14 @@ override mechanism, *without touching core*:
    is a single GEMM.
 2. Weight initialization via the ``Module`` protocol (``param_init``).
 3. A ``sharding_config`` that supports both FSDP and tensor parallelism.
-4. Registration via ``@override`` targeting ``FeedForward.Config``.
+4. Exact ``@override`` registrations for the stock and dist-GEMM FFN configs.
 
 This module also defines the ``torchtitan::silu_and_mul`` custom CUDA op (a fused
 SiLU-and-mul Triton kernel) and :class:`FusedGroupedExperts`, which applies the
-same gate+up fusion to MoE experts. Both the ``fused_swiglu`` (``FeedForward``)
-and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here;
-activate each by naming its factory, e.g. ``--override.imports
-torchtitan.overrides.fused_swiglu.fused_swiglu,torchtitan.overrides.fused_swiglu.fused_grouped_experts``.
+same gate+up fusion to MoE experts. The ``fused_swiglu`` (``FeedForward``),
+``dist_gemm_fused_swiglu`` (``DistGEMMFeedForward``), and
+``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here;
+activate the factories matching the configured modules.
 For the DeepEP inference path, pair it with the sibling ``deepep_override`` dispatcher
 override (``torchtitan.overrides.moe_token_dispatcher``).
 
@@ -59,6 +59,17 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import derive, override
+from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
+
+# The group lookup and the unfused-fallback warning are the dist-GEMM modules'
+# own plumbing, shared here so the overlapping variant behaves identically when
+# TP is off. Private because nothing outside the dist-GEMM path should resolve
+# the group per forward.
+from torchtitan.models.common.dist_gemm import (
+    _tp_group_from_context,
+    _warn_once_unfused,
+    DistGEMMFeedForward,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
@@ -66,8 +77,10 @@ from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
+    "DistGEMMFusedSwiGLU",
     "FusedGroupedExperts",
     "FusedSwiGLU",
+    "dist_gemm_fused_swiglu",
     "fused_grouped_experts",
     "silu_and_mul_backward_kernel",
     "silu_and_mul_forward_kernel",
@@ -491,11 +504,64 @@ class FusedSwiGLU(FeedForward):
             state_dict[f"{prefix}w13.weight"] = state_dict.pop(native_key).flatten(0, 1)
 
 
-@override(
-    target=FeedForward.Config,
-    description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
-)
-def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
+class DistGEMMFusedSwiGLU(FusedSwiGLU):
+    """:class:`FusedSwiGLU` with the TP collectives also folded into its GEMMs.
+
+    The composition of both FFN optimizations: the fused ``w13`` gate+up GEMM
+    consumes an all-gather of the sequence shard, and ``w2`` reduce-scatters back
+    to a shard, over the autograd Functions in ``torchtitan/distributed/linear.py``.
+    Selected by stacking this override on ``tp_gemm_backend="dist_gemm"``; with TP
+    off it falls back to the inherited (fused but unoverlapped) forward.
+
+    Only the schedule differs from the parent -- the ``w13`` parameter, its
+    state_dict hooks, and the Triton activation are all inherited. Because ``w13``
+    is a single weight this needs plain :class:`AllGatherLinear`, where the
+    unfused ``DistGEMMFeedForward`` needs ``AllGatherLinearMulti``. That
+    saves no collective (the multi version already gathers once for both halves),
+    only the pair of ``torch.cat`` calls it does in dgrad.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FusedSwiGLU.Config):
+        """Binds ``Config.build()`` to this module rather than the parent, so it
+        cannot be deleted as empty."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tp_group = _tp_group_from_context()
+        if tp_group is None:
+            _warn_once_unfused()
+            return super().forward(x)
+
+        # w13.weight is (2 * hidden/R, dim) per rank, with gate/up rows
+        # interleaved. The output columns retain that ordering.
+        h = AllGatherLinear.apply(
+            x,
+            self.w13.weight,
+            self.w13.bias,
+            tp_group,
+            tp_group.group_name,
+        )
+        # The output columns carry that same alternation, so splitting the
+        # trailing axis into (hidden/R, 2) recovers the halves. They come out as
+        # strided views, which need no contiguous() here: the kernel is passed
+        # each input's strides. silu_and_mul_op is called directly rather than via
+        # _fused_silu_and_mul because these are already plain local 2D tensors --
+        # there is no DTensor to local_map over.
+        gate, up = h.unflatten(-1, (-1, 2)).unbind(-1)
+        y_flat = LinearReduceScatter.apply(
+            silu_and_mul_op(gate, up),
+            self.w2.weight,
+            self.w2.bias,
+            tp_group,
+            tp_group.group_name,
+        )
+        return y_flat
+
+
+def _fused_swiglu_config(
+    cfg: FeedForward.Config,
+    target: type[FusedSwiGLU.Config],
+) -> FusedSwiGLU.Config:
     w1_init = (cfg.w1.param_init or {}).get("weight")
     w3_init = (cfg.w3.param_init or {}).get("weight")
     w13_param_init = None
@@ -508,7 +574,27 @@ def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
         bias=False,
         param_init=w13_param_init,
     )
-    return derive(cfg, FusedSwiGLU.Config, w13=w13)
+    return derive(cfg, target, w13=w13)
+
+
+@override(
+    target=FeedForward.Config,
+    exact=True,
+    description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
+)
+def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
+    return _fused_swiglu_config(cfg, FusedSwiGLU.Config)
+
+
+@override(
+    target=DistGEMMFeedForward.Config,
+    exact=True,
+    description="Fuse SwiGLU gate+up while preserving dist-GEMM TP overlap.",
+)
+def dist_gemm_fused_swiglu(
+    cfg: DistGEMMFeedForward.Config,
+) -> DistGEMMFusedSwiGLU.Config:
+    return _fused_swiglu_config(cfg, DistGEMMFusedSwiGLU.Config)
 
 
 class FusedGroupedExperts(GroupedExperts):

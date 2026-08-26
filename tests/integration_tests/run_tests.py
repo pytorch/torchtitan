@@ -217,8 +217,6 @@ def run_single_test(
     for run, override_arg in enumerate(test_flavor.override_args):
         test_output_dir = str(Path(output_dir) / test_name)
         config_fn = test_flavor.configs[run] if test_flavor.configs else None
-        if use_fake_pg and test_flavor.fake_pg_numerics_config is not None:
-            config_fn = test_flavor.fake_pg_numerics_config
         config = config_fn() if config_fn is not None else None
         if use_fake_pg and config is not None:
             validate_fake_pg_compatibility(test_flavor, config)
