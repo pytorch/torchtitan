@@ -267,6 +267,3 @@ class KDA(Module):
 
         output_gate_TNK = self.output_gate(x_TD).view_as(out_TNK)
         return self.output_proj(self.output_norm(out_TNK, output_gate_TNK).flatten(-2))
-
-
-KimiDeltaAttention = KDA

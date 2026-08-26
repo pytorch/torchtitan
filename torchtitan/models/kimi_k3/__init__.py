@@ -26,7 +26,7 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .kda import InnerKDA, KDAKernel, KimiDeltaAttention, KimiRMSNormGated
+from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
@@ -170,7 +170,7 @@ def _kda_config(
     num_heads: int,
     head_dim: int,
     conv_kernel_size: int,
-) -> KimiDeltaAttention.Config:
+) -> KDA.Config:
     projection_dim = num_heads * head_dim
 
     def conv() -> Conv1d.Config:
@@ -183,7 +183,7 @@ def _kda_config(
             param_init=_CONV_INIT,
         )
 
-    return KimiDeltaAttention.Config(
+    return KDA.Config(
         num_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
