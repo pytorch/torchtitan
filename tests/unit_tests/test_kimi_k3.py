@@ -502,17 +502,26 @@ class TestKimiK3(unittest.TestCase):
         head_dim = 64
         num_heads = 3
 
+        kernel_configs = (
+            (False, 64, False),
+            (True, 64, False),
+            (True, 32, True),
+        )
         for lower_bound in (-5.0, None):
-            for disable_recompute in (False, True):
+            for disable_recompute, chunk_size, state_v_first in kernel_configs:
                 with self.subTest(
                     lower_bound=lower_bound,
                     disable_recompute=disable_recompute,
+                    chunk_size=chunk_size,
+                    state_v_first=state_v_first,
                 ):
                     self._check_fla_kda_kernel(
                         head_dim,
                         num_heads,
                         lower_bound=lower_bound,
                         disable_recompute=disable_recompute,
+                        chunk_size=chunk_size,
+                        state_v_first=state_v_first,
                     )
 
     def _check_fla_kda_kernel(
@@ -522,6 +531,8 @@ class TestKimiK3(unittest.TestCase):
         *,
         lower_bound: float | None,
         disable_recompute: bool,
+        chunk_size: int,
+        state_v_first: bool,
     ) -> None:
         def parameter(*shape: int) -> torch.Tensor:
             return torch.randn(
@@ -549,6 +560,8 @@ class TestKimiK3(unittest.TestCase):
         kernel = KimiKDAKernel.Config(
             lower_bound=lower_bound,
             disable_recompute=disable_recompute,
+            chunk_size=chunk_size,
+            state_v_first=state_v_first,
         ).build()
         actual_BLHV = kernel(*actual_inputs)
         expected_BLHV = _kda_recurrent_reference(

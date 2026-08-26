@@ -63,13 +63,19 @@ class KimiKDAKernel(Module):
     class Config(Module.Config):
         lower_bound: float | None = -5.0
         disable_recompute: bool = False
+        chunk_size: int = 64
+        state_v_first: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
         self.lower_bound = config.lower_bound
         self.disable_recompute = config.disable_recompute
+        self.chunk_size = config.chunk_size
+        self.state_v_first = config.state_v_first
         if self.lower_bound is not None and not (-5.0 <= self.lower_bound < 0.0):
             raise ValueError("KDA lower_bound must be in the safe range [-5, 0).")
+        if self.chunk_size not in (32, 64):
+            raise ValueError("KDA chunk_size must be either 32 or 64.")
 
     def forward(
         self,
@@ -95,6 +101,8 @@ class KimiKDAKernel(Module):
             safe_gate=self.lower_bound is not None,
             lower_bound=self.lower_bound,
             disable_recompute=self.disable_recompute,
+            chunk_size=self.chunk_size,
+            state_v_first=self.state_v_first,
         )
         return out_BLHV
 

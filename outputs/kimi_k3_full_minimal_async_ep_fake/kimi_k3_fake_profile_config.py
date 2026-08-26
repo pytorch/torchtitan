@@ -21,6 +21,8 @@ def kimi_k3_full_minimal_async_ep_fake_profile() -> Trainer.Config:
     for layer in config.model_spec.model.layers:
         if layer.delta_attention is not None:
             layer.delta_attention.kernel.disable_recompute = True
+            layer.delta_attention.kernel.chunk_size = 32
+            layer.delta_attention.kernel.state_v_first = True
     config.hf_assets_path = "./tests/assets/tokenizer"
     config.dataloader.collator.max_images_per_batch = 128
     config.training.dtype = "bfloat16"
