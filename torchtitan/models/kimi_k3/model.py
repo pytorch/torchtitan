@@ -274,13 +274,6 @@ class KimiK3Model(Decoder):
         # anything else warns and passes through.
         attn_res_cache: bool = True
 
-
-        def _validate_cp_backend(self, parallelism) -> None:
-            """This model's CP is not ShardingConfig-driven -- the KDA kernels
-            are fla triton and never see a DTensor -- so the spmd_types
-            requirement does not apply; apply_cp_kimi_k3 checks its own
-            preconditions at wiring time."""
-
         def update_from_config(self, *, config, **kwargs) -> None:
             dataset = config.dataloader.dataset
             # TODO: Support sample packing by resetting the Q/K/V causal-convolution
