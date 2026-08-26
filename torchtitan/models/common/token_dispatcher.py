@@ -32,7 +32,7 @@ class LocalDispatchMetadata:
 
     token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
     topk_scores_experts_sorted_N: torch.Tensor | None  # noqa: N815
-    routed_scores_R: torch.Tensor | None  # noqa: N815
+    routed_scores_R: torch.Tensor | None = None  # noqa: N815
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -716,24 +716,12 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=(
-                None if self.absorb_router_scores else topk_scores_experts_sorted_N
-            ),
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             # Unused in the EP=1 combine path (no all-to-all to reverse).
             input_splits=[],
             output_splits=[],
-            routed_scores_R=(
-                torch.cat(
-                    [
-                        topk_scores_experts_sorted_N,
-                        topk_scores_experts_sorted_N.new_zeros(1),
-                    ]
-                )[permuted_indices]
-                if self.absorb_router_scores
-                else None
-            ),
         )
         return routed_input_RD, num_tokens_per_local_expert_padded_e, metadata
 
@@ -759,12 +747,10 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         )
 
         out_TD = torch.zeros_like(x_TD)
-        if metadata.routed_scores_R is None:
-            assert metadata.topk_scores_experts_sorted_N is not None
-            routed_output_RD = (
-                routed_output_RD.to(torch.float32)
-                * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-            ).to(routed_output_RD.dtype)
+        routed_output_RD = (
+            routed_output_RD.to(torch.float32)
+            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
+        ).to(routed_output_RD.dtype)
 
         dim = x_TD.shape[-1]
         out_TD = deterministic_scatter_add(
