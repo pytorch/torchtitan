@@ -56,6 +56,8 @@ class GroupedExperts(Module):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine.
 
@@ -103,6 +105,10 @@ class GroupedExperts(Module):
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
+        if routed_scores_R is not None:
+            # Router scores are produced in float32.  Upcast only h_RF for
+            # the score multiplication, then restore W2's bfloat16 input.
+            h_RF = (h_RF.float() * routed_scores_R.reshape(-1, 1)).to(h_RF.dtype)
         return self._grouped_mm(
             A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
@@ -157,10 +163,19 @@ class RoutedExperts(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        routed_scores_R = getattr(metadata, "routed_scores_R", None)
         with maybe_set_sparse_mesh():
-            routed_output_RD = self.inner_experts(
-                routed_input_RD, num_global_tokens_per_local_expert_e
-            )
+            if routed_scores_R is None:
+                routed_output_RD = self.inner_experts(
+                    routed_input_RD,
+                    num_global_tokens_per_local_expert_e,
+                )
+            else:
+                routed_output_RD = self.inner_experts(
+                    routed_input_RD,
+                    num_global_tokens_per_local_expert_e,
+                    routed_scores_R=routed_scores_R,
+                )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
