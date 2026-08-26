@@ -135,9 +135,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8_no_router_recompute() -> (
-    Trainer.Config
-):
+def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config = qwen3_debugmodel_moe_param_groups()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -147,11 +145,6 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8_no_router_recompute() ->
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
-    # Forced router recomputation is not bitwise reproducible when mixed with
-    # cached Real-PG expert-parallel collectives.
-    config.activation_checkpoint = SelectiveAC.Config(
-        force_recompute_mm_shapes_by_fqns=[]
-    )
     return config
 
 
