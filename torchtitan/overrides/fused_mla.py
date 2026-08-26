@@ -609,23 +609,21 @@ def _fused_mla_kv_backward_op_fake(
     )
 
 
-@spmd.register_autograd_function
 class _FusedMLAQ(torch.autograd.Function):
     @staticmethod
-    def typecheck_forward(
+    def spmd_typecheck(
+        output: torch.Tensor,
+        *,
         q: torch.Tensor,
         rope_cache_real: torch.Tensor,
         positions: torch.Tensor,
-        q_nope_dim: int,
-    ) -> torch.Tensor:
+    ) -> None:
         q_type = (spmd.V, spmd.PartitionSpec(None, ("dp", "cp"), "tp", None))
         positions_type = (spmd.V, spmd.PartitionSpec(None, ("dp", "cp")))
         spmd.assert_type(q, *q_type)
         spmd.assert_type(rope_cache_real, spmd.R)
         spmd.assert_type(positions, *positions_type)
-        output = _FusedMLAQ.apply(q, rope_cache_real, positions, q_nope_dim)
         spmd.assert_type(output, *q_type)
-        return output
 
     @staticmethod
     def forward(
@@ -667,16 +665,16 @@ class _FusedMLAQ(torch.autograd.Function):
         return grad_q, None, None, None
 
 
-@spmd.register_autograd_function
 class _FusedMLAKV(torch.autograd.Function):
     @staticmethod
-    def typecheck_forward(
+    def spmd_typecheck(
+        outputs: tuple[torch.Tensor, torch.Tensor],
+        *,
         kv: torch.Tensor,
         k_pe: torch.Tensor,
         rope_cache_real: torch.Tensor,
         positions: torch.Tensor,
-        q_nope_dim: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> None:
         kv_partition = spmd.PartitionSpec(None, ("dp", "cp"), "tp", None)
         k_pe_partition = spmd.PartitionSpec(None, ("dp", "cp"), None)
         positions_partition = spmd.PartitionSpec(None, ("dp", "cp"))
@@ -684,16 +682,9 @@ class _FusedMLAKV(torch.autograd.Function):
         spmd.assert_type(k_pe, spmd.V, k_pe_partition)
         spmd.assert_type(rope_cache_real, spmd.R)
         spmd.assert_type(positions, spmd.V, positions_partition)
-        k, v = _FusedMLAKV.apply(
-            kv,
-            k_pe,
-            rope_cache_real,
-            positions,
-            q_nope_dim,
-        )
+        k, v = outputs
         spmd.assert_type(k, spmd.V, kv_partition)
         spmd.assert_type(v, spmd.V, kv_partition)
-        return k, v
 
     @staticmethod
     def forward(
