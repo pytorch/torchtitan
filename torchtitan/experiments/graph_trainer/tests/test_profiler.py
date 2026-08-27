@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gzip
 import json
 import os
 import tempfile
@@ -23,12 +24,14 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
 )
 from torchtitan.experiments.graph_trainer.cudagraph import (
+    _cg_manager,
+    _cudagraph_annotate_trace_file,
     cudagraph_teardown,
     get_cudagraph_annotations,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    run_traced_train_step,
-    trace_train_step,
+    minimal_fx_tracer,
+    run_traced,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
@@ -42,7 +45,7 @@ class TestKernelAnnotationsE2E(TestCase):
     """E2E test: trace fwd+bwd → insert annotations → cudagraph → profile → check trace."""
 
     def test_profiler_trace_has_module_fqn_annotations(self):
-        """After the full pipeline (trace_train_step → insert_kernel_annotations
+        """After the full pipeline (minimal_fx_tracer → insert_kernel_annotations
         → cudagraph → profile), the profiler trace should contain
         ``module_fqn`` fields on graphed kernel events."""
         if _is_tools_id_unavailable():
@@ -72,15 +75,15 @@ class TestKernelAnnotationsE2E(TestCase):
         x = torch.randn(4, 16, device="cuda")
         labels = torch.randn(4, 16, device="cuda")
 
-        # Trace fwd + loss + bwd via trace_train_step.
-        def fwd_bwd_step(model, inputs, labels):
+        # Trace fwd + loss + bwd via minimal_fx_tracer.
+        def fwd_bwd_step(inputs, labels):
             pred = model(inputs)
             loss = torch.nn.functional.mse_loss(pred, labels)
             params = [p for p in model.parameters() if p.requires_grad]
             grads = torch.autograd.grad(loss, params)
             return [loss] + list(grads)
 
-        traced = trace_train_step(fwd_bwd_step)(model, x, labels)
+        traced = minimal_fx_tracer(fwd_bwd_step, module=model)(x, labels)
 
         # Verify module_fqn metadata survived tracing.
         fqns_in_graph = set()
@@ -96,8 +99,8 @@ class TestKernelAnnotationsE2E(TestCase):
         traced.gm = apply_graph_passes(traced.gm, traced.example_inputs, passes)
 
         # Run: warmup + capture + replay.
-        run_traced_train_step(traced, model, x, labels)  # warmup + capture
-        run_traced_train_step(traced, model, x, labels)  # replay
+        run_traced(traced, module=model)(x, labels)  # warmup + capture
+        run_traced(traced, module=model)(x, labels)  # replay
 
         # Check annotations were captured.
         annotations = get_cudagraph_annotations()
@@ -118,7 +121,7 @@ class TestKernelAnnotationsE2E(TestCase):
                 torch.profiler.ProfilerActivity.CUDA,
             ],
         ) as prof:
-            run_traced_train_step(traced, model, x, labels)
+            run_traced(traced, module=model)(x, labels)
             torch.cuda.synchronize()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -132,7 +135,7 @@ class TestKernelAnnotationsE2E(TestCase):
         self.assertGreater(count, 0, "annotate_trace matched 0 events")
 
         # Verify module_fqn fields appear on graphed kernel events.
-        # Since trace_train_step traces fwd+bwd into a single graph,
+        # Since minimal_fx_tracer traces fwd+bwd into a single graph,
         # backward kernels (e.g. layer_norm_backward) should also carry
         # annotations from _copy_fwd_metadata_to_bw_nodes.
         fqns_in_trace = set()
@@ -206,8 +209,50 @@ class TestTracePostProcessorConfig(TestCase):
 
         self.assertEqual(len(calls), 1, f"Expected 1 call, got {calls}")
         path, existed = calls[0]
-        self.assertTrue(path.endswith("rank0_trace.json"))
+        # Profiler exports gzip-compressed traces (.json.gz) since #3483.
+        self.assertTrue(path.endswith("rank0_trace.json.gz"))
         self.assertTrue(existed, f"Trace file {path} did not exist when callback ran")
+
+    def test_annotate_post_processor_round_trips_gzip_trace(self):
+        """The cudagraph trace post-processor must read and write the
+        gzip-compressed (.json.gz) traces the Profiler produces since #3483.
+        A plain ``open``/``json.load`` would raise on the gzip bytes."""
+
+        graph_node_id = 42
+        trace = {
+            "traceEvents": [
+                {
+                    "name": "some_kernel",
+                    "tid": 1,
+                    "ts": 100,
+                    "args": {"graph node id": graph_node_id},
+                }
+            ]
+        }
+
+        # Seed annotations so the post-processor does real work instead of
+        # returning early on an empty annotation map.
+        saved_annotations = _cg_manager.all_annotations
+        _cg_manager.all_annotations = {
+            graph_node_id: [{_MODULE_FQN: "layers.0.attention.wq"}]
+        }
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                trace_path = os.path.join(tmp, "rank0_trace.json.gz")
+                with gzip.open(trace_path, "wt") as f:
+                    json.dump(trace, f)
+
+                # Must not raise on the gzip-compressed input.
+                _cudagraph_annotate_trace_file(trace_path)
+
+                # And the written-back trace must remain valid gzip JSON.
+                with gzip.open(trace_path, "rt") as f:
+                    annotated = json.load(f)
+        finally:
+            _cg_manager.all_annotations = saved_annotations
+
+        fqns = {e.get("args", {}).get(_MODULE_FQN) for e in annotated["traceEvents"]}
+        self.assertIn("layers.0.attention.wq", fqns)
 
 
 if __name__ == "__main__":

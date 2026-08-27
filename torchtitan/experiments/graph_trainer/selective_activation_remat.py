@@ -18,28 +18,68 @@ from torch._functorch.partitioners import (
     must_recompute,
 )
 
-from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
+from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_module_fqn,
+    _is_backward_node,
+)
 
 
 log = logging.getLogger(__name__)
 
 
+def _privatize_custom_meta(node: fx.Node) -> None:
+    """Give ``node`` its own ``meta["custom"]`` dict.
+
+    ``fx.Graph.node_copy`` / ``dict.update`` shallow-copy ``meta``, so a copied node
+    ends up sharing its source's nested ``custom`` dict; annotating one would then
+    silently mutate the other. A shallow copy suffices -- callers only add or
+    replace keys, they don't mutate the values in place.
+    """
+    custom = node.meta.get("custom")
+    if custom is not None:
+        node.meta["custom"] = dict(custom)
+
+
+# Module FQNs whose backward is not an activation-checkpoint region. In a
+# forward-loss-backward graph the backward runs in reverse module order, so the
+# loss / lm_head backward always precedes the model-layer backward. A
+# chunked-loss / lm_head backward can *consume* must_recompute forward nodes
+# (the tied embedding weight and shared rope buffers flow into the loss
+# backward), but recompute belongs to the model-layer backward. These FQNs mark
+# where that model-layer backward begins.
+_NON_AC_MODULE_FQNS = frozenset({"loss", "lm_head"})
+
+
 def _collect_backward_regions(
     gm: fx.GraphModule,
 ) -> list[tuple[int, int, bool]]:
-    """Returns (bwd_start, bwd_end, needs_remat) for each backward region.
+    """Returns (bwd_start, bwd_end, needs_remat) for each model-layer backward region.
+
+    Relies on the forward-loss-backward structure: the loss / lm_head backward
+    always precedes the model-layer backward. We find the last loss / lm_head
+    node and collect backward regions only from there on, so chunked-loss
+    backward chunks are never counted as remat regions -- only the model-layer
+    backward that follows is. When there are no loss / lm_head nodes (e.g. a
+    synthetic unit-test graph) collection starts at the beginning.
 
     Regions are maximal contiguous runs of backward nodes, as [start, end)
-    indices into the graph node list. This is still kind of OK for chunked
-    loss because: (1) we would have errored earlier if there were multiple
-    regions that need recompute, and (2) we only ever do recompute on the
-    last backward.
+    indices into the graph node list. ``needs_remat`` is True when a backward
+    node in the region consumes a must_recompute forward node.
     """
+    all_nodes = list(gm.graph.nodes)
+
+    # Skip everything up to and including the last loss / lm_head node.
+    start_idx = 0
+    for idx, node in enumerate(all_nodes):
+        if _get_module_fqn(node) in _NON_AC_MODULE_FQNS:
+            start_idx = idx + 1
+
     regions: list[tuple[int, int, bool]] = []
     bwd_start: int | None = None
     needs_remat = False
 
-    for idx, node in enumerate(gm.graph.nodes):
+    for idx in range(start_idx, len(all_nodes)):
+        node = all_nodes[idx]
         if _is_backward_node(node):
             if bwd_start is None:
                 bwd_start = idx
@@ -53,7 +93,7 @@ def _collect_backward_regions(
             bwd_start = None
 
     if bwd_start is not None:
-        regions.append((bwd_start, idx + 1, needs_remat))
+        regions.append((bwd_start, len(all_nodes), needs_remat))
 
     return regions
 
@@ -78,9 +118,11 @@ def selective_activation_remat_pass(
     ``node.meta["autograd_backward"] == True``, set by both Dynamo and
     non-strict ``make_fx`` tracing when tracing ``torch.autograd.grad``.
 
-    The graph may contain multiple disjoint backward regions (e.g. chunked
-    loss). Regions that do not depend on recomputable forward nodes are
-    skipped. Only one region may require remat; if multiple do, we error.
+    The graph may contain multiple disjoint backward regions (e.g. one per
+    chunk of a chunked loss). ``_collect_backward_regions`` excludes loss /
+    lm_head regions from remat even when they consume must_recompute forward
+    nodes, so recompute is driven only by the model-layer backward. Exactly one
+    remat region is expected; more than one is an error.
     """
     if not has_recomputable_ops(gm):
         return gm
@@ -96,17 +138,16 @@ def selective_activation_remat_pass(
     if not regions:
         return gm
 
-    # Assumption: chunked-loss regions (e.g. lm_head) do not carry AC, so
-    # at most one backward region depends on must_recompute forward nodes.
-    # If tag_sac_policy starts tagging the lm_head layer with AC, multiple
-    # disjoint backward regions could need remat and this heuristic must
-    # be revisited.
+    # Loss / lm_head backward regions are already filtered out by
+    # _collect_backward_regions, so the remaining needs-remat regions are the
+    # model-layer AC regions; exactly one is expected.
     remat_regions = [(s, e) for s, e, needs in regions if needs]
 
     if len(remat_regions) > 1:
         raise RuntimeError(
-            f"Detected {len(remat_regions)} disjoint backward regions that require recomputation, "
-            "but remat only supports one such region in a forward-loss-backward graph."
+            f"Detected {len(remat_regions)} disjoint backward regions that require "
+            "recomputation, but remat supports only one such region in a "
+            "forward-loss-backward graph."
         )
 
     if not remat_regions:
@@ -271,6 +312,35 @@ def selective_activation_remat_pass(
             return bwd_wait
         return x
 
+    def duplicate_subgraph_get_attrs(
+        fwd_node: fx.Node, bwd_target: fx.Node
+    ) -> dict[fx.Node, fx.Node]:
+        """Give a recompute dup private copies of its subgraph get_attr inputs.
+
+        HOPs like ``flex_attention`` reference their ``score_mod`` / ``mask_mod``
+        subgraphs through ``get_attr`` nodes. If the dup shared the original's
+        get_attr, the later ``regional_inductor`` pass — which partitions the
+        annotated flex node together with its subgraph get_attrs — could only
+        place that shared get_attr in one flex region's partition, leaving the
+        other flex with the subgraph passed as a raw ``GraphModule`` arg (which
+        fails to compile). Fresh get_attr nodes (same target, same submodule)
+        keep each flex region self-contained. Plain-tensor get_attrs are left
+        shared: they are never annotated, so they stay cross-region inputs for
+        both the original and the dup, exactly as before.
+        """
+        dups: dict[fx.Node, fx.Node] = {}
+        for arg in fwd_node.all_input_nodes:
+            if arg.op != "get_attr":
+                continue
+            if not isinstance(getattr(gm, arg.target, None), fx.GraphModule):
+                continue
+            with gm.graph.inserting_before(bwd_target):
+                dup_attr = gm.graph.get_attr(arg.target)
+                dup_attr.meta.update(arg.meta)  # shares arg's nested custom dict
+                _privatize_custom_meta(dup_attr)
+            dups[arg] = dup_attr
+        return dups
+
     # Iterate the claimed must_recompute fwd nodes in graph order so that
     # each dup's upstream deps are already duped (and visible via
     # ``recomputed_nodes``) by the time we copy a downstream node.
@@ -283,8 +353,18 @@ def selective_activation_remat_pass(
             bwd_wait = offloaded_fwd_to_bwd_wait.get(arg)
             if bwd_wait is not None:
                 ensure_offload_chain_before(bwd_wait, bwd_target)
+        # HOP subgraph get_attrs must be private to each recompute dup so
+        # regional_inductor can partition each flex region independently.
+        get_attr_dups = duplicate_subgraph_get_attrs(fwd_node, bwd_target)
+
+        def remat_and_dup_get_attr(x: object, _dups=get_attr_dups) -> object:
+            if isinstance(x, fx.Node) and x in _dups:
+                return _dups[x]
+            return remat_input(x)
+
         with gm.graph.inserting_before(bwd_target):
-            dup = gm.graph.node_copy(fwd_node, remat_input)
+            dup = gm.graph.node_copy(fwd_node, remat_and_dup_get_attr)
+            _privatize_custom_meta(dup)  # node_copy shares fwd_node's custom dict
         dup.name = fwd_node.name + "_recomputed"
         dup.meta["autograd_backward"] = True
         recomputed_nodes[fwd_node] = dup
