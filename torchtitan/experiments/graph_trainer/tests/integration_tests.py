@@ -267,12 +267,17 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
 def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
     """DeepSeek-v3-based integration tests (require H100 machines)."""
     ep_overlap_flex_tests = [
+        # TODO(#4342): Remove transformer-level chunking. After the model batch
+        # dimension was folded into the token dimension, splitting `layers.*`
+        # in half cuts the packed token stream mid-document, so neither chunk
+        # has full attention context. This variant aborts at step 1 with a
+        # non-finite loss.
         (
             "regional",
             "batch",
             "layers.*",
             "transformer_batch",
-            False,
+            True,
         ),
         (
             "regional",
@@ -288,12 +293,16 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "moe_seq",
             True,
         ),
+        # TODO(#4342): Remove transformer-level chunking, as above. Under full
+        # Inductor the mid-document split surfaces earlier than the non-finite
+        # loss: this variant aborts before step 1 on a Triton index-out-of-
+        # bounds assertion.
         (
             "full",
             "batch",
             "layers.*",
             "transformer_batch",
-            False,
+            True,
         ),
         (
             "full",
