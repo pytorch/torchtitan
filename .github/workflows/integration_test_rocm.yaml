@@ -3,6 +3,8 @@ name: Integration Tests - Features (ROCm)
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/rocm/*
     paths-ignore:
       - 'torchtitan/experiments/**'
 
