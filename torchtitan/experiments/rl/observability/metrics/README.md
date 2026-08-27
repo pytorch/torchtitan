@@ -190,7 +190,17 @@ Return no value when the query rate is zero. Using rates instead of the raw
 cumulative counter values limits the result to the selected time window and
 handles counter resets.
 
-### Write JSONL locally
+### Choose the right exporter option
+
+Both exporters use the same OpenTelemetry instruments and metric names; only
+the destination changes:
+
+- Use `jsonl` for local development, debugging, and short or small-scale runs
+  that do not have an OpenTelemetry collector.
+- Use `otlp` for distributed or production runs that need centralized
+  aggregation, retention, dashboards, or alerts.
+
+#### Write JSONL locally
 
 After completing the [DAPO Math setup](../../examples/dapo_math/README.md#setup),
 use `jsonl` for local inspection without a collector:
@@ -208,7 +218,7 @@ Each TP-rank-0 generator writes compact JSON records to
 `{dump_folder}/vllm_metrics/{generator_name}.rank{rank}.jsonl`. This mode
 requires a configured output directory.
 
-### Export with OTLP
+#### Export with OTLP
 
 Use `otlp` to send metrics directly to an OpenTelemetry collector or compatible
 backend:

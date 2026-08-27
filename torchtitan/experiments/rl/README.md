@@ -186,6 +186,8 @@ Together these answer four different debugging questions: what the distributed s
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
 
+> **TODO:** Add [`Profiler.Config`](https://github.com/pytorch/torchtitan/blob/d208df86f4259711d4ae502fcb54ab28b15297e7/torchtitan/trainer.py#L86) support to `PolicyTrainer`, matching the core trainer's GPU profiler support.
+
 ## Monarch specifics
 
 ### Actor endpoints use `@concurrent_endpoint`

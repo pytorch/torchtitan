@@ -141,7 +141,10 @@ def _compact_json(metrics_data) -> str:
 
 
 class VllmOtelStatLogger(StatLoggerBase):
-    """Per-engine vLLM stat logger that exports OTLP metrics to a collector."""
+    """Per-engine vLLM stat logger that exports OpenTelemetry metrics.
+
+    Metric selection and stat extraction are based on vLLM's ``PrometheusStatLogger``.
+    """
 
     def __init__(
         self,
