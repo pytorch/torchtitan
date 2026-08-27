@@ -10,7 +10,7 @@ Together, the unified model, batch-invariant mode, and single training stack pro
 
 Note: Unified-model performance varies by model, input shape, and parallelism: it can trail native vLLM in inference-only workloads but outperform it end to end in some RL configurations. Batch invariance trades throughput for exact numerics and can be used for debugging or controlled on-policy studies.
 
-[Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
+[Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers) · [Observability](#observability) · [Quick Start](#quick-start)
 
 > **Note:** TitanRL is under active development. APIs and configurations may change.
 
@@ -93,6 +93,12 @@ python -m torchtitan.experiments.rl.train \
 Train on verifiable math with DAPO loss and Math-Verify rewards.
 
 [Run DAPO Math](./examples/dapo_math)
+
+### Verifiers: optional integration example
+
+Run the DAPO Math workload with Verifiers managing the local rollout environment.
+
+[Run Verifiers](./examples/verifiers)
 
 ### Search-R1: multi-turn tool use
 
