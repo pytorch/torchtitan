@@ -8,7 +8,6 @@ import unittest
 
 import torch
 import torch.nn as nn
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     GraphTrainerScaledDotProductAttention,
 )
@@ -16,7 +15,7 @@ from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.muse_glimmer import muse_glimmer_configs
-from torchtitan.models.qwen3_5 import qwen3_5_configs
+from torchtitan.models.qwen3_8 import qwen3_8_configs
 
 
 class _AttentionOutput(nn.Module):
@@ -87,8 +86,8 @@ class TestModelTDLayout(unittest.TestCase):
 
         self.assertEqual(out_TD.shape, x_TD.shape)
 
-    def test_qwen35_attention_preserves_td_shape(self):
-        config = qwen3_5_configs["debugmodel"]("varlen")
+    def test_qwen38_attention_preserves_td_shape(self):
+        config = qwen3_8_configs["debugmodel"]("varlen")
         attention_config = next(
             layer.attention for layer in config.layers if layer.attention is not None
         )

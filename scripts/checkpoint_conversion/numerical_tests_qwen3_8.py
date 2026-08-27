@@ -6,17 +6,17 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-End-to-end numerical correctness test for Qwen3.5 checkpoint conversion.
+End-to-end numerical correctness test for Qwen3.8 checkpoint conversion.
 
 Compares HuggingFace and TorchTitan next-token logits on multimodal inputs
 (random image + text prompt). Each pipeline uses its own image preprocessing
 so the test validates the full path: pixels → vision encoder → decoder → logits.
 
 Usage:
-    python -m scripts.checkpoint_conversion.numerical_tests_qwen3_5 \
-        --hf_model_path hf_assets/Qwen/Qwen3.5-2B \
-        --tt_checkpoint_path outputs/Qwen/qwen3_5_2b_dcp \
-        --model_flavor 2B
+    python -m scripts.checkpoint_conversion.numerical_tests_qwen3_8 \
+        --hf_model_path assets/hf/Qwen3.8-27B \
+        --tt_checkpoint_path outputs/Qwen/qwen3_8_27b_dcp \
+        --model_flavor 27B
 """
 
 import argparse
@@ -39,10 +39,8 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
     vision_to_patches,
 )
-from torchtitan.models.common.attention import ScaledDotProductAttention
-from torchtitan.models.qwen3_5 import model_registry, QWEN3_5_SPECIAL_TOKENS
+from torchtitan.models.qwen3_8 import model_registry, QWEN3_8_SPECIAL_TOKENS
 from transformers import AutoModelForImageTextToText, AutoProcessor
-
 
 # ============================================================
 # Metrics
@@ -78,7 +76,14 @@ def top_k_match(logits_a, logits_b, k=5):
 # ============================================================
 
 
-def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
+def build_inputs(
+    hf_model_path,
+    model_flavor,
+    num_samples,
+    image_size=224,
+    *,
+    text_only=False,
+):
     """Build paired HF / TT inputs from random images.
 
     Returns:
@@ -99,19 +104,42 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     merge_size = encoder_config.spatial_merge_size
 
     image_token_id = processor.tokenizer.convert_tokens_to_ids(
-        QWEN3_5_SPECIAL_TOKENS["image_token"]
+        QWEN3_8_SPECIAL_TOKENS["image_token"]
     )
     video_token_id = processor.tokenizer.convert_tokens_to_ids(
-        QWEN3_5_SPECIAL_TOKENS["video_token"]
+        QWEN3_8_SPECIAL_TOKENS["video_token"]
     )
     special_tokens = {"image_id": image_token_id, "video_id": video_token_id}
     # Reuse the collator's MRoPE builder (only needs spatial_merge_size) so the
     # 3D position IDs match the training path exactly.
-    mrope_builder = types.SimpleNamespace(spatial_merge_size=merge_size)
+    mrope_builder = types.SimpleNamespace(
+        spatial_merge_size=merge_size,
+        patch_order="block",
+    )
 
     hf_inputs, tt_inputs, pixel_comparisons = [], [], []
 
     for i in range(num_samples):
+        if text_only:
+            messages = [
+                {
+                    "role": "user",
+                    "content": f"Continue this deterministic test sequence: {i}.",
+                }
+            ]
+            hf_in = processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+            tokens = hf_in["input_ids"].squeeze(0)
+            positions = torch.arange(tokens.numel(), dtype=tokens.dtype)
+            hf_inputs.append(hf_in)
+            tt_inputs.append((tokens, None, None, positions))
+            continue
+
         rng = torch.Generator().manual_seed(42 + i)
         img_array = (
             torch.randint(0, 256, (image_size, image_size, 3), generator=rng)
@@ -150,10 +178,11 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
             temporal_patch_size,
             merge_size,
         )
-        # 3D MRoPE positions (1, S, 3); positions=None → single document.
+        tokens = hf_in["input_ids"].squeeze(0)
+        # 3D MRoPE positions (S, 3); positions=None -> single document.
         mrope_positions = MultiModalCollator._build_mrope_positions(
             mrope_builder,  # pyrefly: ignore [bad-argument-type]
-            hf_in["input_ids"],
+            tokens,
             grid_thw.unsqueeze(0),
             None,
             None,
@@ -162,8 +191,8 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         )
         tt_inputs.append(
             (
-                hf_in["input_ids"],
-                patches.unsqueeze(0),
+                tokens,
+                patches,
                 grid_thw.unsqueeze(0),
                 mrope_positions,
             )
@@ -233,13 +262,13 @@ def print_pixel_comparisons(comparisons):
 
 
 @torch.no_grad()
-def run_hf(model_path, hf_inputs, device):
+def run_hf(model_path, hf_inputs, device, dtype):
     """Run HF model, return last-token logits per sample."""
     print(f"Loading HuggingFace model on {device} ...")
     model = AutoModelForImageTextToText.from_pretrained(
         model_path,
         device_map=device,
-        dtype=torch.float16,
+        dtype=dtype,
         trust_remote_code=True,
         low_cpu_mem_usage=True,
     )
@@ -266,7 +295,7 @@ def run_hf(model_path, hf_inputs, device):
 
 
 @torch.no_grad()
-def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
+def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device, dtype):
     """Run TT model, return last-token logits per sample."""
     print(f"Loading TorchTitan model on {device} ...")
 
@@ -275,7 +304,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
         model = model_config.build()
     model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
-    model.half()
+    model.to(dtype=dtype)
 
     state_dict = ModelWrapper(model)._get_state_dict()
     print(f"  Loading checkpoint: {checkpoint_path}")
@@ -284,18 +313,33 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
 
     # Replace FlexAttention with SDPA for single-process inference
     # (unfused FlexAttention without torch.compile has poor fp16 numerics).
+    class _CausalSDPA(torch.nn.Module):
+        def forward(self, q_TNH, k_TNH, v_TNH, *, scale, enable_gqa, **kwargs):
+            q_NTH = q_TNH.transpose(0, 1)
+            k_NTH = k_TNH.transpose(0, 1)
+            v_NTH = v_TNH.transpose(0, 1)
+            out_NTH = F.scaled_dot_product_attention(
+                q_NTH,
+                k_NTH,
+                v_NTH,
+                scale=scale,
+                is_causal=True,
+                enable_gqa=enable_gqa,
+            )
+            return out_NTH.transpose(0, 1)
+
     for layer in model.layers.values():
         if layer.full_attn:
-            layer.attn.inner_attention = ScaledDotProductAttention.Config().build()
+            layer.attn.inner_attention = _CausalSDPA()
 
     class _BidirectionalSDPA(torch.nn.Module):
         def forward(self, q, k, v, **kwargs):
-            # q/k/v: (bs, seq, heads, dim) -> transpose to (bs, heads, seq, dim)
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
+            # q/k/v: (tokens, heads, dim) -> (heads, tokens, dim)
+            q = q.transpose(0, 1)
+            k = k.transpose(0, 1)
+            v = v.transpose(0, 1)
             out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-            return out.transpose(1, 2)
+            return out.transpose(0, 1)
 
     for blk in model.vision_encoder.layers.values():
         blk.attn.flex_attention = _BidirectionalSDPA()
@@ -304,14 +348,17 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
 
     outputs = []
     for i, (tokens, pixel_values, grid_thw, mrope_positions) in enumerate(tt_inputs):
-        logits = model(
-            tokens.to(device),
-            pixel_values=pixel_values.half().to(device),
-            grid_thw=grid_thw.to(device),
-            positions=mrope_positions.to(device),
-            special_tokens=special_tokens,
-        )
-        outputs.append(logits[:, -1:, :].cpu())
+        model_kwargs = {
+            "positions": mrope_positions.to(device),
+            "special_tokens": special_tokens,
+        }
+        if pixel_values is not None and grid_thw is not None:
+            model_kwargs.update(
+                pixel_values=pixel_values.to(device=device, dtype=dtype),
+                grid_thw=grid_thw.to(device),
+            )
+        logits = model(tokens.to(device), **model_kwargs)
+        outputs.append(logits[-1:].unsqueeze(0).cpu())
         print(f"  TT  {i + 1}/{len(tt_inputs)}")
 
     del model
@@ -369,12 +416,18 @@ def compare(hf_outputs, tt_outputs):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="End-to-end numerical correctness test for Qwen3.5.",
+        description="End-to-end numerical correctness test for Qwen3.8.",
     )
     parser.add_argument("--hf_model_path", type=str, required=True)
     parser.add_argument("--tt_checkpoint_path", type=str, required=True)
-    parser.add_argument("--model_flavor", type=str, default="4B")
+    parser.add_argument("--model_flavor", type=str, default="27B")
     parser.add_argument("--num_samples", type=int, default=10)
+    parser.add_argument("--text_only", action="store_true")
+    parser.add_argument(
+        "--dtype",
+        choices=("bfloat16", "float16"),
+        default="bfloat16",
+    )
     args = parser.parse_args()
 
     assert os.path.exists(args.hf_model_path), f"Not found: {args.hf_model_path}"
@@ -383,6 +436,7 @@ def main():
     ), f"Not found: {args.tt_checkpoint_path}"
 
     device = torch.device("cuda:0")
+    dtype = getattr(torch, args.dtype)
     print(f"Using {torch.cuda.get_device_name(0)}")
 
     print(f"\nBuilding {args.num_samples} test samples ...")
@@ -390,11 +444,13 @@ def main():
         args.hf_model_path,
         args.model_flavor,
         args.num_samples,
+        text_only=args.text_only,
     )
-    print_pixel_comparisons(pixel_comparisons)
+    if pixel_comparisons:
+        print_pixel_comparisons(pixel_comparisons)
 
     print("\nRunning HuggingFace inference ...")
-    hf_outputs = run_hf(args.hf_model_path, hf_inputs, device)
+    hf_outputs = run_hf(args.hf_model_path, hf_inputs, device, dtype)
 
     print("\nRunning TorchTitan inference ...")
     tt_outputs = run_tt(
@@ -403,6 +459,7 @@ def main():
         tt_inputs,
         special_tokens,
         device,
+        dtype,
     )
 
     compare(hf_outputs, tt_outputs)

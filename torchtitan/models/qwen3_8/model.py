@@ -44,10 +44,9 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
-
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
-from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
+from .sharding import annotate_deltanet_cu_seqlens, set_qwen38_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -79,7 +78,7 @@ class OffsetRMSNorm(Module):
 
 
 class Qwen35Attention(BaseAttention):
-    """Full attention with output gating and partial RoPE for Qwen3.5.
+    """Full attention with output gating and partial RoPE for Qwen3.8.
 
     Differences from GQAttention:
     - wq is 2x wider: produces both query and sigmoid gate
@@ -177,7 +176,7 @@ class Qwen35Attention(BaseAttention):
 
 
 class Qwen35TransformerBlock(Module):
-    """Hybrid transformer block for Qwen3.5.
+    """Hybrid transformer block for Qwen3.8.
 
     Each layer uses either full attention (Qwen35Attention) or linear
     attention (GatedDeltaNet), determined by which config is provided.
@@ -240,11 +239,11 @@ class Qwen35TransformerBlock(Module):
 
 
 class Qwen35Model(Decoder):
-    """Qwen3.5: Multimodal model with hybrid attention.
+    """Qwen3.8 model with hybrid attention and optional vision.
 
-    Combines a hybrid decoder (GatedDeltaNet linear attention + full
-    attention with output gating and partial RoPE) with a Vision
-    Transformer encoder for multimodal understanding.
+    Implements a hybrid decoder (GatedDeltaNet linear attention + full
+    attention with output gating and partial RoPE) and optionally combines it
+    with a Vision Transformer encoder for multimodal understanding.
 
     Key architectural features:
     - Hybrid attention: 75% GatedDeltaNet (linear) + 25% full attention
@@ -284,7 +283,7 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        vision_encoder: Qwen35VisionEncoder.Config
+        vision_encoder: Qwen35VisionEncoder.Config | None = None
 
         def update_from_config(
             self,
@@ -317,7 +316,7 @@ class Qwen35Model(Decoder):
                             f"n_value_heads ({n_value_heads})."
                         )
 
-            set_qwen35_sharding_config(
+            set_qwen38_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
@@ -358,8 +357,14 @@ class Qwen35Model(Decoder):
     def __init__(self, config: Config):
         super().__init__(config)
 
-        self.vision_encoder = config.vision_encoder.build()
-        self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+        self.vision_encoder = (
+            config.vision_encoder.build() if config.vision_encoder is not None else None
+        )
+        self.spatial_merge_size = (
+            config.vision_encoder.spatial_merge_size
+            if config.vision_encoder is not None
+            else None
+        )
 
     def preprocess_inputs(
         self,
@@ -405,7 +410,7 @@ class Qwen35Model(Decoder):
                 ),
             )
         assert rope_positions is not None, (
-            "Qwen3.5 needs RoPE positions: the batch must provide "
+            "Qwen3.8 needs RoPE positions: the batch must provide "
             "'positions' or 'mrope_positions'."
         )
         batch["positions"] = rope_positions
@@ -492,6 +497,8 @@ class Qwen35Model(Decoder):
             vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
             num_tokens_per_item: (num_items,) actual token count per item
         """
+        if self.vision_encoder is None:
+            raise ValueError("Vision inputs were provided without a vision encoder.")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 

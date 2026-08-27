@@ -5,7 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/rl/**'
-      - 'torchtitan/models/qwen3_5/**'
+      - 'torchtitan/models/qwen3_8/**'
       - '.github/workflows/integration_test_8gpu_rl.yaml'
   pull_request:
     types: [labeled, synchronize]

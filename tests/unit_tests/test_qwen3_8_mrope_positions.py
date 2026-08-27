@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Characterization tests for Qwen3.5 position routing.
+"""Characterization tests for Qwen3.8 position routing.
 
 Locks the observable contract of the ``preprocess_inputs`` -> ``forward``
 pipeline: for a folded (batch-flattened) dataloader batch, the position
@@ -25,16 +25,16 @@ from torch import nn
 
 
 def _build_config_modules():
-    # torchtitan.models.qwen3_5 imports the FLA (flash-linear-attention)
+    # torchtitan.models.qwen3_8 imports the FLA (flash-linear-attention)
     # kernels at module scope. FLA is a triton/CUDA-only optional dependency,
     # so skip instead of erroring on environments without it.
     try:
         from torchtitan.config import ParallelismConfig
         from torchtitan.distributed.parallel_dims import ParallelDims
-        from torchtitan.models.qwen3_5 import model_registry
+        from torchtitan.models.qwen3_8 import model_registry
     except ModuleNotFoundError as exc:
         raise unittest.SkipTest(
-            f"Qwen3.5 optional dependency unavailable: {exc.name}"
+            f"Qwen3.8 optional dependency unavailable: {exc.name}"
         ) from exc
     return model_registry, ParallelDims, ParallelismConfig
 
@@ -56,7 +56,7 @@ class _RecordingLayer(nn.Module):
         return x
 
 
-class TestQwen35MRoPEPositions(unittest.TestCase):
+class TestQwen38MRoPEPositions(unittest.TestCase):
     def _build_stub_model(self):
         model_registry, ParallelDims, ParallelismConfig = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex

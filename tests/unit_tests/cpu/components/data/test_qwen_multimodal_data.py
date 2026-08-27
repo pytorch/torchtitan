@@ -10,7 +10,6 @@ import grain.python as grain
 import numpy as np
 import pytest
 import torch
-
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
@@ -22,7 +21,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
-from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
+from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
 
 
 class _Tokenizer:
@@ -153,19 +152,12 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
 @pytest.mark.parametrize(
     "recipe_name",
     [
-        "qwen35_debugmodel",
-        "qwen35_debugmodel_moe",
-        "qwen35_0_8b",
-        "qwen35_2b",
-        "qwen35_4b",
-        "qwen35_9b",
-        "qwen35_27b",
-        "qwen35_35b_a3b",
-        "qwen35_122b_a10b",
-        "qwen35_397b_a17b",
+        "qwen38_debugmodel",
+        "qwen38_debugmodel_moe",
+        "qwen38_27b",
     ],
 )
-def test_qwen35_recipe_geometry_matches_dataset_processor(recipe_name):
+def test_qwen38_recipe_geometry_matches_dataset_processor(recipe_name):
     registry_state = {
         name: (
             id(dataset),
@@ -178,7 +170,7 @@ def test_qwen35_recipe_geometry_matches_dataset_processor(recipe_name):
         if isinstance(dataset.processor, MultiModalProcessor.Config)
     }
 
-    config = getattr(qwen35_configs, recipe_name)()
+    config = getattr(qwen38_configs, recipe_name)()
     dataset = config.dataloader.dataset
     collator = config.dataloader.collator
 

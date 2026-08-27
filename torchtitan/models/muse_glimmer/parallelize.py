@@ -23,7 +23,6 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
 )
 from torchtitan.tools.logging import logger
-
 from .model import MuseGlimmerModel
 
 
@@ -46,7 +45,7 @@ def parallelize_muse_glimmer(
     # When the model owns the vision stack (multimodal flavor), the encoder +
     # adapter are submodules: TP is applied by ``model.parallelize`` (driven by
     # the sharding configs set in update_from_config), and AC/compile/FSDP are
-    # applied to them explicitly below, mirroring qwen3_5's parallelize_qwen3_5.
+    # applied explicitly below, mirroring qwen3_8's parallelize_qwen3_8.
     has_vision = model.vision_encoder is not None
     if has_vision:
         assert model.vision_adapter is not None
@@ -72,7 +71,7 @@ def parallelize_muse_glimmer(
         ac_policy.apply(model)
         if has_vision:
             # The vision encoder's block stack is named ``layers`` (like
-            # qwen3_5), so the policy applies directly. The adapter is a 2-layer
+            # qwen3_8), so the policy applies directly. The adapter is a 2-layer
             # MLP with no transformer-block structure, so it is left unwrapped.
             ac_policy.apply(model.vision_encoder)
 
@@ -104,7 +103,7 @@ def parallelize_muse_glimmer(
     dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
     # FSDP the vision encoder + adapter as single units BEFORE the decoder
-    # (qwen3_5 documents this ordering): one AllGather per module is cheaper than
+    # (qwen3_8 documents this ordering): one AllGather per module is cheaper than
     # per-layer sharding for the (relatively small) vision stack.
     if has_vision:
         param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]

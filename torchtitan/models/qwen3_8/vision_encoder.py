@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Qwen3.5 vision encoder.
+"""Vision encoder for multimodal Qwen3.8 checkpoints.
 
 Shape suffixes:
 - T = packed patch tokens
@@ -306,14 +306,14 @@ class PatchMerger(Module):
 
 
 class Qwen35VisionEncoder(Module):
-    """Qwen3.5 Vision Encoder with FlexAttention.
+    """Qwen3.8 Vision Encoder with FlexAttention.
 
     Processes visual items as one packed patch sequence.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        """Configuration for Qwen3.5 Vision Encoder (ViT)."""
+        """Configuration for the Qwen3.8 Vision Encoder (ViT)."""
 
         dim: int = 1280
         num_layers: int = 32

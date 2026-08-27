@@ -11,7 +11,6 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import create_mask
-
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.models.common.linear import Linear
@@ -23,7 +22,7 @@ from torchtitan.models.kimi_k2_7.vision_encoder import (
     _compute_learned_pos_embeds as _compute_kimi_learned_pos_embeds,
     _tpool_patch_merger,
 )
-from torchtitan.models.qwen3_5.vision_encoder import (
+from torchtitan.models.qwen3_8.vision_encoder import (
     _compute_2d_rope_cache,
     _compute_learned_pos_embeds,
     PatchMerger,

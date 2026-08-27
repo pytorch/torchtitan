@@ -5,13 +5,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Numerical comparison across parallelism configs for Qwen3.5.
+"""Numerical comparison across parallelism configs for Qwen3.8.
 
 Feeds identical fake tokens across configs (no_parallel, FSDP, FSDP+EP,
 FSDP+EP+TP) and verifies logits match. Requires up to 8 GPUs.
 
 Usage:
-  python scripts/checkpoint_conversion/numerical_tests_qwen3_5_shard.py
+  python scripts/checkpoint_conversion/numerical_tests_qwen3_8_shard.py
 """
 
 import argparse
@@ -25,12 +25,11 @@ from typing import cast
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
-
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
-from torchtitan.models.qwen3_5.parallelize import parallelize_qwen3_5
+from torchtitan.models.qwen3_8 import Qwen38Model, qwen3_8_configs
+from torchtitan.models.qwen3_8.parallelize import parallelize_qwen3_8
 from torchtitan.tools import utils
 
 CONFIGS = [
@@ -54,7 +53,7 @@ def run_worker(args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    config = qwen3_5_configs["debugmodel_moe"](
+    config = qwen3_8_configs["debugmodel_moe"](
         attn_backend="flex",
         moe_comm_backend="standard",
     )
@@ -99,7 +98,7 @@ def run_worker(args):
     model.to_empty(device="cuda")
     model.init_weights(buffer_device=torch.device("cuda"))
 
-    model = parallelize_qwen3_5(
+    model = parallelize_qwen3_8(
         model,
         parallel_dims=parallel_dims,
         training=training,
@@ -118,7 +117,7 @@ def run_worker(args):
     # BlockMask, which the model normally builds in its preprocess_inputs; build
     # it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
-    attention_masks = cast(Qwen35Model, model).get_attention_masks(positions=positions)
+    attention_masks = cast(Qwen38Model, model).get_attention_masks(positions=positions)
 
     with torch.no_grad():
         output = model(

@@ -24,7 +24,7 @@ from torchtitan.models.common.rope import (
     CosSinRoPE,
     RoPE,
 )
-from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.models.qwen3_8.rope import MRoPE
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):

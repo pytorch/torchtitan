@@ -44,7 +44,6 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
-
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
 
@@ -287,7 +286,7 @@ class MuseGlimmerModel(Decoder):
         perception_emb_norm: RMSNorm.Config | None = None
         # Optional owned vision stack. When set, ``MuseGlimmerModel`` builds the encoder
         # + adapter as submodules and runs them inside ``forward`` (from padded
-        # ``pixel_values`` + ``grid_thw``), mirroring qwen3_5's
+        # ``pixel_values`` + ``grid_thw``), mirroring qwen3_8's
         # ``Qwen35Model.vision_encoder``. The adapter output dim must match
         # ``vision_projection`` in_features. Both default to None (text-only model).
         vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
@@ -411,7 +410,7 @@ class MuseGlimmerModel(Decoder):
     ) -> torch.Tensor:
         """Encode packed ``pixel_values`` and adapter-project into features.
 
-        Mirrors qwen3_5's ``_get_vision_embeds``: runs the owned encoder +
+        Mirrors qwen3_8's ``_get_vision_embeds``: runs the owned encoder +
         adapter and returns ``[T, adapter_dim]``. ``pixel_values`` contains all
         visual patches packed into one sequence, and ``grid_thw`` describes each
         visual item's contiguous segment.

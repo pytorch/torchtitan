@@ -122,7 +122,7 @@ def _set_multimodal_sharding(
     path stays DTensor-consistent, and (under SP) re-shards the first decoder
     layer to take that ``Replicate`` input -- its rowwise ``wo`` reduce-scatters
     back to ``Shard(0)``, restoring SP activations for every later layer. Mirrors
-    qwen3_5's multimodal sharding overrides.
+    qwen3_8's multimodal sharding overrides.
     """
     replicate = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     # The vision encoder + adapter emit TP-invariant activations (the common
@@ -130,7 +130,7 @@ def _set_multimodal_sharding(
     # modules only promote the TP axis I->R so the features become TP-Replicate for
     # the scatter; the DP axis stays V (per-image, local under multimodal_context).
     # DP is deliberately NOT redistributed to S(0): config-based redistribution
-    # cannot move an axis to/from spmd.V, so (like qwen3_5's scatter helper) the
+    # cannot move an axis to/from spmd.V, so (like qwen3_8's scatter helper) the
     # raw scatter below writes the V vision rows into the S(0) text positions
     # per-rank instead.
     vision_invariant = SpmdType({DP: spmd.V, TP: spmd.I})
@@ -187,7 +187,7 @@ def _set_multimodal_sharding(
     # the first layer to take a Replicate input; its rowwise ``wo`` (output_sp)
     # reduce-scatters back to Shard(0), restoring SP activations for every later layer.
     # Only needed under SP -- without SP the whole decoder already uses Replicate
-    # activations. Mirrors qwen3_5's first-layer Replicate input layout.
+    # activations. Mirrors qwen3_8's first-layer Replicate input layout.
     if enable_sp and config.layers:
         config.layers[0].sharding_config = ShardingConfig(
             in_src_shardings={"x": replicate},
@@ -259,7 +259,7 @@ def set_muse_glimmer_vision_sharding_config(
     """Fill ``sharding_config`` on the Muse Glimmer vision encoder (+ optional adapter).
 
     All vision activations flow as TP-invariant (no sequence parallelism), exactly
-    like qwen3_5's vision encoder. The shared block/linear/norm helpers in
+    like qwen3_8's vision encoder. The shared block/linear/norm helpers in
     :mod:`torchtitan.models.common.vision_encoder_sharding` carry the actual TP
     sharding (colwise q/k/v + rowwise proj, colwise fc1 + rowwise fc2, invariant
     norms, inner-attention local_map); only the Muse-Glimmer-specific learned
@@ -283,13 +283,13 @@ def set_muse_glimmer_vision_sharding_config(
 
     # conv1 builds ``self.conv1_linear``; sharding goes on the *config* field
     # ``conv1``. Plain pixel patches enter invariant; the (bias-free) weight stays
-    # Replicate. Mirrors qwen3_5's patch_embed_proj (vision_invariant_linear_config).
+    # Replicate. Mirrors qwen3_8's patch_embed_proj (vision_invariant_linear_config).
     encoder_cfg.conv1.sharding_config = vision_invariant_linear_config()
     encoder_cfg.ln_pre.sharding_config = invariant_norm_config()
     encoder_cfg.ln_post.sharding_config = invariant_norm_config()
 
     # Per-block TP via the shared helper (norms, q/k/v/proj, fc1/fc2, and the
-    # inner-attention local_map), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a
+    # inner-attention local_map), same as qwen3_8/kimi_k2_7. ``rope_cache`` is a
     # per-image vision activation, so it flows {DP: V, TP: I} like kimi_k2_7.
     set_vision_transformer_block_sharding_config(
         encoder_cfg.block,

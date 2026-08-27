@@ -114,26 +114,26 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="qwen3_non_fused_qkv_fsdp+tp+cp",
             ngpu=8,
         ),
-        # Integration Test Cases for Qwen3.5
+        # Integration Test Cases for Qwen3.8
         OverrideDefinitions(
-            configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
-            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP",
-            test_name="qwen3_5_moe_fsdp+tp+ep+pp",
+            configs=[recipes.qwen38_debugmodel_moe_fsdp2_tp2_pp2_ep4],
+            test_descr="Qwen3.8 MoE FSDP+TP+EP+PP",
+            test_name="qwen3_8_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4],
-            test_descr="Qwen3.5 MoE FSDP+TP+EP",
-            test_name="qwen3_5_moe_fsdp+tp+ep",
+            configs=[recipes.qwen38_debugmodel_moe_fsdp4_tp2_ep4],
+            test_descr="Qwen3.8 MoE FSDP+TP+EP",
+            test_name="qwen3_8_moe_fsdp+tp+ep",
             ngpu=8,
             # NOTE: This topology is not bitwise deterministic with Real PG on
             # A10G, so this case provides end-to-end coverage without a golden.
         ),
         OverrideDefinitions(
-            configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
-            test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + per op SAC",
-            test_name="qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
+            configs=[recipes.qwen38_debugmodel_varlen_attn_fsdp2_tp2_sac],
+            test_descr="Qwen3.8 FSDP+TP+VARLEN_ATTN + per op SAC",
+            test_name="qwen3_8_fsdp+tp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
             use_real_pg=True,

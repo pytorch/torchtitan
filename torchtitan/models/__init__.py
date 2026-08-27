@@ -14,6 +14,6 @@ _supported_models = frozenset(
         "llama3",
         "muse_glimmer",
         "qwen3",
-        "qwen3_5",
+        "qwen3_8",
     ]
 )

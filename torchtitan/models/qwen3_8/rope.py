@@ -13,7 +13,7 @@ from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 
 
 class MRoPE(CosSinRoPE):
-    """Multi-dimensional RoPE for Qwen3.5 temporal/height/width positions.
+    """Multi-dimensional RoPE for Qwen3.8 temporal/height/width positions.
 
     Standard per-layer RoPE: each full-attention layer owns an ``MRoPE`` and
     applies it through ``RoPE.forward`` -> ``_reshape_cache`` -> ``apply_rotary_emb``.

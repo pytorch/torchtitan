@@ -71,8 +71,8 @@ from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
-    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
-    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
+    rl_grpo_qwen3_8_27b_varlen_batch_invariant,
+    rl_grpo_qwen3_8_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
@@ -845,18 +845,18 @@ class TestBitwiseParityFlex(BitwiseParityTestBase):
     attn_backend = "flex"
 
 
-class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
-    """Test Qwen3.5 trainer/generator parity with head-sharded GDN at TP=2."""
+class TestBitwiseParityQwen38Varlen(BitwiseParityTestBase):
+    """Test Qwen3.8 trainer/generator parity with head-sharded GDN at TP=2."""
 
     __test__ = True
-    config_fn = staticmethod(rl_grpo_qwen3_5_9b_varlen_batch_invariant)
+    config_fn = staticmethod(rl_grpo_qwen3_8_27b_varlen_batch_invariant)
     attn_backend = "varlen"
     min_world_size = 2
 
 
-def _qwen3_5_debug_bitwise_config() -> Controller.Config:
-    """Build a two-GPU random-weight Qwen3.5 parity configuration."""
-    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
+def _qwen3_8_debug_bitwise_config() -> Controller.Config:
+    """Build a two-GPU random-weight Qwen3.8 parity configuration."""
+    config = rl_grpo_qwen3_8_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
         config.trainer,
         parallelism=dataclasses.replace(
@@ -867,11 +867,11 @@ def _qwen3_5_debug_bitwise_config() -> Controller.Config:
     return config
 
 
-class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
-    """Qwen3.5 GDN parity with random weights and matched TP=2."""
+class TestBitwiseParityQwen38DebugVarlen(BitwiseParityTestBase):
+    """Qwen3.8 GDN parity with random weights and matched TP=2."""
 
     __test__ = True
-    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    config_fn = staticmethod(_qwen3_8_debug_bitwise_config)
     attn_backend = "varlen"
     min_world_size = 2
     sync_weights_from_trainer = True
