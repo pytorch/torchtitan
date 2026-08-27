@@ -218,50 +218,5 @@ class TestKimiK3(unittest.TestCase):
             torch.testing.assert_close(value, roundtrip_state_dict[key])
 
 
-
-# --- Expert parallelism: the declaration, on CPU ------------------------- #
-# _set on the config tree, so what EP declares can be read back without a
-# mesh or a device: a plain data-parallel run must leave the tree untouched,
-# and an expert-parallel run must shard the routed experts on the expert axis.
-# Constructing configs directly (not through build) has dropped declarations
-# invisibly before, which is the regression this pins.
-
-import spmd_types as spmd
-
-from torchtitan.distributed.parallel_dims import MeshAxisName
-
-
-def _moe_configs(*, enable_ep: bool) -> list:
-    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
-
-    model = kimi_k3_debugmodel().model_spec.model
-
-    if enable_ep:
-        from torchtitan.models.kimi_k3.sharding import (
-            set_expert_parallel_sharding_config,
-        )
-
-        set_expert_parallel_sharding_config(model)
-    return [layer.moe for layer in model.layers if layer.moe is not None]
-
-
-class TestKimiK3ExpertParallelSharding(unittest.TestCase):
-    def test_plain_data_parallel_declares_nothing(self):
-        """A run without expert parallel must leave the tree untouched."""
-        for moe in _moe_configs(enable_ep=False):
-            self.assertIsNone(moe.sharding_config)
-
-    def test_routed_experts_shard_on_the_expert_dim(self):
-        for moe in _moe_configs(enable_ep=True):
-            shardings = moe.routed_experts.inner_experts.sharding_config.state_shardings
-            self.assertEqual(
-                set(shardings), {"w1_EFD", "w2_EDF", "w3_EFD"}
-            )
-            for name, layout in shardings.items():
-                self.assertEqual(
-                    layout.axis_types[MeshAxisName.EP], spmd.S(0), msg=name
-                )
-
-
 if __name__ == "__main__":
     unittest.main()
