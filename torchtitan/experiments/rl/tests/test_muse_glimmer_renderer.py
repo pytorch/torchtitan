@@ -326,6 +326,68 @@ def test_mask_excludes_scaffolding_and_covers_assistant_body(tokenizer):
     assert not any(rendered.sampled_mask[:first])
 
 
+def test_is_content_covers_non_assistant_bodies(tokenizer):
+    """is_content marks caller-supplied bodies on every role, not just assistant.
+
+    It is deliberately NOT a copy of sampled_mask: a user or tool message's body is
+    content the caller supplied even though the model never sampled it. Only header
+    scaffolding is excluded on every role.
+    """
+    renderer = _renderer(tokenizer, current_date="2026-02-03")
+    messages = [
+        {"role": "user", "content": "who wrote Blade Runner"},
+        {
+            "role": "assistant",
+            "tool_calls": [_tool_call(query="Blade Runner author")],
+        },
+        {"role": "tool", "name": "search", "content": "Philip K. Dick wrote it"},
+        {"role": "assistant", "content": "Philip K. Dick"},
+    ]
+    rendered = renderer.render(messages, tools=TOOLS)
+    content = [
+        tid for tid, keep in zip(rendered.token_ids, rendered.is_content) if keep
+    ]
+    text = tokenizer.decode(content)
+
+    # Bodies from every role are present...
+    assert "who wrote Blade Runner" in text
+    assert "Philip K. Dick wrote it" in text
+    # ...and header scaffolding is not content on any role.
+    assert START_ID not in content
+    assert MESSAGE_ID not in content
+    # is_content must differ from sampled_mask now (non-assistant bodies included).
+    assert rendered.is_content != rendered.sampled_mask
+    # Every sampled token is still content (assistant bodies + their terminators).
+    assert all(c for c, s in zip(rendered.is_content, rendered.sampled_mask) if s)
+
+
+def test_bridge_declines_when_retention_requires_rerender(tokenizer):
+    """thinking_retention='tool_cycle' must stop the bridge at a new user query.
+
+    The default is 'all' (the template renders prior reasoning unconditionally), so
+    the bridge extends; an explicit tool_cycle policy has to decline instead.
+    """
+    messages = [{"role": "user", "content": "q"}]
+    keep_all = _renderer(tokenizer, current_date="2026-02-03")
+    assert keep_all.effective_thinking_retention == "all"
+
+    prompt_ids = keep_all.render_ids(messages, add_generation_prompt=True)
+    new_user = [{"role": "user", "content": "a second question"}]
+    tool_only = [{"role": "tool", "name": "search", "content": "x"}]
+
+    # Default policy: a new user query is still bridgeable.
+    assert keep_all.bridge_to_next_turn(prompt_ids, [EOT_ID], new_user) is not None
+
+    cycle = _renderer(
+        tokenizer, current_date="2026-02-03", thinking_retention="tool_cycle"
+    )
+    assert cycle.effective_thinking_retention == "tool_cycle"
+    # A new user query crosses the boundary -> must re-render.
+    assert cycle.bridge_to_next_turn(prompt_ids, [EOT_ID], new_user) is None
+    # Staying inside the tool cycle is still fine.
+    assert cycle.bridge_to_next_turn(prompt_ids, [EOT_ID], tool_only) is not None
+
+
 def test_reasoning_channel_is_trainable_and_ends_with_eom(tokenizer):
     """A to=self channel is sampled and closes with <|eom|>, not <|eot|>."""
     renderer = _renderer(tokenizer, current_date="2026-02-03")

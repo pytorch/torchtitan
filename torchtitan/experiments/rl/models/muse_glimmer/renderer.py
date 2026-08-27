@@ -59,6 +59,8 @@ from renderers.base import (
     ParsedToolCall,
     reject_assistant_in_extension,
     RenderedTokens,
+    resolve_thinking_retention,
+    should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
 from renderers.configs import BaseRendererConfig
@@ -348,6 +350,16 @@ class MuseGlimmerRenderer:
         # The controller reads renderer._tokenizer (e.g. for pad_id=eos_token_id).
         self._tokenizer = tokenizer
         self._bos = tokenizer.bos_token or ""
+        # BaseRendererConfig.thinking_retention is the library-wide knob every renderer
+        # is expected to honour in its bridge. Muse Glimmer's published chat template
+        # renders reasoning_content for every assistant turn unconditionally -- no
+        # query-boundary drop like gpt-oss's auto_drop_analysis or Qwen3's think-block
+        # stripping -- so "all" is the template-faithful implied policy. An explicit
+        # thinking_retention on the config overrides it.
+        self.effective_thinking_retention = resolve_thinking_retention(
+            self._config,
+            "all" if self._config.retain_reasoning_in_history else "tool_cycle",
+        )
         self._verify_special_ids()
 
     def _verify_special_ids(self) -> None:
@@ -448,11 +460,14 @@ class MuseGlimmerRenderer:
             emit(header, idx=idx)
             emit(MESSAGE_STR, token_id=MESSAGE_ID, idx=idx)
             emit(body, sampled=sampled, idx=idx, is_body=True)
+            # The terminator counts as content only on assistant turns, where the model
+            # emits its own stop token; on history roles it is template scaffolding.
             emit(
                 end,
                 token_id=EOT_ID if end == EOT_STR else EOM_ID,
                 sampled=sampled,
                 idx=idx,
+                is_body=sampled,
             )
 
         emit(self._bos, token_id=self._tok.bos_token_id)
@@ -590,17 +605,22 @@ class MuseGlimmerRenderer:
         token_ids: list[int] = []
         message_indices: list[int] = []
         sampled_mask: list[bool] = []
+        is_content: list[bool] = []
         for piece in pieces:
             encoded = self._encode(piece)
             token_ids += encoded
             message_indices += [piece.msg_idx] * len(encoded)
             sampled_mask += [piece.sampled] * len(encoded)
+            # is_content is NOT sampled_mask: a user or tool message's body is content
+            # the caller supplied even though the model never sampled it. Only the
+            # header scaffolding is excluded on every role.
+            is_content += [piece.is_body] * len(encoded)
 
         return RenderedTokens(
             token_ids=token_ids,
             message_indices=message_indices,
             sampled_mask=sampled_mask,
-            is_content=list(sampled_mask),
+            is_content=is_content,
             message_roles=[m.get("role") for m in messages],
             message_tool_names=[m.get("name") for m in messages],
             multi_modal_data=None,
@@ -633,6 +653,12 @@ class MuseGlimmerRenderer:
         if not previous_prompt_ids or not new_messages:
             return None
         if reject_assistant_in_extension(new_messages):
+            return None
+        # Under a retention policy that drops history at user-query boundaries, the next
+        # prompt is not a suffix of this one, so the bridge cannot extend it.
+        if should_rerender_for_thinking_retention(
+            self.effective_thinking_retention, new_messages
+        ):
             return None
 
         # A completion truncated at max_tokens has no terminator; synthesizing <|eot|>
