@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
-import spmd_types as spmd
 
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
@@ -20,8 +19,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.decoder_sharding import set_decoder_sharding_config
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
@@ -277,34 +274,13 @@ class KimiK3Model(Decoder):
             # and KDA recurrent states at document boundaries.
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
-            self._set_sharding_config(
-                enable_ep=config.parallelism.expert_parallel_degree > 1,
-            )
+            if config.parallelism.expert_parallel_degree > 1:
+                from torchtitan.models.kimi_k3.sharding import (
+                    set_expert_parallel_sharding_config,
+                )
+
+                set_expert_parallel_sharding_config(self)
             Decoder.Config.update_from_config(self, config=config, **kwargs)
-
-        def _set_sharding_config(self, *, enable_ep: bool) -> None:
-            """Declare the sharding expert parallel acts on.
-
-            * The routed experts shard on the expert axis; set_moe_sharding_config
-              declares that layout.
-            * The decoder-level distribution makes the activations reaching the
-              MoE boundary DTensors it can redistribute onto the expert mesh.
-            """
-            if not enable_ep:
-                return
-            set_decoder_sharding_config(self, enable_sp=False)
-            for layer in self.layers:
-                if layer.moe is not None:
-                    set_moe_sharding_config(
-                        layer.moe,
-                        enable_ep=True,
-                        enable_sp=False,
-                        expert_param_layout={
-                            "w1_EFD": spmd.S(1),
-                            "w2_EDF": spmd.S(2),
-                            "w3_EFD": spmd.S(1),
-                        },
-                    )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
