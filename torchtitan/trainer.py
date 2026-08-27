@@ -44,7 +44,9 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import (
+    cudagraph_annotate_trace_post_processor,
     cudagraph_teardown,
+    enable_cudagraph_annotations,
     ForwardBackwardFn,
     wrap_with_cuda_graph,
 )
@@ -585,6 +587,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
+            enable_cudagraph_annotations()
+            config.profiler.trace_post_processor = (
+                cudagraph_annotate_trace_post_processor()
+            )
             self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
         # Build validator if validation is configured

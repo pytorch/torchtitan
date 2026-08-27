@@ -11,8 +11,6 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
-import gzip
-import json
 import operator
 import warnings
 from collections.abc import Callable, Sequence
@@ -23,7 +21,11 @@ from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._library.opaque_object import is_opaque_value
 from torch.utils._ordered_set import OrderedSet
 
-from torchtitan.config.function import Function
+from torchtitan.distributed.cudagraph import (
+    collect_cudagraph_annotations,
+    cudagraph_annotations_enabled,
+    enable_cudagraph_annotations,
+)
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 from torchtitan.tools.logging import logger
 
@@ -35,10 +37,6 @@ class _CUDAGraphManager:
         self._initialized = False
         self._cudagraph_wrappers: list["CUDAGraphWrapper"] = []
         self._teardown_called = False
-        # toolsId (graph_id << 32 | node_id) -> list of annotation dicts
-        # (e.g. [{"module_fqn": "layers.0.attention.wq"}]).
-        self.all_annotations: dict[int, list] = {}
-        self.enable_annotations: bool = False
 
     def maybe_initialize(self) -> None:
         if self._initialized:
@@ -106,59 +104,6 @@ def cudagraph_teardown() -> None:
     See Note [explicit cudagraph teardown] for more details.
     """
     _cg_manager.teardown()
-
-
-def get_cudagraph_annotations() -> dict[int, list]:
-    """Return all kernel annotations accumulated across CUDA graph captures."""
-    return _cg_manager.all_annotations
-
-
-def enable_cudagraph_annotations() -> None:
-    """Enable kernel annotation capture on subsequent CUDA graph recordings."""
-    _cg_manager.enable_annotations = True
-
-
-def cudagraph_annotate_trace_post_processor() -> Function.Config:
-    """Return a ``Function.Config`` that merges captured CUDA graph kernel
-    annotations into a profiler trace file.
-
-    Attach this to ``Profiler.Config.trace_post_processor`` so that exported
-    profiler traces automatically carry ``module_fqn`` fields on graphed kernel
-    events.
-    """
-    return Function.Config(fn=_cudagraph_annotate_trace_file)
-
-
-def _cudagraph_annotate_trace_file(trace_path: str) -> None:
-    """Post-process a profiler trace with CUDA graph kernel annotations."""
-    annotations = _cg_manager.all_annotations
-    if not annotations:
-        return
-
-    try:
-        from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
-            annotate_trace,
-        )
-    except ImportError:
-        logger.warning(
-            "torch.cuda._annotate_cuda_graph_trace not available. "
-            "Upgrade PyTorch to enable trace CUDA graph kernel annotation."
-        )
-        return
-
-    # Profiler.export_chrome_trace gzip-compresses when the path ends in
-    # ".gz" (the default PROFILE_FILE since #3483), so read/write the trace
-    # through gzip for those paths and fall back to plain text otherwise.
-    open_trace = gzip.open if trace_path.endswith(".gz") else open
-
-    with open_trace(trace_path, "rt") as f:
-        trace = json.load(f)
-
-    count = annotate_trace(trace, annotations)
-    if count > 0:
-        with open_trace(trace_path, "wt") as f:
-            json.dump(trace, f)
-        logger.info(f"Annotated {count} CUDAGraph kernel event(s) in profiler trace")
 
 
 class CUDAGraphWrapper:
@@ -276,19 +221,17 @@ class CUDAGraphWrapper:
 
             self._cudagraph = torch.cuda.CUDAGraph()
 
+            enable_annotations = cudagraph_annotations_enabled()
             with torch.cuda.graph(
                 self._cudagraph,
                 pool=_cg_manager.graph_pool,
                 stream=_cg_manager.stream,
-                enable_annotations=_cg_manager.enable_annotations,
+                enable_annotations=enable_annotations,
             ):
                 # `output` is managed by pytorch's cudagraph pool
                 self._output = self._runnable(*args)
 
-            if _cg_manager.enable_annotations:
-                from torch.cuda._graph_annotations import get_kernel_annotations
-
-                _cg_manager.all_annotations.update(get_kernel_annotations())
+            collect_cudagraph_annotations()
 
         if self._should_check_address:
             self._check_static_inputs_address()

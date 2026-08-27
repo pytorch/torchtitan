@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gzip
+import json
+import os
+import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -11,7 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
+from torchtitan.distributed.cudagraph import (
+    cudagraph_annotate_trace_post_processor,
+    wrap_with_cuda_graph,
+)
 from torchtitan.trainer import Trainer
 
 
@@ -230,3 +237,33 @@ def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
 
     assert runner is fwd_bwd
     warning.assert_called_once()
+
+
+def test_cuda_graph_trace_post_processor_adds_annotations() -> None:
+    graph_node_id = 42
+    trace = {
+        "traceEvents": [
+            {
+                "name": "some_kernel",
+                "tid": 1,
+                "ts": 100,
+                "args": {"graph node id": graph_node_id},
+            }
+        ]
+    }
+    annotations = {graph_node_id: [{"name": "PP:0F0"}]}
+
+    with tempfile.TemporaryDirectory() as tmp, patch(
+        "torchtitan.distributed.cudagraph.get_cudagraph_annotations",
+        return_value=annotations,
+    ):
+        trace_path = os.path.join(tmp, "rank0_trace.json.gz")
+        with gzip.open(trace_path, "wt") as trace_file:
+            json.dump(trace, trace_file)
+
+        cudagraph_annotate_trace_post_processor().build()(trace_path)
+
+        with gzip.open(trace_path, "rt") as trace_file:
+            annotated = json.load(trace_file)
+
+    assert annotated["traceEvents"][0]["args"]["name"] == "PP:0F0"

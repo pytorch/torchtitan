@@ -19,16 +19,15 @@ from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.config.function import Function
+from torchtitan.distributed.cudagraph import (
+    cudagraph_annotate_trace_post_processor,
+    get_cudagraph_annotations,
+)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import (
-    _cg_manager,
-    _cudagraph_annotate_trace_file,
-    cudagraph_teardown,
-    get_cudagraph_annotations,
-)
+from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -232,10 +231,10 @@ class TestTracePostProcessorConfig(TestCase):
 
         # Seed annotations so the post-processor does real work instead of
         # returning early on an empty annotation map.
-        saved_annotations = _cg_manager.all_annotations
-        _cg_manager.all_annotations = {
-            graph_node_id: [{_MODULE_FQN: "layers.0.attention.wq"}]
-        }
+        annotations = get_cudagraph_annotations()
+        saved_annotations = annotations.copy()
+        annotations.clear()
+        annotations[graph_node_id] = [{_MODULE_FQN: "layers.0.attention.wq"}]
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 trace_path = os.path.join(tmp, "rank0_trace.json.gz")
@@ -243,13 +242,14 @@ class TestTracePostProcessorConfig(TestCase):
                     json.dump(trace, f)
 
                 # Must not raise on the gzip-compressed input.
-                _cudagraph_annotate_trace_file(trace_path)
+                cudagraph_annotate_trace_post_processor().build()(trace_path)
 
                 # And the written-back trace must remain valid gzip JSON.
                 with gzip.open(trace_path, "rt") as f:
                     annotated = json.load(f)
         finally:
-            _cg_manager.all_annotations = saved_annotations
+            annotations.clear()
+            annotations.update(saved_annotations)
 
         fqns = {e.get("args", {}).get(_MODULE_FQN) for e in annotated["traceEvents"]}
         self.assertIn("layers.0.attention.wq", fqns)

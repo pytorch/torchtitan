@@ -9,6 +9,8 @@
 Adapted from ``torchtitan/experiments/graph_trainer/cudagraph.py``.
 """
 
+import gzip
+import json
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ import torch
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
+from torchtitan.config.function import Function
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -123,7 +126,7 @@ class CUDAGraphInputSpec:
 
 
 class _CUDAGraphManager:
-    """Singleton that owns a shared graph pool and stream."""
+    """Singleton that owns a shared graph pool, stream, and annotations."""
 
     def __init__(self) -> None:
         self._initialized = False
@@ -131,6 +134,8 @@ class _CUDAGraphManager:
         self._graph_pool: Any = None
         self._stream: torch.cuda.Stream | None = None
         self._dummy_graph: torch.cuda.CUDAGraph | None = None
+        self.all_annotations: dict[int, list[Any]] = {}
+        self.enable_annotations = False
 
     @property
     def graph_pool(self) -> Any:
@@ -184,6 +189,70 @@ _manager = _CUDAGraphManager()
 def cudagraph_teardown() -> None:
     """Destroy all CUDA graphs and release the shared memory pool."""
     _manager.teardown()
+
+
+def get_cudagraph_annotations() -> dict[int, list[Any]]:
+    """Return all kernel annotations accumulated across CUDA graph captures."""
+    return _manager.all_annotations
+
+
+def enable_cudagraph_annotations() -> None:
+    """Enable kernel annotation capture on subsequent CUDA graph recordings."""
+    _manager.enable_annotations = True
+
+
+def cudagraph_annotations_enabled() -> bool:
+    """Return whether CUDA graph kernel annotation capture is enabled."""
+    return _manager.enable_annotations
+
+
+def collect_cudagraph_annotations() -> None:
+    """Accumulate kernel annotations from the most recent CUDA graph capture."""
+    if not cudagraph_annotations_enabled():
+        return
+
+    from torch.cuda._graph_annotations import get_kernel_annotations
+
+    _manager.all_annotations.update(get_kernel_annotations())
+
+
+def cudagraph_annotate_trace_post_processor() -> Function.Config:
+    """Build a profiler hook that adds captured CUDA graph annotations to traces.
+
+    Attach this to ``Profiler.Config.trace_post_processor`` so exported profiler
+    traces include the annotations recorded during CUDA graph capture.
+    """
+    return Function.Config(
+        fn=_cudagraph_annotate_trace_file  # pyrefly: ignore [bad-argument-type]
+    )
+
+
+def _cudagraph_annotate_trace_file(trace_path: str) -> None:
+    """Post-process a profiler trace with captured CUDA graph annotations."""
+    annotations = get_cudagraph_annotations()
+    if not annotations:
+        return
+
+    try:
+        from torch.cuda._annotate_cuda_graph_trace import annotate_trace
+    except ImportError:
+        logger.warning(
+            "torch.cuda._annotate_cuda_graph_trace not available. "
+            "Upgrade PyTorch to enable trace CUDA graph kernel annotation."
+        )
+        return
+
+    # Profiler exports gzip-compressed traces by default, but plain JSON traces
+    # are also supported.
+    open_trace = gzip.open if trace_path.endswith(".gz") else open
+    with open_trace(trace_path, "rt") as trace_file:
+        trace = json.load(trace_file)
+
+    count = annotate_trace(trace, annotations)
+    if count > 0:
+        with open_trace(trace_path, "wt") as trace_file:
+            json.dump(trace, trace_file)
+        logger.info(f"Annotated {count} CUDA graph kernel events in profiler trace")
 
 
 class CUDAGraphWrapper:
@@ -305,13 +374,16 @@ class CUDAGraphWrapper:
             self._args = args
             self._record_static_input_addresses(args)
             self._graph = torch.cuda.CUDAGraph()
+            enable_annotations = cudagraph_annotations_enabled()
             with torch.cuda.graph(
                 self._graph,
                 pool=_manager.graph_pool,
                 stream=_manager.stream,
+                enable_annotations=enable_annotations,
                 capture_error_mode="thread_local",
             ):
                 self._output = self._fn(*args)
+            collect_cudagraph_annotations()
             logger.info("Recorded CUDA graph")
 
         if self._should_check_address:
