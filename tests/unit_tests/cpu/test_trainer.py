@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.trainer import Trainer
 
@@ -24,11 +23,18 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             pp_has_last_stage=False,
             pp_schedule=SimpleNamespace(step=lambda **kwargs: None),
             train_context=nullcontext,
-            post_dataloading_process=lambda input_dict, labels: (
-                input_dict["input"],
-                labels,
-                {},
-            ),
+            model_parts=[
+                SimpleNamespace(
+                    preprocess_inputs=lambda input_dict, **kw: (
+                        input_dict["input"],
+                        input_dict["labels"],
+                        {},
+                    )
+                )
+            ],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
             device=torch.device("cpu"),
         ),
     )
@@ -41,6 +47,44 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     )
 
     torch.testing.assert_close(loss, torch.tensor([-1.0]))
+
+
+def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
+    captured = {}
+
+    class _FakeModel:
+        def preprocess_inputs(self, input_dict, **kw):
+            captured["preprocess_kwargs"] = kw
+            return ("INPUTS", torch.ones(7), {"positions": 1})
+
+    def fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs):
+        captured["fwd_bwd_args"] = (inputs, labels, extra_kwargs)
+        return torch.tensor(0.0)
+
+    fake = SimpleNamespace(
+        model_parts=[_FakeModel()],
+        parallel_dims=SimpleNamespace(pp_enabled=False),
+        config=SimpleNamespace(parallelism="PARA"),
+        ntokens_seen=100,
+        fwd_bwd_fn=fwd_bwd_fn,
+    )
+
+    Trainer.forward_backward_step(
+        fake,
+        input_dict={"input": 0},
+        labels=torch.zeros(1),
+        global_valid_tokens=torch.tensor(1),
+    )
+
+    inputs, labels, extra = captured["fwd_bwd_args"]
+    assert inputs == "INPUTS"
+    assert extra == {"positions": 1}
+    assert labels.numel() == 7
+    assert fake.ntokens_seen == 107  # labels.numel() (7) folded in
+    assert captured["preprocess_kwargs"] == {
+        "parallel_dims": fake.parallel_dims,
+        "parallelism": "PARA",
+    }
 
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():

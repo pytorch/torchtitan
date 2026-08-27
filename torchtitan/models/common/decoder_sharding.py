@@ -8,7 +8,6 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-
 from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
 from torchtitan.models.common.dist_gemm import (
     DistGEMMFeedForward,
@@ -106,6 +105,18 @@ def dense_sequence_parallel_placement() -> SpmdType:
         },
         partition_spec=spmd.PartitionSpec((DP, CP, TP), None),
     )
+
+
+def decoder_input_sharding() -> dict[str, SpmdType]:
+    """Default ``input_sharding`` for decoder-only models."""
+    return {
+        "input": token_id_placement(),
+        "positions": token_id_placement(),
+        "labels": SpmdType(
+            {DP: spmd.V, CP: spmd.V, TP: spmd.I},
+            partition_spec=spmd.PartitionSpec((DP, CP)),
+        ),
+    }
 
 
 def colwise_config() -> ShardingConfig:

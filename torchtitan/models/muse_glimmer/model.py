@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -12,6 +13,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -25,6 +29,7 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
@@ -33,7 +38,11 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
@@ -311,28 +320,33 @@ class MuseGlimmerModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layers[0].attention, GQAttention.Config)
-            assert self.layers[0].attention.head_dim is not None
-            nparams, num_flops_per_token = get_dense_model_nparams_and_flops(
+            # Vision modules run per image rather than per text token.
+            muse_model = cast("MuseGlimmerModel", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                n_layers=len(self.layers),
-                n_heads=self.layers[0].attention.n_heads,
-                head_dims=2 * self.layers[0].attention.head_dim,
-                seq_len=seq_len,
-                enable_weight_tying=False,
+                modules_excluded_from_active_params=(
+                    muse_model.vision_encoder,
+                    muse_model.vision_adapter,
+                    muse_model.vision_projection,
+                    muse_model.perception_emb_norm,
+                ),
             )
-            # get_dense_model_nparams_and_flops excludes embedding params from
-            # the matmul FLOP count by scanning the model's *immediate* children
-            # for nn.Embedding. Muse Glimmer nests its nn.Embedding inside
-            # EmbeddingWithNorm, so that scan finds nothing and the embedding
-            # FLOPs (6 * params) are not subtracted. Correct for it here (Muse Glimmer
-            # does not tie embeddings). tok_embeddings is None on non-embedding
-            # pipeline stages, where there is nothing to subtract.
-            tok_embeddings = getattr(model, "tok_embeddings", None)
-            if tok_embeddings is not None:
-                nparams_embedding = sum(p.numel() for p in tok_embeddings.parameters())
-                num_flops_per_token -= 6 * nparams_embedding
-            return nparams, num_flops_per_token
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=attention.window_size,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)
@@ -355,6 +369,42 @@ class MuseGlimmerModel(Decoder):
         self.vision_adapter = (
             config.vision_adapter.build() if config.vision_adapter is not None else None
         )
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build masks, CP-shard, SPMD-annotate, and return the batch."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions", None)
+        if positions is not None:
+            inner = getattr(self.config.first_attention, "inner_attention", None)
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
 
     def _get_vision_features(
         self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
@@ -389,14 +439,6 @@ class MuseGlimmerModel(Decoder):
         # On non-embedding pipeline stages tok_embeddings is None and the input
         # is already hidden states, so injection is skipped there.
         with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                from .sharding import annotate_muse_glimmer_input_spmd_types
-
-                annotate_muse_glimmer_input_spmd_types(
-                    pixel_values=pixel_values,
-                    grid_thw=grid_thw,
-                )
-
             if self.tok_embeddings is not None:
                 h = self.tok_embeddings(tokens)
                 # The model owns the encoder: when packed pixel_values are passed,

@@ -37,13 +37,16 @@ def score_math_response(response: str, ground_truth: str) -> float:
         score_math_response("work\nAnswer: $34$", "34")  # 1.0
     """
     try:
-        gold = parse(ground_truth)
+        # TODO: Re-enable Math-Verify timeouts after resolving its signal-based
+        # timeout failure in rollout worker threads (signals require the main thread).
+        gold = parse(ground_truth, parsing_timeout=None)
         prediction = parse(
             response,
             extraction_config=_FINAL_ANSWER_EXTRACTION,
             extraction_mode="first_match",
+            parsing_timeout=None,
         )
-        return float(bool(gold) and verify(gold, prediction))
+        return float(bool(gold) and verify(gold, prediction, timeout_seconds=None))
     except (Exception, TimeoutException):
         # Model output is untrusted; malformed LaTeX is an incorrect answer, not a
         # training-loop failure. Math-Verify raises `TimeoutException` from BaseException.
