@@ -7,11 +7,10 @@
 import unittest
 
 import torch
-import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.kda import KimiKDAKernel
+from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -31,7 +30,7 @@ def _small_model_config() -> KimiK3Model.Config:
         qk_nope_head_dim=16,
         qk_rope_head_dim=16,
         v_head_dim=16,
-        kda_head_dim=64,
+        kda_head_dim=128,
         conv_kernel_size=3,
         dense_hidden_dim=128,
         latent_dim=32,
@@ -65,29 +64,18 @@ def _kda_recurrent_reference(
     A_log_H: torch.Tensor,
     dt_bias_HK: torch.Tensor,
     *,
-    lower_bound: float | None,
+    lower_bound: float,
 ) -> torch.Tensor:
-    """Explicit KDA recurrence in FP32, matching the released Kimi K3 math.
-
-    ``lower_bound`` selects the same two gate activations FLA exposes through
-    ``safe_gate``: the bounded ``lower_bound * sigmoid(...)`` form when set,
-    and ``-exp(A_log) * softplus(...)`` when ``None``.
-    """
+    """Explicit bounded KDA recurrence in FP32."""
     input_dtype = q_BLHK.dtype
     q_BLHK = q_BLHK.float()
     k_BLHK = k_BLHK.float()
     q_BLHK = q_BLHK * torch.rsqrt(q_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
     k_BLHK = k_BLHK * torch.rsqrt(k_BLHK.square().sum(dim=-1, keepdim=True) + 1e-6)
     v_BLHV = v_BLHV.float()
-    if lower_bound is None:
-        log_decay_BLHK = -torch.exp(A_log_H.float()).view(1, 1, -1, 1) * F.softplus(
-            gate_BLHK.float() + dt_bias_HK.float()
-        )
-    else:
-        log_decay_BLHK = lower_bound * torch.sigmoid(
-            torch.exp(A_log_H.float()).view(1, 1, -1, 1)
-            * (gate_BLHK.float() + dt_bias_HK.float())
-        )
+    log_decay_BLHK = lower_bound * torch.sigmoid(
+        torch.exp(A_log_H).view(1, 1, -1, 1) * (gate_BLHK.float() + dt_bias_HK.float())
+    )
     decay_BLHK = torch.exp(log_decay_BLHK)
     beta_BLH = torch.sigmoid(beta_BLH.float())
 
@@ -125,10 +113,14 @@ class TestKimiK3(unittest.TestCase):
         attention_masks = model.get_attention_masks(positions)
         self.assertIsInstance(attention_masks, BlockMask)
 
-    @unittest.skipIf(not torch.cuda.is_available(), "FLA KDA kernel requires CUDA.")
-    def test_fla_kda_kernel_matches_recurrent_reference(self):
+    @unittest.skipIf(
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
+        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
+    )
+    def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
-        head_dim = 64
+        head_dim = 128
         num_heads = 3
 
         def parameter(*shape: int) -> torch.Tensor:
@@ -139,61 +131,64 @@ class TestKimiK3(unittest.TestCase):
                 requires_grad=True,
             )
 
-        for lower_bound in (-5.0, None):
-            with self.subTest(lower_bound=lower_bound):
-                A_log_H = torch.rand(num_heads, device="cuda")
-                A_log_H = A_log_H.uniform_(1.0, 16.0).log().requires_grad_()
-                actual_inputs = (
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads, head_dim),
-                    parameter(2, 64, num_heads),
-                    A_log_H,
-                    parameter(num_heads, head_dim),
-                )
-                expected_inputs = tuple(
-                    tensor.detach().clone().requires_grad_() for tensor in actual_inputs
-                )
+        lower_bound = -5.0
+        A_log_H = (
+            torch.empty(num_heads, device="cuda")
+            .uniform_(1.0, 16.0)
+            .log_()
+            .requires_grad_()
+        )
+        actual_inputs = (
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads, head_dim),
+            parameter(2, 64, num_heads),
+            A_log_H,
+            parameter(num_heads, head_dim),
+        )
+        expected_inputs = tuple(
+            tensor.detach().clone().requires_grad_() for tensor in actual_inputs
+        )
 
-                kernel = KimiKDAKernel.Config(lower_bound=lower_bound).build()
-                actual_BLHV = kernel(*actual_inputs)
-                expected_BLHV = _kda_recurrent_reference(
-                    *expected_inputs,
-                    lower_bound=lower_bound,
-                )
+        kernel = KDAKernel.Config(lower_bound=lower_bound).build()
+        actual_BLHV = kernel(*actual_inputs)
+        expected_BLHV = _kda_recurrent_reference(
+            *expected_inputs,
+            lower_bound=lower_bound,
+        )
 
-                # The chunked kernel accumulates over chunk boundaries and uses
-                # reduced-precision matmuls internally, so it does not reproduce
-                # the sequential FP32 recurrence bit for bit.
-                torch.testing.assert_close(
-                    actual_BLHV,
-                    expected_BLHV,
-                    atol=2e-3,
-                    rtol=2e-3,
-                )
-                output_grad_BLHV = torch.randn_like(actual_BLHV)
-                actual_grads = torch.autograd.grad(
-                    actual_BLHV,
-                    actual_inputs,
-                    grad_outputs=output_grad_BLHV,
-                )
-                expected_grads = torch.autograd.grad(
-                    expected_BLHV,
-                    expected_inputs,
-                    grad_outputs=output_grad_BLHV,
-                )
-                for actual_grad, expected_grad in zip(
-                    actual_grads,
-                    expected_grads,
-                    strict=True,
-                ):
-                    torch.testing.assert_close(
-                        actual_grad,
-                        expected_grad,
-                        atol=2e-2,
-                        rtol=2e-2,
-                    )
+        # The chunked kernel accumulates over chunk boundaries and uses
+        # reduced-precision matmuls internally, so it does not reproduce
+        # the sequential FP32 recurrence bit for bit.
+        torch.testing.assert_close(
+            actual_BLHV,
+            expected_BLHV,
+            atol=2e-3,
+            rtol=2e-3,
+        )
+        output_grad_BLHV = torch.randn_like(actual_BLHV)
+        actual_grads = torch.autograd.grad(
+            actual_BLHV,
+            actual_inputs,
+            grad_outputs=output_grad_BLHV,
+        )
+        expected_grads = torch.autograd.grad(
+            expected_BLHV,
+            expected_inputs,
+            grad_outputs=output_grad_BLHV,
+        )
+        for actual_grad, expected_grad in zip(
+            actual_grads,
+            expected_grads,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_grad,
+                expected_grad,
+                atol=2e-2,
+                rtol=2e-2,
+            )
 
     def test_state_dict_round_trips_through_hf_adapter(self):
         torch.manual_seed(2)
