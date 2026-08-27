@@ -10,6 +10,7 @@ import os
 from collections.abc import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
@@ -128,6 +129,7 @@ def pipeline_llm(
         stages=stages,
         loss_fn=loss_fn,
     )
+    _warmup_pp_edge_communicators(stages)
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
@@ -262,6 +264,39 @@ def _get_pipeline_metadata(
         stages_per_rank = 1 if is_single_stage_schedule else 2
         num_virtual_stages = parallel_dims.pp * stages_per_rank
     return num_virtual_stages, num_layers, input_weight, output_weight
+
+
+def _warmup_pp_edge_communicators(stages: list[PipelineStage]) -> None:
+    """Create every pipeline-edge NCCL communicator eagerly, before step one.
+
+    Without this, the communicator behind an edge is created lazily by the
+    first steady-state ``_batch_p2p`` that touches it. On one node that first
+    touch is cheap; across nodes it is a full NCCL bootstrap, and different
+    ranks reach their first touch at different times -- the late edges of an
+    8-stage pipeline (5->6, 6->7) then sit in communicator creation until the
+    300 s default timeout. The schedules module carries a TODO describing this
+    exact gap ("STATIC mode group communicator warm-up gap ... lazily created
+    on the first mixed `_batch_p2p` call") with this fix prescribed; it is
+    applied here from the torchtitan side because the training repo cannot
+    patch torch in place.
+
+    Every rank calls this at the same point (right after schedule build), every
+    op has its matching counterpart on the neighbouring rank, and the dummy
+    payloads are discarded -- so the only effect is that the communicators
+    exist before any rank depends on a neighbour's progress to create them.
+    """
+    from torch.distributed.pipelining.schedules import _batch_p2p, _wait_batch_p2p
+
+    ops: list[dist.P2POp] = []
+    for stage in stages:
+        get_ops = getattr(stage, "_get_init_p2p_neighbors_ops", None)
+        if get_ops is None:
+            # A stage type without the hook predates the lazy-creation hazard's
+            # fix surface; nothing to warm.
+            continue
+        ops.extend(get_ops())
+    if ops:
+        _wait_batch_p2p(_batch_p2p(ops, desc="pp_edge_warmup"))
 
 
 def _build_pipeline_schedule(
