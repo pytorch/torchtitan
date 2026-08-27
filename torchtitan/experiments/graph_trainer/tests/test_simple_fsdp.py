@@ -47,8 +47,8 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             tp=1,
             pp=1,
             ep=1,
-            etp=1,
             world_size=1,
+            spmd_backend="partial_dtensor",
         )
         training = TrainingConfig(
             mixed_precision_param="bfloat16",

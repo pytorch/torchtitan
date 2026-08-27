@@ -11,7 +11,7 @@ Typical use::
     from torchtitan.observability import structured_logger as sl
 
     sl.init_structured_logger(source="training", output_dir="./outputs")
-    sl.log_trace_instant("binary_start")
+    sl.log_trace_instant("structured_logger_started")
     with sl.log_trace_span("fwd_bwd"):
         ...
 """

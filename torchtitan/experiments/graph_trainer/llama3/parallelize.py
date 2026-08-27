@@ -4,16 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
-    apply_cp_to_attention,
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
@@ -37,7 +32,7 @@ def parallelize_llama(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
     """
@@ -48,20 +43,17 @@ def parallelize_llama(
     the model must fit on GPU or CPU memory.
     """
     assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.num_tokens_per_microbatch_per_dp_rank % parallel_dims.seq_len_divisor
+        == 0
     ), f"""
-        Sequence length {training.seq_len} must be divisible by the product of TP degree
-        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
+        Token count {training.num_tokens_per_microbatch_per_dp_rank} must be divisible by the product of TP degree
+        ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
-
-    if parallel_dims.cp_enabled:
-        apply_cp_to_attention(model, parallel_dims)
 
     annotate_llama(model)
 
     if parallel_dims.tp_enabled:
-        tp_mesh = parallel_dims.get_mesh("tp")
-        model.parallelize(tp_mesh)
+        model.parallelize(parallel_dims)
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
     # real backend (see ParallelDims._mesh_exist), even at degree 1, so that

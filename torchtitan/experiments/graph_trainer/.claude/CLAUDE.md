@@ -40,6 +40,15 @@ When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like
 `remove_noop_passes.py`.
 
+## EP Overlap Trace Contract
+
+EP overlap graph chunking is intentionally coupled to tracing through the
+`ep_overlap` trace-input preparer. The preparer marks token-grid dimensions
+before `minimal_fx_tracer` fakeifies inputs; the chunk pass later uses those
+symbols as its source of truth. When changing EP-overlap input preparation,
+dynamic-shape handling, or graph chunking semantics, update the README contract
+and the trace/chunking tests together.
+
 ## Memory Policy Framework
 
 PyTorch's module-level `torch.utils.checkpoint` and eager SAC make
@@ -72,6 +81,13 @@ two-step process:
 The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
+
+**NUMA binding for CPU offload:** On multi-NUMA machines (e.g. GB200
+NVLink-C2C), D2H/H2D bandwidth is ~350 GB/s NUMA-local vs ~120 GB/s
+cross-NUMA. `Trainer` automatically applies NUMA binding
+(`AffinityMode.NODE`) on CUDA hardware at init, pinning each worker
+to the NUMA node of its GPU. Falls back gracefully on non-CUDA
+hardware or when `numactl` is unavailable.
 
 **Inspecting tags:** `log_activation_memory_policy` (`log_activation_memory_policy.py`)
 prints all forward nodes consumed by backward, grouped by layer with
@@ -110,8 +126,7 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmo
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --parallelism.expert_parallel_degree=4 \
-    --parallelism.expert_tensor_parallel_degree=1
+    --parallelism.expert_parallel_degree=4
 ```
 
 ### Tests
@@ -136,10 +151,9 @@ timing, before/after tlparse graph dumps, and op-count diff summaries.
 Use with `TORCH_TRACE` and `tlparse` to inspect graphs in the browser.
 
 ```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
     --compile.mode aot_fx_trace \
     --compile.debug_graph_passes \
-    --dataloader.dataset c4_test \
     --training.steps 10
 ```
 
@@ -216,17 +230,16 @@ breaks:
 ### Benchmark
 
 Use `./run_train.sh` with a small number of steps. Disable tensorboard,
-profiling, and flight recorder for cleaner timing. Always use
-`--dataloader.dataset c4_test` for local runs to avoid downloading the
-full C4 dataset from HuggingFace:
+profiling, and flight recorder for cleaner timing. Use
+`CONFIG=graph_trainer_llama3_8b_c4_test` for local Llama3 8B runs to avoid
+downloading the full C4 dataset from HuggingFace:
 
 ```bash
 # Llama3 8B aot_fx_trace (8×H100, FSDP+TP, 20 steps)
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
     --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
@@ -238,7 +251,6 @@ NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./r
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --parallelism.expert_parallel_degree=2 \
-    --dataloader.dataset c4_test \
     --metrics.no-enable_tensorboard \
     --profiler.no-enable_profiling \
     --comm.trace_buf_size=0 \
@@ -259,11 +271,10 @@ Set `--profiler.profile_freq` to control which step is captured
 (default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
 
 ```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --dataloader.dataset c4_test \
     --profiler.enable_profiling \
     --profiler.profile_freq 10
 ```
@@ -280,11 +291,10 @@ Open the `.pickle` files with the
 [PyTorch Memory Viz](https://pytorch.org/memory_viz) tool.
 
 ```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
-    --dataloader.dataset c4_test \
     --profiler.enable_memory_snapshot \
     --profiler.profile_freq 10
 ```
@@ -299,6 +309,11 @@ This verifies that the aot_fx_trace path produces bitwise identical losses
 and gradients across runs, and matches eager numerics exactly. Any change
 that breaks this test must be investigated and fixed before proceeding with
 other tests.
+
+### Numerics Debugging
+
+For investigating numerics divergence, use the `numerics_debugging` skill at
+[`.claude/skills/numerics_debugging/SKILL.md`](../../../../.claude/skills/numerics_debugging/SKILL.md).
 
 ### Async Tensor Parallel (micro-pipeline TP)
 
@@ -315,11 +330,10 @@ symmetric memory (NVLink).
 
 **Example:**
 ```bash
-NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh \
+NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
     --compile.mode aot_fx_trace \
     --parallelism.tensor_parallel_degree=4 \
-    --parallelism.enable_async_tensor_parallel \
-    --dataloader.dataset c4_test
+    --parallelism.enable_async_tensor_parallel
 ```
 
 ### CUDA Graph Kernel Annotations

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
+import dataclasses
 import math
 import os
 from collections.abc import Callable
@@ -24,21 +25,17 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
-# pipeline_llm is the public entrypoint for model-specific PP setup. Helpers in
-# this module are implementation details and should stay private.
-__all__ = ["pipeline_llm"]
+# pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
+# setup. Helpers in this module are implementation details and stay private.
+__all__ = ["pipeline_llm", "pipeline_vlm"]
 
 
 def _build_get_mesh_callback(
@@ -72,7 +69,7 @@ def pipeline_llm(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -127,7 +124,7 @@ def pipeline_llm(
 
     pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        num_microbatches=parallelism.num_pp_microbatches,
         stages=stages,
         loss_fn=loss_fn,
     )
@@ -142,6 +139,56 @@ def pipeline_llm(
             has_last_stage = True
 
     return pp_schedule, model_parts, has_first_stage, has_last_stage
+
+
+def pipeline_vlm(
+    model: nn.Module,
+    *,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+    **kwargs,
+) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    """PP entrypoint for vision-language models: co-locate the vision encoder
+    with the first stage, then delegate to ``pipeline_llm``.
+
+    The auto-generated LLM stage split only knows about decoder modules
+    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). For a VLM we inject
+    ``vision_encoder`` into the first stage's FQN list so it runs alongside
+    ``tok_embeddings`` (vision features are scattered into the embedding sequence
+    before the decoder layers). On stages other than the first, ``tok_embeddings``
+    and ``vision_encoder`` are pruned to ``None``; each model's ``forward`` must
+    guard on ``self.tok_embeddings is not None`` so the multimodal logic is
+    skipped there.
+
+    NOTE: This adds load to stage 0 that the auto split does not model
+    (``input_weight`` only accounts for ``tok_embeddings``); for a heavy vision
+    encoder, bump ``parallelism.pipeline_parallel_first_stage_less_layers`` to
+    rebalance.
+    """
+    if parallelism.module_fqns_per_model_part is None:
+        (
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+        ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+        fqn_per_part = _generate_llm_fqn_per_model_part(
+            num_virtual_stages, num_layers, input_weight, output_weight
+        )
+        if model.vision_encoder is not None:
+            fqn_per_part[0].insert(0, "vision_encoder")
+        parallelism = dataclasses.replace(
+            parallelism, module_fqns_per_model_part=fqn_per_part
+        )
+
+    return pipeline_llm(
+        model,
+        parallel_dims=parallel_dims,
+        parallelism=parallelism,
+        model_config=model_config,
+        **kwargs,
+    )
 
 
 def _get_pipeline_metadata(
@@ -220,7 +267,7 @@ def _get_pipeline_metadata(
 def _build_pipeline_schedule(
     *,
     parallelism: ParallelismConfig,
-    local_batch_size: int,
+    num_microbatches: int,
     stages: list[PipelineStage],
     loss_fn: Callable,
     # Graph PP runs explicit backward graphs instead of autograd
@@ -233,7 +280,7 @@ def _build_pipeline_schedule(
 
     Args:
         parallelism (ParallelismConfig): The parallelism configuration.
-        local_batch_size (int): The local batch size for computing microbatches.
+        num_microbatches (int): Number of pipeline microbatches.
         stages (list[PipelineStage]): The stages to be scheduled.
         loss_fn (Callable): The loss function.
 
@@ -253,20 +300,11 @@ def _build_pipeline_schedule(
         schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    microbatch_size = parallelism.pipeline_parallel_microbatch_size
-    batch_size = local_batch_size
-    # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
-    if batch_size % microbatch_size != 0:
-        raise ValueError(
-            f"Batch size {local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
-            "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
-        )
-    n_microbatches = batch_size // microbatch_size
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
     num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
-    if n_microbatches < num_total_stages:
+    if num_microbatches < num_total_stages:
         logger.warning(
-            f"Number of microbatches ({n_microbatches}) is less than the total number "
+            f"Number of microbatches ({num_microbatches}) is less than the total number "
             f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
@@ -275,24 +313,30 @@ def _build_pipeline_schedule(
             "PipelineScheduleSingle is an abstract base class. "
             "Use a concrete single-stage schedule such as GPipe or 1F1B."
         )
+
+    # Pipeline schedules expect a bare scalar loss tensor.
+    def _scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
+        loss, _ = loss_fn(*args, **kwargs)
+        return loss
+
     if looped_schedule:
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
-            n_microbatches=n_microbatches,
-            loss_fn=loss_fn,
+            n_microbatches=num_microbatches,
+            loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
         )
     else:
         schedule = schedule_class(
             stages[0],
-            n_microbatches=n_microbatches,
-            loss_fn=loss_fn,
+            n_microbatches=num_microbatches,
+            loss_fn=_scalar_loss_fn,
             scale_grads=False,
         )
     logger.info(
         f"Using pipeline schedule {parallelism.pipeline_parallel_schedule} "
-        f"with {n_microbatches} microbatches and {num_total_stages} stages."
+        f"with {num_microbatches} microbatches and {num_total_stages} stages."
     )
 
     if pp_schedule_csv:

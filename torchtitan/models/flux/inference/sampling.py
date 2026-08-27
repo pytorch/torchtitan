@@ -180,11 +180,14 @@ def denoise(
     timesteps = get_schedule(denoising_steps, latent_height * latent_width, shift=True)
 
     if enable_classifier_free_guidance:
+        if empty_t5_encodings is None or empty_clip_encodings is None:
+            raise ValueError(
+                "empty_t5_encodings and empty_clip_encodings are required when "
+                "classifier-free guidance is enabled."
+            )
         # Double batch size for CFG: [unconditional, conditional]
         latents = torch.cat([latents, latents], dim=0)
-        # pyrefly: ignore [no-matching-overload]
         t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
-        # pyrefly: ignore [no-matching-overload]
         clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
         bsz *= 2
 

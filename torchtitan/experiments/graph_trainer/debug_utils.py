@@ -7,6 +7,7 @@
 from collections import defaultdict
 
 import torch
+from torch._logging import trace_structured
 
 from torchtitan.tools.logging import logger
 
@@ -89,3 +90,48 @@ def log_graph_diff(
         logger.info(f"[{pass_name}] graph unchanged")
     else:
         logger.info(f"[{pass_name}] graph diff:\n" + "\n".join(lines))
+
+
+def tlparse_log_graph_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    graph_name: str,
+    debug: bool = False,
+) -> torch.fx.GraphModule:
+    """Log the transformed graph to tlparse via trace_structured.
+
+    This pass should be added as the last transform in fwd/bwd_transforms
+    so that the logged graph reflects all prior transformations.
+
+    Args:
+        gm: The graph module to log.
+        example_inputs: The example inputs (unused, required by protocol).
+        graph_name: The name for this graph artifact
+            (e.g. "aot_forward_graph_transformed").
+        debug: When True, include additional metadata in the printed nodes.
+
+    Returns:
+        The graph module unchanged.
+    """
+    additional_meta = ["autograd_backward"]
+    if debug:
+        additional_meta.append("seq_nr")
+
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": graph_name,
+            "encoding": "string",
+        },
+        payload_fn=lambda: gm.print_readable(
+            print_output=False,
+            include_stride=True,
+            include_device=True,
+            expanded_def=True,
+            additional_meta=additional_meta,
+        ),
+        expect_trace_id=False,
+    )
+
+    return gm
