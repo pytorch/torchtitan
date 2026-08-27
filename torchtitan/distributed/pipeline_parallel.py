@@ -267,23 +267,21 @@ def _get_pipeline_metadata(
 
 
 def _warmup_pp_edge_communicators(stages: list[PipelineStage]) -> None:
-    """Create every pipeline-edge NCCL communicator eagerly, before step one.
+    """Bootstrap every pipeline-edge communicator at build time.
 
-    Without this, the communicator behind an edge is created lazily by the
-    first steady-state ``_batch_p2p`` that touches it. On one node that first
-    touch is cheap; across nodes it is a full NCCL bootstrap, and different
-    ranks reach their first touch at different times -- the late edges of an
-    8-stage pipeline (5->6, 6->7) then sit in communicator creation until the
-    300 s default timeout. The schedules module carries a TODO describing this
-    exact gap ("STATIC mode group communicator warm-up gap ... lazily created
-    on the first mixed `_batch_p2p` call") with this fix prescribed; it is
-    applied here from the torchtitan side because the training repo cannot
-    patch torch in place.
+        rank:  0 --fwd acts--> 1 --> ... --> 7    one downstream comm per edge
+               0 <-bwd grads-- 1 <-- ... <-- 7    one upstream comm per edge
+        lazy:  comm(r, r+1) is created by the first send/recv that touches it,
+               which is 1F1B steady state -- where rank r+1 already waits on
+               rank r, so cross-node bootstraps serialize past the timeout
+        here:  one dummy send/recv per edge and direction, posted by every
+               rank at the same point; all communicators come up in parallel
 
-    Every rank calls this at the same point (right after schedule build), every
-    op has its matching counterpart on the neighbouring rank, and the dummy
-    payloads are discarded -- so the only effect is that the communicators
-    exist before any rank depends on a neighbour's progress to create them.
+    Metadata inference (DYNAMIC mode) happens to warm ``self.group``, but
+    nothing warms the per-direction P2P groups, and STATIC mode warms nothing
+    at all. This runs torch's own ``_get_init_p2p_neighbors_ops`` -- the
+    non-PipelineStage path already does -- and leaves numerics untouched:
+    single-node PP8 prints identical losses with and without it.
     """
     from torch.distributed.pipelining.schedules import _batch_p2p, _wait_batch_p2p
 
