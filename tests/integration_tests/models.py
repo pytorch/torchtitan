@@ -202,9 +202,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Case for Kimi K3
         OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_mm_fsdp2],
-            test_descr="Kimi K3 multimodal FSDP",
-            test_name="kimi_k3_mm_fsdp",
+            configs=[recipes.kimi_k3_debugmodel_mm_fsdp2_ep2],
+            test_descr="Kimi K3 multimodal FSDP+EP",
+            test_name="kimi_k3_mm_fsdp+ep",
             ngpu=2,
         ),
     ]
