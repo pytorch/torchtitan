@@ -299,7 +299,7 @@ class KimiK3Model(Decoder):
                         v_head_dim=attention.v_head_dim,
                         seq_len=seq_len,
                     )
-                elif isinstance(layer.delta_attention, KimiDeltaAttention.Config):
+                elif isinstance(layer.delta_attention, KDA.Config):
                     delta_attention = layer.delta_attention
                     attention_op_flops += delta_rule_flops_per_token(
                         num_heads=delta_attention.num_heads,
