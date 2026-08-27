@@ -532,3 +532,10 @@ def apply_graph_passes(
     all_passes_elapsed = time.perf_counter() - all_passes_start
     logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
     return gm
+
+
+# Import paged stash registrations (registers additional policies + pipelines + hooks)
+try:
+    import torchtitan.experiments.graph_trainer.paged_stash_memory_policy  # noqa: F401, E402
+except ImportError:
+    pass

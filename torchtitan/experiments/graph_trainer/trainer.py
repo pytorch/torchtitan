@@ -38,6 +38,7 @@ from torchtitan.experiments.graph_trainer.passes import (
 from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
+    POST_TRAIN_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
@@ -300,6 +301,8 @@ class GraphTrainer(Trainer):
         super().train_step(data_iterator)
 
     def close(self) -> None:
+        POST_TRAIN_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None

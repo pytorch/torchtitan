@@ -94,7 +94,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
+    memory_policy: Literal["default", "full", "eager", "sac_and_offload", "paged_stash"] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
@@ -106,6 +106,7 @@ class GraphTrainerCompileConfig(CompileConfig):
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+        paged_stash: paged activation stashing for MoE (requires HybridEP).
     """
 
     full_recompute_save_ops: str = ""
