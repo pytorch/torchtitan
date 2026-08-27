@@ -19,6 +19,12 @@ from ..utils import swap_token_dispatcher
 _mxfp8_linear_import_error: ImportError | None = None
 
 try:
+    # Nothing about the class itself can fail here. What raises is two levels
+    # down: linear.py and tensor.py import torchao's mxfp8 cast kernels at
+    # module scope, and triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale
+    # is newer than any torchao release. Catching it keeps
+    # ``import torchtitan.components.quantization`` working for float8 and
+    # nvfp4 users, and defers the error to whoever builds this converter.
     from .linear import MXFP8Linear
 
 except ImportError as import_error:
@@ -37,29 +43,42 @@ class MXFP8LinearConverter(QuantizationConverter):
         Only Linear.Config entries whose FQN contains a match are converted.
         If empty, all Linear modules are converted.
         """
-        mxfp8_input_activation_fqns: list[str] = field(default_factory=list)
-        """FQN substrings selecting modules that save MXFP8 input activations.
+        linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(
+            default_factory=list
+        )
+        """FQN substrings selecting linears that save inputs in MXFP8 for backward.
 
         A linear can save either its BF16 input or a columnwise MXFP8 input for
         the backward pass.
 
-        If the preceding operation already saves its BF16 output for backward,
-        as flash attention does, that tensor is also available as this linear's
-        input. Saving another MXFP8 operands would increase memory usage,
-        so this linear should save BF16.
-
-        If no other operation retains the BF16 input, saving MXFP8 reduces
+        Without activation checkpointing, if the preceding operation already
+        saves its BF16 output for backward, as flash attention does, that tensor
+        is also available as this linear's input. Saving another MXFP8
+        operands would increase memory usage, so this linear should save
+        BF16. If no other operation retains the BF16 input, saving MXFP8 reduces
         activation memory and avoids columnwise quantization during backward.
 
-        The best choice is model-dependent, so BF16 is the default. Users can
-        opt selected modules into MXFP8 with this list.
+        With full activation checkpointing, saved tensors from the original
+        forward are discarded and reconstructed during backward. Today, a
+        linear selected here produces its columnwise MXFP8 input in both the
+        original forward and recomputation, even though the original result is
+        discarded. An ideal checkpoint-aware policy could produce it only
+        during recomputation, but distinguishing those executions would add
+        complexity to the linear and its autograd contract. We intentionally
+        apply the same policy to both.
+
+        More granular ``torch.remat`` policies add further save-versus-recompute
+        choices, so the optimal format depends on both model activation
+        ownership and the activation-checkpointing policy. BF16 is therefore
+        the conservative default, and users can opt selected modules into MXFP8
+        with this list.
         """
 
         def __post_init__(self) -> None:
-            if any(not fqn for fqn in self.mxfp8_input_activation_fqns):
+            if any(not fqn for fqn in self.linears_saving_inputs_for_backward_in_mxfp8):
                 raise ValueError(
-                    "MXFP8 mxfp8_input_activation_fqns cannot contain "
-                    "an empty FQN selector."
+                    "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 cannot "
+                    "contain an empty FQN selector."
                 )
 
     def __init__(self, config: Config):
@@ -67,18 +86,13 @@ class MXFP8LinearConverter(QuantizationConverter):
 
         if MXFP8Linear is None:
             raise ImportError(
-                "TorchAO with the MXFP8 32x32 swizzled cast kernels is required "
-                "for MXFP8 linear layers. Install TorchAO from source."
+                "MXFP8 linear layers need torchao's 32x32 swizzled cast "
+                "kernels, added in pytorch/ao#4777 and not in any release up "
+                "to v0.18.0. Install a torchao that contains it."
             ) from _mxfp8_linear_import_error
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
-
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of MXFP8 dynamic quantization."
-            )
 
     def convert(self, model_config):
         assert MXFP8Linear is not None
@@ -89,7 +103,7 @@ class MXFP8LinearConverter(QuantizationConverter):
             if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
         ]
 
-        selectors = self.config.mxfp8_input_activation_fqns
+        selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
         target_fqns = [fqn for fqn, _config, _parent, _attr in targets]
         unmatched_fqn_selectors = {
             selector
@@ -98,8 +112,9 @@ class MXFP8LinearConverter(QuantizationConverter):
         }
         if unmatched_fqn_selectors:
             raise ValueError(
-                "MXFP8 mxfp8_input_activation_fqns selectors did not match "
-                f"any converted Linear.Config: {sorted(unmatched_fqn_selectors)}."
+                "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 selectors "
+                "did not match any converted Linear.Config: "
+                f"{sorted(unmatched_fqn_selectors)}."
             )
 
         mxfp8_fqns = {
@@ -111,7 +126,9 @@ class MXFP8LinearConverter(QuantizationConverter):
                 out_features=config.out_features,
                 bias=config.bias,
                 param_init=config.param_init,
-                input_activation_save_format=("mxfp8" if fqn in mxfp8_fqns else "bf16"),
+                input_activation_format_for_backward=(
+                    "mxfp8" if fqn in mxfp8_fqns else "bf16"
+                ),
             )
             if parent is None:
                 model_config = new_config

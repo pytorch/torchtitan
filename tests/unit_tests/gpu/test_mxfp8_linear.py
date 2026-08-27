@@ -6,7 +6,7 @@
 
 import pytest
 import torch
-from torch import nn
+import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 
@@ -14,13 +14,12 @@ pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
 import torchtitan.components.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
-from torchtitan.components.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
-from torchtitan.components.quantization.mxfp8.quantize import (  # noqa: E402
-    quantize_mxfp8_weight,
+from torchtitan.components.quantization._fsdp_tensor import (  # noqa: E402
+    _UnshardedFSDPTensor,
 )
+from torchtitan.components.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
 from torchtitan.components.quantization.mxfp8.tensor import (  # noqa: E402
-    MXFP8FSDPComputeWeight,
-    MXFP8FSDPWeight,
+    _LinearShardedTensorWithMXFP8Compute,
 )
 
 
@@ -33,19 +32,20 @@ pytestmark = [
 ]
 
 
-def _make_mxfp8_linear(
+def _make_sharded_mxfp8_linear(
     in_features: int = 128,
     out_features: int = 96,
     *,
     bias: bool = True,
-    input_activation_save_format: str = "bf16",
+    input_activation_format_for_backward: str = "bf16",
 ) -> MXFP8Linear:
+    """Build a layer in its as-constructed state, before any unshard."""
     return (
         MXFP8Linear.Config(
             in_features=in_features,
             out_features=out_features,
             bias=bias,
-            input_activation_save_format=input_activation_save_format,
+            input_activation_format_for_backward=input_activation_format_for_backward,
         )
         .build()
         .cuda()
@@ -53,12 +53,65 @@ def _make_mxfp8_linear(
     )
 
 
-@pytest.mark.parametrize("input_activation_save_format", ["bf16", "mxfp8"])
+def _make_mxfp8_linear(
+    in_features: int = 128,
+    out_features: int = 96,
+    *,
+    bias: bool = True,
+    input_activation_format_for_backward: str = "bf16",
+) -> MXFP8Linear:
+    """Build a layer that is ready to run forward.
+
+    ``forward`` requires a data parallel implementation to have built the
+    unsharded tensor for the current unshard lifetime. These tests are single
+    process and have none, so stand in for FSDP's post-all-gather hook and
+    install the unsharded tensor directly.
+    """
+    return _install_unsharded_weight(
+        _make_sharded_mxfp8_linear(
+            in_features,
+            out_features,
+            bias=bias,
+            input_activation_format_for_backward=input_activation_format_for_backward,
+        )
+    )
+
+
+def _build_unsharded_tensor(
+    sharded_weight: _LinearShardedTensorWithMXFP8Compute,
+    weight_NK: torch.Tensor,
+) -> _UnshardedFSDPTensor:
+    """Quantize and wrap, as fsdp_post_all_gather does on the first unshard.
+
+    These tests are single process, so the weight is never a DTensor and the
+    DTensor half of _BuildUnshardedTensorFunction does not apply.
+    """
+    with torch.no_grad():
+        return _UnshardedFSDPTensor(
+            weight_NK, sharded_weight._build_operands(weight_NK)
+        )
+
+
+def _install_unsharded_weight(linear: MXFP8Linear) -> MXFP8Linear:
+    """Stand in for FSDP's post-all-gather hook on a single-process layer.
+
+    The unsharded tensor is storage-free, so anything that reads the weight's
+    storage -- ``state_dict``, ``load_state_dict`` -- has to run before this.
+    """
+    sharded_weight = linear.weight
+    linear.weight = nn.Parameter(
+        _build_unsharded_tensor(sharded_weight, sharded_weight._tensor),
+        requires_grad=sharded_weight.requires_grad,
+    )
+    return linear
+
+
+@pytest.mark.parametrize("input_activation_format_for_backward", ["bf16", "mxfp8"])
 def test_mxfp8_linear_saves_selected_input_activation(
-    input_activation_save_format,
+    input_activation_format_for_backward,
 ):
     linear = _make_mxfp8_linear(
-        input_activation_save_format=input_activation_save_format,
+        input_activation_format_for_backward=input_activation_format_for_backward,
     )
     x = torch.randn(
         37,
@@ -79,35 +132,47 @@ def test_mxfp8_linear_saves_selected_input_activation(
         output.backward(torch.randn_like(output))
 
     assert output.shape == (37, linear.out_features)
-    if input_activation_save_format == "bf16":
-        assert len(saved_tensors) == 3
-        assert saved_tensors[0].dtype == torch.bfloat16
-        assert saved_tensors[0].untyped_storage()._cdata == x.untyped_storage()._cdata
-        assert sum(tensor.dtype == torch.float8_e4m3fn for tensor in saved_tensors) == 1
+    # The weight is saved as the single unsharded-tensor wrapper, not as its
+    # individual DGRAD operands, so FSDP can free and refill that storage
+    # around the reshard. Only the activation operands are saved as tensors.
+    weight_saves = [
+        tensor for tensor in saved_tensors if isinstance(tensor, _UnshardedFSDPTensor)
+    ]
+    activation_saves = [
+        tensor
+        for tensor in saved_tensors
+        if not isinstance(tensor, _UnshardedFSDPTensor)
+    ]
+    assert len(weight_saves) == 1
+    if input_activation_format_for_backward == "bf16":
+        assert len(activation_saves) == 1
+        assert activation_saves[0].dtype == torch.bfloat16
         assert (
-            sum(tensor.dtype == torch.float8_e8m0fnu for tensor in saved_tensors) == 1
+            activation_saves[0].untyped_storage()._cdata == x.untyped_storage()._cdata
         )
     else:
-        assert len(saved_tensors) == 4
-        assert all(tensor.dtype != torch.bfloat16 for tensor in saved_tensors)
-        assert sum(tensor.dtype == torch.float8_e4m3fn for tensor in saved_tensors) == 2
+        assert len(activation_saves) == 2
+        assert all(tensor.dtype != torch.bfloat16 for tensor in activation_saves)
         assert (
-            sum(tensor.dtype == torch.float8_e8m0fnu for tensor in saved_tensors) == 2
+            sum(tensor.dtype == torch.float8_e4m3fn for tensor in activation_saves) == 1
         )
-    assert all(type(tensor) is torch.Tensor for tensor in saved_tensors)
-    assert isinstance(linear.weight, MXFP8FSDPWeight)
+        assert (
+            sum(tensor.dtype == torch.float8_e8m0fnu for tensor in activation_saves)
+            == 1
+        )
+    assert all(type(tensor) is torch.Tensor for tensor in activation_saves)
 
 
 @pytest.mark.parametrize(
-    ("input_activation_save_format", "expected_quantize_calls"),
+    ("input_activation_format_for_backward", "expected_quantize_calls"),
     [
         ("bf16", [(True, False), (True, True), (False, True)]),
         ("mxfp8", [(True, True), (True, True)]),
     ],
 )
-def test_mxfp8_input_activation_save_format_controls_quantization_work(
+def test_mxfp8_input_activation_format_for_backward_controls_quantization_work(
     monkeypatch,
-    input_activation_save_format,
+    input_activation_format_for_backward,
     expected_quantize_calls,
 ):
     original_quantize = mxfp8_linear.mxfp8_quantize_cuda
@@ -120,7 +185,7 @@ def test_mxfp8_input_activation_save_format_controls_quantization_work(
     monkeypatch.setattr(mxfp8_linear, "mxfp8_quantize_cuda", record_quantize)
     linear = _make_mxfp8_linear(
         bias=False,
-        input_activation_save_format=input_activation_save_format,
+        input_activation_format_for_backward=input_activation_format_for_backward,
     )
     x = torch.randn(
         64,
@@ -142,42 +207,82 @@ def test_mxfp8_square_weight_dgrad_qdata_is_transpose_view():
         device="cuda",
         dtype=torch.bfloat16,
     )
-    operands = quantize_mxfp8_weight(weight_NK)
-    unsharded_tensor = MXFP8FSDPComputeWeight(
-        operands,
-        logical_shape=weight_NK.shape,
-        logical_stride=weight_NK.stride(),
-        logical_storage_offset=int(weight_NK.storage_offset()),
-        orig_dtype=weight_NK.dtype,
+    unsharded_tensor = _build_unsharded_tensor(
+        _LinearShardedTensorWithMXFP8Compute(weight_NK), weight_NK
     )
+    operands = unsharded_tensor.operands
+    assert operands is not None
     inner_tensor_names, metadata = unsharded_tensor.__tensor_flatten__()
-    rebuilt_unsharded_tensor = MXFP8FSDPComputeWeight.__tensor_unflatten__(
+    rebuilt_unsharded_tensor = type(unsharded_tensor).__tensor_unflatten__(
         {name: getattr(unsharded_tensor, name) for name in inner_tensor_names},
         metadata,
         unsharded_tensor.shape,
         unsharded_tensor.stride(),
     )
+    rebuilt_operands = rebuilt_unsharded_tensor.operands
+    assert rebuilt_operands is not None
 
-    q_weight_dgrad_NK = unsharded_tensor.q_weight_dgrad_NK
-
+    # Inner tensors are named after the operands dataclass fields.
+    # The FPROP qdata is a property, not a field, so FSDP does not manage it.
     assert inner_tensor_names == [
-        "q_weight_fprop_KN",
-        "s_weight_fprop_blocked",
-        "s_weight_dgrad_blocked",
+        "_weight_qdata_dgrad_NK",
+        "_weight_scale_fprop_swizzled",
+        "_weight_scale_dgrad_swizzled",
     ]
-    assert len(unsharded_tensor.fsdp_managed_tensors()) == 3
-    assert len(rebuilt_unsharded_tensor.fsdp_managed_tensors()) == 3
-    assert q_weight_dgrad_NK.data_ptr() == operands.q_weight_fprop_KN.data_ptr()
-    assert torch.equal(q_weight_dgrad_NK, operands.q_weight_fprop_KN.t())
     assert (
-        rebuilt_unsharded_tensor.q_weight_dgrad_NK.data_ptr()
-        == rebuilt_unsharded_tensor.q_weight_fprop_KN.data_ptr()
+        operands.weight_qdata_dgrad_NK.data_ptr()
+        == operands.weight_qdata_fprop_KN.data_ptr()
+    )
+    assert torch.equal(
+        operands.weight_qdata_dgrad_NK,
+        operands.weight_qdata_fprop_KN.t(),
+    )
+    assert (
+        rebuilt_operands.weight_qdata_dgrad_NK.data_ptr()
+        == rebuilt_operands.weight_qdata_fprop_KN.data_ptr()
     )
 
 
-def test_mxfp8_linear_supports_plain_bf16_weight():
-    linear = _make_mxfp8_linear()
-    linear.weight = nn.Parameter(linear.weight._data.detach().clone())
+def test_operands_fields_must_be_distinct_allocations():
+    """FSDP owns each field's storage, so a field may not alias another.
+
+    Derived views belong in properties, as ``_MXFP8LinearOperands`` does for
+    its FPROP qdata. A format that made one a field instead would have FSDP
+    free the same storage twice.
+    """
+    from dataclasses import dataclass
+
+    from torchtitan.components.quantization._fsdp_tensor import _unsharded_inner_tensors
+
+    qdata = torch.empty(64, 64, device="cuda", dtype=torch.float8_e4m3fn)
+
+    @dataclass(frozen=True)
+    class AliasingOperands:
+        qdata_dgrad: torch.Tensor
+        qdata_fprop: torch.Tensor
+
+    with pytest.raises(ValueError, match="distinct allocations"):
+        _unsharded_inner_tensors(AliasingOperands(qdata, qdata.t()))
+
+    @dataclass(frozen=True)
+    class DistinctOperands:
+        qdata_dgrad: torch.Tensor
+        scale: torch.Tensor
+
+    scale = torch.empty(64, 2, device="cuda", dtype=torch.float8_e8m0fnu)
+    assert len(_unsharded_inner_tensors(DistinctOperands(qdata, scale))) == 2
+
+
+def test_mxfp8_linear_quantizes_per_call_without_an_unsharded_tensor():
+    """A layer nobody unsharded builds its operands on every call.
+
+    GraphTrainer under the spmd_types backend reaches forward this way: its
+    runtime hands over a plain annotated local tensor, so the wrapper
+    SimpleFSDP built never arrives. Eager FSDP2 always installs one.
+    """
+    linear = _make_sharded_mxfp8_linear()
+    assert isinstance(linear.weight, _LinearShardedTensorWithMXFP8Compute)
+    assert not isinstance(linear.weight, _UnshardedFSDPTensor)
     x = torch.randn(
         32,
         linear.in_features,
@@ -191,16 +296,49 @@ def test_mxfp8_linear_supports_plain_bf16_weight():
 
     assert output.shape == (32, linear.out_features)
     assert x.grad is not None
+    # The gradient reaches the wrapped parameter in high precision.
     assert linear.weight.grad is not None
+    assert linear.weight.grad.dtype == torch.bfloat16
 
 
-@pytest.mark.parametrize("input_activation_save_format", ["bf16", "mxfp8"])
-def test_mxfp8_linear_compiles_forward_and_backward(input_activation_save_format):
+def test_mxfp8_linear_gradient_reaches_the_unsharded_tensor():
+    linear = _make_mxfp8_linear()
+    assert isinstance(linear.weight, _UnshardedFSDPTensor)
+    x = torch.randn(
+        32,
+        linear.in_features,
+        device="cuda",
+        dtype=torch.bfloat16,
+        requires_grad=True,
+    )
+
+    output = linear(x)
+    output.sum().backward()
+
+    assert output.shape == (32, linear.out_features)
+    assert x.grad is not None
+    # The gradient reaches the wrapped parameter in high precision.
+    assert linear.weight.grad is not None
+    assert linear.weight.grad.dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize("input_activation_format_for_backward", ["bf16", "mxfp8"])
+@pytest.mark.parametrize("execution_mode", ["compile", "activation_checkpoint"])
+def test_mxfp8_linear_runs_outside_plain_eager(
+    execution_mode,
+    input_activation_format_for_backward,
+):
+    """Both non-eager entry points must reach the weight gradient.
+
+    Each one re-enters forward in a way that can lose the saved activation
+    state: compile traces it, and non-reentrant checkpointing discards it and
+    recreates it during recompute. The saved state differs per format, so both
+    formats are exercised under both.
+    """
     linear = _make_mxfp8_linear(
         bias=False,
-        input_activation_save_format=input_activation_save_format,
+        input_activation_format_for_backward=input_activation_format_for_backward,
     )
-    compiled_linear = torch.compile(linear, fullgraph=True)
     x = torch.randn(
         64,
         linear.in_features,
@@ -209,46 +347,32 @@ def test_mxfp8_linear_compiles_forward_and_backward(input_activation_save_format
         requires_grad=True,
     )
 
-    output = compiled_linear(x)
+    if execution_mode == "compile":
+        output = torch.compile(linear, fullgraph=True)(x)
+    else:
+        output = checkpoint(linear, x, use_reentrant=False)
     output.backward(torch.randn_like(output))
 
     assert output.shape == (64, linear.out_features)
     assert x.grad is not None
     assert linear.weight.grad is not None
+    # The gradient is a plain tensor, not the unsharded wrapper.
     assert type(linear.weight.grad) is torch.Tensor
 
 
-@pytest.mark.parametrize("input_activation_save_format", ["bf16", "mxfp8"])
-def test_mxfp8_linear_nonreentrant_checkpoint(input_activation_save_format):
-    linear = _make_mxfp8_linear(
+def test_mxfp8_input_activation_formats_for_backward_match():
+    bf16 = _make_sharded_mxfp8_linear(
         bias=False,
-        input_activation_save_format=input_activation_save_format,
+        input_activation_format_for_backward="bf16",
     )
-    x = torch.randn(
-        64,
-        linear.in_features,
-        device="cuda",
-        dtype=torch.bfloat16,
-        requires_grad=True,
-    )
-
-    output = checkpoint(linear, x, use_reentrant=False)
-    output.backward(torch.randn_like(output))
-
-    assert x.grad is not None
-    assert linear.weight.grad is not None
-
-
-def test_mxfp8_input_activation_save_formats_match():
-    bf16 = _make_mxfp8_linear(
+    mxfp8 = _make_sharded_mxfp8_linear(
         bias=False,
-        input_activation_save_format="bf16",
+        input_activation_format_for_backward="mxfp8",
     )
-    mxfp8 = _make_mxfp8_linear(
-        bias=False,
-        input_activation_save_format="mxfp8",
-    )
+    # Copy the weight while it still has storage, then unshard both layers.
     mxfp8.load_state_dict(bf16.state_dict())
+    _install_unsharded_weight(bf16)
+    _install_unsharded_weight(mxfp8)
 
     x_hp = torch.randn(
         64,
