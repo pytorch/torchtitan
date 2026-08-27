@@ -1,0 +1,16 @@
+# This math task uses a local subprocess and exposes no tools.
+
+[env.taskset]
+id = "torchtitan.experiments.rl.examples.verifiers.taskset"
+dataset = "dapo_math"
+
+[env.agent]
+runtime = { type = "subprocess" }
+max_turns = 1
+
+[env.agent.harness]
+id = "null"
+
+[serve.pool]
+type = "static"
+num_workers = 1
