@@ -114,6 +114,25 @@ def _replace_vllm_layer_configs(model_config):
                 ),
             )
 
+        kda_cfg = getattr(layer_cfg, "delta_attention", None)
+        if kda_cfg is not None:
+            from torchtitan.experiments.rl.models.kda_attention import VLLMInnerKDA
+
+            vllm_inner_kda_cfg = VLLMInnerKDA.Config(
+                num_heads=kda_cfg.num_heads,
+                head_dim=kda_cfg.head_dim,
+                conv_kernel_size=kda_cfg.conv_kernel_size,
+                lower_bound=kda_cfg.inner_kda.kernel.lower_bound,
+                layer_index=layer_idx,
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                delta_attention=dataclasses.replace(
+                    kda_cfg,
+                    inner_kda=vllm_inner_kda_cfg,
+                ),
+            )
+
         new_layers.append(new_layer_cfg)
 
     return dataclasses.replace(model_config, layers=new_layers)
