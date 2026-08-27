@@ -14,6 +14,8 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+import torch
+
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -332,10 +334,14 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[OverrideDefinitions]
-) -> tuple[list[OverrideDefinitions], list[OverrideDefinitions]]:
+) -> tuple[
+    list[OverrideDefinitions],
+    list[OverrideDefinitions],
+    list[OverrideDefinitions],
+]:
     """Filter tests by name, scope, disabled state, architecture, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu).
+    Returns (runnable, skipped_due_to_ngpu, skipped_due_to_cuda_capability).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
@@ -343,6 +349,13 @@ def _filter_tests(
 
     runnable: list[OverrideDefinitions] = []
     skipped_ngpu: list[OverrideDefinitions] = []
+    skipped_cuda_capability: list[OverrideDefinitions] = []
+    cuda_capability = (
+        torch.cuda.get_device_capability()
+        if getattr(args, "gpu_arch_type", "cuda") == "cuda"
+        and torch.cuda.is_available()
+        else None
+    )
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -361,11 +374,17 @@ def _filter_tests(
             and test_flavor.skip_rocm_test
         ):
             continue
+        if (
+            test_flavor.required_cuda_capabilities
+            and cuda_capability not in test_flavor.required_cuda_capabilities
+        ):
+            skipped_cuda_capability.append(test_flavor)
+            continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu
+    return runnable, skipped_ngpu, skipped_cuda_capability
 
 
 def run_tests(
@@ -374,11 +393,17 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    runnable, skipped_ngpu, skipped_cuda_capability = _filter_tests(args, test_list)
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
             f" because --ngpu arg is {args.ngpu}"
+        )
+    for test_flavor in skipped_cuda_capability:
+        logger.info(
+            f"Skipping test {test_flavor.test_name} because its required CUDA "
+            "capability is unavailable; supported capabilities are "
+            f"{tuple(test_flavor.required_cuda_capabilities)}"
         )
 
     failed_tests: list[tuple[str, str]] = []
