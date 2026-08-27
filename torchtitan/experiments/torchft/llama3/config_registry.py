@@ -1,0 +1,75 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.loss import CrossEntropyLoss
+from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.validate import Validator
+from torchtitan.config import CommConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
+from torchtitan.experiments.torchft.config.job_config import FaultTolerance
+from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
+from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.tools.profiler import Profiler
+
+from . import model_registry
+
+
+def llama3_torchft_debugmodel() -> FaultTolerantTrainer.Config:
+    model_spec = model_registry("debugmodel")
+    return FaultTolerantTrainer.Config(
+        loss=CrossEntropyLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_spec),
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        profiler=Profiler.Config(
+            enable_profiling=True,
+            profile_freq=10,
+            profiler_active=10,
+            profiler_warmup=0,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model_spec=model_spec,
+        optimizer=TorchFTOptimizersContainer.Config(
+            param_groups=default_adamw(lr=8e-4).param_groups
+        ),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=2,
+            decay_ratio=0.8,
+            decay_type="linear",
+            min_lr_factor=0.0,
+        ),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
+            max_context_length=2048,
+            steps=100,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        ),
+        checkpoint=TorchFTCheckpointManager.Config(
+            interval=10,
+            last_save_model_only=False,
+        ),
+        activation_checkpoint=SelectiveAC.Config(),
+        comm=CommConfig(train_timeout_seconds=15),
+        fault_tolerance=FaultTolerance(
+            enable=True,
+            semi_sync_method="diloco",
+            process_group="nccl",
+            process_group_timeout_ms=10000,
+            sync_steps=10,
+            num_fragments=2,
+        ),
+        validator=Validator.Config(
+            freq=5,
+            steps=10,
+        ),
+    )

@@ -12,19 +12,6 @@ artifact from a single process, which can then be loaded by all ranks
 during torchrun training. This avoids the need to run torchrun with N
 GPUs just for precompilation.
 
-Supports two compile modes:
-- aot: AOT joint graph export + Inductor compilation
-- aot_fx_trace: make_fx tracing of fwd+loss+bwd + Inductor compilation
-
-Usage (aot mode):
-    python -m torchtitan.experiments.graph_trainer.precompile_main \
-        --module graph_trainer.llama3 \
-        --config graph_trainer_llama3_debugmodel \
-        --compile.mode aot \
-        --compile.passes full_inductor_compilation \
-        --compile.joint_passes inductor_decomposition \
-        --compile.precompile_artifact_dir /tmp/precompile_artifacts
-
 Usage (aot_fx_trace mode):
     python -m torchtitan.experiments.graph_trainer.precompile_main \
         --module graph_trainer.llama3 \
@@ -34,35 +21,22 @@ Usage (aot_fx_trace mode):
 """
 
 import contextlib
-import dataclasses
-import functools
 from typing import Any, cast
 
 import torch
 import torch.distributed as dist
 
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
-    parallelize_inputs,
-    register_blockmask_pytree_node,
+    maybe_register_blockmask_pytree_node,
 )
-
-from torchtitan.experiments.graph_trainer.compile import (
-    _make_precompile_callback,
-    _SERIALIZABLE_PASSES,
+from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_keys
+from torchtitan.experiments.graph_trainer.memory_policy import (
+    validate_memory_policy_config,
 )
-from torchtitan.experiments.graph_trainer.graph_utils import (
-    CompiledModule,
-    get_compiler_passes_from_config,
-    get_joint_custom_passes_from_config,
-    joint_graph_builder,
-    make_compiler_with_passes,
-)
-from torchtitan.experiments.graph_trainer.precompile import (
-    _ARTIFACT_KEY,
-    _FX_TRACE_ARTIFACT_KEY,
-)
+from torchtitan.experiments.graph_trainer.precompile import _FX_TRACE_ARTIFACT_KEY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -71,7 +45,7 @@ from torchtitan.tools.logging import logger
 
 
 def _common_setup(config):
-    """Common setup for all precompile modes: fake PG, CooR, model build."""
+    """Common setup for precompile: fake PG, CooR, model build."""
     compile_config = config.compile
 
     if not compile_config.precompile_artifact_dir:
@@ -80,6 +54,7 @@ def _common_setup(config):
         )
 
     parallelism = config.parallelism
+    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
     cp = parallelism.context_parallel_degree
@@ -131,6 +106,7 @@ def _common_setup(config):
         pp=pp,
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
+        spmd_backend=parallelism.spmd_backend,
     )
     parallel_dims.build_mesh()
 
@@ -144,7 +120,7 @@ def _common_setup(config):
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
-    model_config.update_from_config(trainer_config=config)
+    model_config.update_from_config(config=config)
 
     logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")
     with (
@@ -157,21 +133,12 @@ def _common_setup(config):
 
     # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
     # (returns model unchanged), so we pass the real compile_config.
-    # For aot, apply_compile would try to load a non-existent artifact,
-    # so we suppress it with a copy that has enable=False. This
-    # complexity goes away once we complete the migration to
-    # aot_fx_trace and remove the aot code path.
-    if compile_config.mode == "aot":
-        parallelize_compile_config = dataclasses.replace(compile_config, enable=False)
-    else:
-        parallelize_compile_config = compile_config
-
     model = model_spec.parallelize_fn(
         model,
         parallel_dims=parallel_dims,
         training=config.training,
         parallelism=parallelism,
-        compile_config=parallelize_compile_config,
+        compile_config=compile_config,
         ac_config=config.activation_checkpoint,
         dump_folder=config.dump_folder,
     )
@@ -204,88 +171,17 @@ def _common_setup(config):
     )
 
 
-def _precompile_aot(
-    config,
-    model,
-    model_config,
-    model_spec,
-    compile_config,
-    parallel_dims,
-    device,
-    tokenizer,
-):
-    """AOT mode precompilation: joint graph export + Inductor."""
-    # Only one pass in the pipeline needs to produce serializable OutputCode.
-    if not (_SERIALIZABLE_PASSES & set(compile_config.passes)):
-        raise ValueError(
-            "precompile_main requires at least one pass that produces "
-            "serializable output "
-            f"({', '.join(sorted(_SERIALIZABLE_PASSES))}) in --compile.passes."
-        )
+def _prepare_loss_for_precompile(model, loss_fn) -> None:
+    """Match Trainer's post-parallelization loss setup for precompile tracing."""
+    if not isinstance(loss_fn, ChunkedLossWrapper):
+        return
 
-    register_blockmask_pytree_node()
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is None:
+        raise ValueError("Model must have lm_head for ChunkedLossWrapper precompile")
 
-    from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-
-    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        config.parallelism.fsdp_reshard_after_forward, parallel_dims.pp_enabled
-    )
-
-    from .precompile import compute_config_fingerprint
-
-    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallel_dims
-    )
-
-    joint_custom_passes = get_joint_custom_passes_from_config(
-        parallel_dims, compile_config, fsdp_reshard_after_forward
-    )
-    compiler_passes = get_compiler_passes_from_config(model, compile_config)
-    fw_compiler, bw_compiler = make_compiler_with_passes(
-        compiler_passes, dump_folder=config.dump_folder
-    )
-
-    on_compile = _make_precompile_callback(
-        model,
-        compile_config,
-        parallel_dims,
-        storage=storage,
-        config_fingerprint=config_fingerprint,
-    )
-
-    model_joint_graph_builder = functools.partial(
-        joint_graph_builder,
-        fw_compiler=fw_compiler,
-        bw_compiler=bw_compiler,
-        joint_custom_passes=joint_custom_passes,
-        dump_folder=config.dump_folder,
-        compile_config=compile_config,
-        serializable=True,
-        on_compile=on_compile,
-    )
-
-    compiled_model = CompiledModule(
-        model, parallel_dims, model_joint_graph_builder, parallelize_inputs
-    )
-
-    # Forward pass triggers AOT compilation; the backward graph is compiled
-    # eagerly (not lazily) because serializable=True sets
-    # force_non_lazy_backward_lowering=True in aot_compile_joint.
-    seq_len = config.training.seq_len
-    local_batch_size = config.training.local_batch_size
-    vocab_size = model_config.vocab_size
-
-    dummy_input = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
-    logger.info("Running forward pass to trigger AOT compilation...")
-    compiled_model(dummy_input)
-
-    logger.info(
-        f"Precompile complete. Artifact saved to "
-        f"{compile_config.precompile_artifact_dir}/{_ARTIFACT_KEY}.bin"
-    )
+    loss_fn.set_lm_head(lm_head)
+    model._skip_lm_head = True
 
 
 def _precompile_aot_fx_trace(
@@ -299,7 +195,7 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.experiments.graph_trainer.make_fx_tracer import trace_train_step
+    from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         precompile_fx_trace_save,
@@ -307,93 +203,92 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
+    _prepare_loss_for_precompile(model, loss_fn)
 
-    fwd_bwd_fn = make_fwd_bwd_step(loss_fn)
+    fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-    seq_len = config.training.seq_len
-    local_batch_size = config.training.local_batch_size
+    num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     vocab_size = model_config.vocab_size
 
-    dummy_inputs = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
-    dummy_labels = torch.randint(
-        0, vocab_size, (local_batch_size, seq_len), device=device
-    )
+    dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
+    dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
     # The trainer computes global_valid_tokens via dist_sum (an
     # all-reduce + .item()), which returns a Python float. Use the
     # same type here so make_fx bakes it as a graph constant — not a
     # graph input — identical to the non-precompile runtime trace.
-    global_batch_size = (
-        local_batch_size
+    global_num_tokens = (
+        num_tokens
         * parallel_dims.dp_shard
         * parallel_dims.dp_replicate
         * parallel_dims.cp
     )
-    dummy_global_valid_tokens = float(global_batch_size * seq_len)
-    extra_inputs: dict[str, torch.Tensor] = {}
+    dummy_global_valid_tokens = float(global_num_tokens)
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
 
-        if attn_config.mask_type == "block_causal":
-            positions = torch.arange(
-                0, dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).expand(dummy_inputs.shape)
-        else:
-            positions = torch.arange(
-                dummy_inputs.shape[1], dtype=torch.int32, device=dummy_inputs.device
-            ).repeat(dummy_inputs.shape[0], 1)
+        positions = (
+            torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
+            % config.training.max_context_length
+        )
+        extra_kwargs["positions"] = positions
 
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,
             )
 
-        extra_kwargs["positions"] = positions
-
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
-    # dimension, matching the trainer's post_dataloading_process.
+    # dimension, matching the trainer's preprocess_inputs path.
     if parallel_dims.cp_enabled:
         raise NotImplementedError(
             "CooR precompile does not yet support context parallelism. "
             "Set --parallelism.context_parallel_degree 1."
         )
 
-    # Enable loss_parallel when TP is active and loss_parallel is not
-    # disabled. This matches the training path which wraps tracing +
-    # execution inside train_context() → loss_parallel(). Without it,
-    # cross_entropy fails with "mixed torch.Tensor and DTensor" because
-    # the TP-parallelized model outputs Shard'd DTensors but labels
-    # remain plain tensors.
-    loss_parallel_enabled = (
-        parallel_dims.tp_enabled and not config.parallelism.disable_loss_parallel
-    )
     loss_parallel_ctx = (
+        # TODO(bobrenjc93): Migrate graph trainer to the manual loss-parallel
+        # custom autograd function and remove this DTensor context manager.
         torch.distributed.tensor.parallel.loss_parallel()
-        if loss_parallel_enabled
+        if parallel_dims.tp_enabled
         else contextlib.nullcontext()
-    )
-
-    from torchtitan.experiments.graph_trainer.common_utils import (
-        maybe_register_blockmask_pytree_node,
     )
 
     maybe_register_blockmask_pytree_node()
 
+    from torchtitan.experiments.graph_trainer.registry import (
+        TRACE_CALL_INPUT_PREPARERS,
+        TRACE_INPUT_PREPARERS,
+    )
+
+    def prepare_trace_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        for pass_name in trace_input_preparer_keys(config.compile):
+            prepare = TRACE_INPUT_PREPARERS.get(pass_name)
+            if prepare is not None:
+                prepare(config.compile, args, kwargs)
+
+    def prepare_trace_call_inputs(
+        args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        for pass_name in trace_input_preparer_keys(config.compile):
+            prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
+            if prepare is not None:
+                prepared = prepare(config.compile, args, kwargs)
+                if prepared is not None:
+                    args, kwargs = prepared
+        return args, kwargs
+
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with loss_parallel_ctx:
-        traced_result = trace_train_step(fwd_bwd_fn)(
-            model,
-            dummy_inputs,
-            dummy_labels,
-            dummy_global_valid_tokens,
-            extra_inputs,
-            extra_kwargs,
-        )
+        traced_result = minimal_fx_tracer(
+            fwd_bwd_fn,
+            module=model,
+            prepare_inputs=prepare_trace_inputs,
+            prepare_call_inputs=prepare_trace_call_inputs,
+        )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"
@@ -407,7 +302,7 @@ def _precompile_aot_fx_trace(
         compile_time_passes,
     )
 
-    passes = compile_time_passes(traced_result, config)
+    passes = compile_time_passes(traced_result, config, parallel_dims=parallel_dims)
 
     traced_result.gm = apply_graph_passes(
         traced_result.gm, traced_result.example_inputs, passes
@@ -439,9 +334,9 @@ def main():
     config = config_manager.parse_args()
 
     mode = config.compile.mode
-    if mode not in ("aot", "aot_fx_trace"):
+    if mode != "aot_fx_trace":
         raise ValueError(
-            f"precompile_main only supports --compile.mode aot or aot_fx_trace, "
+            f"precompile_main only supports --compile.mode aot_fx_trace, "
             f"got '{mode}'."
         )
 
@@ -454,29 +349,18 @@ def main():
         device,
         tokenizer,
     ) = _common_setup(config)
+    validate_memory_policy_config(compile_config)
 
-    if mode == "aot":
-        _precompile_aot(
-            config,
-            model,
-            model_config,
-            model_spec,
-            compile_config,
-            parallel_dims,
-            device,
-            tokenizer,
-        )
-    elif mode == "aot_fx_trace":
-        _precompile_aot_fx_trace(
-            config,
-            model,
-            model_config,
-            model_spec,
-            compile_config,
-            parallel_dims,
-            device,
-            tokenizer,
-        )
+    _precompile_aot_fx_trace(
+        config,
+        model,
+        model_config,
+        model_spec,
+        compile_config,
+        parallel_dims,
+        device,
+        tokenizer,
+    )
 
     dist.destroy_process_group()
 

@@ -6,20 +6,17 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import dataclasses
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    GQAttention,
-    VarlenAttention,
-)
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.tools.logging import logger
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -56,13 +53,10 @@ class Qwen3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        x = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -83,42 +77,15 @@ class Qwen3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 1024
         vocab_size: int = 151936
-        enable_weight_tying: bool = False
 
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
-
-            parallelism = trainer_config.parallelism
-            # ``training`` and ``debug`` are optional: the RL vLLM generator
-            # passes a minimal trainer_config containing only ``parallelism``
-            # (no RoPE cache extension at this stage; no MoE force-load-balance
-            # at inference time).
-
-            # TODO: This method is used by more than just training. We should
-            # refactor this method such that the logic and naming are meaningful
-            # for both training and RL use cases.
-            training = getattr(trainer_config, "training", None)
-            debug = getattr(trainer_config, "debug", None)
-
-            if training is not None:
-                seq_len = training.seq_len
-                if seq_len > self.rope.max_seq_len:
-                    logger.warning(
-                        f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
-                    )
-                # Sync rope max_seq_len
-                self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
-
-            if debug is not None:
-                for layer_cfg in self.layers:
-                    if layer_cfg.moe is not None:
-                        layer_cfg.moe.router._debug_force_load_balance = (
-                            debug.moe_force_load_balance
-                        )
+            Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
 
             if parallelism.context_parallel_degree > 1 and isinstance(
                 self.layers[0].attention.inner_attention, VarlenAttention.Config
@@ -128,62 +95,30 @@ class Qwen3Model(Decoder):
                     "Varlen attention is not supported with CP."
                 )
 
-            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Weight tying is not supported with Pipeline Parallel."
-                )
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                n_heads = self.layers[0].attention.n_heads
-                n_kv_heads = self.layers[0].attention.n_kv_heads or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide n_kv_heads ({n_kv_heads})."
-                    )
-
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 
             set_qwen3_sharding_config(
                 self,
-                loss_parallel=not parallelism.disable_loss_parallel,
                 enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-
-            assert isinstance(self.layers[0].attention, GQAttention.Config)
-            assert self.layers[0].attention.head_dim is not None
-            return get_moe_model_nparams_and_flops(
-                self,
-                model,
-                self.layers[0].attention.n_heads,
-                2 * self.layers[0].attention.head_dim,
-                seq_len,
-            )
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.enable_weight_tying = config.enable_weight_tying
-
-        if self.enable_weight_tying:
-            self.tok_embeddings.weight = self.lm_head.weight
-
-    def init_states(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-    ) -> None:
-        if self.enable_weight_tying:
-            # Re-tie before init: on meta device the __init__ tying may
-            # not have worked correctly.
-            assert self.tok_embeddings is not None and self.lm_head is not None
-            self.tok_embeddings.weight = self.lm_head.weight
-
-        super().init_states(buffer_device=buffer_device)
+            nparams, active_nparams = get_nparams_and_active_nparams(model)
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
+                    seq_len=seq_len,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops

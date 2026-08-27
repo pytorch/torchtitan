@@ -1,0 +1,4 @@
+torchmonarch
+pygtrie
+portpicker
+git+https://github.com/PrimeIntellect-ai/renderers.git@main
