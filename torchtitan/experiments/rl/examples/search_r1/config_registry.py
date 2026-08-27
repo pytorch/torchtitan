@@ -44,9 +44,6 @@ from torchtitan.experiments.rl.examples.search_r1.rollouter import (
     SearchR1Worker,
 )
 from torchtitan.experiments.rl.losses import DAPOLoss
-from torchtitan.experiments.rl.models.muse_glimmer import (
-    renderer as muse_glimmer_renderer,
-)
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
@@ -279,7 +276,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     """
     # Muse Glimmer's renderer ships in torchtitan rather than the `renderers` library;
     # registering makes RendererConfig(name="muse_glimmer") resolve it.
-    muse_glimmer_renderer.register()
 
     model_spec = muse_glimmer_model_registry("30B", attn_backend="varlen")
     model_spec = dataclasses.replace(
