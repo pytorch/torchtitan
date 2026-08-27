@@ -235,7 +235,7 @@ def _moe_configs(*, enable_ep: bool) -> list:
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     model = kimi_k3_debugmodel().model_spec.model
-    
+
     if enable_ep:
         from torchtitan.models.kimi_k3.sharding import (
             set_expert_parallel_sharding_config,

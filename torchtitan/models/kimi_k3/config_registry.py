@@ -26,8 +26,6 @@ from torchtitan.trainer import Trainer
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
-
-
 def _kimi_k3_multimodal_dataloader(
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
@@ -96,4 +94,3 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
-

@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.kimi_k3.sharding import set_expert_parallel_sharding_config
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
@@ -275,10 +276,6 @@ class KimiK3Model(Decoder):
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
             if config.parallelism.expert_parallel_degree > 1:
-                from torchtitan.models.kimi_k3.sharding import (
-                    set_expert_parallel_sharding_config,
-                )
-
                 set_expert_parallel_sharding_config(self)
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
