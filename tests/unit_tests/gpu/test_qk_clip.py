@@ -6,11 +6,12 @@
 
 # @lint-ignore-every CITRINE
 
-import pytest
 import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
+
+import pytest
 
 import torch
 import torch.nn as nn
