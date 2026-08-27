@@ -2,5 +2,3 @@ av
 einops
 pillow
 torchvision
-flash-linear-attention
-attention-gym[linear]

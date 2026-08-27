@@ -60,13 +60,6 @@ class KDAKernel(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.lower_bound = config.lower_bound
-        if torch.cuda.is_available():
-            capability = torch.cuda.get_device_capability()
-            if capability not in {(10, 0), (10, 3)}:
-                raise RuntimeError(
-                    "Attention Gym KDA requires Blackwell SM100/SM103; "
-                    f"got CUDA capability {capability}."
-                )
 
     def forward(
         self,
@@ -82,6 +75,12 @@ class KDAKernel(Module):
     ) -> torch.Tensor:
         if not q_BTNK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
+        capability = torch.cuda.get_device_capability(q_BTNK.device)
+        if capability not in {(10, 0), (10, 3)}:
+            raise RuntimeError(
+                "Attention Gym KDA requires Blackwell SM100/SM103; "
+                f"got CUDA capability {capability}."
+            )
 
         gate_BTNK = bound_gate(
             raw_gate_BTNK,
