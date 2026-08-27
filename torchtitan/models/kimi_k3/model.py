@@ -19,6 +19,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -166,9 +167,17 @@ def _apply_attention_residual(
     variance = values_float.pow(2).mean(dim=-1, keepdim=True)
     keys_TND = values_float * torch.rsqrt(variance + norm.eps)
     score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
+    if is_in_batch_invariant_mode():
+        # Do not use CUDA sum/bmm to avoid varying reduction schedules.
+        scores_TN = (keys_TND * score_weight_D).mean(dim=-1) * keys_TND.shape[-1]
+        probs_T1N = torch.log_softmax(scores_TN, dim=-1).exp().unsqueeze(1)
+        output_TD = (probs_T1N.transpose(1, 2) * values_float).mean(
+            dim=1
+        ) * values_float.shape[1]
+    else:
+        scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
+        probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
+        output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
     return output_TD.to(values_TND.dtype)
 
 

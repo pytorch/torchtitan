@@ -7,7 +7,10 @@
 import sys
 from types import ModuleType, SimpleNamespace
 
-from torchtitan.experiments.rl.models.vllm_registry import _configure_gdn_hybrid_model
+from torchtitan.experiments.rl.models.vllm_registry import (
+    _configure_gdn_hybrid_model,
+    _configure_kda_hybrid_model,
+)
 
 
 def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):
@@ -49,5 +52,46 @@ def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):
     assert Model.get_mamba_state_copy_func() is copy_funcs
     assert Model.get_mamba_state_copy_funcs({gdn_type, short_conv_type}) == {
         gdn_type: copy_funcs,
+        short_conv_type: copy_funcs,
+    }
+
+
+def test_kda_hybrid_model_registers_state_copy_funcs(monkeypatch):
+    copy_funcs = (object(), object())
+
+    class FakeStateCopyFuncCalculator:
+        @staticmethod
+        def kda_state_copy_func():
+            return copy_funcs
+
+    mamba_utils = ModuleType("vllm.model_executor.layers.mamba.mamba_utils")
+    mamba_utils.MambaStateCopyFuncCalculator = FakeStateCopyFuncCalculator
+    mamba_utils.MambaStateDtypeCalculator = object()
+    mamba_utils.MambaStateShapeCalculator = object()
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.layers.mamba.mamba_utils",
+        mamba_utils,
+    )
+
+    kda_config = SimpleNamespace(
+        num_heads=8,
+        head_dim=128,
+        conv_kernel_size=4,
+    )
+    model_spec = SimpleNamespace(
+        model=SimpleNamespace(layers=[SimpleNamespace(delta_attention=kda_config)])
+    )
+
+    class Model:
+        pass
+
+    _configure_kda_hybrid_model(Model, model_spec)
+
+    kda_type = object()
+    short_conv_type = object()
+    assert Model.get_mamba_state_copy_func() is copy_funcs
+    assert Model.get_mamba_state_copy_funcs({kda_type, short_conv_type}) == {
+        kda_type: copy_funcs,
         short_conv_type: copy_funcs,
     }
