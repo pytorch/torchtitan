@@ -157,7 +157,7 @@ class AsyncLoopConfig(Configurable.Config):
 
     num_prompts_per_train_step: int = 8
     """Global number of prompt groups, across all DPs, whose surviving rollouts compose
-    one train step. This is independent of the trainer's token batch shape."""
+    one train step (the global_batch_size, in groups)."""
 
     num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
@@ -355,11 +355,11 @@ class Controller(Configurable):
                 )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                num_tokens = self.trainer.training.num_tokens_per_microbatch_per_dp_rank
-                if sp_degree > 1 and num_tokens % sp_degree != 0:
+                max_context_length = self.trainer.training.max_context_length
+                if sp_degree > 1 and max_context_length % sp_degree != 0:
                     raise ValueError(
-                        "training.num_tokens_per_microbatch_per_dp_rank "
-                        f"({num_tokens}) must be divisible "
+                        "training.max_context_length "
+                        f"({max_context_length}) must be divisible "
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
