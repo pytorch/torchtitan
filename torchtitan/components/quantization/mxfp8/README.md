@@ -9,11 +9,12 @@ MXFP8 training can provide substantial training speedups for models where the ma
 - [Requirements](#requirements)
 - [How MXFP8 Works](#how-mxfp8-works)
   - [TorchAO and TorchTitan Responsibilities](#torchao-and-torchtitan-responsibilities)
-  - [FSDP-Managed Dense Weights](#fsdp-managed-dense-weights)
+  - [FSDP-Managed Weights](#fsdp-managed-weights)
 - [MXFP8 for Linear Modules](#mxfp8-for-linear-modules)
   - [Input Activation Storage](#input-activation-storage)
   - [Usage](#usage)
 - [MXFP8 for Grouped GEMMs (MoE)](#mxfp8-for-grouped-gemms-moe)
+  - [Grouped Weight Operands](#grouped-weight-operands)
   - [Usage](#usage-1)
 - [Example Python Configuration](#example-python-configuration)
 - [Performance](#performance)
@@ -76,7 +77,7 @@ TorchTitan owns the pieces coupled to the training system:
 This keeps FSDP and parallelism policy in TorchTitan while allowing additional
 kernel fusion to be implemented independently in TorchAO.
 
-#### FSDP-Managed Dense Weights
+#### FSDP-Managed Weights
 
 The FSDP post-all-gather hook quantizes each unsharded BF16 weight and returns
 independent MXFP8 qdata and scale tensors for FSDP to manage. There is no
@@ -187,7 +188,40 @@ MXFP8 training requires NVIDIA B200 (SM100) or newer GPUs.
 
 ### MXFP8 for Grouped GEMMs (MoE)
 
-For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation through dynamically quantized grouped GEMMs.
+For Mixture-of-Experts (MoE) models, MXFP8 accelerates the expert computation
+through scaled grouped GEMMs. Expert weights follow the same FSDP-managed
+lifecycle as dense weights: the post-all-gather hook quantizes each grouped
+weight with square 32x32 tiles, and FSDP owns the resulting operands across
+resharding and pipeline microbatches. Routed activations use standard 1D
+scaling.
+
+#### Grouped Weight Operands
+
+Dense weights need only one qdata allocation because
+`torch._scaled_mm` accepts a transposed second operand, so DGRAD can read a
+transpose view of the FPROP qdata. The grouped GEMM instead requires its second
+operand to be column-major *within each expert*, so the `(E, K, N)` operand
+consumed by FPROP and the `(E, N, K)` operand consumed by DGRAD are two
+different physical layouts:
+
+| Operand | Shape | Consumer |
+| --- | --- | --- |
+| `weight_qdata_fprop_EKN` | `(E, K, N)` | FPROP |
+| `weight_scale_fprop_swizzled` | swizzled E8M0 | FPROP |
+| `weight_qdata_dgrad_ENK` | `(E, N, K)` | DGRAD |
+| `weight_scale_dgrad_swizzled` | swizzled E8M0 | DGRAD |
+
+Square tiles still make the two qdata tensors hold identical *values*, so the
+duplication is layout-only, and FSDP manages four inner tensors per grouped
+weight instead of the dense case's three.
+
+This is a current limitation of the PyTorch op rather than something inherent.
+`torch._scaled_grouped_mm_v2` takes a `contraction_dim`, but does not lift it
+today: passing one allocation for both rejects with `Expected mat2 to be
+transposed`, and a non-default contraction dim with `Currently contraction dims
+must be (-1, -2) only`. If the op accepts a strided second operand, TorchTitan
+can drop to one qdata allocation here exactly as the dense path already does,
+saving `E * N * K` bytes per expert weight.
 
 #### Usage
 
@@ -200,7 +234,6 @@ model_spec = model_registry(
     "debugmodel",
     quantization=[
         MXFP8GroupedExpertsConverter.Config(
-            recipe_name="mxfp8_rceil",
             model_compile_enabled=True,
         ),
     ],
@@ -217,7 +250,6 @@ model_spec = model_registry(
           model_compile_enabled=True,
       ),
       MXFP8GroupedExpertsConverter.Config(
-          recipe_name="mxfp8_rceil",
           model_compile_enabled=True,
       ),
   ]
@@ -225,12 +257,25 @@ model_spec = model_registry(
 
 **Configuration Options:**
 
-* `recipe_name="mxfp8_rceil"`: MXFP8 dynamic quantization with RCEIL rounding mode for scale calculation.
+* `input_activation_format_for_backward`: `"bf16"` (default) saves the routed
+  BF16 input and quantizes it columnwise during backward; `"mxfp8"` saves the
+  columnwise qdata and scales produced during forward. The same trade-off as
+  [Input Activation Storage](#input-activation-storage) applies. BF16 is the
+  default because the routed input feeds more than one expert projection, so
+  its BF16 form stays alive regardless.
+* `pad_multiple`: token-group padding, 128 by default.
 * `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model.
 
 **Important Notes:**
 
-* **Token group alignment**: For MoE training with MXFP8, token group sizes must be multiples of 32 (the MXFP8 block size). The token dispatcher is automatically swapped to a padded variant (`TorchAOTokenDispatcher` or `DeepEPTokenDispatcher`) by `swap_token_dispatcher()` when the converter runs. Expert parallelism (EP) must be enabled.
+* **Token group alignment**: token group sizes must be multiples of 128. Two
+  constraints combine here. Columnwise WGRAD quantization scales 32 rows
+  together, so a scale block must not span two experts; and the blocked scale
+  layout consumed by the grouped GEMM starts each group on a 128-row block
+  boundary. The token dispatcher is automatically swapped to a padded variant
+  (`TorchAOTokenDispatcher` or `DeepEPTokenDispatcher`) by
+  `swap_token_dispatcher()` when the converter runs. Expert parallelism (EP)
+  must be enabled.
 
 * **torch.compile recommendation**: All benchmarks in this document were run with `torch.compile` enabled. We recommend using `torch.compile` for best performance.
 
@@ -250,7 +295,6 @@ model_spec = model_registry(
             model_compile_enabled=True,
         ),
         MXFP8GroupedExpertsConverter.Config(
-            recipe_name="mxfp8_rceil",
             model_compile_enabled=True,
         ),
     ],

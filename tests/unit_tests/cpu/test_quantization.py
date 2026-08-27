@@ -18,7 +18,8 @@ from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.quantization import Float8Linear
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.components.quantization.mxfp8.converter import (
-    _get_mxfp8_grouped_experts_cls,
+    get_mxfp8_grouped_experts_cls,
+    MXFP8GroupedExpertsConverter,
     MXFP8Linear,
     MXFP8LinearConverter,
 )
@@ -366,14 +367,14 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
 def test_quantized_grouped_experts():
     """Quantized GroupedExperts: _owner, subclass handling, extra config fields."""
     # Base case
-    MXFP8GroupedExperts = _get_mxfp8_grouped_experts_cls(GroupedExperts)
+    MXFP8GroupedExperts = get_mxfp8_grouped_experts_cls(GroupedExperts)
     Float8GroupedExperts = _get_float8_grouped_experts_cls(GroupedExperts)
 
     assert MXFP8GroupedExperts.Config._owner is MXFP8GroupedExperts
     assert Float8GroupedExperts.Config._owner is Float8GroupedExperts
 
     # Subclass case (GptOssGroupedExperts has extra swiglu_limit field)
-    mxfp8_cls = _get_mxfp8_grouped_experts_cls(GptOssGroupedExperts)
+    mxfp8_cls = get_mxfp8_grouped_experts_cls(GptOssGroupedExperts)
     float8_cls = _get_float8_grouped_experts_cls(GptOssGroupedExperts)
 
     assert mxfp8_cls.Config._owner is mxfp8_cls
@@ -382,6 +383,27 @@ def test_quantized_grouped_experts():
     assert issubclass(float8_cls, GptOssGroupedExperts)
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
+
+
+def test_mxfp8_grouped_experts_config_validation():
+    """The grouped-expert config rejects unusable padding and activation formats."""
+    experts_cls = get_mxfp8_grouped_experts_cls(GroupedExperts)
+    experts_cls.Config(dim=16, hidden_dim=32, num_experts=2)
+
+    with pytest.raises(ValueError, match="input_activation_format_for_backward"):
+        experts_cls.Config(
+            dim=16,
+            hidden_dim=32,
+            num_experts=2,
+            input_activation_format_for_backward="fp8",
+        )
+
+    # Token groups must land on the 128-row boundary the blocked grouped-GEMM
+    # scale layout assumes.
+    MXFP8GroupedExpertsConverter.Config(model_compile_enabled=True, pad_multiple=128)
+    MXFP8GroupedExpertsConverter.Config(model_compile_enabled=True, pad_multiple=256)
+    with pytest.raises(ValueError, match="multiple of 128"):
+        MXFP8GroupedExpertsConverter.Config(model_compile_enabled=True, pad_multiple=32)
 
 
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
