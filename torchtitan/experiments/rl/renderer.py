@@ -23,8 +23,11 @@ _RENDERER_BY_MODEL = {
     "qwen3_vl": "qwen3-vl",
     "gpt_oss": "gpt-oss",
     "deepseek_v3": "deepseek-v3",
-    # Muse Glimmer's renderer is not in the `renderers` library yet, so it ships in
-    # torchtitan and self-registers; see rl/models/muse_glimmer/renderer.py.
+    # TODO: upstream the Muse Glimmer renderer to PrimeIntellect-ai/renderers, then
+    # delete its `register()` and point this at the library's name (hyphenated, like
+    # the entries above). It ships in torchtitan and self-registers only because the
+    # library has no Muse Glimmer renderer yet; every other model here resolves to one
+    # the library owns. See rl/models/muse_glimmer/renderer.py.
     "muse_glimmer": "muse_glimmer",
     "default": "default",  # llama3
     "auto": "auto",  # ignores knobs, resolves from tokenizer,

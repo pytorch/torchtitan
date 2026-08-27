@@ -34,8 +34,12 @@ which is that library's supported extension path -- no fork or upstream change n
 
 Every other TorchTitan model resolves to a renderer that lives in
 PrimeIntellect-ai/renderers. This one ships here because Muse Glimmer is not in that
-library yet. Once it is upstreamed, delete ``register()`` and keep only the
-``_RENDERER_BY_MODEL`` entry.
+library yet.
+
+TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
+atem.py -> a tool parser in renderers/parsers.py), then delete both files and
+``register()``, leaving only the ``_RENDERER_BY_MODEL`` entry in
+experiments/rl/renderer.py.
 
 It lives under ``experiments/rl`` rather than ``torchtitan/models/muse_glimmer`` because
 RL is its only consumer and ``renderers`` is an RL-only optional dependency; keeping it
