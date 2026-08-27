@@ -246,7 +246,7 @@ def to_graph_trainer_config(
     from the graph_trainer model_registry. The compile field is removed and
     left as the GraphTrainer.Config default; callers should explicitly set it.
     """
-    from torchtitan.distributed.cudagraph import cudagraph_annotate_trace_post_processor
+    from .cudagraph import cudagraph_annotate_trace_post_processor
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
