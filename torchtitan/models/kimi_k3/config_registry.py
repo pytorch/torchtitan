@@ -23,8 +23,6 @@ from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
-from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
-from torchtitan.hf_datasets.text_datasets import DATASETS as TEXT_DATASETS
 
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
@@ -99,31 +97,21 @@ def kimi_k3_debugmodel() -> Trainer.Config:
     )
 
 
-def kimi_k3_debugmodel_text() -> Trainer.Config:
-    """The debug model with no vision tower, trained on the packed text dataset."""
+def kimi_k3_debugmodel_32l() -> Trainer.Config:
+    """The debug model at 32 layers, for the pipeline x virtual-stage matrix."""
     config = kimi_k3_debugmodel()
-    config.model_spec = model_registry("debugmodel_text")
-    config.loss.loss_fn.global_vocab_size = decoder_vocab_size(config.model_spec)
-    config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=TEXT_DATASETS["c4_test"]),
-    )
-    return config
-
-def kimi_k3_debugmodel_text_32l() -> Trainer.Config:
-    """The text debug model at 32 layers, for the pipeline x virtual-stage matrix."""
-    config = kimi_k3_debugmodel_text()
-    config.model_spec = model_registry("debugmodel_text_32l")
+    config.model_spec = model_registry("debugmodel_32l")
     config.loss.loss_fn.global_vocab_size = decoder_vocab_size(config.model_spec)
     return config
 
 
-def kimi_k3_debugmodel_text_32l_naive() -> Trainer.Config:
+def kimi_k3_debugmodel_32l_naive() -> Trainer.Config:
     """The 32-layer text flavor with the delta block transport turned off.
 
     The transport is the default under pipeline parallelism; this flavor
     selects the fallback, so a matrix can put the two side by side.
     """
-    config = kimi_k3_debugmodel_text_32l()
+    config = kimi_k3_debugmodel_32l()
     config.model_spec.model.attn_res_cache = False
     return config
 

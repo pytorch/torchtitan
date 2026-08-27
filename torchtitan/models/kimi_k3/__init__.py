@@ -497,35 +497,22 @@ def _debugmodel(
     )
 
 
-def _debugmodel_text(attn_backend: str) -> KimiK3Model.Config:
-    """The debug decoder with no vision tower.
-
-    The text arm of the parallelism matrix needs a flavor with no vision path,
-    so that a failure there is attributable to the decoder rather than to the
-    tower or to the image/text token interleaving.
-    """
-    config = _debugmodel(attn_backend)
-    config.vision_encoder = None
-    return config
-
-
-def _debugmodel_text_32l(attn_backend: str) -> KimiK3Model.Config:
-    """A 32-layer text debug decoder, for the pipeline x virtual-stage matrix.
+def _debugmodel_32l(attn_backend: str) -> KimiK3Model.Config:
+    """The debug model at 32 layers, for the pipeline x virtual-stage matrix.
 
     The 24-layer flavor cannot express every pp x vp product: 24 is not
     divisible by 16 (pp4 x vp4, pp8 x vp2) or 32 (pp8 x vp4), and virtual stages
     are expressed as layers-per-stage. 32 divides all of them, so the same
     3 KDA : 1 MLA pattern at 32 layers covers the whole cross product with an
-    integer split.
+    integer split. The tower stays: it rides with the embedding on the first
+    stage and takes no stage of its own, so the split arithmetic is unchanged.
     """
-    config = _debugmodel(
+    return _debugmodel(
         attn_backend,
         num_layers=32,
         full_attention_layers=set(range(3, 32, 4)),
         attn_res_block_size=16,
     )
-    config.vision_encoder = None
-    return config
 
 
 def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
@@ -566,8 +553,7 @@ def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
 
 kimi_k3_configs = {
     "debugmodel": _debugmodel,
-    "debugmodel_text": _debugmodel_text,
-    "debugmodel_text_32l": _debugmodel_text_32l,
+    "debugmodel_32l": _debugmodel_32l,
     "Kimi-K3": _kimi_k3,
 }
 
