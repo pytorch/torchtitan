@@ -29,6 +29,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
 )
+from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
@@ -229,7 +230,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
         config = self.config
-        dist_utils.set_batch_invariance(config.debug.batch_invariant)
+        set_batch_invariance(config.debug.batch_invariant)
         with sl.log_trace_span("torch_distributed_init"):
             topology = dist_utils.init_distributed(
                 config.comm,

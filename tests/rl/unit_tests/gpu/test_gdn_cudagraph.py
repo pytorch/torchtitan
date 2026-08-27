@@ -18,15 +18,15 @@ from batch_invariant_ops import enable_batch_invariant_mode
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import OverrideConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.utils import (
+from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.model import gdn, vllm_registry as registry
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.gdn_backend import (
+from torchtitan.rl.model.linear_attention_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionMetadata,
 )
