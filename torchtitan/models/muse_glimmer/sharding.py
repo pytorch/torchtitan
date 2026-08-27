@@ -7,7 +7,6 @@
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -38,26 +37,6 @@ if TYPE_CHECKING:
 
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
-
-
-def annotate_muse_glimmer_input_spmd_types(
-    *,
-    pixel_values: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-) -> None:
-    """Annotate Muse Glimmer multimodal inputs with their local SPMD types.
-
-    Called inside ``MuseGlimmerModel.multimodal_context`` (a DP-local mesh), so
-    the pixel/grid tensors carry per-rank (``V@DP``) types the vision encoder can
-    consume. Mirrors kimi_k2_7's ``annotate_multimodal_input_spmd_types``.
-    """
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
-    }
-    for tensor in (pixel_values, grid_thw):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
 
 
 def set_muse_glimmer_sharding_config(

@@ -6,7 +6,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -41,6 +41,8 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
+from torchtitan.observability import structured_logger as sl
+from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -150,7 +152,13 @@ class GraphTrainer(Trainer):
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        with sl.log_trace_span("preprocess_inputs"):
+            inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
+                {**input_dict, "labels": labels},
+                parallel_dims=self.parallel_dims,
+                parallelism=self.config.parallelism,
+            )
+            self.ntokens_seen += labels.numel()
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [

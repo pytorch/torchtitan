@@ -43,15 +43,12 @@ from torchtitan.distributed.activation_checkpoint import (
     MemoryBudgetAC,
     SelectiveAC,
 )
-from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.cudagraph import (
     cudagraph_teardown,
     ForwardBackwardFn,
     wrap_with_cuda_graph,
 )
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -668,85 +665,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
-    @sl.log_trace_span("post_dataloading_process")
-    def post_dataloading_process(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """
-        Post-processing hook after data loading and before model forward pass.
-
-        This method processes the raw data from the dataloader and prepares it for
-        the model's forward pass. It separates the main input tensor from auxiliary
-        inputs and constructs additional keyword arguments (e.g., attention masks).
-
-        This method can be overridden in subclasses to customize data processing
-        for different training strategies (e.g., converting tensors to DTensors,
-        applying custom transformations, etc.).
-
-        Args:
-            input_dict: Dictionary containing tensors from the dataloader. Must
-                contain an "input" key with the main input tensor. May contain
-                additional keys for auxiliary inputs (e.g., position ids).
-            labels: Target labels for the batch.
-
-        Returns:
-            A tuple of (inputs, labels, extra_kwargs) where:
-                - inputs: Main input tensor extracted from input_dict["input"].
-                - labels: Target labels (unchanged from input parameter).
-                - extra_kwargs: Additional keyword arguments for the model forward
-                    (e.g. positions, attention_masks), forwarded to every
-                    pipeline-parallel stage.
-        """
-        inputs = input_dict["input"]
-        # Everything else becomes a model-forward kwarg, forwarded to all PP
-        # stages by the schedule. positions is read here so we can build masks.
-        extra_kwargs: dict[str, Any] = {
-            k: v for k, v in input_dict.items() if k != "input"
-        }
-
-        positions = extra_kwargs.get("positions", None)
-
-        # positions and attention_masks are optional (Decoder.forward defaults
-        # both to None). Build attention masks only for the masked backends
-        # (Flex/Varlen), which is where get_attention_masks is defined. A
-        # maskless backend (e.g. the SDPA config used by the graph_trainer
-        # tests) still receives positions for RoPE but no masks — it relies on
-        # is_causal instead.
-        if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            attention_backend = self.model_config.first_full_attention_backend
-            if isinstance(
-                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
-            ):
-                model = cast(Decoder, self.model_parts[0])
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    positions=positions,
-                )
-
-        if self.parallel_dims.cp_enabled:
-            inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs,
-                labels,
-                extra_kwargs,
-                self.parallel_dims.get_mesh("cp"),
-                self.device,
-                self.config.parallelism.context_parallel_load_balancer,
-                self.config.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        # Accumulate after CP sharding so labels.numel() reflects the actual
-        # unique tokens this rank processes (not the full pre-split sequence).
-        self.ntokens_seen += labels.numel()
-
-        if self.config.parallelism.spmd_backend == "spmd_types":
-            inputs, labels, extra_kwargs = annotate_input_spmd_types(
-                self.parallel_dims,
-                inputs,
-                labels,
-                extra_kwargs,
-            )
-
-        return inputs, labels, extra_kwargs
-
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
         self,
@@ -769,7 +687,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         assert isinstance(input_dict, dict)
         assert isinstance(labels, torch.Tensor)
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        with sl.log_trace_span("preprocess_inputs"):
+            inputs, labels, extra_kwargs = cast(
+                BaseModel, self.model_parts[0]
+            ).preprocess_inputs(
+                {**input_dict, "labels": labels},
+                parallel_dims=self.parallel_dims,
+                parallelism=self.config.parallelism,
+            )
+            self.ntokens_seen += labels.numel()
 
         assert len(model_parts) == 1
         return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
@@ -812,9 +738,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         kwarg_mbs: list[dict[str, Any]] = []
         target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
         for input_dict, labels in zip(input_dict_mbs, label_mbs, strict=True):
-            inputs, labels, extra_kwargs = self.post_dataloading_process(
-                input_dict, labels
-            )
+            with sl.log_trace_span("preprocess_inputs"):
+                inputs, labels, extra_kwargs = cast(
+                    BaseModel, self.model_parts[0]
+                ).preprocess_inputs(
+                    {**input_dict, "labels": labels},
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.config.parallelism,
+                )
+                self.ntokens_seen += labels.numel()
             if self.pp_has_first_stage:
                 arg_mbs.append((inputs,))
             kwarg_mbs.append(extra_kwargs)

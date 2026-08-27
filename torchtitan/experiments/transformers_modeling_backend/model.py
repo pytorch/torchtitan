@@ -10,6 +10,7 @@ import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
 from fractions import Fraction
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -21,6 +22,8 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -1163,6 +1166,52 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build the attention mask (when positions are present), CP-shard, return."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        if "attention_masks" not in batch:
+            positions = batch.get("positions")
+            if positions is not None:
+                masks = self.get_attention_masks(positions=positions)
+                if masks is not None:
+                    batch["attention_masks"] = masks
+
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                None,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+            from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+
+            input_sharding = decoder_input_sharding()
+            # DSA attention masks are dense tensors but are not decoder inputs;
+            # preserve the old trainer behavior by annotating only declared names.
+            annotated = annotate_input_spmd_types(
+                parallel_dims,
+                {name: batch[name] for name in input_sharding if name in batch},
+                input_sharding,
+            )
+            batch.update(annotated)
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
+
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
 
@@ -1236,18 +1285,10 @@ class HFTransformerModel(BaseModel):
             # the sequence-sharded global positions (load-balancer permuted),
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
-            # Transformers still requires a batch dimension for RoPE and
-            # attention. Keep it local to this backend boundary; TorchTitan's
-            # dataloader and model-facing contract remain flat.
+            #
+            # The BlockMask is prebuilt in ``preprocess_inputs`` and passed
+            # in via ``attention_masks``.
             kwargs["position_ids"] = positions.unsqueeze(0)
-            # Build the BlockMask here rather than in the core
-            # trainer: the trainer only builds masks for Decoder.Config models,
-            # so this backend opts in by building its own (keeps trainer.py free
-            # of HF-backend special-casing). This outer forward runs eager (only
-            # the inner transformer blocks are compiled), so BlockMask creation
-            # here is safe.
-            if attention_masks is None:
-                attention_masks = self.get_attention_masks(positions)
         else:
             local_seq_len = args[0].shape[0]
             kwargs["position_ids"] = torch.arange(
