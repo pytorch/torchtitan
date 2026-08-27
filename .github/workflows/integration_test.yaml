@@ -15,6 +15,8 @@ on:
         default: fake_pg
   push:
     branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
@@ -134,20 +136,22 @@ jobs:
           "$RUNNER_ARTIFACT_DIR/flux"
 
   integration-real-pg:
-    name: 8 GPU Integration (Real PG)
+    name: 8 GPU Integration (Real PG - ${{ github.event_name == 'pull_request' && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
     needs: set-matrix-real-pg
     if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.set-matrix-real-pg.outputs.matrix) }}
+      matrix:
+        test_suite: [features, models]
+        runner_config: ${{ fromJSON(needs.set-matrix-real-pg.outputs.matrix).include }}
     with:
-      runner: ${{ matrix.runner }}
-      gpu-arch-type: ${{ matrix.gpu-arch-type }}
-      gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      docker-image: ${{ matrix.docker-image }}
+      runner: ${{ matrix.runner_config.runner }}
+      gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
+      gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
+      docker-image: ${{ matrix.runner_config['docker-image'] }}
       repository: pytorch/torchtitan
-      upload-artifact: integration-8gpu-outputs
+      upload-artifact: integration-8gpu-${{ matrix.test_suite }}-outputs
       timeout: 60
       script: |
         set -eux
@@ -159,14 +163,14 @@ jobs:
 
         pip config --user set global.progress_bar off
         TORCH_SPEC="torch"
-        if [ -n "${{ matrix.torch-version }}" ]; then
-          TORCH_SPEC="torch==${{ matrix.torch-version }}"
+        if [ -n "${{ matrix.runner_config['torch-version'] }}" ]; then
+          TORCH_SPEC="torch==${{ matrix.runner_config['torch-version'] }}"
         fi
         python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
-        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+          "${TORCH_SPEC}" torchvision --index-url ${{ matrix.runner_config['index-url'] }}
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.runner_config['index-url'] }}
 
-        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+        if [[ "${{ matrix.runner_config['gpu-arch-type'] }}" == "rocm" ]]; then
           export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
         fi
 
@@ -193,11 +197,13 @@ jobs:
           TEST_SCOPE_ARG="--test_scope=real_pg_required"
         fi
         python -m tests.integration_tests.run_tests \
-          --gpu_arch_type ${{ matrix.gpu-arch-type }} \
-          --test_suite features,models --execution_mode real_pg --ngpu 8 \
+          --gpu_arch_type ${{ matrix.runner_config['gpu-arch-type'] }} \
+          --test_suite ${{ matrix.test_suite }} --execution_mode real_pg --ngpu 8 \
           $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
           "$RUNNER_ARTIFACT_DIR"
-        python -m tests.integration_tests.flux \
-          --execution_mode real_pg --ngpu 8 \
-          $TEST_NAME_ARG $TEST_SCOPE_ARG \
-          "$RUNNER_ARTIFACT_DIR/flux"
+        if [[ "${{ matrix.test_suite }}" == "models" ]]; then
+          python -m tests.integration_tests.flux \
+            --execution_mode real_pg --ngpu 8 \
+            $TEST_NAME_ARG $TEST_SCOPE_ARG \
+            "$RUNNER_ARTIFACT_DIR/flux"
+        fi

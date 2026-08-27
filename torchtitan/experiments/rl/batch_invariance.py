@@ -72,7 +72,7 @@ def patch_bmm_for_batch_invariance() -> None:
     global _batch_invariant_bmm_lib
     if _batch_invariant_bmm_lib is not None:
         return
-    from vllm.model_executor.layers.batch_invariant import bmm_batch_invariant
+    from vllm.model_executor.determinism.batch_invariant import bmm_batch_invariant
 
     _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
     _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")

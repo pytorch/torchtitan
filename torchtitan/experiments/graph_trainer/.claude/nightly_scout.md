@@ -98,7 +98,8 @@ For each commit found, answer:
 - Does this change a signature or field that graph_trainer depends on?
   Key fragile surfaces:
   - `Trainer.Config` fields (dict-spread copy in `configs.py:to_graph_trainer_config`)
-  - `Trainer.post_dataloading_process()` return tuple
+  - `BaseModel.preprocess_inputs()` return tuple (inlined into
+    `Trainer.forward_backward_step`/`pp_forward_backward_step`)
   - `CompileConfig` fields (extended by `GraphTrainerCompileConfig`)
   - `FlexAttention.forward`, `MoE.forward` signatures (monkey-patched)
   - `ParallelDims` properties and `build_mesh()`

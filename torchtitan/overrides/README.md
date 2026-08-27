@@ -202,6 +202,11 @@ the override package and defeat the no-touch goal.
 torchtitan_train --module llama3 --config llama3_8b \
     --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
 
+# The dist-GEMM FFN has a separate exact override so its communication overlap
+# cannot be replaced accidentally by the regular fused implementation:
+torchtitan_train --module llama3 --config llama3_debugmodel_dist_gemm \
+    --override.imports torchtitan.overrides.fused_swiglu.dist_gemm_fused_swiglu
+
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
 torchtitan_train --module llama3 --config llama3_8b \

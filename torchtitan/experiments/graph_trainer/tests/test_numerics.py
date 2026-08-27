@@ -606,6 +606,11 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             ),
         )
 
+    # TODO(#4342): Remove transformer-level chunking. After the model batch
+    # dimension was folded into the token dimension, splitting `layers.*` in
+    # half cuts the packed token stream mid-document, so neither chunk has full
+    # attention context and the loss goes non-finite at step 1.
+    @unittest.expectedFailure
     def test_moe_dsv3_ep_overlap_aot_fx_trace_vs_eager_chunked(self):
         self.assertTrue(_run_deepseek_v3_ep_overlap_loss_compare())
 

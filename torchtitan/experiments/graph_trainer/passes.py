@@ -14,8 +14,9 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
-- ``remove_noop_passes.py`` — graph cleanup bundled as ``canonicalize_graph_pass``
-  (detach, identity view/slice, back-to-back transpose, view→reshape normalization)
+- ``remove_noop_passes.py`` — mandatory gradient-marker cleanup plus graph
+  cleanup bundled as ``canonicalize_graph_pass`` (detach, identity view/slice,
+  back-to-back transpose, view→reshape normalization)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
@@ -83,6 +84,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
+    remove_parameter_gradient_markers_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
@@ -198,15 +200,15 @@ def compile_time_passes(
         split_moe_expert_buckets=efsdp_degree > 1,
     )
 
-    passes: list[Callable] = (
-        [
-            eliminate_dead_code_pass,
-            canonicalize_graph_pass,
-            deduplicate_fsdp_unshard_chains_pass,
-        ]
-        if include_mandatory_normalization
-        else []
-    )
+    passes: list[Callable] = [remove_parameter_gradient_markers_pass]
+    if include_mandatory_normalization:
+        passes.extend(
+            [
+                eliminate_dead_code_pass,
+                canonicalize_graph_pass,
+                deduplicate_fsdp_unshard_chains_pass,
+            ]
+        )
     ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
     ep_overlap_chunk_strategy: str | None = None

@@ -7,7 +7,7 @@
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
@@ -28,7 +28,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_invariant_linear_config,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel, MuseGlimmerTransformerBlock
@@ -37,26 +37,6 @@ if TYPE_CHECKING:
 
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
-
-
-def annotate_muse_glimmer_input_spmd_types(
-    *,
-    pixel_values: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-) -> None:
-    """Annotate Muse Glimmer multimodal inputs with their local SPMD types.
-
-    Called inside ``MuseGlimmerModel.multimodal_context`` (a DP-local mesh), so
-    the pixel/grid tensors carry per-rank (``V@DP``) types the vision encoder can
-    consume. Mirrors kimi_k2_7's ``annotate_multimodal_input_spmd_types``.
-    """
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
-    }
-    for tensor in (pixel_values, grid_thw):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
 
 
 def set_muse_glimmer_sharding_config(
@@ -153,8 +133,8 @@ def _set_multimodal_sharding(
     # cannot move an axis to/from spmd.V, so (like qwen3_5's scatter helper) the
     # raw scatter below writes the V vision rows into the S(0) text positions
     # per-rank instead.
-    vision_invariant = SpmdLayout({DP: spmd.V, TP: spmd.I})
-    vision_tp_replicate = SpmdLayout({DP: spmd.V, TP: spmd.R})
+    vision_invariant = SpmdType({DP: spmd.V, TP: spmd.I})
+    vision_tp_replicate = SpmdType({DP: spmd.V, TP: spmd.R})
     emb_cfg = config.tok_embeddings
 
     # Embedding output Replicate (vs Shard(0)/SP): the vision scatter needs the
@@ -292,12 +272,12 @@ def set_muse_glimmer_vision_sharding_config(
     # Replicate (it is bilinearly resampled per image, see _get_pos_emb).
     encoder_cfg.sharding_config = ShardingConfig(
         state_shardings={
-            "positional_embedding_vlm": SpmdLayout({DP: spmd.R, TP: spmd.I}),
+            "positional_embedding_vlm": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
     )
     encoder_cfg.rope_freq.sharding_config = ShardingConfig(
         state_shardings={
-            "inv_freq": SpmdLayout({DP: spmd.R, TP: spmd.I}),
+            "inv_freq": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
     )
 
@@ -316,8 +296,8 @@ def set_muse_glimmer_vision_sharding_config(
         rope_cache_dp=spmd.V,
     )
 
-    vision_invariant = SpmdLayout({DP: spmd.V, TP: spmd.I})
-    pos_param_invariant = SpmdLayout({DP: spmd.R, TP: spmd.I})
+    vision_invariant = SpmdType({DP: spmd.V, TP: spmd.I})
+    pos_param_invariant = SpmdType({DP: spmd.R, TP: spmd.I})
     encoder_cfg.pos_embed.sharding_config = ShardingConfig(
         in_src_shardings={"pos_param": pos_param_invariant},
         in_dst_shardings={"pos_param": pos_param_invariant},
