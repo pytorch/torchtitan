@@ -50,7 +50,7 @@ def llama3_mxfp8_linear_converter_config(
     """
     return MXFP8LinearConverter.Config(
         model_compile_enabled=model_compile_enabled,
-        mxfp8_input_activation_fqns=[
+        linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.qkv_linear.wqkv",
             "feed_forward.w2",
         ],

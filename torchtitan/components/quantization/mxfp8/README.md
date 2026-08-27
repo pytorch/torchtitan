@@ -8,7 +8,10 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 - [Requirements](#requirements)
 - [How MXFP8 Works](#how-mxfp8-works)
+  - [TorchAO and TorchTitan Responsibilities](#torchao-and-torchtitan-responsibilities)
+  - [FSDP-Managed Dense Weights](#fsdp-managed-dense-weights)
 - [MXFP8 for Linear Modules](#mxfp8-for-linear-modules)
+  - [Input Activation Storage](#input-activation-storage)
   - [Usage](#usage)
 - [MXFP8 for Grouped GEMMs (MoE)](#mxfp8-for-grouped-gemms-moe)
   - [Usage](#usage-1)
@@ -53,10 +56,107 @@ quantized values and share one cached qdata allocation. This avoids choosing
 two independently quantized weight operands for the two GEMM
 orientations.
 
+#### TorchAO and TorchTitan Responsibilities
+
+The dense linear integration keeps a narrow boundary between TorchAO and
+TorchTitan. TorchTitan uses these kernel-level operations from TorchAO:
+
+- `mxfp8_quantize_cuda` for rowwise and columnwise activation quantization.
+- `triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale` for 32x32 weight
+  quantization with one shared qdata allocation and both scale layouts.
+- `triton_mx_block_rearrange` for scale layout conversion.
+
+TorchTitan owns the pieces coupled to the training system:
+
+- MXFP8 linear autograd.
+- The generic FSDP unsharded-tensor lifecycle and its MXFP8 specialization.
+- Quantized-weight storage and lifetime.
+- Model-specific input-activation storage policy.
+
+This keeps FSDP and parallelism policy in TorchTitan while allowing additional
+kernel fusion to be implemented independently in TorchAO.
+
+#### FSDP-Managed Dense Weights
+
+The FSDP post-all-gather hook quantizes each unsharded BF16 weight and returns
+independent MXFP8 qdata and scale tensors for FSDP to manage. There is no
+separate module-level or autograd-level weight cache. The unsharded tensor
+therefore follows the normal FSDP lifecycle:
+
+| `reshard_after_forward` | Behavior |
+| --- | --- |
+| `False` | Quantize on the first unshard and reuse the MXFP8 operands until FSDP releases them after backward. Pipeline parallelism can reuse them across microbatches. |
+| `True` | Reshard after forward. Backward performs another BF16 all-gather and post-all-gather quantization. |
+
+FSDP keeps the storage-free logical weight stable and allocates, releases, or
+refills its inner qdata and scale tensors. The module keeps an ordinary
+`nn.Parameter` when FSDP is not used and quantizes it dynamically. FSDP setup
+installs the unsharded-tensor wrapper immediately before sharding. This reuses
+the existing FSDP state machine instead of introducing another cache lifecycle
+in `MXFP8Linear`.
+
+The hook currently constructs both FPROP and DGRAD weight operands on every
+actual unshard. This is already optimal when `reshard_after_forward=False`
+because the operands are constructed once and reused. With
+`reshard_after_forward=True`, phase-specific construction would require FSDP to
+expose whether an unshard is serving forward, backward, or checkpoint
+recomputation.
+
 ### MXFP8 for Linear Modules
 
 Dense weights always use square 32x32 scale tiles, and both local weight
 dimensions must be divisible by 32. Activations use standard 1D scaling.
+
+#### Input Activation Storage
+
+Weight-gradient computation needs the linear input during backward.
+`MXFP8Linear` supports two ways to retain it:
+
+| Save format | Forward quantization | Saved for WGRAD | Backward work |
+| --- | --- | --- | --- |
+| `bf16` (default) | Rowwise only | Original BF16 input | Quantize the input columnwise |
+| `mxfp8` | Rowwise and columnwise | Columnwise qdata and scales | Reuse the saved MXFP8 operand |
+
+Saving MXFP8 reduces activation storage and avoids a backward quantization pass
+only when no other operation retains the same BF16 input. If a preceding
+operation already saves its output for backward, as flash attention does, the
+BF16 tensor is already available as the linear input. Saving an additional
+MXFP8 operands would then increase peak memory. Since this ownership is
+model-dependent, `bf16` is the conservative default and audited modules opt in
+through `linears_saving_inputs_for_backward_in_mxfp8`.
+
+##### Interaction with activation checkpointing
+
+Without activation checkpointing, the selected operands remains live
+from forward until WGRAD. Saving BF16 is preferable when another operation
+already retains the same tensor; otherwise, saving MXFP8 can replace that BF16
+storage and avoid columnwise quantization during backward.
+
+With full activation checkpointing, neither operands is retained from
+the original forward; it is reconstructed during backward recomputation. The
+current implementation applies the configured format to both executions. An
+MXFP8-selected linear therefore produces rowwise and columnwise operands
+during the original forward, discards the columnwise result, and produces it
+again during recomputation. Ideally, it would produce only the rowwise operand
+in the original forward and produce both operands during recomputation. We keep
+one policy for both executions to avoid adding recomputation detection and a
+second execution-dependent autograd contract.
+
+More granular `torch.remat` policies introduce additional choices about which
+operations and tensors are saved or recomputed. The optimal format is therefore
+both model-dependent and activation-checkpointing-policy-dependent. The current
+model policy deliberately remains fixed across those modes.
+
+The built-in policies currently select:
+
+| Model | Modules saving MXFP8 inputs |
+| --- | --- |
+| Llama 3 | `attention.qkv_linear.wqkv`, `feed_forward.w2` |
+| DeepSeek V3 | `attention.wkv_b`, `feed_forward.w2`, `shared_experts.w2` |
+| Flux | None |
+
+All other converted linears save BF16 inputs. Trainer and GraphTrainer share
+these model policies.
 
 #### Usage
 
@@ -73,14 +173,13 @@ model_spec = model_registry(
     quantization=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
+            # Add audited single-consumer inputs here. Flux uses BF16 by default.
+            linears_saving_inputs_for_backward_in_mxfp8=[],
             model_compile_enabled=True,
         ),
     ],
 )
 ```
-
-The converter and linear config field docstrings describe the memory trade-off
-between saving BF16 and MXFP8 input activations.
 
 **Hardware Requirements:**
 
@@ -114,7 +213,6 @@ model_spec = model_registry(
 
   quantization=[
       MXFP8LinearConverter.Config(
-          recipe_name="mxfp8_rceil",
           fqns=["double_blocks", "single_blocks"],
           model_compile_enabled=True,
       ),
@@ -148,7 +246,6 @@ model_spec = model_registry(
     "671B",
     quantization=[
         MXFP8LinearConverter.Config(
-            recipe_name="mxfp8_rceil",
             fqns=["double_blocks", "single_blocks"],
             model_compile_enabled=True,
         ),
@@ -191,11 +288,7 @@ Single-node training on 8x power limited B200 GPUs, batch size 1, sequence lengt
 | None (bfloat16)        | 6169            | -                 |
 | mxfp8                  | 7401            | +20.3%            |
 
-Training runs on 64 node GB200 cluster with TorchTitan Llama4 Scout show that MXFP8 MoE training has equivalent convergence to bfloat16 training baseline. In fact, after 3,000 steps it finishes with slightly *lower* loss than bfloat16! This is consistent with our scaling experiments with [MXFP8 training for dense models](https://pytorch.org/blog/accelerating-2k-scale-pre-training-up-to-1-28x-with-torchao-mxfp8-and-torchtitan-on-crusoe-b200-cluster/).
-
-![MXFP8 vs BF16 Training Loss Curves](../../../../assets/images/mxfp8_with_loss.png)
-
-*Training loss curves over 3,000 steps showing MXFP8 achieves equivalent convergence to bfloat16 baseline.*
+Training runs on 64 node GB200 cluster with TorchTitan Llama4 Scout show that MXFP8 MoE training has equivalent convergence to bfloat16 training baseline over 3,000 steps. In fact, it finishes with slightly *lower* loss than bfloat16! This is consistent with our scaling experiments with [MXFP8 training for dense models](https://pytorch.org/blog/accelerating-2k-scale-pre-training-up-to-1-28x-with-torchao-mxfp8-and-torchtitan-on-crusoe-b200-cluster/).
 
 Training and model configurations for this run:
 - Model: Llama4 Scout
@@ -211,6 +304,34 @@ Training and model configurations for this run:
 - `torch.compile` enabled
 - `mxfp8` applied to routed experts computation (grouped GEMMs)
 - `mxfp8` applied to all linear layers except: `output`, `router.gate`, `attention.wk`, `attention.wv` (Wk and Wv too small to benefit from mxfp8)
+
+#### Dense model convergence
+
+A deterministic 3,000-step comparison on C4 shows that Llama 3 8B with
+32x32 MXFP8 weights closely tracks the BF16 baseline over 196.6M tokens. The
+lower panel shows the difference between the 50-step mean losses, making the
+small numerical divergence visible rather than implying bitwise-identical
+training.
+
+![Llama 3 8B BF16 and MXFP8 32x32 training loss on C4](../../../../assets/images/mxfp8_32x32_vs_bf16_loss.png)
+
+*Training loss over 3,000 steps; faint lines are per-step values and bold lines
+are 50-step moving averages.*
+
+Training and model configurations for this run:
+
+- Model: Llama 3 8B
+- Dataset: C4
+- Hardware: 4x NVIDIA GB300
+- Training: 3,000 steps, 65,536 tokens/step, 196.6M tokens total
+- Sequence length: 8192
+- Learning rate: 3e-4
+- LR scheduler warmup steps: 600
+- Parallelism: FSDP=4
+- Activation checkpointing: selective
+- Seed: 42 with deterministic mode enabled
+- `torch.compile` enabled
+- MXFP8 weights use 32x32 scaling; BF16 is the baseline
 
 ### Composability
 For distributed training, MXFP8 is compatible with:

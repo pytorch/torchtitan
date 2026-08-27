@@ -230,26 +230,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp",
             ngpu=8,
         ),
-        # TODO: Enable this in a Blackwell-specific CI suite. MXFP8 requires
-        # SM100, which is not available in the current TorchTitan CI fleet.
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--module graph_trainer.llama3",
-        #             "--config graph_trainer_llama3_debugmodel_mxfp8",
-        #             "--compile.mode aot_fx_trace",
-        #             "--training.steps 3",
-        #             "--training.local_batch_size 2",
-        #             "--training.seq_len 128",
-        #             "--parallelism.data_parallel_shard_degree 2",
-        #         ],
-        #     ],
-        #     "aot_fx_trace llama3 MXFP8 with CUDA graph replay",
-        #     "aot_fx_trace_llama3_mxfp8_cudagraph",
-        #     ngpu=2,
-        #     skip_rocm_test=True,
-        #     timeout=300,
-        # ),
         OverrideDefinitions(
             [
                 [

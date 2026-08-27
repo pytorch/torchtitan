@@ -430,21 +430,27 @@ def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
         torch.testing.assert_close(target_parameter, source_parameter)
 
 
-def test_mxfp8_linear_uses_fsdp_tensor_wrapper():
+def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
-    from torchtitan.components.quantization.mxfp8.tensor import MXFP8FSDPWeight
+    from torchtitan.components.quantization._fsdp_tensor import _UnshardedFSDPTensor
+    from torchtitan.components.quantization.mxfp8.tensor import (
+        _LinearShardedTensorWithMXFP8Compute,
+    )
 
     with pytest.raises(ValueError, match="in_features divisible by 32"):
         MXFP8Linear.Config(in_features=127, out_features=128)
     with pytest.raises(ValueError, match="out_features divisible by 32"):
         MXFP8Linear.Config(in_features=128, out_features=127)
-    with pytest.raises(ValueError, match="input_activation_save_format must be one of"):
+    with pytest.raises(
+        ValueError,
+        match="input_activation_format_for_backward must be one of",
+    ):
         MXFP8Linear.Config(
             in_features=128,
             out_features=128,
-            input_activation_save_format="missing",
+            input_activation_format_for_backward="missing",
         )
 
     for sharding_config in (colwise_config(), rowwise_config()):
@@ -454,14 +460,39 @@ def test_mxfp8_linear_uses_fsdp_tensor_wrapper():
             bias=False,
             sharding_config=sharding_config,
         ).build()
-        assert isinstance(linear.weight, MXFP8FSDPWeight)
         assert linear._sharding_config is not None
-        assert linear._sharding_config.local_map is not None
-        assert "input" in linear._sharding_config.in_src_shardings
-        assert "input" in linear._sharding_config.in_dst_shardings
+        # The wrapper is installed at construction, so no caller has to opt
+        # in. Until a data parallel implementation drives its lifecycle it is
+        # the sharded state, which holds the BF16 weight; the unsharded tensor
+        # is a separate type the post-all-gather hook produces.
+        assert isinstance(linear.weight, _LinearShardedTensorWithMXFP8Compute)
+        assert not isinstance(linear.weight, _UnshardedFSDPTensor)
 
 
-def test_mxfp8_converter_sets_default_input_activation_save_format(monkeypatch):
+def test_mxfp8_linear_rejects_the_partial_dtensor_backend():
+    """MXFP8 needs the spmd_types backend to survive tensor parallelism.
+
+    The matmul is an opaque autograd function, so DTensor has no sharding
+    strategy for it and propagation fails on the storage-free unsharded tensor.
+    spmd_types annotates the function instead.
+    """
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
+
+    previous_backend = get_spmd_backend()
+    set_spmd_backend("partial_dtensor")
+    try:
+        with pytest.raises(ValueError, match="spmd_backend"):
+            MXFP8Linear.Config(in_features=128, out_features=128).build()
+    finally:
+        set_spmd_backend(previous_backend)
+
+
+def test_mxfp8_converter_sets_default_input_activation_format_for_backward(
+    monkeypatch,
+):
     import torchtitan.components.quantization.mxfp8.converter as converter_mod
 
     monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
@@ -476,17 +507,17 @@ def test_mxfp8_converter_sets_default_input_activation_save_format(monkeypatch):
     )
 
     assert isinstance(converted, MXFP8Linear.Config)
-    assert converted.input_activation_save_format == "bf16"
+    assert converted.input_activation_format_for_backward == "bf16"
 
 
-def test_mxfp8_converter_applies_mxfp8_input_activation_fqns(monkeypatch):
+def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     import torchtitan.components.quantization.mxfp8.converter as converter_mod
 
     monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
         MXFP8LinearConverter.Config(
             model_compile_enabled=True,
-            mxfp8_input_activation_fqns=["w2"],
+            linears_saving_inputs_for_backward_in_mxfp8=["w2"],
         )
     )
     converted = converter.convert(
@@ -500,19 +531,19 @@ def test_mxfp8_converter_applies_mxfp8_input_activation_fqns(monkeypatch):
     assert isinstance(converted.w1, MXFP8Linear.Config)
     assert isinstance(converted.w2, MXFP8Linear.Config)
     assert isinstance(converted.w3, MXFP8Linear.Config)
-    assert converted.w1.input_activation_save_format == "bf16"
-    assert converted.w2.input_activation_save_format == "mxfp8"
-    assert converted.w3.input_activation_save_format == "bf16"
+    assert converted.w1.input_activation_format_for_backward == "bf16"
+    assert converted.w2.input_activation_format_for_backward == "mxfp8"
+    assert converted.w3.input_activation_format_for_backward == "bf16"
 
 
-def test_mxfp8_converter_rejects_unmatched_input_activation_fqns(monkeypatch):
+def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
     import torchtitan.components.quantization.mxfp8.converter as converter_mod
 
     monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
         MXFP8LinearConverter.Config(
             model_compile_enabled=True,
-            mxfp8_input_activation_fqns=["missing"],
+            linears_saving_inputs_for_backward_in_mxfp8=["missing"],
         )
     )
     model_config = FeedForward.Config(
@@ -528,11 +559,11 @@ def test_mxfp8_converter_rejects_unmatched_input_activation_fqns(monkeypatch):
         converter.convert(model_config)
 
 
-def test_mxfp8_converter_rejects_empty_input_activation_fqn():
+def test_mxfp8_converter_rejects_empty_saved_input_fqn():
     with pytest.raises(ValueError, match="cannot contain an empty FQN selector"):
         MXFP8LinearConverter.Config(
             model_compile_enabled=True,
-            mxfp8_input_activation_fqns=[""],
+            linears_saving_inputs_for_backward_in_mxfp8=[""],
         )
 
 
@@ -557,7 +588,7 @@ def test_mxfp8_converter_rejects_empty_input_activation_fqn():
         ),
     ],
 )
-def test_builtin_mxfp8_configs_assign_input_activation_save_format(
+def test_builtin_mxfp8_configs_assign_input_activation_format_for_backward(
     monkeypatch, config_factory, mxfp8_fqns
 ):
     if MXFP8Linear is None:
@@ -586,7 +617,7 @@ def test_builtin_mxfp8_configs_assign_input_activation_save_format(
     assert trainer_config.model_spec is not None
     model_config = trainer_config.model_spec.model
     assignments = {
-        fqn: config.input_activation_save_format
+        fqn: config.input_activation_format_for_backward
         for fqn, config, _parent, _attr in model_config.traverse(MXFP8Linear.Config)
     }
 
@@ -604,7 +635,9 @@ def test_mxfp8_linear_loads_stock_checkpoint():
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
-    from torchtitan.components.quantization.mxfp8.tensor import MXFP8FSDPWeight
+    from torchtitan.components.quantization.mxfp8.tensor import (
+        _LinearShardedTensorWithMXFP8Compute,
+    )
 
     stock = Linear.Config(in_features=128, out_features=96).build()
     mxfp8 = MXFP8Linear.Config(in_features=128, out_features=96).build()
@@ -612,5 +645,5 @@ def test_mxfp8_linear_loads_stock_checkpoint():
         stock.weight.normal_()
 
     mxfp8.load_state_dict(stock.state_dict())
-    assert isinstance(mxfp8.weight, MXFP8FSDPWeight)
-    assert torch.equal(mxfp8.weight._data, stock.weight)
+    assert isinstance(mxfp8.weight, _LinearShardedTensorWithMXFP8Compute)
+    assert torch.equal(mxfp8.weight._tensor, stock.weight)
