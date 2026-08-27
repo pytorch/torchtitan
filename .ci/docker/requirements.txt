@@ -8,5 +8,4 @@ safetensors
 einops
 pillow
 spmd_types==0.2.3
-flash-linear-attention
 attn-gym[linear]==0.0.5
