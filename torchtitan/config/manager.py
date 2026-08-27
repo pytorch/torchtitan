@@ -31,7 +31,9 @@ class ConfigManager:
     def __init__(self):
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(self, args: list[str] = sys.argv[1:]):
+    def parse_args(self, args: list[str] | None = None):
+        if args is None:
+            args = sys.argv[1:]
         loaded_config, args = self._load_config(args)
         config_cls = type(loaded_config)
 
@@ -101,8 +103,13 @@ class ConfigManager:
 
         # Import config_registry from module based on module specification
         if module_name in all_supported:
-            # short module from supported module list  (search models first, then experiments)
-            for prefix in ("torchtitan.models", "torchtitan.experiments"):
+            # short module from supported module list (search models, then
+            # experiments, then RL examples for their per-example config_registry)
+            for prefix in (
+                "torchtitan.models",
+                "torchtitan.experiments",
+                "torchtitan.experiments.rl.examples",
+            ):
                 module_path = f"{prefix}.{module_name}.config_registry"
                 try:
                     module = importlib.import_module(module_path)
@@ -112,7 +119,8 @@ class ConfigManager:
             if module is None:
                 raise ImportError(
                     f"Cannot import config_registry for module '{module_name}' "
-                    f"from torchtitan.models or torchtitan.experiments"
+                    f"from torchtitan.models, torchtitan.experiments, or "
+                    f"torchtitan.experiments.rl.examples"
                 )
         else:
             # Fully qualified module path: try appending .config_registry first,
@@ -233,6 +241,43 @@ class ConfigManager:
                 instance_from_str=lambda args: args[0].split(","),
                 is_instance=lambda instance: all(isinstance(i, str) for i in instance),
                 str_from_instance=lambda instance: [",".join(instance)],
+            )
+
+        @registry.primitive_rule
+        def override_imports_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
+            """Parse ``--override.imports`` targets, each with optional kwargs.
+
+            Needed because ``OverrideConfig.imports`` is a ``str | tuple`` union,
+            which tyro cannot render as a CLI flag on its own. Tokens are space-
+            or comma-separated ``module.function`` targets; attach kwargs to a
+            target with ``target=<json>`` (see ``parse_cli_imports``),
+            e.g. ``--override.imports
+            'my_pkg.triton_rope.triton_rope={"block_size": 256}'``.
+            """
+            from torchtitan.config.override import (
+                format_cli_imports,
+                OverrideImport,
+                parse_cli_imports,
+            )
+
+            if type_info.type != list[OverrideImport]:
+                return None
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs="*",
+                metavar="TARGET[='{\"k\": v}'] ...",
+                instance_from_str=lambda args: parse_cli_imports(args),
+                is_instance=lambda instance: isinstance(instance, list)
+                and all(
+                    isinstance(i, str)
+                    or (
+                        isinstance(i, tuple)
+                        and len(i) == 2
+                        and isinstance(i[0], str)
+                        and isinstance(i[1], dict)
+                    )
+                    for i in instance
+                ),
+                str_from_instance=lambda instance: format_cli_imports(instance),
             )
 
 
