@@ -20,6 +20,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.components.checkpointer import CheckpointManager
@@ -42,7 +43,6 @@ from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismC
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import SpmdLayout
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -116,9 +116,7 @@ def _replace_vllm_layer_configs(model_config):
 
         kda_cfg = getattr(layer_cfg, "delta_attention", None)
         if kda_cfg is not None:
-            from torchtitan.experiments.rl.models.kda_attention import (
-                VLLMInnerKDA,
-            )
+            from torchtitan.experiments.rl.models.kda_attention import VLLMInnerKDA
 
             vllm_inner_kda_cfg = VLLMInnerKDA.Config(
                 num_heads=kda_cfg.num_heads,
@@ -146,7 +144,7 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
     def __init__(
         self,
         adapter: BaseStateDictAdapter,
-        state_dict_layouts: dict[str, SpmdLayout],
+        state_dict_layouts: dict[str, SpmdType],
         parallel_dims: ParallelDims,
     ) -> None:
         self.adapter = adapter
@@ -173,6 +171,8 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
         from_quantized: bool = False,
     ) -> HuggingFaceStorageReader:
         return self.adapter.get_hf_storage_reader(path, from_quantized)
+
+
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
 # This is because piecewise CUDA-graph capture calls weak_ref_tensor()
 # on every subgraphoutput (see vllm/compilation/cuda_graph.py).
@@ -593,12 +593,12 @@ class VLLMModelWrapper(Module):
         # the live weights fit.
         torch.cuda.empty_cache()
 
-    def get_state_dict_layouts(self) -> dict[str, SpmdLayout]:
+    def get_state_dict_layouts(self) -> dict[str, SpmdType]:
         """Return SPMD layouts keyed by the model's exposed state-dict names.
 
         TODO(pianpwk): Remove the fused QKV state-dict glue code.
         """
-        layouts: dict[str, SpmdLayout] = {}
+        layouts: dict[str, SpmdType] = {}
 
         for module_fqn, module in self.model.named_modules():
             module_prefix = f"{module_fqn}." if module_fqn else ""
@@ -639,7 +639,7 @@ class VLLMModelWrapper(Module):
                         "_q_scale",
                         "_v_scale",
                     }:
-                        layouts[f"{module_prefix}{buffer_name}"] = SpmdLayout({})
+                        layouts[f"{module_prefix}{buffer_name}"] = SpmdType({})
 
         return layouts
 

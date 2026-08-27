@@ -11,13 +11,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    GQAttention,
-    VarlenAttention,
-)
+from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -107,13 +106,19 @@ class Qwen3Model(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-
-            assert isinstance(self.layers[0].attention, GQAttention.Config)
-            assert self.layers[0].attention.head_dim is not None
-            return get_moe_model_nparams_and_flops(
-                self,
-                model,
-                self.layers[0].attention.n_heads,
-                2 * self.layers[0].attention.head_dim,
-                seq_len,
-            )
+            nparams, active_nparams = get_nparams_and_active_nparams(model)
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
+                    seq_len=seq_len,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops

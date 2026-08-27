@@ -18,7 +18,6 @@ from typing import Any, ClassVar, NamedTuple
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-from spmd_types.runtime import get_partition_spec
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -36,7 +35,10 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
     flex_attention,
 )
-from torch.nn.attention.varlen import AuxRequest as VarlenAuxRequest, varlen_attn
+from torch.nn.attention.varlen import (
+    AuxRequest as VarlenAuxRequest,
+    varlen_attn as _varlen_attn,
+)
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
@@ -85,6 +87,21 @@ class VarlenMetadata(NamedTuple):
 AttentionMasksType = (
     Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
 )
+
+
+@spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
+def varlen_attn(*args, **kwargs):
+    return _varlen_attn(*args, **kwargs)
+
+
+@spmd.no_typecheck(
+    out_types=(
+        spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        spmd.PartitionSpec("tp", ("dp", "cp")),
+    )
+)
+def varlen_attn_with_lse(*args, **kwargs):
+    return _varlen_attn(*args, return_aux=VarlenAuxRequest(lse=True), **kwargs)
 
 
 def local_head_split(
@@ -175,47 +192,28 @@ class VarlenAttention(Module):
         if kwargs.get("enable_gqa", False):
             varlen_kwargs["enable_gqa"] = True
 
-        if out_transform is not None:
-            varlen_kwargs["return_aux"] = VarlenAuxRequest(lse=True)
+        varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        # FA3 varlen attention takes rank-local metadata tensors.
-        # TODO(pianpwk): Move this op contract into pytorch/spmd_types.
-        with spmd.no_typecheck():
-            # Some operators can upcast under AMP, but varlen attention currently only
-            # supports bf16/fp16 inputs. If this changes, or fp16 training support
-            # is added, this may need to be revisited.
-            result = varlen_attn(
-                q_TNH.to(torch.bfloat16),
-                k_TNH.to(torch.bfloat16),
-                v_TNH.to(torch.bfloat16),
-                cu_seq_q,
-                cu_seq_k,
-                max_q,
-                max_k,
-                scale=scale,
-                window_size=self.window_size,
-                **varlen_kwargs,
-            )
+        result = varlen_attn_fn(
+            q_TNH.to(torch.bfloat16),
+            k_TNH.to(torch.bfloat16),
+            v_TNH.to(torch.bfloat16),
+            cu_seq_q,
+            cu_seq_k,
+            max_q,
+            max_k,
+            scale=scale,
+            window_size=self.window_size,
+            **varlen_kwargs,
+        )
 
         # varlen_attn returns the packed output (T, N, H), plus the LSE when an
         # out_transform epilogue was requested.
         if out_transform is None:
             assert isinstance(result, torch.Tensor)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                q_local = spmd.get_local_type(q_TNH)
-                q_ps = get_partition_spec(q_TNH)
-                spmd.assert_type(result, q_local, q_ps)
             return result.to(q_TNH.dtype)
 
         out_TNH, lse_NT = result
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-            q_local = spmd.get_local_type(q_TNH)
-            q_ps = get_partition_spec(q_TNH)
-            spmd.assert_type(out_TNH, q_local, q_ps)
-            # The current implementation returns LSE as (N, T).
-            lse_ps = None if q_ps is None else spmd.PartitionSpec(q_ps[1], q_ps[0])
-            spmd.assert_type(lse_NT, q_local, lse_ps)
-
         out_TNH = out_TNH.to(q_TNH.dtype)
         lse_TN = lse_NT.transpose(0, 1)
         return out_transform(out_TNH, lse_TN)
@@ -315,7 +313,7 @@ class FlexAttention(Module):
             )
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
             q_local = spmd.get_local_type(q)
-            q_ps = get_partition_spec(q)
+            q_ps = spmd.get_partition_spec(q)
             spmd.assert_type(out, q_local, q_ps)
             # Aux outputs are (B, N, T) = q minus the trailing head dim.
             aux_ps = None if q_ps is None else spmd.PartitionSpec(*q_ps[:-1])

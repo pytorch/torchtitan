@@ -118,7 +118,7 @@ def resize_to_pixel_budget(
 
     Returns:
         ``(resize_h, resize_w, 0, 0)`` -- trailing zeros are padding (always 0
-        here), kept for a uniform interface with ``resize_to_patch_budget``.
+        here), kept for a uniform interface with ``resize_to_navit_patch_grid``.
     """
     factor = patch_size * merge_size
     # Ensure both dims >= factor so the rounding has a valid starting point.
@@ -145,7 +145,7 @@ def resize_to_pixel_budget(
     return h_bar, w_bar, 0, 0
 
 
-def resize_to_patch_budget(
+def resize_to_navit_patch_grid(
     height: int,
     width: int,
     *,
@@ -155,9 +155,10 @@ def resize_to_patch_budget(
     max_patches_per_side: int,
     **_: object,
 ) -> tuple[int, int, int, int]:
-    """Cap the total and per-side raw-patch counts (scale down,
-    aspect-preserving), then pad right/bottom to a ``patch_size * merge_size``
-    multiple. Small images within both limits are not upscaled.
+    """Apply pre-padding total and per-side raw-patch budgets while preserving
+    aspect ratio, then pad right/bottom to a ``patch_size * merge_size`` grid.
+    Small images within both limits are not upscaled. Grid padding can make the
+    final raw-patch count exceed ``max_patches``.
 
     A resize strategy (``resize_fn``) for ``process_image`` -- extra budget
     kwargs (e.g. ``min_pixels`` / ``max_pixels``) are accepted and ignored via
@@ -168,8 +169,8 @@ def resize_to_patch_budget(
         width: Original width in pixels.
         patch_size: Spatial patch size.
         merge_size: Spatial merge factor.
-        max_patches: Max raw patches per image.
-        max_patches_per_side: Per-side patch cap (vision position-embedding limit).
+        max_patches: Pre-padding raw-patch budget used to calculate resize scale.
+        max_patches_per_side: Pre-padding per-side raw-patch limit.
 
     Returns:
         ``(resize_h, resize_w, pad_h, pad_w)`` -- resize to the first two, then
@@ -213,7 +214,7 @@ def process_image(
     Uses torchvision APIs for decoding and resizing (faster uint8 SIMD paths),
     then normalizes with the given mean/std. ``resize_fn`` is the resize strategy
     -- ``resize_to_pixel_budget`` (Qwen-VL, default) or
-    ``resize_to_patch_budget`` (Kimi-VL) -- with the uniform signature
+    ``resize_to_navit_patch_grid`` (Kimi-VL) -- with the uniform signature
     ``(height, width, *, patch_size, merge_size, **budget) -> (resize_h,
     resize_w, pad_h, pad_w)``. All budget kwargs are passed through; each
     strategy uses the subset it needs.
@@ -227,8 +228,9 @@ def process_image(
         image_mean: Per-channel mean for normalization.
         image_std: Per-channel std for normalization.
         resize_fn: Resize-strategy callable (see above).
-        max_patches: Max raw patches per image (``resize_to_patch_budget``).
-        max_patches_per_side: Per-side patch cap (``resize_to_patch_budget``).
+        max_patches: Pre-padding patch budget (``resize_to_navit_patch_grid``).
+        max_patches_per_side: Pre-padding per-side patch limit
+            (``resize_to_navit_patch_grid``).
 
     Returns:
         Tensor of shape (1, H, W, C) with a dummy temporal dim, or None on failure.

@@ -125,6 +125,13 @@ def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
         sys.stderr.flush()
 
 
+def _join_override_args(override_args: tuple[str, ...]) -> str:
+    """Safely join legacy shell fragments into a command line."""
+    return shlex.join(
+        token for fragment in override_args for token in shlex.split(fragment)
+    )
+
+
 def _read_golden_spec(golden_numerics_path: Path) -> tuple[int, tuple[str, ...]]:
     columns = ("step", "loss")
     steps: list[int] = []
@@ -217,8 +224,6 @@ def run_single_test(
     for run, override_arg in enumerate(test_flavor.override_args):
         test_output_dir = str(Path(output_dir) / test_name)
         config_fn = test_flavor.configs[run] if test_flavor.configs else None
-        if use_fake_pg and test_flavor.fake_pg_numerics_config is not None:
-            config_fn = test_flavor.fake_pg_numerics_config
         config = config_fn() if config_fn is not None else None
         if use_fake_pg and config is not None:
             validate_fake_pg_compatibility(test_flavor, config)
@@ -250,7 +255,7 @@ def run_single_test(
                 result_path = golden_numerics_path
                 result_arg = f"--import-result={golden_numerics_path}"
 
-            options = shlex.join(override_arg)
+            options = _join_override_args(override_arg)
             command = [
                 sys.executable,
                 "scripts/loss_compare.py",
@@ -296,7 +301,7 @@ def run_single_test(
             env["TORCH_TRACE"] = f"{output_dir}/{test_name}/compile_trace"
             cmd = f"./run_train.sh {dump_folder_arg}"
             if override_arg:
-                cmd += " " + shlex.join(override_arg)
+                cmd += " " + _join_override_args(override_arg)
             result = _run_cmd(cmd, timeout=test_flavor.timeout, env=env)
         returncode = result.returncode
         captured = result.stdout or ""

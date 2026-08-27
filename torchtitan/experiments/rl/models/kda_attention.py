@@ -14,21 +14,19 @@ from attn_gym.linear.kda import (
     recurrent_kda_decode,
 )
 from attn_gym.linear.kda.short_conv import causal_conv1d_decode
+
+from torchtitan.protocols.module import Module
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    is_conv_state_dim_first,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
-    is_conv_state_dim_first,
 )
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn,
-)
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_fn
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-
-from torchtitan.protocols.module import Module
 
 
 class VLLMInnerKDA(Module, MambaBase):

@@ -36,7 +36,7 @@ from PIL import Image
 
 from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
-    resize_to_patch_budget,
+    resize_to_navit_patch_grid,
     vision_to_patches,
 )
 from torchtitan.models.kimi_k3 import model_registry
@@ -360,7 +360,7 @@ def run_tt(
         Image.fromarray(ref["raw_image"].numpy()),
         patch_size=_PATCH_SIZE,
         merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_patch_budget,
+        resize_fn=resize_to_navit_patch_grid,
         max_patches=_MAX_PATCHES,
         max_patches_per_side=_MAX_PATCHES_PER_SIDE,
         image_mean=(0.5, 0.5, 0.5),

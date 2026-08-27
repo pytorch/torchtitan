@@ -103,17 +103,21 @@ def test_specialized_moe_backends_have_ep_coverage() -> None:
         assert config.parallelism.expert_parallel_degree > 1
 
 
-def test_models_do_not_reserve_canonical_real_pg_cases() -> None:
+def test_models_select_fake_and_real_pg_cases() -> None:
     model_tests = build_model_tests_list()
     fake_pg_model_tests = {
         test.test_name for test in model_tests if not test.use_real_pg
     }
+    real_pg_model_tests = {test.test_name for test in model_tests if test.use_real_pg}
 
     assert {
+        "deepseek_v3_fsdp+ep",
         "qwen3_moe_fsdp+tp+cp+ep_param_groups",
         "kimi_k2_5_muon_fsdp+ep",
+        "muse_glimmer_text_fsdp",
         "muse_glimmer_mm_fsdp+tp+sp",
     } <= fake_pg_model_tests
+    assert {"deepseek_v3_fsdp+cp+pp+ep"} <= real_pg_model_tests
 
 
 def test_flux_fake_pg_filters_real_collective_cases() -> None:
