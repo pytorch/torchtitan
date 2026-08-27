@@ -30,6 +30,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
+    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
@@ -51,7 +52,7 @@ from torchtitan.tools.logging import logger
 class NodePolicyKey:
     target: str
     module_fqn: str
-    occurrence: int
+    occurrence: tuple[int | str, ...]
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -133,8 +134,7 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
-def _make_node_override_memory_policy(
-    base_policy: Callable[[torch.fx.Node], CheckpointPolicy],
+def make_node_override_memory_policy(
     overrides: dict[NodePolicyKey, CheckpointPolicy],
 ) -> Callable[[torch.fx.Node], CheckpointPolicy]:
     """Override memory policy for selected node occurrences.
@@ -147,23 +147,38 @@ def _make_node_override_memory_policy(
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
         count_key = (node.target, fqn)
-
         node_counts[count_key] += 1
         occurrence = node_counts[count_key]
-
-        override_key = NodePolicyKey(
-            target=node.target,
-            module_fqn=fqn,
-            occurrence=occurrence,
-        )
-
-        if override_key in overrides:
-            return overrides[override_key]
-
-        return base_policy(node)
+        for target_node in overrides:
+            target_match = str(node.target) == target_node.target
+            fqn_match = matches_module_fqn_pattern(
+                target_node.module_fqn,
+                fqn,
+            )
+            occurrence_match = _matches_occurrence(
+                occurrence,
+                target_node.occurrence,
+            )
+            if target_match and fqn_match and occurrence_match:
+                logger.info(
+                    "LAYER %s: NODE TARGET %s HIT %s",
+                    _get_layer_id(node),
+                    node.target,
+                    overrides[target_node],
+                )
+                return overrides[target_node]
+        return CheckpointPolicy.MUST_RECOMPUTE
 
     return policy_fn
 
+def _matches_occurrence(
+    actual: int,
+    expected: tuple[int | str, ...],
+) -> bool:
+    if "*" in expected:
+        return True
+
+    return actual in expected
 
 def tag_sac_policy(
     gm: torch.fx.GraphModule,
@@ -171,6 +186,7 @@ def tag_sac_policy(
     *,
     policy_fn: Callable[[torch.fx.Node], CheckpointPolicy] | None = None,
     force_save_nodes: set[torch.fx.Node] | None = None,
+    layer_step: int = 1,
 ) -> torch.fx.GraphModule:
     """Apply selective activation checkpointing on the joint graph.
 
@@ -267,6 +283,7 @@ def tag_sac_policy(
                 not _is_backward_node(user)
                 and _is_recomputable(user)
                 and _get_layer_id(user) > node_layer_id
+                and int(node_layer_id) % layer_step == 0
             ):
                 node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
                 boundary_saves += 1
