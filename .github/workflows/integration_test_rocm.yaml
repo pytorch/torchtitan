@@ -1,4 +1,4 @@
-name: Integration Tests - Features (ROCm)
+name: Integration Tests (ROCm)
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 jobs:
-  features:
+  rocm:
     uses: ./.github/workflows/integration_test.yaml
     with:
       gpu-arch: rocm
