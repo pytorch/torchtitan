@@ -206,5 +206,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="Kimi K3 multimodal FSDP",
             test_name="kimi_k3_mm_fsdp",
             ngpu=2,
+            required_cuda_capabilities=((10, 0), (10, 3)),
         ),
     ]
