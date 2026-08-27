@@ -42,7 +42,7 @@ from PIL import Image
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.hf_datasets.multimodal.utils.image import (
     process_image,
-    resize_to_patch_budget,
+    resize_to_navit_patch_grid,
     vision_to_patches,
 )
 from torchtitan.models.common.attention import ScaledDotProductAttention
@@ -189,7 +189,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
         Image.fromarray(ref["raw_image"].numpy()),
         patch_size=_PATCH_SIZE,
         merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_patch_budget,
+        resize_fn=resize_to_navit_patch_grid,
         max_patches=4096,
         max_patches_per_side=512,
         image_mean=(0.5, 0.5, 0.5),

@@ -172,7 +172,7 @@ def _prepare_layers(model):
 class _FakeParallelDims:
     """Minimal ParallelDims stub for tests that don't use full distributed setup."""
 
-    spmd_backend = "partial_dtensor"
+    spmd_backend = "spmd_types"
     tp_enabled = False
     ep_enabled = False
     tp = 1
@@ -395,10 +395,10 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         native_moe.to_empty(device=torch.device("cuda"))
         native_moe.init_states(buffer_device=torch.device("cuda"))
 
-        x = torch.randn(2, 16, 64, device="cuda")
+        x = torch.randn(32, 64, device="cuda")
         output = native_moe(x)
 
-        self.assertEqual(output.shape, (2, 16, 64))
+        self.assertEqual(output.shape, (32, 64))
         self.assertFalse(torch.isnan(output).any())
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for MoE backward")
@@ -424,7 +424,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         native_moe.to_empty(device=torch.device("cuda"))
         native_moe.init_states(buffer_device=torch.device("cuda"))
 
-        x = torch.randn(2, 16, 64, device="cuda", requires_grad=True)
+        x = torch.randn(32, 64, device="cuda", requires_grad=True)
         output = native_moe(x)
         output.sum().backward()
 
@@ -492,12 +492,12 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         native_moe.to_empty(device=torch.device("cuda"))
         native_moe.init_states(buffer_device=torch.device("cuda"))
 
-        x = torch.randn(2, 8, 64, device="cuda")
+        x = torch.randn(16, 64, device="cuda")
         native_moe(x)
 
-        # 2*8 tokens, top_k=2 → 32 total expert assignments
+        # 16 tokens, top_k=2 -> 32 total expert assignments.
         self.assertEqual(
-            _moe_buffer(native_moe, "tokens_per_expert").sum().item(), 2 * 8 * 2
+            _moe_buffer(native_moe, "tokens_per_expert").sum().item(), 16 * 2
         )
 
     def test_optimizer_hook_updates_expert_bias(self):

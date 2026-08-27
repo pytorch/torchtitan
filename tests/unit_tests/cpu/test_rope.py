@@ -318,7 +318,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
         attention_masks = create_varlen_metadata_for_document(positions)
 
         with patch(
-            "torchtitan.models.common.attention.varlen_attn",
+            "torchtitan.models.common.attention._varlen_attn",
             side_effect=lambda q, k, v, *args, **kwargs: q,
         ):
             out = attention(x, attention_masks, positions)

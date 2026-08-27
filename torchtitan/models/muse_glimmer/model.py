@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -33,7 +34,10 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
@@ -311,28 +315,33 @@ class MuseGlimmerModel(Decoder):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            assert isinstance(self.layers[0].attention, GQAttention.Config)
-            assert self.layers[0].attention.head_dim is not None
-            nparams, num_flops_per_token = get_dense_model_nparams_and_flops(
+            # Vision modules run per image rather than per text token.
+            muse_model = cast("MuseGlimmerModel", model)
+            nparams, active_nparams = get_nparams_and_active_nparams(
                 model,
-                n_layers=len(self.layers),
-                n_heads=self.layers[0].attention.n_heads,
-                head_dims=2 * self.layers[0].attention.head_dim,
-                seq_len=seq_len,
-                enable_weight_tying=False,
+                modules_excluded_from_active_params=(
+                    muse_model.vision_encoder,
+                    muse_model.vision_adapter,
+                    muse_model.vision_projection,
+                    muse_model.perception_emb_norm,
+                ),
             )
-            # get_dense_model_nparams_and_flops excludes embedding params from
-            # the matmul FLOP count by scanning the model's *immediate* children
-            # for nn.Embedding. Muse Glimmer nests its nn.Embedding inside
-            # EmbeddingWithNorm, so that scan finds nothing and the embedding
-            # FLOPs (6 * params) are not subtracted. Correct for it here (Muse Glimmer
-            # does not tie embeddings). tok_embeddings is None on non-embedding
-            # pipeline stages, where there is nothing to subtract.
-            tok_embeddings = getattr(model, "tok_embeddings", None)
-            if tok_embeddings is not None:
-                nparams_embedding = sum(p.numel() for p in tok_embeddings.parameters())
-                num_flops_per_token -= 6 * nparams_embedding
-            return nparams, num_flops_per_token
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=attention.window_size,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

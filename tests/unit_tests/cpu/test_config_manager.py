@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import io
 import sys
 import unittest
 from unittest import mock
@@ -162,17 +163,25 @@ class TestConfigManager(unittest.TestCase):
 
     def test_cuda_graphs_reject_pipeline_parallelism(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="do not support pipeline parallelism"):
-            config_manager.parse_args(
-                [
-                    "--module",
-                    "llama3",
-                    "--config",
-                    "llama3_debugmodel",
-                    "--parallelism.pipeline_parallel_degree",
-                    "2",
-                ]
-            )
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with pytest.raises((ValueError, SystemExit)) as exc_info:
+                config_manager.parse_args(
+                    [
+                        "--module",
+                        "llama3",
+                        "--config",
+                        "llama3_debugmodel",
+                        "--parallelism.pipeline_parallel_degree",
+                        "2",
+                    ]
+                )
+
+        if isinstance(exc_info.value, SystemExit):
+            assert exc_info.value.code == 2
+            error = stderr.getvalue()
+        else:
+            error = str(exc_info.value)
+        assert "do not support pipeline parallelism" in error
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -182,17 +191,25 @@ class TestConfigManager(unittest.TestCase):
 
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="without CPU synchronization"):
-            config_manager.parse_args(
-                [
-                    "--module",
-                    "deepseek_v3",
-                    "--config",
-                    "deepseek_v3_debugmodel",
-                    "--parallelism.expert_parallel_degree",
-                    "2",
-                ]
-            )
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with pytest.raises((ValueError, SystemExit)) as exc_info:
+                config_manager.parse_args(
+                    [
+                        "--module",
+                        "deepseek_v3",
+                        "--config",
+                        "deepseek_v3_debugmodel",
+                        "--parallelism.expert_parallel_degree",
+                        "2",
+                    ]
+                )
+
+        if isinstance(exc_info.value, SystemExit):
+            assert exc_info.value.code == 2
+            error = stderr.getvalue()
+        else:
+            error = str(exc_info.value)
+        assert "without CPU synchronization" in error
 
     def test_cuda_graphs_allow_non_blocking_hybridep(self):
         config_manager = ConfigManager()

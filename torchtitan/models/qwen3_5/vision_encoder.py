@@ -431,7 +431,9 @@ class Qwen35VisionEncoder(Module):
         # One host sync for the whole forward: read the (N, 3) grid to CPU ints
         # so every per-item loop below builds shapes without a device sync.
         grids = grid_thw.tolist()  # [[t, h, w], ...]
-        segment_lengths = grid_thw.prod(dim=-1)
+        segment_lengths = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        )
         total_tokens = pixel_values.shape[0]
         expected_tokens = sum(t * h * w for t, h, w in grids)
         if total_tokens != expected_tokens:

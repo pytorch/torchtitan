@@ -38,8 +38,6 @@ class OverrideDefinitions:
     timeout: int | None = None
     golden_numerics_path: str | None = None
     """Run through loss_compare.py using this mode-specific golden path."""
-    fake_pg_numerics_config: Callable[[], Trainer.Config] | None = None
-    """Optional stable topology used only for Fake-PG numerical comparison."""
     use_real_pg: bool = False
     """Whether the test requires communication semantics from a real PG."""
     configs: Sequence[Callable[[], Trainer.Config]] = ()
@@ -58,13 +56,6 @@ class OverrideDefinitions:
             raise ValueError(
                 f"{self.test_name}: {len(self.configs)} configs but "
                 f"{len(self.override_args)} override_args; they pair up per run."
-            )
-        if self.fake_pg_numerics_config is not None and (
-            self.golden_numerics_path is None or len(self.configs) != 1
-        ):
-            raise ValueError(
-                "fake_pg_numerics_config requires one config and "
-                "golden_numerics_path"
             )
 
     def __repr__(self):
