@@ -10,7 +10,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from monarch.actor import Actor, endpoint
+from monarch.actor import Actor, concurrent_endpoint
 from torchtitan.experiments.rl.renderer import RendererConfig
 
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
@@ -32,7 +32,7 @@ class RolloutWorkerActor(Actor):
         )
         self._worker: RolloutWorker = worker_config.build()
 
-    @endpoint
+    @concurrent_endpoint
     async def setup_async(
         self,
         *,
@@ -44,7 +44,7 @@ class RolloutWorkerActor(Actor):
             hf_assets_path=hf_assets_path,
         )
 
-    @endpoint
+    @concurrent_endpoint
     async def run_group(
         self,
         *,
@@ -62,6 +62,6 @@ class RolloutWorkerActor(Actor):
             sampling=sampling,
         )
 
-    @endpoint
+    @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         sl.set_step(step)

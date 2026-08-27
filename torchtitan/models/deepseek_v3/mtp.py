@@ -390,17 +390,8 @@ class MTPLoss(BaseLoss):
             mtp_loss = depth_loss if mtp_loss is None else mtp_loss + depth_loss
         assert mtp_loss is not None
         if num_mtp_layers > 1:
-            # TODO: Teach spmd_types that V / scalar preserves the scalar
-            # loss placement. This mirrors the base loss normalization.
-            with spmd.no_typecheck():
-                mtp_loss = mtp_loss / num_mtp_layers
-        # TODO: Teach spmd_types that scalar loss composition preserves
-        # the loss placement across auxiliary weighted losses.
-        with spmd.no_typecheck():
-            loss = main_loss + mtp_loss * self.mtp_scale
+            mtp_loss = mtp_loss / num_mtp_layers
+        loss = main_loss + mtp_loss * self.mtp_scale
         if global_valid_tokens is not None:
-            # TODO: Teach spmd_types that scalar loss normalization preserves
-            # the loss placement.
-            with spmd.no_typecheck():
-                loss = loss / global_valid_tokens
+            loss = loss / global_valid_tokens
         return loss, {}
