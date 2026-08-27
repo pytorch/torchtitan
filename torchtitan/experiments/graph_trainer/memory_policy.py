@@ -15,6 +15,7 @@ entry point selects a tagging strategy via ``--compile.memory_policy``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import operator
 from collections import defaultdict
 from collections.abc import Callable
@@ -50,6 +51,13 @@ from torchtitan.tools.logging import logger
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+
+
+@dataclass(frozen=True)
+class NodePolicyKey:
+    target: str
+    module_fqn: str
+    occurrence: tuple[int | str, ...]
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -198,12 +206,59 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def make_node_override_memory_policy(
+    overrides: dict[NodePolicyKey, CheckpointPolicy],
+) -> Callable[[torch.fx.Node], CheckpointPolicy]:
+    """Override memory policy for selected node occurrences.
+
+    Occurrence is 1-based and counted independently for each
+    ``(node.target, module_fqn)`` pair.
+    """
+    node_counts: defaultdict[tuple[object, str], int] = defaultdict(int)
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+        count_key = (node.target, fqn)
+        node_counts[count_key] += 1
+        occurrence = node_counts[count_key]
+        for target_node in overrides:
+            target_match = str(node.target) == target_node.target
+            fqn_match = matches_module_fqn_pattern(
+                target_node.module_fqn,
+                fqn,
+            )
+            occurrence_match = _matches_occurrence(
+                occurrence,
+                target_node.occurrence,
+            )
+            if target_match and fqn_match and occurrence_match:
+                logger.info(
+                    "LAYER %s: NODE TARGET %s HIT %s",
+                    _get_layer_id(node),
+                    node.target,
+                    overrides[target_node],
+                )
+                return overrides[target_node]
+        return CheckpointPolicy.MUST_RECOMPUTE
+
+    return policy_fn
+
+def _matches_occurrence(
+    actual: int,
+    expected: tuple[int | str, ...],
+) -> bool:
+    if "*" in expected:
+        return True
+
+    return actual in expected
+
 def tag_sac_policy(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
     policy_fn: Callable[[torch.fx.Node], CheckpointPolicy] | None = None,
     force_save_nodes: set[torch.fx.Node] | None = None,
+    layer_step: int = 1,
 ) -> torch.fx.GraphModule:
     """Apply selective activation checkpointing on the joint graph.
 
@@ -300,6 +355,7 @@ def tag_sac_policy(
                 not _is_backward_node(user)
                 and _is_recomputable(user)
                 and _get_layer_id(user) > node_layer_id
+                and int(node_layer_id) % layer_step == 0
             ):
                 node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
                 boundary_saves += 1
@@ -401,7 +457,6 @@ def _sac_and_offload_memory_policy_pass(
         cpu_budget_gb=config.compile.cpu_offload_budget_gb,
     )
     return gm
-
 
 def tag_with_memory_policy_pass(
     gm: torch.fx.GraphModule,
