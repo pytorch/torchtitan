@@ -71,14 +71,35 @@ For other types: I is no-op, S(i) is sharded at rest, P is banned in titan for n
 
 def _spmd_local_tensor_to_dtensor(
     tensor: torch.Tensor,
+    param_name: str,
     non_dp_mesh: DeviceMesh | None,
-    non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType] | None,
+    param_non_dp_mesh_types: dict[
+        str, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
+    ],
 ) -> torch.Tensor:
-    """Restore active model-parallel DTensor metadata on an SPMD local tensor."""
-    if non_dp_mesh_types is None or non_dp_mesh is None:
+    """Prepare an SPMD-annotated parameter for SimpleFSDP.
+
+    For the spmd_types backend, record the parameter's model-parallel axis types
+    for ReplicateComputation and restore its DTensor wrapper on ``non_dp_mesh``.
+    """
+    non_dp_mesh_types = {}
+    param_non_dp_mesh_types[param_name] = non_dp_mesh_types
+    if non_dp_mesh is None:
         return tensor
 
+    if not spmd.has_local_type(tensor):
+        raise ValueError(
+            f"Parameter {param_name!r} must have an SPMD type before "
+            "applying SimpleFSDP with a non-DP mesh."
+        )
     assert non_dp_mesh.mesh_dim_names is not None
+    local_type = spmd.get_local_type(tensor)
+    partition_spec = spmd.get_partition_spec(tensor)
+    for axis_name in non_dp_mesh.mesh_dim_names:
+        axis = spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))
+        non_dp_mesh_types[axis] = (
+            partition_spec_get_shard(partition_spec, axis) or local_type[axis]
+        )
     placements = tuple(
         spmd.spmd_type_to_dtensor_placement(
             non_dp_mesh_types[spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))]
@@ -345,35 +366,17 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
-        param_non_dp_mesh_types: dict[
-            str, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
-        ] | None = ({} if get_spmd_backend() == "spmd_types" else None)
+        param_non_dp_mesh_types = {}
+
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
-                non_dp_mesh_types = None
-                if get_spmd_backend() == "spmd_types" and non_dp_mesh is not None:
-                    if not spmd.has_local_type(p):
-                        raise ValueError(
-                            f"Parameter {p_name!r} must have an SPMD type before "
-                            "applying SimpleFSDP with a non-DP mesh."
-                        )
-                    assert non_dp_mesh.mesh_dim_names is not None
-                    local_type = spmd.get_local_type(p)
-                    partition_spec = spmd.get_partition_spec(p)
-                    non_dp_mesh_types = {}
-                    for axis_name in non_dp_mesh.mesh_dim_names:
-                        axis = spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))
-                        non_dp_mesh_types[axis] = (
-                            partition_spec_get_shard(partition_spec, axis)
-                            or local_type[axis]
-                        )
-                    assert param_non_dp_mesh_types is not None
-                    param_non_dp_mesh_types[p_name] = non_dp_mesh_types
-                p = _spmd_local_tensor_to_dtensor(
-                    p,
-                    non_dp_mesh,
-                    non_dp_mesh_types,
-                )
+                if get_spmd_backend() == "spmd_types":
+                    p = _spmd_local_tensor_to_dtensor(
+                        p,
+                        p_name,
+                        non_dp_mesh,
+                        param_non_dp_mesh_types,
+                    )
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
@@ -408,7 +411,7 @@ def data_parallel(
                 mp_policy=mp_policy,
                 non_dp_mesh_types=(
                     param_non_dp_mesh_types.get(param_name, {})
-                    if param_non_dp_mesh_types is not None
+                    if get_spmd_backend() == "spmd_types"
                     else None
                 ),
             ),
