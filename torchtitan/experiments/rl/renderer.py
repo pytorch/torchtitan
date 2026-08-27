@@ -80,10 +80,15 @@ class RendererConfig(Configurable.Config):
         # `name=None` (or "auto") -> let `create_renderer` resolve from the tokenizer.
         renderer_name = _RENDERER_BY_MODEL.get(self.name, self.name)
         if renderer_name == "muse_glimmer":
-            # Registration has to happen here, not in the config registry: the renderer
-            # is built inside a Monarch-spawned RolloutWorker, which never imports the
-            # config module. Drop this along with register() once the renderer is
-            # upstreamed (see the TODO on the _RENDERER_BY_MODEL entry above).
+            # TODO: temporary. Delete this block once the Muse Glimmer renderer is
+            # upstreamed to PrimeIntellect-ai/renderers -- the library registers its
+            # own renderers in _populate_registry(), so no torchtitan-side hook is
+            # needed for any other model here.
+            #
+            # Until then it has to live in build(), not in the config registry: the
+            # renderer is constructed inside a Monarch-spawned RolloutWorker, which
+            # only receives the serialized config and never imports the recipe module,
+            # so a register() call there never runs in that process.
             from torchtitan.experiments.rl.models.muse_glimmer import (
                 renderer as _muse_glimmer_renderer,
             )
