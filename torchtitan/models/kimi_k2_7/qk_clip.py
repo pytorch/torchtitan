@@ -12,6 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optimizer import OptimizersContainer
@@ -42,33 +43,67 @@ class QKClipFlexAttention(FlexAttention):
             self.max_attention_logits_N.append(max_scores_BNT.amax(dim=(0, 2)).detach())
 
 
-def _validate_head_sharding(weight: DTensor) -> None:
-    """Require MLA weights to be replicated or contiguously sharded on dim 0."""
-    for placement in weight.placements:
-        if type(placement) is Replicate:
-            continue
-        # ``_StridedShard`` subclasses ``Shard``, so an exact type check rejects
-        # it: its non-default shard order would pair heads with the wrong rows.
-        if type(placement) is not Shard or placement.dim != 0:
-            raise ValueError(
-                "QK clipping requires MLA weights sharded only on tensor "
-                "dimension 0."
-            )
+def _distributed_head_scales(
+    scales_N: torch.Tensor,
+    weight: DTensor,
+    *,
+    num_heads: int,
+) -> DTensor:
+    """Represent TP-local head scales on the weight's storage mesh.
 
-
-def _replicated_scales(scales_N: torch.Tensor, weight: DTensor) -> DTensor:
-    """Represent per-head scales on the same distributed mesh as ``weight``.
-
-    The MAX all-reduce already leaves identical scales on every rank.
-    ``from_local`` records the scales as replicated without communication,
-    allowing DTensor dispatch to align them with sharded heads. Using
-    ``distribute_tensor`` would add an unnecessary broadcast.
+    The MAX all-reduce makes scales identical across data-parallel axes, while
+    FlexAttention produces only the heads local to each TP rank. Recording
+    those placements lets DTensor locally align the scales with finer-grained
+    FlexShard ownership without another collective.
     """
+    mesh_axis_names = weight.device_mesh.mesh_dim_names
+    if mesh_axis_names is None:
+        raise ValueError("QK clipping requires named MLA weight mesh axes.")
+
+    tp_axis = mesh_axis_names.index("tp") if "tp" in mesh_axis_names else None
+    scale_placements = []
+    for mesh_axis, placement in enumerate(weight.placements):
+        is_tp_axis = mesh_axis == tp_axis and weight.device_mesh.size(mesh_axis) > 1
+        if is_tp_axis:
+            if type(placement) is not Shard or placement.dim != 0:
+                raise ValueError(
+                    "QK clipping requires the TP mesh axis to shard MLA head rows."
+                )
+            scale_placements.append(Shard(0))
+        else:
+            if type(placement) is Replicate:
+                scale_placements.append(Replicate())
+                continue
+            if type(placement) not in (Shard, _StridedShard):
+                raise ValueError(
+                    "QK clipping requires MLA weights sharded only on tensor "
+                    "dimension 0."
+                )
+            sharded_placement = cast(Shard | _StridedShard, placement)
+            if sharded_placement.dim != 0:
+                raise ValueError(
+                    "QK clipping requires MLA weights sharded only on tensor "
+                    "dimension 0."
+                )
+            scale_placements.append(Replicate())
+
+    expected_local_heads = num_heads
+    if tp_axis is not None and weight.device_mesh.size(tp_axis) > 1:
+        expected_local_heads = Shard.local_shard_size_and_offset(
+            num_heads,
+            weight.device_mesh.size(tp_axis),
+            weight.device_mesh.get_local_rank(tp_axis),
+        )[0]
+    if scales_N.numel() != expected_local_heads:
+        raise ValueError("QK clip scales do not match the TP-local MLA heads.")
+
     return DTensor.from_local(
         scales_N,
         weight.device_mesh,
-        tuple(Replicate() for _ in weight.placements),
+        tuple(scale_placements),
         run_check=False,
+        shape=torch.Size((num_heads,)),
+        stride=(1,),
     )
 
 
@@ -85,15 +120,18 @@ def _scale_mla_heads(
     """Scale the NoPE and remaining rows of every MLA head in place.
 
     ``weight`` is viewed as ``[num_heads, rows_per_head, in_features]``, and
-    ``scales_N`` contains one scale per head. The remaining rows are unchanged
-    when ``remaining_scale_exponent`` is ``None``.
+    ``scales_N`` contains one scale per TP-local head. The remaining rows are
+    unchanged when ``remaining_scale_exponent`` is ``None``.
     """
-    num_heads = scales_N.numel()
-    if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
+    if weight.ndim != 2 or weight.shape[0] % rows_per_head:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
-    _validate_head_sharding(weight)
+    num_heads = weight.shape[0] // rows_per_head
 
-    scales_N11 = _replicated_scales(scales_N, weight).view(-1, 1, 1)
+    scales_N11 = _distributed_head_scales(
+        scales_N,
+        weight,
+        num_heads=num_heads,
+    ).view(-1, 1, 1)
     heads_NDI = weight.view(num_heads, rows_per_head, weight.shape[1])
     heads_NDI[:, :nope_rows_per_head].mul_(scales_N11.pow(nope_scale_exponent))
     if remaining_scale_exponent is not None:
