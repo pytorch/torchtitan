@@ -8,6 +8,8 @@
 
 import importlib.util
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -20,6 +22,8 @@ _HAS_BLACKWELL = (
     and torch.cuda.is_available()
     and torch.cuda.get_device_capability() in {(10, 0), (10, 3)}
 )
+
+_HAS_VLLM = importlib.util.find_spec("vllm") is not None
 
 
 def _kda_config() -> KDA.Config:
@@ -126,6 +130,165 @@ class TestKDA(unittest.TestCase):
             independent_grads,
             rtol=2e-2,
             atol=2e-2,
+        )
+
+
+@unittest.skipUnless(
+    _HAS_BLACKWELL and _HAS_VLLM,
+    "paged KDA requires attention-gym, vLLM, and CUDA capability 10.0 or newer",
+)
+class TestVLLMInnerKDA(unittest.TestCase):
+    def _wrapper(self):
+        from torchtitan.experiments.rl.models.kda_attention import VLLMInnerKDA
+
+        wrapper = object.__new__(VLLMInnerKDA)
+        torch.nn.Module.__init__(wrapper)
+        wrapper.local_num_heads = 2
+        wrapper.head_dim = 128
+        wrapper.lower_bound = -5.0
+        return wrapper
+
+    def test_prefill_advances_pool_without_gather_scatter(self):
+        from attn_gym.linear.kda import bounded_gate_cumsum, chunk_kda, l2norm
+
+        torch.manual_seed(5)
+        wrapper = self._wrapper()
+        tokens, heads, head_dim = 128, wrapper.local_num_heads, wrapper.head_dim
+        mixed_qkv_TC = torch.randn(
+            tokens, heads * 3 * head_dim, device="cuda", dtype=torch.bfloat16
+        )
+        raw_gate = torch.randn(
+            1, tokens, heads, head_dim, device="cuda", dtype=torch.bfloat16
+        )
+        raw_beta = torch.randn(1, tokens, heads, device="cuda", dtype=torch.bfloat16)
+        A_log = torch.randn(heads, device="cuda", dtype=torch.float32)
+        dt_bias = torch.randn(heads, head_dim, device="cuda", dtype=torch.float32)
+        query_start_loc = torch.tensor([0, 64, 128], device="cuda", dtype=torch.int32)
+        slots = torch.tensor([4, 2], device="cuda", dtype=torch.int32)
+        has_initial_state = torch.tensor([True, False], device="cuda")
+        metadata = SimpleNamespace(
+            non_spec_query_start_loc=query_start_loc,
+            non_spec_state_indices_tensor=slots,
+            has_initial_state=has_initial_state,
+        )
+        initial_pool = torch.randn(6, heads, head_dim, head_dim, device="cuda")
+        actual_pool = initial_pool.clone()
+        expected_pool = initial_pool.clone()
+        conv_state = mixed_qkv_TC.new_empty(6, 3, mixed_qkv_TC.shape[1])
+        conv_weight = mixed_qkv_TC.new_empty(mixed_qkv_TC.shape[1], 4)
+
+        query, key, value = (
+            tensor.reshape(1, tokens, heads, head_dim)
+            for tensor in mixed_qkv_TC.unflatten(-1, (heads, 3, head_dim)).unbind(-2)
+        )
+        cumulative_gate = bounded_gate_cumsum(
+            raw_gate,
+            A_log,
+            dt_bias,
+            chunk_size=64,
+            lower_bound=wrapper.lower_bound,
+            cu_seqlens=query_start_loc,
+        )
+        expected_initial = torch.stack(
+            (expected_pool[slots[0]], torch.zeros_like(expected_pool[slots[1]]))
+        ).transpose(-1, -2)
+        expected, expected_state = chunk_kda(
+            l2norm(query),
+            l2norm(key),
+            value,
+            cumulative_gate,
+            raw_beta.float().sigmoid(),
+            expected_initial,
+            cu_seqlens=query_start_loc,
+            output_final_state=True,
+        )
+        self.assertIsNotNone(expected_state)
+
+        def identity_conv(x, *_args, **_kwargs):
+            return x
+
+        with (
+            torch.no_grad(),
+            patch(
+                "torchtitan.experiments.rl.models.kda_attention.causal_conv1d_fn",
+                identity_conv,
+            ),
+        ):
+            actual = wrapper._kda_prefill(
+                mixed_qkv_TC,
+                raw_gate,
+                raw_beta,
+                A_log,
+                dt_bias,
+                metadata,
+                conv_state,
+                conv_weight,
+                actual_pool,
+            )
+
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual_pool[slots], expected_state.transpose(-1, -2))
+        torch.testing.assert_close(actual_pool[0], initial_pool[0], rtol=0, atol=0)
+
+    def test_decode_uses_vllm_sd_cache_layout_and_ignores_padding(self):
+        from attn_gym.linear.kda import recurrent_kda_decode
+        from attn_gym.linear.kda.short_conv import causal_conv1d_decode
+
+        torch.manual_seed(7)
+        wrapper = self._wrapper()
+        sequences, heads, head_dim = 2, wrapper.local_num_heads, wrapper.head_dim
+        channels = heads * 3 * head_dim
+        mixed_qkv_TC = torch.randn(
+            sequences, channels, device="cuda", dtype=torch.bfloat16
+        )
+        raw_gate = torch.randn(
+            1, sequences, heads, head_dim, device="cuda", dtype=torch.bfloat16
+        )
+        raw_beta = torch.randn(1, sequences, heads, device="cuda", dtype=torch.bfloat16)
+        A_log = torch.randn(heads, device="cuda", dtype=torch.float32)
+        dt_bias = torch.randn(heads, head_dim, device="cuda", dtype=torch.float32)
+        conv_weight = torch.randn(channels, 4, device="cuda", dtype=torch.bfloat16)
+        slots = torch.tensor([3, 0], device="cuda", dtype=torch.int32)
+        metadata = SimpleNamespace(non_spec_state_indices_tensor=slots)
+        conv_state = torch.randn(5, 3, channels, device="cuda", dtype=torch.bfloat16)
+        recurrent_state = torch.randn(5, heads, head_dim, head_dim, device="cuda")
+        expected_conv_state = conv_state.clone()
+        expected_recurrent_state = recurrent_state.clone()
+
+        with torch.no_grad():
+            expected_conv = causal_conv1d_decode(
+                mixed_qkv_TC,
+                conv_weight,
+                expected_conv_state,
+                activation="silu",
+                state_indices=slots,
+            )
+            expected = recurrent_kda_decode(
+                expected_conv,
+                raw_gate,
+                raw_beta,
+                A_log,
+                dt_bias,
+                expected_recurrent_state,
+                slots,
+                lower_bound=wrapper.lower_bound,
+            )
+            actual = wrapper._kda_decode(
+                mixed_qkv_TC,
+                raw_gate,
+                raw_beta,
+                A_log,
+                dt_bias,
+                metadata,
+                conv_state,
+                conv_weight,
+                recurrent_state,
+            )
+
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(conv_state, expected_conv_state, rtol=0, atol=0)
+        torch.testing.assert_close(
+            recurrent_state, expected_recurrent_state, rtol=0, atol=0
         )
 
 
