@@ -422,15 +422,15 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return config
 
-def kimi_k3_debugmodel_text_cp2() -> Trainer.Config:
+def kimi_k3_debugmodel_cp2() -> Trainer.Config:
     """Kimi K3 text decoder with context parallel over two ranks.
 
     KCP on the KDA layers and Ulysses on the MLA layers; the load balancer is
     rejected under CP because both paths assume contiguous, equal shards.
     """
-    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_text
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel_text()
+    config = kimi_k3_debugmodel()
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
     return config
