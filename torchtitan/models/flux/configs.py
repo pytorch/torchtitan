@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 class FluxEncoderConfig:
     """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
 
-    t5_encoder: str = "google/t5-v1_1-small"
-    """HuggingFace model name or local path for the T5 text encoder."""
-    clip_encoder: str = "openai/clip-vit-large-patch14"
-    """HuggingFace model name or local path for the CLIP text encoder."""
+    t5_encoder: str = ""
+    """Override for the T5 text encoder version/path. Empty uses the model registry default."""
+    clip_encoder: str = ""
+    """Override for the CLIP text encoder version/path. Empty uses the model registry default."""
     autoencoder_path: str = (
         "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
     )

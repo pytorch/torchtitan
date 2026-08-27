@@ -12,13 +12,11 @@ from typing import Any
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
-    ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     DebugConfig,
@@ -26,6 +24,11 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    MemoryBudgetAC,
+    SelectiveAC,
+)
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -48,12 +51,22 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         checkpoint: CheckpointManager.Config = field(
             default_factory=CheckpointManager.Config
         )
-        activation_checkpoint: ActivationCheckpointConfig = field(
-            default_factory=ActivationCheckpointConfig
+        activation_checkpoint: ActivationCheckpointingConfig = field(
+            default_factory=SelectiveAC.Config
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
+
+        def __post_init__(self):
+            if isinstance(self.activation_checkpoint, MemoryBudgetAC.Config) and not (
+                self.compile.enable and "model" in self.compile.components
+            ):
+                raise ValueError(
+                    "Memory budget activation checkpointing requires the model to be "
+                    "compiled: set --compile.enable and include 'model' in "
+                    "--compile.components."
+                )
 
         def to_dict(self) -> dict[str, Any]:
             return asdict(self)
@@ -76,6 +89,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     device: torch.device
     gc_handler: utils.GarbageCollection
     gradient_accumulation_steps: int
+    num_pp_microbatches: int
     train_context: Generator[None, None, None]
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -88,7 +102,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     model_config: BaseModel.Config
     num_flops_per_token: float
     model_param_count: int
-    global_batch_size: int
+    num_tokens_per_train_step: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -98,7 +112,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.config = config
 
         device_module, device_type = utils.device_module, utils.device_type
-        self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
+        self.device = utils.get_local_device()
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
@@ -138,7 +152,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.model_config = model_config = self.train_spec.model
         # set the model args from training configs
         model_config.update_from_config(
-            trainer_config=config,
+            config=config,
         )
 
         with (
@@ -151,7 +165,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             self.model_param_count,
             self.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(
+            model, config.training.max_context_length
+        )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         if config.training.enable_cpu_offload:
@@ -165,27 +181,39 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.compile, parallel_dims=parallel_dims
         )
 
-        # verify batch sizes
-        global_batch_size = config.training.global_batch_size
-        if global_batch_size < 0:
-            # This global batch size results in 1 gradient accumulation
-            # step.
-            global_batch_size = config.training.local_batch_size * dp_degree
-        assert global_batch_size > 0
-        assert (
-            global_batch_size % (config.training.local_batch_size * dp_degree) == 0
-        ), (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {dp_degree}) != 0)"
+        # Verify token budgets.
+        num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-        self.global_batch_size = global_batch_size
-
-        # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * dp_degree
+        self.num_pp_microbatches = num_pp_microbatches
+        self.num_tokens_per_train_step = config.training.num_tokens_per_train_step
+        if self.num_tokens_per_train_step < 0:
+            self.num_tokens_per_train_step = (
+                config.training.num_tokens_per_microbatch_per_dp_rank
+                * self.num_pp_microbatches
+                * dp_degree
+            )
+        if (
+            self.num_tokens_per_train_step
+            % (
+                config.training.num_tokens_per_microbatch_per_dp_rank
+                * self.num_pp_microbatches
+                * dp_degree
+            )
+            != 0
+        ):
+            raise ValueError(
+                "training.num_tokens_per_train_step "
+                f"({self.num_tokens_per_train_step}) must be divisible by the "
+                "number of tokens processed globally in one gradient accumulation "
+                "iteration "
+                f"({config.training.num_tokens_per_microbatch_per_dp_rank * self.num_pp_microbatches * dp_degree})."
+            )
+        self.gradient_accumulation_steps = self.num_tokens_per_train_step // (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+            * self.num_pp_microbatches
+            * dp_degree
         )
-        assert self.gradient_accumulation_steps > 0
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -269,10 +297,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             base_folder=config.dump_folder,
         )
 
-        loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
+        self.train_context = dist_utils.get_spmd_context(
+            parallel_dims=parallel_dims,
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
     def close(self) -> None:
         if self.checkpointer:

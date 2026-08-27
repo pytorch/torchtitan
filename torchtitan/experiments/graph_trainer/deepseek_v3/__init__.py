@@ -7,11 +7,12 @@
 from dataclasses import fields
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.experiments.graph_trainer.graph_pp.pipeline import graph_pipeline_llm
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
+from ..common_utils import build_decoder_config_for_backend
 from .model import GraphTrainerDeepSeekV3Model
 from .parallelize import parallelize_deepseekv3
 
@@ -28,12 +29,13 @@ def _parallelize_fn(model, *, compile_config, **kwargs):
 
 def model_registry(
     flavor: str,
-    attn_backend: str = "sdpa",
+    attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> ModelSpec:
-    base = deepseekv3_configs[flavor](
-        attn_backend=attn_backend,
+    base = build_decoder_config_for_backend(
+        deepseekv3_configs[flavor],
+        attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
@@ -45,7 +47,7 @@ def model_registry(
         flavor=flavor,
         model=config,
         parallelize_fn=_parallelize_fn,
-        pipelining_fn=pipeline_llm,
+        pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

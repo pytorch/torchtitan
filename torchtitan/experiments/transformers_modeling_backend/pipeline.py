@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 import copy
 import math
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -19,17 +20,17 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import _build_pipeline_schedule
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.pipeline_parallel import (
+    _build_get_mesh_callback,
+    _build_pipeline_schedule,
+)
+from torchtitan.models.common.nn_modules import Identity
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
-from torchtitan.protocols.module import Module, ModuleDict, ModuleList
+from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
@@ -150,6 +151,7 @@ def pipeline_module_split(
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
+    get_mesh: Callable | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
@@ -227,9 +229,7 @@ def pipeline_module_split(
                         setattr(model, module_name, ModuleList())
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
-                # Replace with Identity
-                Identity = Module.from_nn_module(nn.Identity)
-                setattr(model, module_name, Identity())
+                setattr(model, module_name, Identity.Config().build())
 
         stage = PipelineStage(
             model,
@@ -237,6 +237,7 @@ def pipeline_module_split(
             num_stages,
             device,
             group=pp_mesh.get_group("pp"),
+            get_mesh=get_mesh,
         )
         return stage, model
 
@@ -293,7 +294,7 @@ def pipeline_hf_transformers(
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
+    ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -377,6 +378,7 @@ def pipeline_hf_transformers(
         parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
+        get_mesh=_build_get_mesh_callback(parallel_dims),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -400,7 +402,7 @@ def pipeline_hf_transformers(
 
     pp_schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        num_microbatches=parallelism.num_pp_microbatches,
         stages=stages,
         loss_fn=loss_fn,
     )

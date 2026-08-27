@@ -11,8 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.config import ActivationCheckpointConfig
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_registry,
 )
@@ -23,8 +22,7 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
 
 DTYPE = torch.bfloat16
-BATCH_SIZE = 2
-SEQ_LEN = 2048
+NUM_TOKENS = 2 * 2048
 MAX_PEAK_MEMORY_RATIO = 1.10
 DEBUGMODEL = "debugmodel"
 
@@ -35,8 +33,8 @@ def _set_deterministic() -> None:
     torch.use_deterministic_algorithms(True)
 
 
-def _build_model(model_flavor: str) -> nn.Module:
-    model_spec = llama3_registry(model_flavor)
+def _build_model(model_flavor: str, attn_backend: str = "flex") -> nn.Module:
+    model_spec = llama3_registry(model_flavor, attn_backend=attn_backend)
     with torch.device("meta"):
         model = model_spec.model.build()
     model.to_empty(device="cuda")
@@ -61,11 +59,15 @@ def _measure_step(
     model = trainer.model_parts[0]
     model.zero_grad(set_to_none=True)
     global_valid_tokens = torch.tensor(labels.numel(), dtype=torch.float, device="cuda")
+    # The dataloader always supplies per-document positions, which the trainer
+    # requires to build the FlexAttention mask. Reset positions between the
+    # packed documents.
+    positions = torch.arange(NUM_TOKENS, device="cuda", dtype=torch.int32) % 2048
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     loss = trainer.forward_backward_step(
-        input_dict={"input": tokens},
+        input_dict={"input": tokens, "positions": positions},
         labels=labels,
         global_valid_tokens=global_valid_tokens,
     )
@@ -92,8 +94,8 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         }
         del model
         torch.cuda.empty_cache()
-        self.tokens = torch.randint(0, 2048, (BATCH_SIZE, SEQ_LEN), device="cuda")
-        self.labels = torch.randint(0, 2048, (BATCH_SIZE, SEQ_LEN), device="cuda")
+        self.tokens = torch.randint(0, 2048, (NUM_TOKENS,), device="cuda")
+        self.labels = torch.randint(0, 2048, (NUM_TOKENS,), device="cuda")
 
     def tearDown(self):
         torch.use_deterministic_algorithms(False)
@@ -101,7 +103,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
     def test_llama3_debugmodel_peak_memory_matches_eager_selective_ac(self):
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        apply_ac(eager_model, ActivationCheckpointConfig(mode="selective"))
+        SelectiveAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
             llama3_registry(DEBUGMODEL).model,
@@ -158,6 +160,45 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             f"eager={eager.active_gib:.3f} GiB, "
             f"ratio={active_ratio:.3f}",
         )
+
+    def test_llama3_debugmodel_full_ac_numerics_match_eager(self):
+        """Graph full recompute produces bitwise-identical loss and grads vs eager."""
+        eager_model = _build_model(DEBUGMODEL)
+        eager_model.load_state_dict(copy.deepcopy(self.state_dict))
+        FullAC.Config().build().apply(eager_model)
+        eager_trainer = build_minimal_trainer(
+            eager_model,
+            llama3_registry(DEBUGMODEL).model,
+            Trainer,
+        )
+
+        traced_model = _build_model(DEBUGMODEL)
+        traced_model.load_state_dict(copy.deepcopy(self.state_dict))
+        traced_trainer = build_minimal_trainer(
+            traced_model,
+            llama3_registry(DEBUGMODEL).model,
+            GraphTrainer,
+            activation_checkpoint_mode="selective",
+        )
+        traced_trainer.config.compile.memory_policy = "full"
+
+        _measure_step(eager_trainer, self.tokens, self.labels)
+        _measure_step(traced_trainer, self.tokens, self.labels)
+        torch.cuda.empty_cache()
+
+        eager = _measure_step(eager_trainer, self.tokens, self.labels)
+        traced = _measure_step(traced_trainer, self.tokens, self.labels)
+
+        self.assertTrue(
+            torch.equal(eager.loss, traced.loss),
+            f"loss mismatch: eager={eager.loss.item()} traced={traced.loss.item()}",
+        )
+        for idx, (eager_grad, traced_grad) in enumerate(
+            zip(eager.grads, traced.grads, strict=True)
+        ):
+            self.assertTrue(
+                torch.equal(eager_grad, traced_grad), f"grad[{idx}] mismatch"
+            )
 
 
 if __name__ == "__main__":

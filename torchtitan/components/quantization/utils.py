@@ -8,7 +8,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
+    HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
 
@@ -30,41 +30,37 @@ def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) ->
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
-def swap_token_dispatcher(config, pad_multiple: int) -> None:
-    """Swap token dispatcher config to support padded grouped GEMMs.
+def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
+    """Swap the routed-experts token dispatcher config to support padded grouped GEMMs.
 
-    Requires a dispatcher that handles padding (TorchAOTokenDispatcher or
-    DeepEP hybridep). Raises ValueError if the dispatcher doesn't support it.
+    Takes the ``RoutedExperts.Config`` (which owns the ``token_dispatcher`` child) and
+    swaps its dispatcher in place. Requires a dispatcher that handles padding
+    (TorchAOTokenDispatcher or DeepEP hybridep). Raises ValueError if the
+    dispatcher doesn't support it.
     """
-    td = config.token_dispatcher
-    if isinstance(td, AllToAllTokenDispatcher.Config) and not isinstance(
-        td, TorchAOTokenDispatcher.Config
+    dispatcher = routed_experts_config.token_dispatcher
+    if isinstance(dispatcher, AllToAllTokenDispatcher.Config) and not isinstance(
+        dispatcher, TorchAOTokenDispatcher.Config
     ):
-        config.token_dispatcher = TorchAOTokenDispatcher.Config(
-            num_experts=td.num_experts,
-            top_k=td.top_k,
-            score_before_experts=td.score_before_experts,
+        routed_experts_config.token_dispatcher = TorchAOTokenDispatcher.Config(
+            num_experts=dispatcher.num_experts,
+            top_k=dispatcher.top_k,
             pad_multiple=pad_multiple,
         )
-    elif isinstance(td, DeepEPTokenDispatcher.Config):
-        if td.comm_backend == "deepep":
-            raise ValueError(
-                "DeepEP does not support pad_multiple. "
-                "Use hybridep or standard comm backend instead."
-            )
-        config.token_dispatcher = DeepEPTokenDispatcher.Config(
-            num_experts=td.num_experts,
-            top_k=td.top_k,
-            score_before_experts=td.score_before_experts,
-            comm_backend=td.comm_backend,
-            non_blocking_capacity_factor=td.non_blocking_capacity_factor,
+    elif isinstance(dispatcher, HybridEPTokenDispatcher.Config):
+        routed_experts_config.token_dispatcher = HybridEPTokenDispatcher.Config(
+            num_experts=dispatcher.num_experts,
+            top_k=dispatcher.top_k,
+            non_blocking_capacity_factor=dispatcher.non_blocking_capacity_factor,
             pad_multiple=pad_multiple,
+            hidden_dim=dispatcher.hidden_dim,
+            num_max_tokens_per_rank=dispatcher.num_max_tokens_per_rank,
         )
     else:
         raise ValueError(
-            "MoE quantization requires a token dispatcher that handles "
-            "padding (TorchAOTokenDispatcher or hybridep). "
-            "Enable expert parallelism or use a compatible comm backend."
+            f"MoE quantization requires a token dispatcher that supports "
+            f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
+            f"got {type(dispatcher).__name__}."
         )
 
 
@@ -75,17 +71,19 @@ def has_quantization(model_config) -> bool:
         Float8Linear,
     )
     from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+    from torchtitan.components.quantization.nvfp4 import NVFP4Linear
 
-    has_quant_linear = (
-        any(
-            isinstance(config, (Float8Linear.Config, MXFP8Linear.Config))
-            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
-        )
-        if Float8Linear is not None
-        else any(
-            isinstance(config, MXFP8Linear.Config)
-            for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
-        )
+    quant_linear_types: list[type] = []
+    if Float8Linear is not None:
+        quant_linear_types.append(Float8Linear.Config)
+    if MXFP8Linear is not None:
+        quant_linear_types.append(MXFP8Linear.Config)
+    if NVFP4Linear is not None:
+        quant_linear_types.append(NVFP4Linear.Config)
+
+    has_quant_linear = bool(quant_linear_types) and any(
+        isinstance(config, tuple(quant_linear_types))
+        for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
     )
     quant_experts_types = tuple(
         cls.Config  # type: ignore[attr-defined]
