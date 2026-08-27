@@ -9,7 +9,7 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from torchtitan.rl.model.gdn_backend import TorchTitanGDNAttentionBackend
+from torchtitan.rl.model.linear_attention_backend import TorchTitanGDNAttentionBackend
 from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -21,9 +21,10 @@ from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
-    """Keep native FULL descriptors distinct for packed GDN and fused decode.
+    """Keep native FULL descriptors distinct for packed linear attention and fused decode.
 
-    Currently installed only for TorchTitan's Attention Gym GDN wrapper.
+    Currently installed only for TorchTitan's Attention Gym linear attention
+    backends (GDN/KDA).
     vLLM at c6fa1f0 erases the uniform-decode discriminator in FULL mode:
     four one-token decodes collide with one four-token prefill. Attention Gym's
     different numerical paths need distinct keys. Delegate decode keys to the
@@ -76,7 +77,7 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner with sequence-parallel padding and GDN decode specialization."""
+    """V1 runner with sequence-parallel padding and linear attention (GDN/KDA) decode specialization."""
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)

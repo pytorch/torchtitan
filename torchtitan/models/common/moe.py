@@ -341,13 +341,6 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
     ) -> torch.Tensor:
         if expert_bias_E is None:
             raise ValueError("Quantile balancing requires an expert bias.")
-        if not self.training:
-            return super()._select_experts(
-                scores_TE,
-                expert_bias_E,
-                **router_kwargs,
-            )
-
         biased_scores_TE = scores_TE + expert_bias_E
         topk_plus_one_scores, topk_plus_one_expert_ids = torch.topk(
             biased_scores_TE,
@@ -355,12 +348,13 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        self.quantile_balancer.observe(
-            scores_TE,
-            topk_plus_one_scores[:, self.top_k :],
-            expert_bias_E,
-            padding_mask_T,
-        )
+        if self.training:
+            self.quantile_balancer.observe(
+                scores_TE,
+                topk_plus_one_scores[:, self.top_k :],
+                expert_bias_E,
+                padding_mask_T,
+            )
         return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
 
@@ -403,11 +397,6 @@ class QuantileBalancer(Module):
             return
 
         with spmd.no_typecheck(), torch.no_grad():
-            if padding_mask_T is not None:
-                valid_mask_T = ~padding_mask_T
-                scores_TE = scores_TE[valid_mask_T]
-                cutoff_T1 = cutoff_T1[valid_mask_T]
-
             lower_bound = expert_bias_E.min() - 1.0
             bin_width = (
                 expert_bias_E.max() - expert_bias_E.min() + 2.0
@@ -417,13 +406,18 @@ class QuantileBalancer(Module):
                 (required_bias_TE - lower_bound) / bin_width
             ).to(torch.int64)
             bin_indices_ET = bin_indices_TE.clamp_(0, self.num_bins - 1).transpose(0, 1)
+            histogram_updates_ET = torch.ones_like(
+                bin_indices_ET,
+                dtype=self.required_bias_histogram_EB.dtype,
+            )
+            if padding_mask_T is not None:
+                histogram_updates_ET = histogram_updates_ET * (
+                    ~padding_mask_T
+                ).unsqueeze(0)
             self.required_bias_histogram_EB.scatter_add_(
                 1,
                 bin_indices_ET,
-                torch.ones_like(
-                    bin_indices_ET,
-                    dtype=self.required_bias_histogram_EB.dtype,
-                ),
+                histogram_updates_ET,
             )
 
     def estimate_expert_bias(

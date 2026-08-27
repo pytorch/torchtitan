@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Attention Gym's paged GDN metadata contract for the native vLLM runner."""
+"""Attention Gym's paged linear attention backends (GDN/KDA) for the native vLLM runner."""
 
 from dataclasses import dataclass
 from enum import auto, Enum
@@ -87,10 +87,13 @@ class TorchTitanGDNAttentionMetadataBuilder(
             compilation.cudagraph_mode.has_full_cudagraphs()
             and compilation.cudagraph_num_of_warmups < 1
         ):
-            raise ValueError("GDN FULL capture requires at least one kernel warmup")
+            raise ValueError(
+                "Linear attention (GDN/KDA) FULL capture requires at least one kernel warmup"
+            )
         if vllm_config.cache_config.mamba_cache_mode == "all":
             raise ValueError(
-                "Attention Gym GDN does not support intermediate prefix-cache checkpoints; use 'none' or 'align'"
+                "Attention Gym linear attention (GDN/KDA) does not support "
+                "intermediate prefix-cache checkpoints; use 'none' or 'align'"
             )
         self.num_reqs_capacity = vllm_config.scheduler_config.max_num_seqs
         # Always allocate one extra interval in query_start_loc (cu_seqlens)
@@ -118,7 +121,9 @@ class TorchTitanGDNAttentionMetadataBuilder(
         m = common_attn_metadata
         capacity = min(self.num_reqs_capacity, m.num_actual_tokens)
         if not 0 <= m.num_reqs <= capacity:
-            raise ValueError("GDN request count exceeds the batch's metadata capacity")
+            raise ValueError(
+                "Linear attention (GDN/KDA) request count exceeds the batch's metadata capacity"
+            )
         slots = mamba_get_block_table_tensor(
             m.block_table_tensor,
             m.seq_lens,
@@ -155,7 +160,7 @@ class TorchTitanGDNAttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            # The GDN layer constructor rejects speculative decoding.
+            # The linear attention (GDN/KDA) layer constructors reject speculative decoding.
             num_spec_decodes=0,
             num_spec_decode_tokens=0,
             num_actual_tokens=m.num_actual_tokens,

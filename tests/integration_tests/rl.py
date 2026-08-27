@@ -25,6 +25,8 @@ import subprocess
 import sys
 import time
 
+import torch
+
 from torchtitan.observability.logging import init_logger
 
 from tests.integration_tests import OverrideDefinitions
@@ -232,6 +234,34 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "RL GRPO Qwen3.5 hybrid GDN TP=2 batch-invariant",
             "rl_grpo_qwen3_5_debug_tp2_batch_invariant",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_kimi_k3_debug_varlen_batch_invariant",
+                    "--async-loop.num-training-steps 3",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
+                    "--generator.parallelism.tensor_parallel_degree 1",
+                    "--num_generators 2",
+                    "--async-loop.target-offpolicy-steps 0",
+                    "--async-loop.num-samples-per-prompt 2",
+                    "--trainer.training.max_context_length 1024",
+                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 1024",
+                    "--generator.sampling.max_tokens 128",
+                    "--metrics.no-enable-wandb",
+                ],
+            ],
+            "RL GRPO Kimi K3 hybrid KDA batch-invariant",
+            "rl_grpo_kimi_k3_debug_batch_invariant",
+            ngpu=4,
+            disabled=not (
+                torch.cuda.is_available()
+                and torch.version.hip is None
+                and torch.cuda.get_device_capability() in ((10, 0), (10, 3))
+            ),
         ),
     ]
 

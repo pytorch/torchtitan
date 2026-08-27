@@ -88,3 +88,58 @@ jobs:
         with:
           name: b200-outputs
           path: ${{ runner.temp }}/artifacts-to-be-uploaded
+
+  rl-kimi-k3:
+    if: github.repository_owner == 'pytorch'
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 60
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      options: --gpus all
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Run Kimi K3 RL tests
+        run: |
+          set -eux
+
+          bash .ci/docker/common/install_base.sh
+
+          uv venv --python 3.12
+          source .venv/bin/activate
+
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+
+          uv pip install -r requirements.txt
+          uv pip install -r torchtitan/rl/requirements.txt pytest
+          uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+          uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
+          uv pip install torch torchvision vllm xformers "flash-attn-4[cu13]" --pre \
+            --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+            --index-strategy unsafe-best-match
+
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+          OUTPUT_DIR="$RUNNER_TEMP/artifacts-to-be-uploaded/rl"
+          mkdir -p "$OUTPUT_DIR"
+
+          RL_TEST_DUMP_FOLDER="$OUTPUT_DIR" torchrun --nproc-per-node=1 -m pytest \
+            tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
+
+          python -m tests.integration_tests.rl "$OUTPUT_DIR" --ngpu 8 \
+            --test_name rl_grpo_kimi_k3_debug_batch_invariant
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b200-rl-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded

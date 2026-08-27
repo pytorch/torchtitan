@@ -54,14 +54,14 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.batch_invariant import (
+    is_in_batch_invariant_mode,
+    set_batch_invariance,
+)
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
     spmd_mesh_group,
-)
-from torchtitan.distributed.utils import (
-    is_in_batch_invariant_mode,
-    set_batch_invariance,
 )
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -73,6 +73,7 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
@@ -828,6 +829,41 @@ class BitwiseParityTestBase(unittest.TestCase):
                     "2ndPrefill",
                 )
 
+    def _check_vllm_prefill_and_decode_batch_invariance(self):
+        """Check that vLLM prefill and decode do not depend on batch composition."""
+        single_prompt = self.prompt_ids[:1]
+
+        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
+        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
+
+        single_gen_ids, single_decode_lps = vllm_generate(
+            self.engine, single_prompt, self.MAX_GEN_TOKENS
+        )
+        batched_gen_ids, batched_decode_lps = vllm_generate(
+            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
+        )
+
+        if dist.get_rank() == 0:
+            self._assert_logprobs_equal(
+                "seq 0: vLLM prefill(bsz=1) vs prefill(bsz=3)",
+                single_prefill_lps[0],
+                batched_prefill_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
+            self.assertEqual(
+                single_gen_ids[0],
+                batched_gen_ids[0],
+                "seq 0: greedy decode token IDs differ by batch composition",
+            )
+            self._assert_logprobs_equal(
+                "seq 0: vLLM decode(bsz=1) vs decode(bsz=3)",
+                single_decode_lps[0],
+                batched_decode_lps[0],
+                "bsz=1",
+                "bsz=3",
+            )
+
 
 class TestBitwiseParityVarlen(BitwiseParityTestBase):
     """Bitwise parity tests using varlen attention."""
@@ -881,38 +917,53 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
 
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""
-        single_prompt = self.prompt_ids[:1]
+        self._check_vllm_prefill_and_decode_batch_invariance()
 
-        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
-        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
 
-        single_gen_ids, single_decode_lps = vllm_generate(
-            self.engine, single_prompt, self.MAX_GEN_TOKENS
-        )
-        batched_gen_ids, batched_decode_lps = vllm_generate(
-            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
-        )
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and torch.version.hip is None
+    and torch.cuda.get_device_capability() in ((10, 0), (10, 3)),
+    "Attention Gym KDA requires CUDA capability 10.0 or 10.3",
+)
+class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
+    """Run Kimi K3 parity checks with the trainer in training mode."""
 
-        if dist.get_rank() == 0:
-            self._assert_logprobs_equal(
-                "seq 0: vLLM prefill(bsz=1) vs prefill(bsz=3)",
-                single_prefill_lps[0],
-                batched_prefill_lps[0],
-                "bsz=1",
-                "bsz=3",
-            )
-            self.assertEqual(
-                single_gen_ids[0],
-                batched_gen_ids[0],
-                "seq 0: greedy decode token IDs differ by batch composition",
-            )
-            self._assert_logprobs_equal(
-                "seq 0: vLLM decode(bsz=1) vs decode(bsz=3)",
-                single_decode_lps[0],
-                batched_decode_lps[0],
-                "bsz=1",
-                "bsz=3",
-            )
+    __test__ = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.model.train()
+
+
+def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+    """Build a one-GPU random-weight Kimi K3 parity configuration."""
+    config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=1,
+        ),
+    )
+    return config
+
+
+class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
+    """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
+
+    __test__ = True
+    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    attn_backend = "varlen"
+    sync_weights_from_trainer = True
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 64
+    MAX_GEN_TOKENS = 128
+
+    def test_vllm_prefill_and_decode_batch_invariance(self):
+        """vLLM prefill and decode must not depend on batch composition."""
+        self._check_vllm_prefill_and_decode_batch_invariance()
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):

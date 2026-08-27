@@ -252,14 +252,6 @@ def set_determinism(
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
 
 
-_batch_invariant_enabled: bool = False
-
-
-def is_in_batch_invariant_mode() -> bool:
-    """Return whether batch-invariant mode is active."""
-    return _batch_invariant_enabled
-
-
 def enable_fp32_matmul_emulation_with_bf16x9() -> None:
     """Enable BF16x9 emulation for FP32 CUDA matmuls where supported."""
     if (
@@ -280,79 +272,6 @@ def enable_fp32_matmul_emulation_with_bf16x9() -> None:
         ) from exc
 
     logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
-
-
-def set_batch_invariance(enable: bool) -> None:
-    """Enable batch-invariant mode for reproducible RL training.
-
-    Delegates ATen operator overrides (``mm``, ``addmm``, ``_log_softmax``,
-    ``mean.dim``) to the ``batch_invariant_ops`` package, which registers
-    Triton kernels with a fixed tile iteration order producing bit-identical
-    results for the same input regardless of batch composition.
-
-    On top of that, this function applies torchtitan-specific settings:
-    - NCCL env vars for deterministic inter-GPU collectives
-    - Disables reduced-precision reductions and TF32
-
-    Note: callers must set ``debug.deterministic=True`` separately.
-    """
-    global _batch_invariant_enabled
-    if not enable or _batch_invariant_enabled:
-        return
-
-    # Register batch-invariant ATen overrides via upstream package
-    # https://github.com/thinking-machines-lab/batch_invariant_ops
-    from batch_invariant_ops import enable_batch_invariant_mode as _upstream_enable
-
-    _upstream_enable()
-
-    # Set NCCL env vars for deterministic inter-GPU collectives.
-    # Must be set BEFORE dist.init_process_group.
-    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/determinism/batch_invariant.py
-    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"  # Fixed kernel launch ordering
-    os.environ[
-        "NCCL_COLLNET_ENABLE"
-    ] = "0"  # Disable SHARP (non-deterministic IB HW reduce)
-    os.environ[
-        "NCCL_NVLS_ENABLE"
-    ] = "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
-    os.environ[
-        "NCCL_P2P_NET_DISABLE"
-    ] = "1"  # Disable P2P to avoid transport-dependent accumulation order
-    os.environ[
-        "NCCL_MIN_NCHANNELS"
-    ] = "1"  # Single channel to prevent split-interleave reordering
-    os.environ[
-        "NCCL_MAX_NCHANNELS"
-    ] = "1"  # Single channel to prevent split-interleave reordering
-    os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 protocols may reorder reductions
-    os.environ[
-        "NCCL_ALGO"
-    ] = "allreduce:tree"  # Deterministic reduction order across ranks
-    os.environ[
-        "NCCL_NTHREADS"
-    ] = "1"  # Single thread to eliminate scheduling non-determinism
-    os.environ[
-        "NCCL_SOCKET_NTHREADS"
-    ] = "1"  # Single socket thread to eliminate scheduling non-determinism
-
-    # Disable reduced-precision reductions: these allow cuBLAS to use
-    # lower-precision accumulation that can round differently depending
-    # on batch size / tile decomposition.
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-
-    # Disable TF32 for exact fp32 accumulation
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-
-    _batch_invariant_enabled = True
-
-    logger.info(
-        "Batch-invariant mode enabled: mm, addmm, _log_softmax, mean.dim "
-        "overridden with Triton kernels (via batch_invariant_ops); "
-        "reduced-precision reductions and TF32 disabled"
-    )
 
 
 @contextlib.contextmanager
