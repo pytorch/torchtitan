@@ -21,7 +21,6 @@ TP/EP/SP uniformly via the Module protocol.
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -48,28 +47,6 @@ if TYPE_CHECKING:
     from torchtitan.models.kimi_k2_7.model import KimiK25Model
 
 _REPLICATE_ACT = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-
-
-def annotate_multimodal_input_spmd_types(
-    *,
-    pixel_values: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-    pixel_values_videos: torch.Tensor | None,
-    grid_thw_videos: torch.Tensor | None,
-) -> None:
-    """Annotate Kimi K2.5 multimodal inputs with their local SPMD types."""
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
-    }
-    for tensor in (
-        pixel_values,
-        grid_thw,
-        pixel_values_videos,
-        grid_thw_videos,
-    ):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
 
 
 def set_kimi_k2_5_sharding_config(

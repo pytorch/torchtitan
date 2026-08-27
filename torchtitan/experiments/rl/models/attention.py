@@ -198,9 +198,11 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         assert self.alibi_slopes is None, "Alibi slopes not supported yet."
 
-        # FA3 can infer cu_seqlens_k from block_table + seqused_k.
+        # FA3 and FA4 infer key lengths from block_table + seqused_k for paged
+        # KV. FA4 explicitly rejects page_table together with cu_seqlens_k.
         # FA2 requires cu_seqlens_k to be explicitly set.
-        if current_flash_attention_impl() == "FA3":
+        fa_impl = current_flash_attention_impl()
+        if fa_impl in ("FA3", "FA4"):
             cu_seqlens_k = None
         else:
             num_seqs = seqused_k.shape[0]
@@ -216,7 +218,6 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         # upstream. current_flash_attention_impl() returns None when FA2
         # is the implicit default (SM < 9.0). For FA3, only force
         # num_splits=1 in batch-invariant mode (determinism).
-        fa_impl = current_flash_attention_impl()
         if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
             extra_kwargs["num_splits"] = 1
 

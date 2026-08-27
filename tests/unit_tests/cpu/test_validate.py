@@ -30,7 +30,17 @@ class _ClosableLoader:
         self.closed = True
 
 
-class _FailingModel(nn.Module):
+class _EchoModel(nn.Module):
+    def preprocess_inputs(self, input_dict, *, parallel_dims, parallelism):
+        del parallel_dims, parallelism
+        return input_dict["input"], input_dict["labels"], {}
+
+    def forward(self, inputs, **kwargs):
+        del kwargs
+        return inputs
+
+
+class _FailingModel(_EchoModel):
     def forward(self, *args, **kwargs):
         del args, kwargs
         raise RuntimeError("validation failed")
@@ -61,11 +71,7 @@ def _generic_validator(loader):
     )
     validator.validation_context = nullcontext
     validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
-    validator.post_dataloading_process = lambda input_dict, labels, model_parts: (
-        input_dict["input"],
-        labels,
-        {},
-    )
+    validator.parallelism = SimpleNamespace()
     return validator
 
 
@@ -74,7 +80,7 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     row = ({"input": torch.ones(1, 1)}, torch.ones(1, 1, dtype=torch.long))
     loader = _ClosableLoader([row, row])
     validator = _generic_validator(loader)
-    model = _FailingModel() if raises else nn.Identity()
+    model = _FailingModel() if raises else _EchoModel()
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
 
     if raises:

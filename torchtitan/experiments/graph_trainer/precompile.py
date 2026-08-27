@@ -32,7 +32,13 @@ ConfigFingerprint = NewType("ConfigFingerprint", str)
 
 
 def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
-    """Return SPMD meshes that must be runtime graph inputs."""
+    """
+    Return SPMD meshes that must be registered as runtime graph inputs.
+
+    Pre-registering meshes allows PG lookups for collectives in forward code (ambient mesh)
+    to appear in graph as custom op results (indexing input meshes), rather than
+    opaque objects with no source, matching graph structure from legacy DTensor path.
+    """
     candidates = [
         parallel_dims.spmd_dense_mesh(),
         parallel_dims.spmd_sparse_mesh(),

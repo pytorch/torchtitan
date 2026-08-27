@@ -9,24 +9,34 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 """
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+from torch import nn
 
-from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    FlexAttention,
+    VarlenAttention,
+)
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     multimodal_context,
     scatter_vision_embeds,
 )
-from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
-
-from .sharding import (
-    annotate_multimodal_input_spmd_types,
-    set_kimi_k2_5_sharding_config,
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.models.deepseek_v3.model import (
+    DeepSeekV3Model,
+    get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
 )
+
+from .sharding import set_kimi_k2_5_sharding_config
 from .vision_encoder import KimiK25VisionEncoder
 
 
@@ -76,11 +86,58 @@ class KimiK25Model(DeepSeekV3Model):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            kimi_model = cast("KimiK25Model", model)
+            return get_kimi_k2_7_nparams_and_flops(
+                self,
+                model,
+                seq_len,
+                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
+            )
+
     def __init__(self, config: Config):
         super().__init__(config)
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build masks, CP-shard, SPMD-wrap, and return the batch."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions", None)
+        if positions is not None:
+            inner = getattr(self.config.first_attention, "inner_attention", None)
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
 
     def _prepare_multimodal_embeds(
         self,
@@ -173,14 +230,6 @@ class KimiK25Model(DeepSeekV3Model):
             ``(num_tokens, vocab_size)`` logits.
         """
         with multimodal_context():
-            if get_spmd_backend() == "spmd_types":
-                annotate_multimodal_input_spmd_types(
-                    pixel_values=pixel_values,
-                    grid_thw=grid_thw,
-                    pixel_values_videos=pixel_values_videos,
-                    grid_thw_videos=grid_thw_videos,
-                )
-
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,
