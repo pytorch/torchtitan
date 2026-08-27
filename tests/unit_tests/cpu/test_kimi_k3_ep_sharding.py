@@ -22,10 +22,16 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 
 
 def _moe_configs(*, enable_ep: bool) -> list:
-    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_text
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
-    model = kimi_k3_debugmodel_text().model_spec.model
-    model._set_sharding_config(enable_ep=enable_ep)
+    model = kimi_k3_debugmodel().model_spec.model
+    
+    if enable_ep:
+        from torchtitan.models.kimi_k3.sharding import (
+            set_expert_parallel_sharding_config,
+        )
+
+        set_expert_parallel_sharding_config(model)
     return [layer.moe for layer in model.layers if layer.moe is not None]
 
 

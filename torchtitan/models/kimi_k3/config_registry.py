@@ -26,8 +26,6 @@ from torchtitan.trainer import Trainer
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
-from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
-from torchtitan.hf_datasets.text_datasets import DATASETS as TEXT_DATASETS
 
 
 def _kimi_k3_multimodal_dataloader(
@@ -99,13 +97,3 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         activation_checkpoint=SelectiveAC.Config(),
     )
 
-
-def kimi_k3_debugmodel_text() -> Trainer.Config:
-    """The debug model with no vision tower, trained on the packed text dataset."""
-    config = kimi_k3_debugmodel()
-    config.model_spec = model_registry("debugmodel_text")
-    config.loss.loss_fn.global_vocab_size = decoder_vocab_size(config.model_spec)
-    config.dataloader = GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=TEXT_DATASETS["c4_test"]),
-    )
-    return config
