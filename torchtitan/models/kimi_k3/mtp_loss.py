@@ -80,12 +80,23 @@ class KimiMTPLoss(BaseLoss):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_valid_tokens: float | None = None,
+        *,
+        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        # ``positions`` is keyword-only and optional for two reasons. The
+        # trainer passes it by keyword, and rejecting it was a TypeError before
+        # any step ran -- the GB200 runs hit exactly that. And it is more than
+        # plumbing: on a packed batch the position ids restart at every document
+        # boundary, which is the ONLY way this loss can see the boundaries, so
+        # without it a depth-k target can be the first tokens of the next
+        # document and MTP trains the model to predict across documents.
         main_loss, metrics = self.inner(pred, labels, global_valid_tokens)
 
         mtp_logits = take_mtp_logits()
         if not mtp_logits:
             return main_loss, metrics
+
+        from torchtitan.components.loss import IGNORE_INDEX
 
         depth_losses = []
         for k, logits in enumerate(mtp_logits):
@@ -97,9 +108,20 @@ class KimiMTPLoss(BaseLoss):
             n = min(logits.size(1), target.size(1))
             if n <= 0:
                 continue
-            depth_loss, _ = self.inner(
-                logits[:, :n], target[:, :n], global_valid_tokens
-            )
+            target = target[:, :n]
+            if positions is not None:
+                # A target belongs to the SAME document as its prediction
+                # exactly when the position ids are still climbing: after a
+                # packing boundary the id restarts, so pos[t+shift] < pos[t] +
+                # shift. Masked with IGNORE_INDEX, the same convention the
+                # inner loss already applies to padding.
+                pos_t = positions[:, :n]
+                pos_target = positions[:, shift : shift + n]
+                same_doc = pos_target == pos_t + shift
+                target = torch.where(
+                    same_doc, target, torch.full_like(target, IGNORE_INDEX)
+                )
+            depth_loss, _ = self.inner(logits[:, :n], target, global_valid_tokens)
             depth_losses.append(depth_loss)
 
         if not depth_losses:

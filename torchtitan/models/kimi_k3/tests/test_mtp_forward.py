@@ -156,3 +156,32 @@ class TestMTPLoss(unittest.TestCase):
         total, _ = mtp_loss(pred, labels)
         main_only, _ = mtp_loss.inner(pred, labels)
         self.assertAlmostEqual(total.item(), main_only.item(), places=4)
+
+    def test_positions_keyword_masks_cross_document_targets(self):
+        """The trainer passes positions=; rejecting it was a TypeError before
+        any step ran. And it carries the packing boundaries: a depth-k target
+        past a document restart must not be trained on.
+        """
+        import torch
+
+        from torchtitan.components.loss import CrossEntropyLoss
+        from torchtitan.models.kimi_k3.mtp_loss import KimiMTPLoss, put_mtp_logits
+
+        loss = KimiMTPLoss(
+            KimiMTPLoss.Config(mtp_weight=1.0, loss_fn=CrossEntropyLoss.Config())
+        )
+        torch.manual_seed(0)
+        vocab, seq = 32, 8
+        pred = torch.randn(1, seq, vocab)
+        labels = torch.randint(0, vocab, (1, seq))
+        # Two packed documents of four tokens each: ids restart mid-sequence.
+        positions = torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3]])
+
+        depth = torch.randn(1, seq - 1, vocab)
+        put_mtp_logits([depth])
+        with_mask, _ = loss(pred, labels, positions=positions)
+        put_mtp_logits([depth])
+        without, _ = loss(pred, labels)
+        # Position 3's target crosses into document two; masking it changes
+        # the depth loss, so the two totals must differ.
+        self.assertNotAlmostEqual(with_mask.item(), without.item(), places=6)
