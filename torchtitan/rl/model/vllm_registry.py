@@ -29,11 +29,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-
 
 # Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
@@ -44,6 +46,24 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.model.vllm_worker.TorchTitanGPUWorker"
+
+_KDA_CHUNK_SIZE = 64
+
+
+def _attention_dimensions(
+    attention_config, model_dim: int
+) -> tuple[int, int, int, int]:
+    """Return query heads, KV heads, Q/K head dim, and value head dim."""
+    num_heads = attention_config.n_heads
+    num_kv_heads = getattr(attention_config, "n_kv_heads", None) or num_heads
+    if hasattr(attention_config, "qk_nope_head_dim"):
+        head_dim = attention_config.qk_nope_head_dim + attention_config.qk_rope_head_dim
+        value_head_dim = attention_config.v_head_dim
+    else:
+        head_dim = getattr(attention_config, "head_dim", None)
+        head_dim = head_dim if head_dim is not None else model_dim // num_heads
+        value_head_dim = head_dim
+    return num_heads, num_kv_heads, head_dim, value_head_dim
 
 
 def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
@@ -67,12 +87,15 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
     attn = cfg.first_attention
+    if attn is None:
+        raise ValueError(
+            f"ModelSpec {spec.name!r} has no full-attention layer. vLLM's engine "
+            "requires full-attention metadata before the model is built."
+        )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
 
-    n_heads = attn.n_heads
-    n_kv_heads = attn.n_kv_heads or n_heads
-    head_dim = attn.head_dim if attn.head_dim is not None else cfg.dim // n_heads
+    n_heads, n_kv_heads, head_dim, _ = _attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
     rope_theta = None if rope is None else rope.theta
 
@@ -192,6 +215,97 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
     model_cls.get_mamba_state_copy_funcs = classmethod(get_state_copy_funcs)
 
 
+def _configure_kda_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains KDA layers."""
+    kda_configs = [
+        layer.delta_attention
+        for layer in model_spec.model.layers
+        if getattr(layer, "delta_attention", None) is not None
+    ]
+    if not kda_configs:
+        return
+
+    state_shapes = {
+        (
+            kda_config.num_heads,
+            kda_config.head_dim,
+            kda_config.conv_kernel_size,
+        )
+        for kda_config in kda_configs
+    }
+    if len(state_shapes) != 1:
+        raise ValueError(
+            f"All KDA layers must use the same state shape, got {state_shapes}"
+        )
+    (state_shape,) = state_shapes
+
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFuncCalculator,
+        MambaStateDtypeCalculator,
+        MambaStateShapeCalculator,
+    )
+
+    num_heads, head_dim, conv_kernel_size = state_shape
+
+    def get_state_shape(cls, vllm_config):
+        speculative_config = vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+        shapes = MambaStateShapeCalculator.kda_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_heads,
+            head_dim,
+            conv_kernel_size=conv_kernel_size,
+            num_spec=num_speculative_tokens,
+        )
+        if not is_in_batch_invariant_mode():
+            return shapes
+        local_num_heads = num_heads // vllm_config.parallel_config.tensor_parallel_size
+        return (
+            *shapes,
+            (_KDA_CHUNK_SIZE, local_num_heads, head_dim),
+            (_KDA_CHUNK_SIZE, local_num_heads, head_dim),
+            (_KDA_CHUNK_SIZE, local_num_heads, head_dim),
+            (_KDA_CHUNK_SIZE, local_num_heads, head_dim),
+            (_KDA_CHUNK_SIZE, local_num_heads),
+            (1,),
+        )
+
+    def get_state_dtype(cls, vllm_config):
+        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+        )
+        if not is_in_batch_invariant_mode():
+            return dtypes
+        return (
+            *dtypes,
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.float32,
+            torch.float32,
+            torch.int32,
+        )
+
+    def get_state_copy_func(cls):
+        copy_funcs = MambaStateCopyFuncCalculator.kda_state_copy_func()
+        if not is_in_batch_invariant_mode():
+            return copy_funcs
+        return (*copy_funcs, *(copy_funcs[1] for _ in range(6)))
+
+    def get_state_copy_funcs(cls, mamba_types):
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
+
+    model_cls.is_hybrid = True
+    model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
+    model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
+    model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
+    model_cls.get_mamba_state_copy_funcs = classmethod(get_state_copy_funcs)
+
+
 def register_to_vllm(
     model_spec: ModelSpec,
     *,
@@ -267,7 +381,7 @@ def register_to_vllm(
     # vLLM needs a model-level state contract to allocate shared attention/GDN
     # cache pages before individual layers are constructed.
     _configure_gdn_hybrid_model(VLLMModelFromSpec, model_spec)
-
+    _configure_kda_hybrid_model(VLLMModelFromSpec, model_spec)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing ModelSpec in the closure. This

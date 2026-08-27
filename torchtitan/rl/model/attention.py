@@ -29,6 +29,10 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionMetadata,
     FlashAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.flash_attn_diffkv import (
+    FlashAttentionDiffKVBackend,
+    FlashAttentionDiffKVImpl,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,22 @@ class PyTorchVarlenInnerAttentionBackend(FlashAttentionBackend):
             _cudagraph_support = AttentionCGSupport.ALWAYS
 
         return PyTorchVarlenInnerAttentionMetadataBuilder
+
+
+class PyTorchVarlenInnerAttentionDiffKVBackend(FlashAttentionDiffKVBackend):
+    """PyTorch varlen backend using vLLM's unequal K/V cache support."""
+
+    @staticmethod
+    def get_name():
+        return "CUSTOM"
+
+    @staticmethod
+    def get_impl_cls():
+        return PyTorchVarlenInnerAttentionDiffKVImpl
+
+    @staticmethod
+    def get_builder_cls():
+        return PyTorchVarlenInnerAttentionBackend.get_builder_cls()
 
 
 class PyTorchVarlenInnerAttentionImpl(FlashAttentionImpl):
@@ -251,6 +271,22 @@ class PyTorchVarlenInnerAttentionImpl(FlashAttentionImpl):
         return output[:num_actual_tokens]
 
 
+class PyTorchVarlenInnerAttentionDiffKVImpl(PyTorchVarlenInnerAttentionImpl):
+    """PyTorch varlen implementation using vLLM's unequal K/V cache writer."""
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        return FlashAttentionDiffKVImpl.do_kv_cache_update(
+            self, layer, key, value, kv_cache, slot_mapping
+        )
+
+
 class VLLMAttentionWrapper(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
@@ -273,6 +309,7 @@ class VLLMAttentionWrapper(Module):
         num_heads: int
         num_kv_heads: int
         head_dim: int
+        value_head_dim: int | None = None
         scale: float | None = None
         sliding_window_size: int | None = None
         """Causal sliding-window size (``None`` => full attention)."""
@@ -307,12 +344,16 @@ class VLLMAttentionWrapper(Module):
         num_heads = num_heads // tp_degree
         num_kv_heads = num_kv_heads // tp_degree
         head_dim = config.head_dim
+        value_head_dim = (
+            config.value_head_dim if config.value_head_dim is not None else head_dim
+        )
         scale = config.scale if config.scale is not None else head_dim**-0.5
 
         self.hidden_size = config.hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
+        self.value_head_dim = value_head_dim
         self.scale = scale
 
         cache_config = (
@@ -321,6 +362,13 @@ class VLLMAttentionWrapper(Module):
 
         # TODO: This need to be compatible with Pipeline Parallelism
         layer_id = next(VLLMAttentionWrapper._layer_counter)
+        diff_kv_kwargs: dict[str, Any] = {}
+        if value_head_dim != head_dim:
+            FlashAttentionDiffKVBackend.set_head_size_v(value_head_dim)
+            diff_kv_kwargs = {
+                "head_size_v": value_head_dim,
+                "attn_backend": PyTorchVarlenInnerAttentionDiffKVBackend,
+            }
         self.vllm_attn = Attention(
             num_heads=num_heads,
             head_size=head_dim,
@@ -330,6 +378,7 @@ class VLLMAttentionWrapper(Module):
             quant_config=None,
             per_layer_sliding_window=config.sliding_window_size,
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
+            **diff_kv_kwargs,
         )
 
     def forward(
@@ -349,7 +398,7 @@ class VLLMAttentionWrapper(Module):
             v_THV: ``(num_tokens, num_kv_heads, value_head_dim)``
 
         Returns:
-            ``(num_tokens, num_heads, head_dim)``.
+            ``(num_tokens, num_heads, value_head_dim)``.
         """
         if attention_masks is not None:
             raise ValueError(
@@ -357,11 +406,15 @@ class VLLMAttentionWrapper(Module):
                 "manages causal masking and the KV-cache internally."
             )
 
+        if self.value_head_dim != self.head_dim:
+            # vLLM assumes the V head stride is 128, but it is 256 here, so
+            # repack the tensor before updating the cache.
+            v_THV = v_THV.contiguous()
         out_TD = self.vllm_attn(q_THK, k_THK, v_THV)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
         # shape under torch.compile.  Narrow to trim this padding.
-        num_tokens, _, head_dim = q_THK.shape
+        num_tokens = q_THK.shape[0]
         out_TD = out_TD.narrow(0, 0, num_tokens)
-        return out_TD.view(num_tokens, -1, head_dim)
+        return out_TD.view(num_tokens, -1, self.value_head_dim)

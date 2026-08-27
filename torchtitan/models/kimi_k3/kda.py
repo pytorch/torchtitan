@@ -15,6 +15,7 @@ from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
 from torch import nn
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     local_head_split,
@@ -28,6 +29,19 @@ from torchtitan.protocols.module import Module
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
+
+
+def _batch_invariant_silu(x: torch.Tensor) -> torch.Tensor:
+    x_float = x.float()
+    return (x_float * torch.sigmoid(x_float)).to(x.dtype)
+
+
+def _batch_invariant_l2norm(x_1THK: torch.Tensor) -> torch.Tensor:
+    """Normalize each row without launch geometry depending on token count."""
+    x_float = x_1THK.float()
+    return (
+        x_float * torch.rsqrt((x_float * x_float).sum(dim=-1, keepdim=True) + 1e-6)
+    ).to(x_1THK.dtype)
 
 
 class KimiRMSNormGated(Module):
@@ -102,13 +116,16 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
+        batch_invariant = is_in_batch_invariant_mode()
+        normalize = _batch_invariant_l2norm if batch_invariant else l2norm
         output_1THV, _ = chunk_kda(
-            l2norm(q_1THK),
-            l2norm(k_1THK),
+            normalize(q_1THK),
+            normalize(k_1THK),
             v_1THV,
             gate_1THK,
             raw_beta_1TH.float().sigmoid(),
             cu_seqlens=cu_seqlens,
+            autotune=not batch_invariant,
         )
         return output_1THV
 
@@ -124,7 +141,7 @@ class InnerKDA(Module):
         def __post_init__(self):
             if self.head_dim != 128:
                 raise ValueError(
-                    "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
+                    f"Attention Gym KDA requires head_dim=128, got {self.head_dim}."
                 )
 
     def __init__(self, config: Config):
@@ -157,13 +174,16 @@ class InnerKDA(Module):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
+        batch_invariant = is_in_batch_invariant_mode()
         conv_output_1TC = causal_conv1d(
             mixed_qkv_1TC,
             conv_weight_C1W[:, 0],
-            activation="silu",
+            activation=None if batch_invariant else "silu",
             cu_seqlens=cu_seqlens,
         )
         assert isinstance(conv_output_1TC, torch.Tensor)
+        if batch_invariant:
+            conv_output_1TC = _batch_invariant_silu(conv_output_1TC)
 
         q_1TC, k_1TC, v_1TC = conv_output_1TC.chunk(3, dim=-1)
         q_1THK, k_1THK, v_1THV = (
@@ -210,7 +230,7 @@ class KDA(Module):
                 raise ValueError(f"num_heads must be positive, got {self.num_heads}")
             if self.head_dim != 128:
                 raise ValueError(
-                    "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
+                    f"Attention Gym KDA requires head_dim=128, got {self.head_dim}."
                 )
             if self.conv_kernel_size < 1:
                 raise ValueError(

@@ -45,6 +45,8 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.model.kda_attention import VLLMInnerKDA
+from torchtitan.rl.model.vllm_registry import _attention_dimensions
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -69,18 +71,15 @@ def _replace_vllm_layer_configs(model_config):
 
         attention_cfg = getattr(layer_cfg, "attention", None)
         if attention_cfg is not None:
-            num_heads = attention_cfg.n_heads
-            num_kv_heads = attention_cfg.n_kv_heads or num_heads
-            head_dim = (
-                attention_cfg.head_dim
-                if attention_cfg.head_dim is not None
-                else model_config.dim // num_heads
+            num_heads, num_kv_heads, head_dim, value_head_dim = _attention_dimensions(
+                attention_cfg, model_config.dim
             )
             vllm_attention_cfg = VLLMAttentionWrapper.Config(
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                value_head_dim=value_head_dim,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
             )
             new_layer_cfg = dataclasses.replace(
@@ -112,6 +111,23 @@ def _replace_vllm_layer_configs(model_config):
                 delta_net=dataclasses.replace(
                     delta_net_cfg,
                     inner_gated_delta_net=vllm_inner_gdn_cfg,
+                ),
+            )
+
+        kda_cfg = getattr(layer_cfg, "delta_attention", None)
+        if kda_cfg is not None:
+            vllm_inner_kda_cfg = VLLMInnerKDA.Config(
+                num_heads=kda_cfg.num_heads,
+                head_dim=kda_cfg.head_dim,
+                conv_kernel_size=kda_cfg.conv_kernel_size,
+                lower_bound=kda_cfg.inner_kda.kernel.lower_bound,
+                layer_index=layer_idx,
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                delta_attention=dataclasses.replace(
+                    kda_cfg,
+                    inner_kda=vllm_inner_kda_cfg,
                 ),
             )
 
@@ -364,6 +380,7 @@ class VLLMModelWrapper(Module):
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
+        self.model._skip_lm_head = True
 
         self.model = self.parallelize_fn(
             model=self.model,
@@ -378,6 +395,8 @@ class VLLMModelWrapper(Module):
             # TorchTitan FSDP/DDP here.
             skip_dp=True,
         )
+
+        self._state_dict_layouts = self.get_state_dict_layouts()
 
         # Load initial weights based on checkpoint config.
         self._checkpointer_config = checkpointer_config
@@ -465,14 +484,7 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.spmd_context():
-            # Get embeddings
-            h = self.model.tok_embeddings(input_ids)
-
-            # Pass through transformer layers
-            for layer in self.model.layers.values():
-                h = layer(h, attention_masks=None, positions=positions)
-
-            h = self.model.norm(h)
+            h = self.model(input_ids, attention_masks=None, positions=positions)
         # Inference disables sequence parallelism, so final hidden states should
         # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):
@@ -551,7 +563,20 @@ class VLLMModelWrapper(Module):
 
         TODO(pianpwk): Remove the fused QKV state-dict glue code.
         """
-        layouts: dict[str, SpmdType] = {}
+        layouts = dict(getattr(self, "_state_dict_layouts", {}))
+
+        for state_name, state in (
+            *self.model.named_parameters(),
+            *self.model.named_buffers(),
+        ):
+            if not spmd.has_local_type(state):
+                continue
+            local_type = spmd.get_local_type(state)
+            partition_spec = spmd.get_partition_spec(state)
+            if partition_spec is None and all(
+                axis_type is spmd.R for axis_type in local_type.values()
+            ):
+                layouts[state_name] = SpmdType({})
 
         for module_fqn, module in self.model.named_modules():
             module_prefix = f"{module_fqn}." if module_fqn else ""
@@ -576,6 +601,15 @@ class VLLMModelWrapper(Module):
                         state_name,
                         layout,
                     ) in w13_sharding_config.state_shardings.items():
+                        for projection_name in ("w1", "w3"):
+                            layouts[
+                                f"{module_prefix}{projection_name}.{state_name}"
+                            ] = layout
+                else:
+                    for state_name in ("weight", "bias"):
+                        layout = layouts.get(f"{module_prefix}w13.{state_name}")
+                        if layout is None:
+                            continue
                         for projection_name in ("w1", "w3"):
                             layouts[
                                 f"{module_prefix}{projection_name}.{state_name}"
