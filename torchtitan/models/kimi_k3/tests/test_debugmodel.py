@@ -50,11 +50,20 @@ class TestKimiDebugModel(unittest.TestCase):
         self.assertEqual(tuple(logits.shape), (1, 128, 2016))
         self.assertTrue(torch.isfinite(logits).all())
         logits.sum().backward()
-        # AttnRes projections get gradients (zero-init but on the path).
-        for name, p in model.named_parameters():
-            if name.endswith("attention_res_proj.weight"):
-                self.assertIsNotNone(p.grad, f"no grad at {name}")
-                break
+        # AttnRes projections get gradients (zero-init but on the path) -- but
+        # only where there IS a path: the earliest such layer has no committed
+        # block before it, so its aggregation projection can legitimately see no
+        # gradient. named_parameters() yields in registration order, so the old
+        # first-match assertion tested exactly the one layer with nothing to
+        # aggregate; assert the LAST match instead, which always has history.
+        res_projs = [
+            (name, p)
+            for name, p in model.named_parameters()
+            if name.endswith("attention_res_proj.weight")
+        ]
+        self.assertTrue(res_projs, "no attention_res_proj parameters found")
+        name, p = res_projs[-1]
+        self.assertIsNotNone(p.grad, f"no grad at {name}")
 
 
 if __name__ == "__main__":
