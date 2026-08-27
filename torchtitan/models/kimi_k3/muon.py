@@ -269,10 +269,29 @@ class KimiOptimizersContainer(OptimizersContainer):
         """
 
     @staticmethod
-    def _resolve_optimizer_cls(name: str) -> type:
+    def _build_param_groups(model, param_group_configs, impl_kwargs):
+        # Re-tag immediately before grouping, because the tags do not survive
+        # to this point on a parallelized model: tag_per_head_muon marks the
+        # WEIGHT, and FSDP2/TP replace the parameter objects with DTensors --
+        # the attention modules survive, their weights do not. The model-build
+        # call is kept for single-process runs and tests; this one re-derives
+        # the same tags from the same modules, so it is idempotent, and a
+        # parameter nothing reads the tag from costs nothing.
+        tag_per_head_muon(model)
+        return OptimizersContainer._build_param_groups(
+            model, param_group_configs, impl_kwargs
+        )
+
+    @staticmethod
+    def _resolve_optimizer_factory(name: str):
+        # The override must track core's method NAME: this hook was called
+        # _resolve_optimizer_cls until core renamed it, and the stale override
+        # was dead code -- build() reached core's factory table and raised
+        # "Optimizer Muon not added." while this class sat here believing it
+        # had Muon covered. That is exactly what the GB200 run hit.
         if name == "Muon":
             return Muon
-        return OptimizersContainer._resolve_optimizer_cls(name)
+        return OptimizersContainer._resolve_optimizer_factory(name)
 
 
 # Report sec 2.5: Muon for the matrix parameters, with the per-head refinement on

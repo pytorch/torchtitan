@@ -251,3 +251,23 @@ class TestPerHeadMuonTagging(unittest.TestCase):
         Muon([b], lr=0.1, per_head=False).step()
 
         self.assertGreater((a.data - b.data).abs().max().item(), 1e-4)
+
+    def test_container_resolves_muon_through_the_factory_hook(self):
+        """Red if the override drifts off core's method name again.
+
+        Core renamed _resolve_optimizer_cls to _resolve_optimizer_factory and
+        the stale override became dead code: build() reached core's factory
+        table and raised "Optimizer Muon not added." while the subclass sat
+        here believing it had Muon covered. The GB200 runs hit exactly that.
+        """
+        from torchtitan.models.kimi_k3.muon import KimiOptimizersContainer, Muon
+
+        resolved = KimiOptimizersContainer._resolve_optimizer_factory("Muon")
+        self.assertIs(resolved, Muon)
+        # Delegation for everything else must still reach core's table.
+        import torch
+
+        self.assertIs(
+            KimiOptimizersContainer._resolve_optimizer_factory("AdamW"),
+            torch.optim.AdamW,
+        )
