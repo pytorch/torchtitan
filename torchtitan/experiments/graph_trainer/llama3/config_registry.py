@@ -34,6 +34,16 @@ def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.disable_cuda_graphs = True
+    config.training.steps = 2
+    config.sdc_replay.enabled = True
+    return config
+
+
 def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     """Debug model with the attention and FFN TP collectives folded into the GEMMs.
 

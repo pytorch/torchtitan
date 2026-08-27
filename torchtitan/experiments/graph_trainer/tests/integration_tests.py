@@ -10,6 +10,10 @@ import os
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
 
+from torchtitan.experiments.graph_trainer.llama3 import (
+    config_registry as llama3_recipes,
+)
+
 # TODO: JIT mode tests are disabled due to an upstream PyTorch
 # partitioner regression ("Node tangents_2 was invalid, but is output")
 # triggered by the full DTensor change (#2149). Re-enable once the
@@ -28,6 +32,13 @@ _FLEX_CP_INDUCTOR_DISABLED = True
 def _build_llama3_tests() -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
     return [
+        OverrideDefinitions(
+            configs=[llama3_recipes.graph_trainer_llama3_debugmodel_sdc_replay],
+            test_descr="GraphTrainer SDC replay",
+            test_name="sdc_replay",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
         # === JIT mode tests ===
         OverrideDefinitions(
             [
