@@ -6,7 +6,7 @@ MODULE=gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
 ```
 
 ## Supported Features
-- FSDP/HSDP, TP, EP, ETP
+- FSDP/HSDP, TP, EP
 - Grouped matrix multiplication for efficient computation
 
 

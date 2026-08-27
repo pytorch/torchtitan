@@ -6,6 +6,7 @@
 
 import contextlib
 import gc
+import os
 import subprocess
 import time
 from collections.abc import Generator
@@ -19,11 +20,27 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 
 
+def round_up(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
 def has_cuda_capability(major: int, minor: int) -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() >= (
-        major,
-        minor,
+    # torch.version.hip is None excludes ROCm (capability is a tuple on AMD too).
+    return (
+        torch.cuda.is_available()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability() >= (major, minor)
     )
+
+
+def get_cuda_flash_attention_impl() -> str | None:
+    """Return the FlashAttention implementation for the current CUDA architecture."""
+    # Blackwell (SM 10.0) and newer use FA4; Hopper (SM 9.0) uses FA3.
+    if has_cuda_capability(10, 0):
+        return "FA4"
+    if has_cuda_capability(9, 0):
+        return "FA3"
+    return None
 
 
 def has_rocm_capability(major: int, minor: int) -> bool:
@@ -41,6 +58,43 @@ def get_device_info() -> tuple[str, ModuleType]:
 
 
 device_type, device_module = get_device_info()
+
+
+def get_local_device() -> torch.device:
+    """Return this process's device under LOCAL_RANK or visible-device launch.
+
+    Launchers normally expose multiple accelerators per process and set
+    LOCAL_RANK to identify which local device the process should use. Some
+    launchers instead mask each process down to a single accelerator with
+    CUDA_VISIBLE_DEVICES or another backend-specific visible-device mask. When
+    exactly one device is visible, target device index 0; otherwise preserve
+    the existing LOCAL_RANK mapping.
+    """
+    local_rank_str = os.environ.get("LOCAL_RANK")
+    if local_rank_str is None:
+        raise ValueError("LOCAL_RANK must be set before selecting a local device.")
+    try:
+        local_rank = int(local_rank_str)
+    except ValueError as e:
+        raise ValueError(
+            "LOCAL_RANK environment variable must be a valid integer, "
+            f"got: {local_rank_str}"
+        ) from e
+    if local_rank < 0:
+        raise ValueError(f"LOCAL_RANK must be non-negative, got: {local_rank}")
+
+    num_devices = None
+    if hasattr(device_module, "device_count"):
+        num_devices = device_module.device_count()
+    device_index = 0 if num_devices == 1 else local_rank
+    if num_devices is not None and num_devices > 1 and device_index >= num_devices:
+        raise ValueError(
+            f"LOCAL_RANK={local_rank} is outside the visible {device_type} "
+            f"device count ({num_devices}). If each process is launched with a "
+            f"single visible {device_type} device, set the visible-device mask "
+            "per process so device_count() returns 1."
+        )
+    return torch.device(device_type, device_index)
 
 
 # used to avoid stragglers in garbage collection
@@ -66,7 +120,6 @@ class GarbageCollection:
                 "Force GC to perform collection to obtain debug information",
                 generation=2,
             )
-            gc.collect()
             sl.add_step_tag("gc")
             return True
         if step_count > 1 and step_count % self.gc_freq == 0:
@@ -134,7 +187,7 @@ def get_peak_flops(device_name: str) -> float:
         # GB300 data from https://www.nvidia.com/en-us/data-center/dgx-gb300
         return 2.5e15
     elif "B300" in device_name or "B200" in device_name:
-        # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+        # data from https://resources.nvidia.com/en-us-blackwell-architecture
         # Checked after GB300 to avoid false match on "GB300"
         return 2.25e15
     elif "MI355X" in device_name:
@@ -157,7 +210,7 @@ def get_peak_flops(device_name: str) -> float:
         # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
-    elif "l40s" in device_name:
+    elif "l40s" in device_name.casefold():
         # data from: "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413"
         return 362e12
     elif "neuron" in device_name:
@@ -178,6 +231,27 @@ def get_peak_flops(device_name: str) -> float:
                 f"Unknown neuron device: {neuron_device_name}, fallback to trn2/trn3"
             )
             return 79e12 * 2
+
+    elif device_name.startswith("TPU"):
+        # Google Cloud TPU: dense BF16 matrix-engine (MXU) peak, per device.
+        # Source: https://cloud.google.com/tpu/docs/system-architecture-tpu-vm
+        if "v4" in device_name:
+            return 275e12
+        elif "v5e" in device_name:
+            return 197e12
+        elif "v5p" in device_name:
+            return 459e12
+        elif "v6e" in device_name:
+            return 918e12
+        elif "v7" in device_name:
+            # 2307 TFLOPS is the published per-chip figure; v7 exposes each of
+            # its two TensorCores as a separate device, so halve for per-device.
+            return 2307e12 / 2
+        else:
+            logger.warning(
+                f"Peak flops undefined for TPU: {device_name}, fallback to A100"
+            )
+            return 312e12
 
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")

@@ -8,7 +8,7 @@
 
 import functools
 import operator
-from dataclasses import dataclass
+import sys
 
 import torch
 
@@ -25,19 +25,21 @@ from torch._functorch._activation_offloading.offload_ops import (
 from torch.fx.experimental.proxy_tensor import is_sym_node
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.config import Configurable
-from torchtitan.distributed.activation_checkpoint import _get_save_ops
+from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.experiments.graph_trainer.cpu_offload import _classify_forward_backward
 from torchtitan.tools.logging import logger
 
+from .memory_policy import tag_sac_policy as apply_sac_pass
 from .passes import (
-    apply_sac_pass,
     construct_default_graph_passes,
+    selective_activation_remat_pass,
+)
+from .registry import (
     register_memory_policy,
     register_pass_pipeline,
     register_post_init_hook,
+    register_post_train_hook,
     register_pre_train_step_hook,
-    selective_activation_remat_pass,
 )
 
 
@@ -46,70 +48,122 @@ from .passes import (
 # ---------------------------------------------------------------------------
 
 
-class PagedStash(Configurable):
+class PagedStash:
     """Paged activation stashing for CUDA-graphable MoE training.
 
     Manages pre-allocated paged buffers that store MoE expert activations,
     reducing memory from O(layers x worst_case) to O(worst_case + actual_usage).
     """
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        """Configuration for paged stash memory policy buffers."""
-
-        buffer_size_factor: float = 1.1
-        """Factor to scale estimated_tokens for CUDA buffer over-provisioning."""
-
-        host_buffer_size_factor: float = 0.0
-        """Factor for host (pinned CPU) spillover buffer. 0 = no host buffer."""
-
-        page_size: int = 64
-        """Number of tokens per page in the paged stash buffer."""
-
     def __init__(
         self,
-        config: "PagedStash.Config",
         *,
         model: torch.nn.Module,
         max_tokens: int,
         capacity_factor: float | None,
+        page_size: int = 64,
+        buffer_size_factor: float = 1.1,
+        host_buffer_size_factor: float = 0.0,
         device: str | torch.device = "cuda",
     ):
         self.buffers, self.overflow, self.host_spill = create_paged_buffers(
             model,
             max_tokens=max_tokens,
             capacity_factor=capacity_factor,
-            page_size=config.page_size,
-            buffer_size_factor=config.buffer_size_factor,
-            host_buffer_size_factor=config.host_buffer_size_factor,
+            page_size=page_size,
+            buffer_size_factor=buffer_size_factor,
+            host_buffer_size_factor=host_buffer_size_factor,
             buffer_device=device,
         )
+        self._init_overflow_check_state()
+
+    def _init_overflow_check_state(self):
+        """State for the non-blocking overflow check (see check_overflow):
+        a pinned host mirror of the overflow flag, an event marking when the
+        most recent async copy into it completed, and whether a copy is in
+        flight. Pre-allocated so the per-step path allocates nothing.
+        (Separate from __init__ so unit tests can build the check state
+        around a bare overflow tensor without a model.)
+        """
+        self._overflow_host = None
+        self._overflow_event = None
+        self._overflow_pending = False
+        if self.overflow is not None:
+            self._overflow_host = torch.zeros(
+                self.overflow.shape,
+                dtype=self.overflow.dtype,
+                device="cpu",
+                pin_memory=True,
+            )
+            self._overflow_event = torch.cuda.Event()
 
     def reset(self):
-        """Reset all buffers and flags for the next step. CUDA graph safe."""
+        """Reset all buffers and flags for the next step. CUDA graph safe.
+
+        The overflow flag is deliberately NOT cleared: it is sticky so a
+        transient overflow cannot be overwritten before the deferred check in
+        ``check_overflow`` observes it, no matter how far the CPU runs ahead
+        of the GPU. Overflow is fatal (RuntimeError), so there is no recovery
+        path that would need the flag cleared.
+        """
         if self.buffers:
             for buf in self.buffers.values():
                 buf.reset()
-        if self.overflow is not None:
-            self.overflow.zero_()
         if self.host_spill is not None:
             self.host_spill.zero_()
 
     def check_overflow(self):
-        """Raise RuntimeError if the previous step overflowed."""
+        """Raise RuntimeError if a recent step overflowed. Never blocks.
+
+        Reading the device flag with ``Tensor.item()`` would synchronize the
+        CPU with the GPU at every step boundary, forfeiting CPU run-ahead and
+        exposing each step's CPU work as a GPU idle bubble. Instead, read the
+        pinned host mirror filled by the async copy enqueued on a previous
+        call (guarded by its event), then enqueue a fresh copy of the current
+        flag. Because the flag is sticky (see ``reset``), an overflow at step
+        N is observed at a later hook — typically step N+2 (the blocking
+        version already reported one step late), later if the CPU is running
+        further ahead (those steps' replays were already enqueued anyway) —
+        or, for an overflow on the final steps where no later hook runs, by
+        ``check_overflow_blocking`` at trainer shutdown. Note the raise is
+        rank-local: only ranks whose routing overflowed raise; peers block in
+        the next collective until the process group times out / torchrun
+        tears the job down.
+        """
+        if self.overflow is None:
+            return
+        if self._overflow_pending and self._overflow_event.query():
+            self._overflow_pending = False
+            if self._overflow_host.item() != 0:
+                self._raise_overflow()
+        self._overflow_host.copy_(self.overflow, non_blocking=True)
+        self._overflow_event.record()
+        self._overflow_pending = True
+
+    def check_overflow_blocking(self):
+        """Blocking overflow check for trainer shutdown.
+
+        The deferred ``check_overflow`` needs a later hook invocation to
+        observe an overflow, so an overflow on the last 1 + run-ahead steps
+        would otherwise escape and the job would exit cleanly (with its final
+        checkpoint). One synchronizing read at shutdown closes that window at
+        zero per-step cost.
+        """
         if self.overflow is not None and self.overflow.item() != 0:
-            raise RuntimeError(
-                "Paged stash buffer overflow detected. "
-                "The CUDA paged stash buffer is too small for the current "
-                "routing pattern.\n\n"
-                "To fix, try one of:\n"
-                "  1. Enable host spillover: "
-                "--compile.paged_stash.host_buffer_size_factor 1.0\n"
-                "  2. Increase buffer size: "
-                "--compile.paged_stash.buffer_size_factor 2.0\n"
-                "  3. Disable paged stash: "
-                "--compile.memory_policy default"
-            )
+            self._raise_overflow()
+
+    @staticmethod
+    def _raise_overflow():
+        raise RuntimeError(
+            "Paged stash buffer overflow detected. "
+            "The CUDA paged stash buffer is too small for the current "
+            "routing pattern.\n\n"
+            "To fix, try one of:\n"
+            "  1. Enable host spillover: set host_buffer_size_factor=1.0\n"
+            "  2. Increase buffer size: set buffer_size_factor=2.0\n"
+            "  3. Disable paged stash: "
+            "--compile.memory_policy default"
+        )
 
     @property
     def buffers_dict(self) -> dict | None:
@@ -548,8 +602,23 @@ def create_paged_buffers(
     for _fqn, mod in model.named_modules():
         if isinstance(mod, GroupedExperts):
             num_expert_modules += 1
-            ops_per_key[(mod.w1.dtype, mod.w1.shape[-2])] += 4
-            ops_per_key[(mod.w1.dtype, mod.w1.shape[-1])] += 1
+            # Access raw parameter from _parameters to bypass SimpleFSDP
+            # parametrization properties that would trigger all-gather.
+            w1 = mod._parameters.get("w1_EFD")
+            if w1 is None:
+                w1 = mod._parameters.get("w1")
+            if w1 is None:
+                continue
+            # The compute dtype for _grouped_mm output: the model casts
+            # weights to bfloat16 before matmul (see GroupedExperts.forward).
+            compute_dtype = torch.bfloat16
+            if w1.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                compute_dtype = torch.bfloat16
+            elif w1.dtype == torch.bfloat16:
+                compute_dtype = torch.bfloat16
+            # Shape is [num_experts, hidden_dim, dim] for w1_EFD
+            ops_per_key[(compute_dtype, w1.shape[-2])] += 4
+            ops_per_key[(compute_dtype, w1.shape[-1])] += 1
 
     if not ops_per_key:
         logger.warning("No GroupedExperts found; no paged stash buffers created.")
@@ -853,7 +922,10 @@ def _is_moe_fc1_grouped_mm(node: fx.Node) -> bool:
     """
     if node.op != "call_function":
         return False
-    if node.target != torch.ops.aten._grouped_mm.default:
+    if node.target not in (
+        torch.ops.aten._grouped_mm.default,
+        torch.ops.aten._scaled_grouped_mm.default,
+    ):
         return False
     for user in node.users:
         if user.op != "call_function":
@@ -872,11 +944,8 @@ def _is_silu_output(node: fx.Node) -> bool:
 
 
 def _has_dynamic_first_dim(node: fx.Node) -> bool:
-    """Check if a node's first dimension is dynamic (SymInt)."""
-    val = node.meta.get("val")
-    if val is None or not hasattr(val, "shape") or len(val.shape) < 1:
-        return False
-    return isinstance(val.shape[0], torch.SymInt)
+    """DEPRECATED: kept as a no-op for any external callers. Always returns True."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -908,11 +977,20 @@ def _find_num_tokens_node(
 
     if (
         fwd_node.op == "call_function"
-        and fwd_node.target == torch.ops.aten._grouped_mm.default
+        and fwd_node.target in (
+            torch.ops.aten._grouped_mm.default,
+            torch.ops.aten._scaled_grouped_mm.default,
+        )
     ):
         offsets_node = fwd_node.kwargs.get("offs")
-        if offsets_node is None and len(fwd_node.args) > 2:
-            offsets_node = fwd_node.args[2]
+        if offsets_node is None:
+            # _grouped_mm: offs is arg[2]; _scaled_grouped_mm: offs is arg[4]
+            if fwd_node.target == torch.ops.aten._scaled_grouped_mm.default:
+                offs_idx = 4
+            else:
+                offs_idx = 2
+            if len(fwd_node.args) > offs_idx:
+                offsets_node = fwd_node.args[offs_idx]
         if offsets_node is None or not isinstance(offsets_node, fx.Node):
             return None
 
@@ -979,8 +1057,11 @@ def _is_paged_stash_eligible(
         return None
     if all(is_sym_node(u) for u in bwd_consumers):
         return None
-    if not _has_dynamic_first_dim(node):
-        return None
+    # Note: we do NOT require a dynamic first dimension. With HybridEP
+    # capacity-factor padding, the dispatch buffer has static shape but the
+    # actual token count varies per step. Paged stash still helps because it
+    # shares one buffer across all layers (O(worst_case + actual_usage) vs
+    # O(layers x worst_case) in the CUDA graph pool).
 
     val = node.meta.get("val")
     if val is None or not hasattr(val, "shape") or len(val.shape) < 1:
@@ -1174,12 +1255,14 @@ def apply_paged_stash_pass(
             page_record_node.meta["autograd_backward"] = False
 
         with gm.graph.inserting_after(page_record_node):
-            # keepalive=fwd_node extends the activation's lifetime past the
-            # async Triton copy on the transfer stream (same pattern as
-            # ao.wait_tensor(offload_result, gpu_tensor) in cpu_offload_pass)
+            # No keepalive needed: paged stash copies to GPU buffer on the
+            # same stream, so the activation's lifetime is already correct.
+            # NOTE: do NOT pass fwd_node as keepalive -- ao.wait_tensor
+            # destroys the keepalive tensor's storage (resize_(0)), which
+            # would corrupt the activation for other forward consumers.
             wait_copy_node = gm.graph.call_function(
                 torch.ops.ao.wait_tensor.default,
-                args=(page_record_node, fwd_node),
+                args=(page_record_node,),
             )
             wait_copy_node.meta["val"] = page_record_fake
             # ao.wait_tensor has has_side_effect, which the partitioner treats
@@ -1298,7 +1381,7 @@ def _make_paged_stash_policy(
             ``MUST_SAVE`` for the baseline experiment that saves expert
             activations as regular tensors (no paged stash).
     """
-    save_ops = _get_save_ops()
+    save_ops = _get_default_save_ops()
     save_ops.add(torch.ops._c10d_functional.all_gather_into_tensor.default)
 
     def policy_fn(node: fx.Node) -> CheckpointPolicy:
@@ -1336,26 +1419,24 @@ def paged_stash_tag_policy(
 
 
 @register_pass_pipeline("paged_stash")
-def paged_stash_pass_pipeline(traced_result, config):
-    """Default passes with paged_stash_pass inserted between tagging and remat."""
-    passes = construct_default_graph_passes(traced_result, config)
+def paged_stash_pass_pipeline(traced_result, config, *, parallel_dims=None):
+    """Default passes with paged_stash_pass inserted before selective_activation_remat."""
+    passes = construct_default_graph_passes(traced_result, config, parallel_dims=parallel_dims)
     if _PAGED_STASH_BUFFERS_DICT is not None:
-        bound_pass = functools.partial(
-            paged_stash_pass, paged_buffers=_PAGED_STASH_BUFFERS_DICT
-        )
-        new_passes = []
-        for p in passes:
-            _fn = p.func if isinstance(p, functools.partial) else p
-            if _fn is selective_activation_remat_pass:
-                new_passes.append(bound_pass)
-            new_passes.append(p)
-        passes = new_passes
+        stash_pass = functools.partial(paged_stash_pass, paged_buffers=_PAGED_STASH_BUFFERS_DICT)
+        for i, p in enumerate(passes):
+            fn = p.func if isinstance(p, functools.partial) else p
+            if fn is selective_activation_remat_pass:
+                passes.insert(i, stash_pass)
+                break
+        else:
+            passes.append(stash_pass)
     return passes
 
 
 @register_post_init_hook("paged_stash")
 def setup_paged_stash_buffers(trainer):
-    """Create paged stash buffers via PagedStash.Config.build()."""
+    """Create paged stash buffers."""
     global _PAGED_STASH_BUFFERS_DICT
 
     model = trainer.model_parts[0]
@@ -1367,11 +1448,14 @@ def setup_paged_stash_buffers(trainer):
     )
     num_experts = moe_config.num_experts
     top_k = moe_config.router.top_k
-    base_tokens = training.local_batch_size * training.seq_len
-    dispatcher_cfg = moe_config.experts.token_dispatcher
+    base_tokens = training.num_tokens_per_microbatch_per_dp_rank
+    dispatcher_cfg = moe_config.routed_experts.token_dispatcher
     cf = getattr(dispatcher_cfg, "non_blocking_capacity_factor", None)
-    comm_backend = getattr(dispatcher_cfg, "comm_backend", "standard")
-    if comm_backend == "hybridep" and cf is not None and parallel_dims.ep_enabled:
+
+    from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+
+    is_hybridep = isinstance(dispatcher_cfg, HybridEPTokenDispatcher.Config)
+    if is_hybridep and cf is not None and parallel_dims.ep_enabled:
         ep_size = parallel_dims.ep
         num_local_experts = num_experts // ep_size
         max_tokens = int(base_tokens * ep_size * min(num_local_experts, top_k) * cf)
@@ -1379,7 +1463,7 @@ def setup_paged_stash_buffers(trainer):
         cf = None
         max_tokens = base_tokens * top_k
 
-    paged_stash = trainer.config.compile.paged_stash.build(
+    paged_stash = PagedStash(
         model=model,
         max_tokens=max_tokens,
         capacity_factor=cf,
@@ -1395,8 +1479,22 @@ def setup_paged_stash_buffers(trainer):
 
 @register_pre_train_step_hook("paged_stash")
 def reset_paged_stash_buffers(trainer):
-    """Check previous step's overflow flag, then reset buffers for this step."""
+    """Check the overflow flag (non-blocking), then reset buffers for this step."""
     paged_stash = getattr(trainer, "_paged_stash", None)
     if paged_stash is not None:
         paged_stash.check_overflow()
         paged_stash.reset()
+
+
+@register_post_train_hook("paged_stash")
+def final_overflow_check(trainer):
+    """Blocking overflow check at shutdown, so an overflow on the final steps
+    (where no later pre_train_step hook runs) still fails the job instead of
+    exiting cleanly with a checkpoint that absorbed degenerate gradients."""
+    if sys.exc_info()[0] is not None:
+        # close() runs in a `finally`; if training is already failing, don't
+        # mask the original exception with the overflow raise.
+        return
+    paged_stash = getattr(trainer, "_paged_stash", None)
+    if paged_stash is not None:
+        paged_stash.check_overflow_blocking()

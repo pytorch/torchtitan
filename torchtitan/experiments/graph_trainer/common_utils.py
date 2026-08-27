@@ -4,24 +4,56 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import fnmatch
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, TypeAlias
 
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate
-from torch.fx.traceback import annotate_fn
+from torch.fx.traceback import annotate, annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.common.attention import ScaledDotProductAttention
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
+
+
+BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
+LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
+AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
+
+
+class GraphTrainerScaledDotProductAttention(ScaledDotProductAttention):
+    """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ScaledDotProductAttention.Config):
+        pass
+
+    def forward(
+        self,
+        q_TNH: torch.Tensor,
+        k_TNH: torch.Tensor,
+        v_TNH: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        out_BLNH = super().forward(
+            q_TNH.unsqueeze(0),
+            k_TNH.unsqueeze(0),
+            v_TNH.unsqueeze(0),
+            **kwargs,
+        )
+        return out_BLNH.squeeze(0)
 
 
 @contextmanager
@@ -32,12 +64,177 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
+def build_decoder_config_for_backend(
+    config_builder: Callable, attn_backend: str, **builder_kwargs
+):
+    """Build a Decoder model config for ``attn_backend``, allowing test-only SDPA.
+
+    ``SDPA`` is not a valid production language-model backend — ``get_attention_config``
+    rejects it because the dataloaders always emit per-document positions and SDPA
+    cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
+    tests, however, use SDPA to exercise *backend-agnostic* graph machinery
+    (precompile-artifact serialization, custom codegen, context parallel, bitwise
+    determinism) without FlexAttention's ``BlockMask``, which is unpicklable (its
+    ``mask_mod`` closures are Python code objects), is not a tensor (so it breaks
+    pipeline-parallel split-backward, which calls ``.requires_grad`` on every stage
+    input), and overflows the fp32 Triton shared-memory limit on large head dims.
+
+    For SDPA we build the flex config (a valid backend) and swap each layer's
+    ``inner_attention`` to ``GraphTrainerScaledDotProductAttention.Config()``.
+    The adapter adds a singleton batch around the flat graph-trainer inputs and
+    delegates to the common batched SDPA implementation. Production code never
+    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
+    registry can construct an SDPA language model outside these tests.
+    """
+    if attn_backend != "sdpa":
+        return config_builder(attn_backend=attn_backend, **builder_kwargs)
+
+    config = config_builder(attn_backend="flex", **builder_kwargs)
+    for layer in config.layers:
+        layer.attention.inner_attention = GraphTrainerScaledDotProductAttention.Config()
+    return config
+
+
+def _local_stride(tensor: torch.Tensor) -> tuple[int, ...]:
+    return (
+        tensor.to_local().stride() if isinstance(tensor, DTensor) else tensor.stride()
+    )
+
+
+def _maybe_materialize_grad_for_param_layout(
+    param: torch.Tensor, grad: torch.Tensor
+) -> torch.Tensor:
+    """Match eager autograd's ``param.grad`` layout contract after graph replay.
+
+    Graph replay assigns ``torch.autograd.grad`` outputs manually, bypassing
+    AccumulateGrad's normal stride materialization. Copying through
+    ``empty_like(param)`` restores the param's global and DTensor-local layout
+    when Inductor returns an equivalent but differently-strided grad.
+    """
+    if grad.stride() == param.stride() and _local_stride(grad) == _local_stride(param):
+        return grad
+
+    materialized_grad = torch.empty_like(param)
+    materialized_grad.copy_(grad)
+    return materialized_grad
+
+
+def set_graph_module_boxed_codegen(
+    gm: torch.fx.GraphModule,
+    *,
+    boxed: bool,
+) -> torch.fx.GraphModule:
+    """Set the FX calling convention and record it in graph metadata.
+
+    Args:
+        gm: Graph module whose generated Python wrapper should be updated.
+        boxed: Whether the wrapper should accept one mutable argument list and
+            clear it after placeholder extraction.
+
+    Returns:
+        The same graph module after recompilation if the calling convention
+        changed.
+    """
+
+    if gm.meta.get(BOXED_CODEGEN_META) is boxed:
+        return gm
+    codegen = torch.fx.graph._BoxedCodeGen() if boxed else torch.fx.graph.CodeGen()
+    gm.graph.set_codegen(codegen)
+    gm.recompile()
+    gm.meta[BOXED_CODEGEN_META] = boxed
+    return gm
+
+
+def ensure_boxed_graph_module(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    """Use boxed FX codegen for runtime-owned graph modules.
+
+    Args:
+        gm: Graph module to box.
+
+    Returns:
+        The same graph module with boxed FX codegen enabled.
+    """
+
+    return set_graph_module_boxed_codegen(gm, boxed=True)
+
+
 _MODULE_FQN = "module_fqn"
+# Tuple of unique parameter FQNs naming one gradient value. Consumers must
+# treat it as a set: tied parameters can associate multiple FQNs with one node.
+PARAMETER_GRADIENT_FQNS_META = "parameter_gradient_fqns"
+_EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
+_EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
+_EP_TOKEN_EXCHANGE = "EP_token_exchange"
+_EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def compute_parameter_gradients(
+    loss: torch.Tensor,
+    named_parameters: Iterable[tuple[str, torch.Tensor]],
+) -> tuple[torch.Tensor, ...]:
+    """Compute and identify parameter gradients in the traced graph.
+
+    Each gradient is passed through an annotated ``aten.alias`` immediately
+    after ``torch.autograd.grad`` establishes its parameter correspondence.
+    The alias is a view of the same storage, not a copy or device computation,
+    and keeps the identity available even when an optimizer consumes the
+    gradient inside the graph instead of returning it as a graph output.
+    GraphTrainer moves the FQN set onto the underlying gradient node and
+    erases the markers before later graph passes and backend compilation.
+    """
+    named_parameters = tuple(named_parameters)
+    gradients = torch.autograd.grad(
+        loss, tuple(parameter for _, parameter in named_parameters)
+    )
+    tagged_gradients = []
+    for (parameter_fqn, _), gradient in zip(named_parameters, gradients, strict=True):
+        with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
+            tagged_gradients.append(torch.ops.aten.alias.default(gradient))
+    return tuple(tagged_gradients)
+
+
+def compute_annotated_loss(
+    loss_fn: AnnotatedLossFn,
+    pred: torch.Tensor,
+    labels: torch.Tensor,
+    loss_kwargs: dict[str, Any] | None = None,
+) -> torch.Tensor:
+    """Compute the loss tensor with the same FX metadata convention as GraphTrainer."""
+    annotated_loss_fn = annotate_fn({_MODULE_FQN: "loss"})(loss_fn)
+    result = annotated_loss_fn(pred, labels, **(loss_kwargs or {}))
+    if isinstance(result, tuple):
+        if len(result) != 2:
+            raise ValueError(
+                "GraphTrainer loss functions must return a loss tensor or "
+                "(loss tensor, metrics)."
+            )
+        loss, _metrics = result
+        return loss
+    return result
+
+
+def accumulate_param_grads_(
+    params: Iterable[torch.Tensor],
+    grads: Iterable[torch.Tensor | None],
+) -> None:
+    """Accumulate explicit graph-produced gradients into live parameters."""
+    for param, grad in zip(params, grads, strict=True):
+        if grad is None:
+            continue
+        grad = _maybe_materialize_grad_for_param_layout(param, grad)
+        if param.grad is None:
+            param.grad = grad
+        else:
+            param.grad += grad
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def _get_module_fqn(node: torch.fx.Node) -> str:
+    return node.meta.get("custom", {}).get(_MODULE_FQN, "")
 
 
 def _get_layer_id(node: torch.fx.Node) -> int:
@@ -46,7 +243,7 @@ def _get_layer_id(node: torch.fx.Node) -> int:
     Nodes under ``layers.<N>`` return ``N``.
     All other nodes (tok_embeddings, norm, output) return ``_NOT_IN_LAYERS``.
     """
-    fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
+    fqn = _get_module_fqn(node)
     parts = fqn.split(".")
     if parts[0] == "layers" and len(parts) >= 2:
         try:
@@ -68,6 +265,59 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
+    """Match one module FQN against a component-wise fnmatch pattern."""
+    pattern_parts = pattern.split(".")
+    fqn_parts = fqn.split(".")
+    return len(pattern_parts) == len(fqn_parts) and all(
+        fnmatch.fnmatchcase(fqn_part, pattern_part)
+        for pattern_part, fqn_part in zip(pattern_parts, fqn_parts)
+    )
+
+
+_MOE_EP_REGIONS_ANNOTATED = False
+
+
+def annotate_moe_ep_regions() -> None:
+    """Annotate MoE EP compute, dispatch, and combine regions for FX passes."""
+    global _MOE_EP_REGIONS_ANNOTATED
+    if _MOE_EP_REGIONS_ANNOTATED:
+        return
+
+    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.token_dispatcher import (
+        AllToAllTokenDispatcher,
+        LocalTokenDispatcher,
+    )
+
+    LocalTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        LocalTokenDispatcher.dispatch
+    )
+    LocalTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        LocalTokenDispatcher.combine
+    )
+    AllToAllTokenDispatcher.dispatch = annotate_fn({"EP": "dispatch"})(
+        AllToAllTokenDispatcher.dispatch
+    )
+    AllToAllTokenDispatcher.combine = annotate_fn({"EP": "combine"})(
+        AllToAllTokenDispatcher.combine
+    )
+    AllToAllTokenDispatcher._token_count_exchange = annotate_fn(
+        {_EP_TOKEN_COUNT_EXCHANGE: "dispatch"}
+    )(AllToAllTokenDispatcher._token_count_exchange)
+    AllToAllTokenDispatcher._sync_token_count_exchange = annotate_fn(
+        {_EP_TOKEN_COUNT_SYNC: "dispatch"}
+    )(AllToAllTokenDispatcher._sync_token_count_exchange)
+    AllToAllTokenDispatcher._dispatch_token_exchange = annotate_fn(
+        {_EP_TOKEN_EXCHANGE: "dispatch"}
+    )(AllToAllTokenDispatcher._dispatch_token_exchange)
+    AllToAllTokenDispatcher._combine_token_exchange = annotate_fn(
+        {_EP_TOKEN_EXCHANGE: "combine"}
+    )(AllToAllTokenDispatcher._combine_token_exchange)
+    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
+    _MOE_EP_REGIONS_ANNOTATED = True
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -126,16 +376,42 @@ def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
 
 def get_default_transformer_block_buckets(
     n_layers: int,
+    *,
+    chunked_loss_enabled: bool = False,
+    moe_layer_ids: frozenset[int] = frozenset(),
+    split_moe_expert_buckets: bool = False,
 ) -> list[list[str] | str]:
     """Get default transformer block buckets for manual bucketing passes.
 
     Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
     norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
     """
+    layer_buckets: list[list[str] | str] = []
+    for layer_id in range(n_layers):
+        if layer_id in moe_layer_ids and split_moe_expert_buckets:
+            layer_buckets.extend(
+                [
+                    [
+                        f"layers.{layer_id}.attention_norm",
+                        f"layers.{layer_id}.attention",
+                        f"layers.{layer_id}.ffn_norm",
+                        f"layers.{layer_id}.moe.router",
+                        f"layers.{layer_id}.moe.shared_experts",
+                    ],
+                    f"layers.{layer_id}.moe.routed_experts.inner_experts",
+                ]
+            )
+        else:
+            layer_buckets.append(f"layers.{layer_id}")
+    final_bucket = ["norm", "lm_head"]
+    if chunked_loss_enabled:
+        # Chunked loss moves the lm_head weight use under module_fqn "loss".
+        final_bucket.append("loss")
+
     return [
         "tok_embeddings",
-        *[f"layers.{i}" for i in range(n_layers)],
-        ["norm", "lm_head"],
+        *layer_buckets,
+        final_bucket,
     ]
 
 
@@ -170,19 +446,6 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def apply_cp_to_attention(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-) -> None:
-    """Wrap each layer's inner attention with CP logic."""
-    attention_modules = [
-        # pyrefly: ignore [missing-attribute]
-        block.attention.inner_attention
-        for block in model.layers.values()
-    ]
-    apply_cp_to_forward(attention_modules, parallel_dims.get_mesh("cp"))
-
-
 def apply_simple_fsdp(
     model: nn.Module,
     *,
@@ -191,8 +454,9 @@ def apply_simple_fsdp(
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    For MoE-enabled models, ``moe.experts`` submodules are separately wrapped
-    on the EDP mesh when expert parallelism is enabled.
+    For MoE-enabled models, the ``moe.routed_experts.inner_experts`` submodules
+    (the routed-expert weights) are separately wrapped on the EDP mesh when expert
+    parallelism is enabled.
     """
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
@@ -211,7 +475,7 @@ def apply_simple_fsdp(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    if parallel_dims.ep_enabled and hasattr(model, "layers"):
+    if parallel_dims.ep_enabled and isinstance(model, Decoder):
         edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
@@ -221,18 +485,18 @@ def apply_simple_fsdp(
         assert edp_mesh is not None
 
         for _, transformer_block in model.layers.items():
-            if not getattr(transformer_block, "moe_enabled", False):
+            if not isinstance(transformer_block, TransformerBlock):
                 continue
-            assert hasattr(transformer_block, "moe")
+            moe = getattr(transformer_block, "moe", None)
+            if moe is None:
+                continue
+            inner_experts = moe.routed_experts.inner_experts
             experts_shard_dim = 0
-            if (
-                edp_mesh["efsdp"].size() * parallel_dims.ep
-                > transformer_block.moe.experts.num_experts
-            ):
+            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
-            transformer_block.moe.experts = data_parallel(
-                transformer_block.moe.experts,
+            moe.routed_experts.inner_experts = data_parallel(
+                inner_experts,
                 edp_mesh,
                 dp_mode,
                 mp_policy=mp_policy,

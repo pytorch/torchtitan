@@ -6,8 +6,10 @@ MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiler.enable_memory_s
 ```
 * `--profiler.enable_memory_snapshot`: to enable memory profiling
 * `--profiler.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
+* `--profiler.memory_snapshot_freq`: controls how often regular memory snapshots are taken. When unset, it defaults to `--profiler.profile_freq` for backward compatibility.
 	+ In case of OOMs, the snapshots will be in `./outputs/memory_snapshot/iteration_x_exit`.
-	+ Regular snapshots (taken every `profiler.profile_freq` iterations) will be in `memory_snapshot/iteration_x`.
+	+ Regular snapshots will be in `memory_snapshot/iteration_x`.
+	+ For example, set `--profiler.memory_snapshot_freq 3` to take a snapshot every three iterations independently of trace profiling.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
@@ -56,15 +58,9 @@ python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel -
 
 This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
 
-## Communication Mode (COMM_MODE) for Debugging
+## Fake Backend Debugging
 
-The `COMM_MODE` environment variable provides specialized debugging modes that allow you to test and validate your training setup without requiring full multi-GPU distributed execution. This is particularly useful for rapid iteration during development and debugging.
-
-### Available Modes
-
-#### 1. `fake_backend` - Configuration Validation Mode
-
-This mode enables dry-run validation of your configuration, model setup, and rank-0 program logic without actual distributed communication:
+Set `COMM_MODE="fake_backend"` to validate your configuration, model setup, and rank-0 program logic without requiring full multi-GPU distributed execution:
 
 ```bash
 NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
@@ -86,38 +82,9 @@ NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
 NGPU=128 COMM_MODE="fake_backend" MODULE=llama3 CONFIG=llama3_70b ./run_train.sh
 ```
 
-#### 2. `local_tensor` - Single-GPU Distributed Simulation
-
-This mode simulates the full distributed training workflow on a single GPU by executing all communication and computation locally:
-
-```bash
-NGPU=32 COMM_MODE="local_tensor" ./run_train.sh
-```
-
-**What it does:**
-- Simulates multi-GPU behavior on a single shared GPU
-- Executes all collectives (all-reduce, all-gather, etc.) locally without network communication
-- Maintains the same code paths as distributed training for accurate debugging
-- Runs only one training step by default
-
-**When to use it:**
-- Debugging distributed training logic (FSDP, TP, PP, CP, EP) with data dependencies without multi-GPU setup. Note that local tensor doesn't support FSDP2 but should support SimpleFSDP.
-- Verifying correctness of parallelism strategies locally
-- Testing gradient synchronization and communication patterns
-- Reproducing distributed training bugs in a simplified environment
-
-**Example use case:**
-```bash
-# Debug 8-way TP + 2-way FSDP on a single GPU
-NGPU=16 COMM_MODE="local_tensor" ./run_train.sh \
-  --parallelism.tensor_parallel_degree 8 \
-  --parallelism.data_parallel_shard_degree 2
-```
-
 ### Limitations
 
-- **Performance testing**: Neither mode provides accurate performance metrics; use actual distributed runs for benchmarking
-- **Memory requirement**: Local tensor runs require more memory on a single GPU than the actual distributed runs
+- **Performance testing**: Fake backend mode does not provide accurate performance metrics; use actual distributed runs for benchmarking
 
 ## Troubleshooting jobs that timeout
 

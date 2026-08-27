@@ -6,8 +6,12 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
-from torchtitan.config import Configurable
+import torch
+
+from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
 
@@ -16,7 +20,8 @@ class ModelConfigConverter(Configurable):
     """Base class for converters that transform the model config tree.
 
     Subclasses implement ``convert()`` to modify configs before model build
-    (e.g. quantization, LoRA).
+    (e.g. quantization, LoRA).  Converters may return a replacement root
+    config when the transform needs to wrap the model config itself.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -24,7 +29,7 @@ class ModelConfigConverter(Configurable):
         pass
 
     @abstractmethod
-    def convert(self, model_config) -> None:
+    def convert(self, model_config: Module.Config) -> Module.Config:
         raise NotImplementedError
 
 
@@ -49,6 +54,30 @@ class BaseModel(Module):
         buffer_device = kwargs.get("buffer_device")
         self.init_states(buffer_device=buffer_device)
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Prepare the forward inputs from a dataloader batch.
+
+        Models driven by the standard trainer/validator forward path implement
+        this to build any attention masks, apply context-parallel sharding and
+        SPMD annotation as needed, and split ``input``/``labels`` out of the
+        batch. ``input_dict`` is the batch with ``labels`` folded in; return
+        ``(inputs, labels, extra_kwargs)``.
+
+        The trainer calls this via ``cast(BaseModel, model).preprocess_inputs``,
+        so the declaration lives here for typing. There is no meaningful default:
+        models with a bespoke pipeline (e.g. Flux) never call it, and every model
+        that does must override it -- hence the ``NotImplementedError`` below.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement preprocess_inputs()."
+        )
+
     def verify_module_protocol(self) -> None:
         """Verify all submodules satisfy the ``Module`` protocol.
 
@@ -66,8 +95,7 @@ class BaseModel(Module):
         if failures:
             details = ", ".join(f"'{fqn}' ({cls})" for fqn, cls in failures)
             raise RuntimeError(
-                f"The following modules do not satisfy the Module protocol: "
-                f"{details}"
+                f"The following modules do not satisfy the Module protocol: {details}"
             )
 
     @dataclass(kw_only=True, slots=True)
@@ -83,7 +111,7 @@ class BaseModel(Module):
         def update_from_config(
             self,
             *,
-            trainer_config,
+            config,
             **kwargs,
         ) -> None:
             pass

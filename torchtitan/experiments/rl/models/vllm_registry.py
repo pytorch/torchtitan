@@ -13,11 +13,11 @@ subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
 
 Usage:
     from torchtitan.experiments.rl.models.vllm_registry import (
-        registry_to_vllm,
+        register_to_vllm,
         TORCHTITAN_CONFIG_FORMAT,
     )
 
-    registry_to_vllm(
+    register_to_vllm(
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
@@ -27,9 +27,11 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
-from torchtitan.config import CompileConfig, ParallelismConfig
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
 
@@ -39,6 +41,74 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 # Identifier passed to ``EngineArgs(config_format=...)`` to select the
 # torchtitan ConfigParser registered below.
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
+
+# Selects the experiment-owned runner that pads tokens for dense and expert SP.
+TORCHTITAN_WORKER_CLS = (
+    "torchtitan.experiments.rl.models.vllm_worker.TorchTitanGPUWorker"
+)
+
+
+@dataclass(kw_only=True, slots=True)
+class InferenceParallelismConfig:
+    """Parallelism for vLLM inference — a focused subset of the training
+    :class:`~torchtitan.config.ParallelismConfig`.
+
+    Not specific to RL: any vLLM-based inference path (the RL generator or
+    standalone inference) uses it. Inference replicates parameters across pure
+    data-parallel groups (the vLLM wrapper skips FSDP/DDP), so
+    ``data_parallel_degree`` is vLLM's pure DP size, not the trainer's
+    ``data_parallel_shard_degree`` (FSDP). The vLLM wrapper translates this to
+    the training ``ParallelismConfig`` via :meth:`to_training`
+    before building ``ParallelDims``; other utils (e.g. world-size calc) call it
+    too.
+    """
+
+    data_parallel_degree: int = 1
+    """vLLM pure data-parallel degree; parameters are replicated across these
+    groups. 1 means disabled."""
+
+    tensor_parallel_degree: int = 1
+    """Tensor parallelism degree. 1 means disabled."""
+
+    expert_parallel_degree: int = 1
+    """Expert parallelism degree for MoE layers. 1 means disabled."""
+
+    enable_sequence_parallel: bool = False
+    """Enable dense sequence parallelism across the tensor-parallel axis."""
+
+    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
+    """SPMD backend used by TorchTitan model parallelization in the generator."""
+
+    @property
+    def expert_sequence_parallel_size(self) -> int:
+        """TP-axis shard count used internally by expert-parallel MoE."""
+        if self.expert_parallel_degree <= 1:
+            return 1
+        return self.tensor_parallel_degree
+
+    def to_training(self) -> ParallelismConfig:
+        """Translate to the training ``ParallelismConfig`` for utils that need
+        the full shape (``ParallelDims``, ``parallelize_fn``, world-size calc).
+
+        Pins the inference-only invariants: no DP replication, no CP/PP, and
+        loss parallel disabled.
+        """
+        return ParallelismConfig(
+            # Carry the vLLM DP factor on dp_shard (not dp_replicate) so the
+            # translated config passes ParallelDims' checks for MoE:
+            # EP to divide the dp_shard * cp * tp region (efsdp = dp_shard*cp*tp
+            # // ep).
+            # TODO: In core torchtitan, allow dp_replicate being converted
+            # to EP degree in the future
+            data_parallel_shard_degree=self.data_parallel_degree,
+            tensor_parallel_degree=self.tensor_parallel_degree,
+            expert_parallel_degree=self.expert_parallel_degree,
+            data_parallel_replicate_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+            enable_sequence_parallel=self.enable_sequence_parallel,
+            spmd_backend=self.spmd_backend,
+        )
 
 
 def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
@@ -61,22 +131,9 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     cfg = spec.model
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
-    # Some models mix dense and MoE layers (e.g. deepseek_v3 has dense
-    # first layers, MoE later); scan the layer list for a representative
-    # of each component rather than relying on layer 0.
-    attn = cfg.layers[0].attention
-    ffn = next(
-        (
-            ff
-            for layer in cfg.layers
-            if (ff := getattr(layer, "feed_forward", None)) is not None
-        ),
-        None,
-    )
-    moe = next(
-        (m for layer in cfg.layers if (m := getattr(layer, "moe", None)) is not None),
-        None,
-    )
+    attn = cfg.first_attention
+    ffn = cfg.first_feed_forward
+    moe = cfg.first_moe
 
     n_heads = attn.n_heads
     n_kv_heads = attn.n_kv_heads or n_heads
@@ -90,14 +147,14 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         "num_attention_heads": n_heads,  # TP divisibility + FA3 num_heads_q
         "num_key_value_heads": n_kv_heads,  # DCP divisibility + FA3 num_heads_kv
         "head_dim": head_dim,  # FA3 scheduler headdim
-        "max_position_embeddings": cfg.rope.max_seq_len,  # caps max_model_len
+        "max_position_embeddings": attn.rope.max_context_length,  # caps max_model_len
         # Presence required
         "model_type": "torchtitan",  # any non-empty string
         "num_hidden_layers": len(
             cfg.layers
         ),  # positive int; only PP/KV-transfer read magnitude
         # Unused
-        "rope_theta": cfg.rope.theta,  # only used for non-default rope_type; wrapper builds RoPE
+        "rope_theta": attn.rope.theta,  # only used for non-default rope_type; wrapper builds RoPE
         "rms_norm_eps": cfg.norm.eps,  # only minimax-qk-norm fusion reads it; wrapper builds RMSNorm
         "tie_word_embeddings": getattr(
             cfg, "enable_weight_tying", False
@@ -112,23 +169,94 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
 
     if moe is not None:
         # Presence required: >0 toggles MoE/EP branches.
-        hf["num_experts"] = moe.experts.num_experts
+        hf["num_experts"] = moe.routed_experts.inner_experts.num_experts
         # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
-        hf[
-            "num_experts_per_tok"
-        ] = moe.router.top_k  # top_k is on the router, not experts
-        hf["moe_intermediate_size"] = moe.experts.hidden_dim
+        hf["num_experts_per_tok"] = moe.router.top_k
+        hf["moe_intermediate_size"] = moe.routed_experts.inner_experts.hidden_dim
         hf["decoder_sparse_step"] = 1
         hf.setdefault("norm_topk_prob", True)
 
     return hf
 
 
-def registry_to_vllm(
+def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains GDN layers.
+
+    vLLM exposes one model-level recurrent-state shape. GDN layers may differ
+    otherwise, but every field that determines that state shape must match.
+    """
+    gdn_configs = [
+        layer.delta_net
+        for layer in model_spec.model.layers
+        if getattr(layer, "delta_net", None) is not None
+    ]
+    if not gdn_configs:
+        return
+
+    state_shapes = {
+        (
+            gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
+            gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
+            gdn_config.key_head_dim,
+            gdn_config.value_head_dim,
+            gdn_config.conv_kernel_size,
+        )
+        for gdn_config in gdn_configs
+    }
+    if len(state_shapes) != 1:
+        raise ValueError(
+            f"All GDN layers must use the same state shape, got {state_shapes}"
+        )
+    (state_shape,) = state_shapes
+
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFuncCalculator,
+        MambaStateDtypeCalculator,
+        MambaStateShapeCalculator,
+    )
+
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size = state_shape
+
+    def get_state_shape(cls, vllm_config):
+        speculative_config = vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            num_speculative_tokens,
+        )
+
+    def get_state_dtype(cls, vllm_config):
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    def get_state_copy_func(cls):
+        # Align-mode prefix caching copies both the convolution and SSM state at
+        # block boundaries, matching vLLM's native GDN models.
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
+    model_cls.is_hybrid = True
+    model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
+    model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
+    model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
+
+
+def register_to_vllm(
     model_spec: ModelSpec,
     *,
-    parallelism: ParallelismConfig,
+    parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig,
+    checkpoint_config: CheckpointManager.Config,
+    override: OverrideConfig,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -138,25 +266,33 @@ def registry_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_spec``/``parallelism``/``compile_config`` and forwards them
-         when vLLM constructs the model.
+         ``model_spec``/``parallelism``/``compile_config``/``checkpoint_config``
+         and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_spec``.
 
-    Per-engine torchtitan config (parallelism, compile) is delivered to the
-    wrapper via closure rather than via vLLM's ``hf_overrides`` channel. This
-    keeps the parser scope strictly HF-shaped and isolates vLLM-specific
-    plumbing from torchtitan-specific config.
+    Per-engine torchtitan config (parallelism, compile, checkpoint) is
+    delivered to the wrapper via closure rather than via vLLM's
+    ``hf_overrides`` channel. This keeps the parser scope strictly HF-shaped
+    and isolates vLLM-specific plumbing from torchtitan-specific config.
 
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components.
-        parallelism: Authoritative parallelism configuration. The wrapper
-            uses this directly to build ``ParallelDims``; the caller is
-            responsible for translating the relevant fields (TP, EP) to
-            ``EngineArgs`` so vLLM's own world layout matches.
+        parallelism: Inference parallelism configuration. The wrapper
+            translates it to a full ``ParallelismConfig`` to build
+            ``ParallelDims``; the caller is responsible for translating the
+            relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
+            layout matches.
         compile_config: torch.compile config applied per-layer by the
             wrapper's parallelize step.
+        checkpoint_config: CheckpointManager config controlling initial
+            weight loading. Set ``enable=True`` with ``initial_load_in_hf``
+            and ``initial_load_path`` for standalone inference. Set
+            ``enable=False`` to skip loading (RL loop, weights from TorchStore).
+        override: Config overrides applied to the generator's model spec after
+            ``update_from_config`` and before build (empty ``OverrideConfig`` for
+            no overrides).
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
@@ -179,12 +315,18 @@ def registry_to_vllm(
                 model_spec=model_spec,
                 parallelism=parallelism,
                 compile_config=compile_config,
+                checkpoint_config=checkpoint_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
+                override=override,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
     VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
+    # vLLM needs a model-level state contract to allocate shared attention/GDN
+    # cache pages before individual layers are constructed.
+    _configure_gdn_hybrid_model(VLLMModelFromSpec, model_spec)
+
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing ModelSpec in the closure. This

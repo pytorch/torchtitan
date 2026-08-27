@@ -6,19 +6,31 @@
 
 # imported from black-forest-labs/FLUX
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 from einops import rearrange
 from torch import nn, Tensor
+
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rmsnorm import RMSNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
 from torchtitan.protocols.module import Module, Sequential
 
-LayerNorm = Module.from_nn_module(nn.LayerNorm)
-GELU = Module.from_nn_module(nn.GELU)
-SiLU = Module.from_nn_module(nn.SiLU)
+
+@spmd.local_map(
+    in_types=(spmd.PartitionSpec("dp", "cp", None), None),
+    out_types=(
+        spmd.PartitionSpec("dp", "cp", None),
+        spmd.PartitionSpec("dp", "cp", None),
+    ),
+)
+def local_split_text_image(
+    combined: torch.Tensor,
+    text_seq_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return combined[:, :text_seq_len], combined[:, text_seq_len:]
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -106,7 +118,7 @@ class MLPEmbedder(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.in_layer = config.in_layer.build()
-        self.silu = SiLU()
+        self.silu = SiLU.Config().build()
         self.out_layer = config.out_layer.build()
 
     def forward(self, x: Tensor) -> Tensor:
@@ -138,6 +150,9 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
+        inner_attention: ScaledDotProductAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -145,7 +160,7 @@ class SelfAttention(Module):
         self.qkv = config.qkv.build()
         self.norm = config.norm.build()
         self.proj = config.proj.build()
-        self.inner_attention = ScaledDotProductAttention.Config().build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(self, x: Tensor, pe: Tensor) -> Tensor:
         qkv = self.qkv(x)
@@ -203,49 +218,66 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
+        inner_attention: ScaledDotProductAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
 
         self.num_heads = config.num_heads
         self.hidden_size = config.hidden_size
-        self.img_mod = config.img_mod.build()
-        self.img_norm1 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
+        ln_cfg = LayerNorm.Config(
+            normalized_shape=config.hidden_size,
+            elementwise_affine=False,
+            eps=1e-6,
         )
+        gelu_cfg = GELU.Config(approximate="tanh")
+
+        self.img_mod = config.img_mod.build()
+        self.img_norm1 = ln_cfg.build()
         self.img_attn = config.img_attn.build()
 
-        self.img_norm2 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.img_norm2 = ln_cfg.build()
         self.img_mlp = Sequential(
             config.img_mlp_in.build(),
-            GELU(approximate="tanh"),
+            gelu_cfg.build(),
             config.img_mlp_out.build(),
         )
 
         self.txt_mod = config.txt_mod.build()
-        self.txt_norm1 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.txt_norm1 = ln_cfg.build()
         self.txt_attn = config.txt_attn.build()
 
-        self.txt_norm2 = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.txt_norm2 = ln_cfg.build()
         self.txt_mlp = Sequential(
             config.txt_mlp_in.build(),
-            GELU(approximate="tanh"),
+            gelu_cfg.build(),
             config.txt_mlp_out.build(),
         )
 
-        self.inner_attention = ScaledDotProductAttention.Config().build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor
     ) -> tuple[Tensor, Tensor]:
+        @spmd.local_map(
+            in_types=(
+                spmd.PartitionSpec("dp", "cp", None, None),
+                spmd.PartitionSpec("dp", "cp", None, None),
+            ),
+            out_types=spmd.PartitionSpec("dp", "cp", None, None),
+        )
+        def _local_concat_text_image_attention_states(
+            text: torch.Tensor,
+            image: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.cat((text, image), dim=1)
+
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
+        assert txt_mod2 is not None
+        assert img_mod2 is not None
 
         # prepare image for attention
         img_modulated = self.img_norm1(img)
@@ -266,15 +298,15 @@ class DoubleStreamBlock(Module):
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
-        q = torch.cat((txt_q, img_q), dim=1)
-        k = torch.cat((txt_k, img_k), dim=1)
-        v = torch.cat((txt_v, img_v), dim=1)
+        q = _local_concat_text_image_attention_states(txt_q, img_q)
+        k = _local_concat_text_image_attention_states(txt_k, img_k)
+        v = _local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v)
+        attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
-        txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
+        txt_attn, img_attn = local_split_text_image(attn, txt.shape[1])
 
         # calculate the img blocks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
@@ -306,6 +338,9 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
+        inner_attention: ScaledDotProductAttention.Config = field(
+            default_factory=ScaledDotProductAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -323,13 +358,15 @@ class SingleStreamBlock(Module):
         self.norm = config.norm.build()
 
         self.hidden_size = config.hidden_size
-        self.pre_norm = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.pre_norm = LayerNorm.Config(
+            normalized_shape=config.hidden_size,
+            elementwise_affine=False,
+            eps=1e-6,
+        ).build()
 
-        self.mlp_act = GELU(approximate="tanh")
+        self.mlp_act = GELU.Config(approximate="tanh").build()
         self.modulation = config.modulation.build()
-        self.inner_attention = ScaledDotProductAttention.Config().build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
@@ -343,7 +380,7 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v)
+        attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer
@@ -362,12 +399,14 @@ class LastLayer(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.norm_final = LayerNorm(
-            config.hidden_size, elementwise_affine=False, eps=1e-6
-        )
+        self.norm_final = LayerNorm.Config(
+            normalized_shape=config.hidden_size,
+            elementwise_affine=False,
+            eps=1e-6,
+        ).build()
         self.linear = config.linear.build()
         self.adaLN_modulation = Sequential(
-            SiLU(),
+            SiLU.Config().build(),
             config.adaln_linear.build(),
         )
 

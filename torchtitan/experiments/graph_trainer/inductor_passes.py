@@ -4,19 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Inductor compilation passes for graph_trainer.
+"""Inductor compilation passes for GraphTrainer.
 
-Regional and full Inductor compilation, plus FlexAttention annotation for
-regional_inductor.
+``regional_inductor_pass`` compiles only explicitly tagged regions. The
+``full_inductor_compilation_pass`` convenience wrapper tags the whole graph and uses that same regional pipeline.
+``standalone_inductor_compilation_pass`` bypasses region discovery which saves compilation time and
+invokes ``standalone_compile`` once without additional overhead.
 """
 
 from __future__ import annotations
 
 import torch
-from torch._inductor.compile_fx import compile_fx_inner
-from torch.fx.passes.regional_inductor import regional_inductor
+from torch.fx.passes.regional_inductor import _dummy_wrapper, regional_inductor
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    set_graph_module_boxed_codegen,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -36,6 +39,7 @@ def _ops_filter_with_distributed(name: str) -> bool:
             "torch.ops._c10d_functional",
             "torch.ops._dtensor",
             "torch.ops.device_mesh",
+            "torch.ops.bucketing",
         )
     )
 
@@ -53,8 +57,122 @@ def _node_metadata_key_filter_distributed(key: str) -> bool:
     return key not in ["source_fn_stack", "nn_module_stack", "fwd_source_fn_stack"]
 
 
+def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    for node in gm.graph.nodes:
+        if node.op == "placeholder" and "val" in node.meta:
+            val = node.meta["val"]
+            if isinstance(val, FakeTensor):
+                return val.fake_mode
+    return None
+
+
+def _wrap_compiled_artifact_as_graph_module(
+    root: torch.fx.GraphModule,
+    compiled_fn,
+    used_placeholder_indices: list[int],
+) -> torch.fx.GraphModule:
+    graph = torch.fx.Graph()
+    placeholders = []
+    output_meta = None
+    for node in root.graph.nodes:
+        if node.op == "placeholder":
+            placeholders.append(graph.node_copy(node))
+        elif node.op == "output":
+            output_meta = node.meta.copy()
+
+    call_args = tuple(placeholders[i] for i in used_placeholder_indices)
+    call = graph.call_function(_dummy_wrapper(compiled_fn), args=call_args)
+    if output_meta:
+        call.meta = output_meta
+    graph.output(call)
+    graph.lint()
+
+    wrapped = torch.fx.GraphModule(root, graph)
+    wrapped.meta.update(root.meta)
+    return wrapped
+
+
+def _copy_graph_with_used_placeholders(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> tuple[torch.fx.GraphModule, tuple, list[int]]:
+    original_placeholders = list(gm.graph.find_nodes(op="placeholder"))
+    used_placeholder_indices = [
+        i for i, node in enumerate(original_placeholders) if len(node.users) > 0
+    ]
+    used_placeholders = set(original_placeholders[i] for i in used_placeholder_indices)
+
+    graph = torch.fx.Graph()
+    env = {}
+    for node in gm.graph.nodes:
+        if node.op == "placeholder":
+            if node not in used_placeholders:
+                continue
+            env[node] = graph.node_copy(node)
+        else:
+            env[node] = graph.node_copy(node, lambda n: env[n])
+    graph.lint()
+
+    copied_gm = torch.fx.GraphModule(gm, graph)
+    copied_gm.meta.update(gm.meta)
+    used_example_inputs = tuple(example_inputs[i] for i in used_placeholder_indices)
+    return copied_gm, used_example_inputs, used_placeholder_indices
+
+
+def standalone_inductor_compilation_pass(
+    gm: torch.fx.GraphModule, example_inputs: tuple, *, inductor_configs=None
+) -> torch.fx.GraphModule:
+    """Compile the whole graph with one direct Inductor invocation.
+
+    Use it when you want full inductor compilation and minimal compilation time,
+    identical to torch.compile on full model without any additional compile time overhead.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs corresponding to the graph placeholders.
+        inductor_configs: Optional Inductor config overrides.
+    """
+    import torch._inductor.config as ic
+
+    fake_mode = _get_fake_mode_from_gm(gm)
+    tracing_ctx = torch._guards.TracingContext(fake_mode)
+    full_inductor_configs = {
+        "reorder_for_peak_memory": True,
+        **dict(inductor_configs or {}),
+    }
+
+    (
+        compile_gm,
+        compile_inputs,
+        used_placeholder_indices,
+    ) = _copy_graph_with_used_placeholders(gm, example_inputs)
+
+    with (
+        torch._guards.tracing(tracing_ctx),
+        ic.patch(full_inductor_configs),
+        torch.no_grad(),
+    ):
+        compiled_fn = torch._inductor.standalone_compile(
+            compile_gm,
+            compile_inputs,
+            dynamic_shapes="from_tracing_context",
+            aot=True,
+            donate_graph_module=False,
+        )
+
+    return _wrap_compiled_artifact_as_graph_module(
+        gm, compiled_fn, used_placeholder_indices
+    )
+
+
 def regional_inductor_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple, *, serializable: bool = False
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    serializable: bool = False,
+    boxed_codegen: bool = False,
 ) -> torch.fx.GraphModule:
     """Compile tagged graph regions with ``regional_inductor``.
 
@@ -73,18 +191,18 @@ def regional_inductor_pass(
             ``force_autograd_cache`` so that ``regional_inductor`` wraps
             its output in ``RegionalOutputCode``, and overrides the ops
             filter to allow distributed collective ops.
+        boxed_codegen: When True, compile the returned FX graph with boxed
+            calling convention so its mutable runtime arg list is cleared after
+            placeholder extraction.
     """
     import torch._inductor.config as ic
-    from torch._subclasses.fake_tensor import FakeTensor
 
-    def _get_fake_mode_from_gm(gm: torch.fx.GraphModule):
-        """Extract the FakeTensorMode from a graph module's placeholder metadata."""
-        for node in gm.graph.nodes:
-            if node.op == "placeholder" and "val" in node.meta:
-                val = node.meta["val"]
-                if isinstance(val, FakeTensor):
-                    return val.fake_mode
-        return None
+    if serializable and boxed_codegen:
+        raise ValueError(
+            "regional_inductor_pass cannot use boxed_codegen with "
+            "serializable=True because precompile returns RegionalOutputCode, "
+            "not a normal FX GraphModule callable."
+        )
 
     # Ensure inductor produces bitwise-equal numerics vs eager.
     ic.eager_numerics.division_rounding = True
@@ -127,11 +245,7 @@ def regional_inductor_pass(
     with torch._guards.tracing(tracing_ctx):
         gm = regional_inductor(gm, example_inputs)
 
-    # regional_inductor may switch to boxed calling convention; reset to
-    # default so the graph can be called with positional args as usual.
-    gm.graph.set_codegen(torch.fx.graph.CodeGen())
-    gm.recompile()
-    return gm
+    return set_graph_module_boxed_codegen(gm, boxed=boxed_codegen)
 
 
 def annotate_flex_attention_for_regional_inductor_pass(
@@ -199,56 +313,98 @@ def annotate_flex_attention_for_regional_inductor_pass(
     return gm
 
 
-def full_inductor_compilation_pass(
-    gm: torch.fx.GraphModule, example_inputs: tuple
-) -> torch.fx.GraphModule:
-    """Apply full Inductor compilation with code generation.
+def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
+    """Move CPU constant tensor get_attrs to CUDA so cudagraph capture works."""
+    from torch.fx.graph_module import _assign_attr, _get_attr
 
-    Applies inductor decompositions (e.g. ``aten.t`` → ``aten.permute``),
-    then compiles the graph into optimized Triton/C++ kernels via
-    ``compile_fx_inner`` and replaces the GraphModule's ``forward``
-    with the compiled callable.
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.find_nodes(op="get_attr"):
+            attr = _get_attr(module, node.target)
+            if isinstance(attr, torch.Tensor) and attr.device.type == "cpu":
+                _assign_attr(attr.cuda(), module, node.target)
+
+
+def full_inductor_compilation_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+    *,
+    boxed_codegen: bool = False,
+    inductor_configs=None,
+) -> torch.fx.GraphModule:
+    """Compile the whole graph as one ``regional_inductor`` region.
+
+    Marks every non-placeholder/output node with the ``compile_with_inductor``
+    custom metadata key so ``regional_inductor`` scoops the entire graph as
+    one compiled region. This reuses the regional path (which goes through
+    ``standalone_compile`` and gets c10d functionalization, PG unboxing,
+    decompositions, and caching for free) instead of duplicating that prep
+    around a direct ``compile_fx_inner`` call.
+
+    The collapse hides cudagraph-incompatible ops (unpinned D2H copies,
+    sm<10 ``_grouped_mm``) inside the opaque ``standalone_compile_inner``
+    node, so the later :func:`is_cudagraph_compatible` scan can't see
+    them. Snapshot the verdict on the pre-collapse gm and stash it on
+    the result so the downstream scan can honor it.
 
     Must be the **terminal** pass — no FX-graph-level passes (e.g.
     ``custom_codegen_pass``, ``insert_kernel_annotations_pass``) can
     run after this because the FX graph is no longer authoritative.
+
+    Args:
+        gm: The graph module to compile.
+        example_inputs: Example inputs for shape propagation.
+        boxed_codegen: When True, the returned FX graph uses boxed calling
+            convention and clears its mutable runtime arg list.
+        inductor_configs: Optional Inductor config overrides for the full
+            compiled region.
     """
+    import torch._inductor.config as ic
 
-    def _apply_decompositions(
-        gm: torch.fx.GraphModule, example_inputs: tuple
-    ) -> torch.fx.GraphModule:
-        """Retrace with ``select_decomp_table()`` so that ops like ``aten.t``
-        are decomposed before ``compile_fx_inner``."""
-        from torch._inductor.decomposition import select_decomp_table
-        from torch._subclasses.fake_tensor import FakeTensor
-        from torch.fx.experimental.proxy_tensor import make_fx
+    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
 
-        decomp_table = select_decomp_table()
+    pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
+        gm, skip_flex_attention_check=True
+    )
 
-        fake_mode = None
-        for inp in example_inputs:
-            if isinstance(inp, FakeTensor):
-                fake_mode = inp.fake_mode
-                break
+    full_inductor_configs = {
+        # Preserve the mainline full-compile behavior: AOT autograd via
+        # standalone_compile reorders fwd/bwd unless Inductor restores the
+        # peak-memory schedule.
+        "reorder_for_peak_memory": True,
+        **dict(inductor_configs or {}),
+    }
+    _migrate_cpu_get_attrs_to_cuda(gm)
+    for module in gm.modules():
+        if not isinstance(module, torch.fx.GraphModule):
+            continue
+        for node in module.graph.nodes:
+            if node.op in ("placeholder", "output"):
+                continue
+            custom = node.meta.setdefault("custom", {})
+            compile_with_inductor = custom.setdefault(
+                "compile_with_inductor", {"inductor_configs": {}}
+            )
+            custom["compile_with_inductor"] = {
+                **compile_with_inductor,
+                "inductor_configs": {
+                    **compile_with_inductor.get("inductor_configs", {}),
+                    **full_inductor_configs,
+                },
+            }
+    # AOT autograd (via ``standalone_compile``) reorders the gm and breaks
+    # fwd/bwd interleaving, blowing up the baseline schedule. Re-enable
+    # Inductor's reorder pass (disabled globally in ``compile.py``) to fix.
+    with ic.patch(reorder_for_peak_memory=True):
+        result = regional_inductor_pass(
+            gm,
+            example_inputs,
+            boxed_codegen=boxed_codegen,
+        )
 
-        if fake_mode is not None:
-            with fake_mode:
-                gm = make_fx(
-                    gm,
-                    decomposition_table=decomp_table,
-                    _allow_non_fake_inputs=True,
-                )(*example_inputs)
-
-        return gm
-
-    gm = _apply_decompositions(gm, example_inputs)
-    output_code = compile_fx_inner(gm, example_inputs)
-
-    # compile_fx_inner returns OutputCode with boxed calling convention
-    # (single list arg). Adapt to positional args so the graph trainer's
-    # execution path (gm(*flat_inputs)) works unchanged.
-    def _compiled_forward(*args):
-        return output_code(list(args))
-
-    gm.forward = _compiled_forward
-    return gm
+    # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
+    # collapse is information-destroying; this is how downstream passes
+    # know whether the artifact contains hidden cudagraph-incompatible ops.
+    result.meta["cudagraph_compatible"] = pre_collapse_cudagraph_compatible
+    return result

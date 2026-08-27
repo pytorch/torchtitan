@@ -4,73 +4,77 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
+import torchtitan_recipes.tests.h100 as recipes
+from torchtitan.models.llama3.config_registry import llama3_debugmodel_float8
 
 from tests.integration_tests import OverrideDefinitions
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 def build_h100_tests_list() -> list[OverrideDefinitions]:
     """
-    key is the config file name and value is a list of OverrideDefinitions
-    that is used to generate variations of integration tests based on the
-    same root config file.
+    Build the list of integration tests that need H100-class hardware.
+
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.h100``.
     """
-    integration_tests_flavors = [
-        # TODO: re-enable this test once the async TP issue is fixed
+    return [
         OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
-                ],
-            ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
-            disabled=True,
+            configs=[recipes.llama3_debugmodel_tp2_asynctp_compile],
+            test_descr="2D async TP compile",
+            test_name="2d_asynctp_compile",
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_float8",
-                ],
-            ],
-            "Float8 test",
-            "float8",
+            configs=[llama3_debugmodel_float8],
+            test_descr="Float8 test",
+            test_name="float8",
         ),
-        # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_float8",
-                    "--compile.enable",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
-                ],
-            ],
-            "FSDP+async TP+PP+torch.compile+Float8",
-            "fsdp+tp+cp+compile+float8",
+            configs=[recipes.llama3_debugmodel_fsdp_symm_mem],
+            test_descr="FSDP symmetric memory",
+            test_name="fsdp_symm_mem",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile],
+            test_descr="FSDP+async TP+PP+torch.compile+Float8",
+            test_name="fsdp+tp+cp+compile+float8",
             ngpu=8,
-            disabled=True,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_float8",
-                    "--compile.enable",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.data_parallel_replicate_degree 2",
-                    "--parallelism.context_parallel_degree 2",
-                ]
-            ],
-            "HSDP+CP+torch.compile+Float8",
-            "hsdp+cp+compile+float8",
+            configs=[recipes.llama3_debugmodel_float8_hsdp2x2_cp2_compile],
+            test_descr="HSDP+CP+torch.compile+Float8",
+            test_name="hsdp+cp+compile+float8",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile],
+            test_descr="DeepSeek V3 FSDP+HybridEP+compile",
+            test_name="deepseek_v3_fsdp+hybridep+compile",
+            ngpu=4,
+            # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8],
+            test_descr="DeepSeek V3 FSDP+CP+TP+MinimalAsyncEP",
+            test_name="deepseek_v3_fsdp+cp+tp+minimal_async_ep",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_dist_gemm_tp2],
+            test_descr="Dist GEMM: fuse the TP collectives into the attention "
+            "and FFN projections (FSDP2 + TP2)",
+            test_name="dist_gemm",
+            ngpu=4,
+            # symmetric memory is CUDA-only.
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.qwen3_moe_deepep_fsdp4_ep4],
+            test_descr="Qwen3 FSDP+DeepEP",
+            test_name="qwen3_fsdp+deepep",
+            ngpu=4,
+            skip_rocm_test=True,
         ),
     ]
-    return integration_tests_flavors
