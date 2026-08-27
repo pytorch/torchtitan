@@ -116,13 +116,18 @@ uv pip install -r torchtitan/experiments/rl/requirements.txt
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 ```
 
-2. Install Flash Attention 3 kernels:
+2. Install the Flash Attention kernels for your GPU architecture:
 ```bash
-# Flash Attention v3 (recommended for H100/H200 and newer GPUs)
+# Hopper (H100/H200, SM90): Flash Attention 3
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
+
+# Blackwell (GB200/GB300, SM100): Flash Attention 4
+# Newer FA4 betas require apache-tvm-ffi>=0.1.12, but vLLM pins 0.1.11.
+uv pip install "flash-attn-4[cu13]==4.0.0b19"
 ```
 
-**NOTE:** FA2 is bundled with PyTorch and will be used automatically on older GPUs (e.g. A100) that don't support FA3.
+TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
+bundled with PyTorch on older GPUs such as A100.
 
 3. Install batch-invariant ops if you need to run batch-invariant mode (Triton kernels for bitwise-reproducible training):
 ```bash
