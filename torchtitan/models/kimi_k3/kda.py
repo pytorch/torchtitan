@@ -10,7 +10,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from attn_gym.linear.kda import bound_gate, causal_conv1d, chunk_kda, l2norm
+from attn_gym.linear.kda import bound_gate, chunk_kda
+from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
+from attn_gym.linear.kda.short_conv import causal_conv1d
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
@@ -151,6 +153,7 @@ class InnerKDA(Module):
             activation="silu",
             cu_seqlens=cu_seqlens,
         )
+        assert isinstance(conv_output_BTC, torch.Tensor)
 
         q_BTC, k_BTC, v_BTC = conv_output_BTC.chunk(3, dim=-1)
         q_BTNK, k_BTNK, v_BTNV = (
