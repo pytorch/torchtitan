@@ -80,7 +80,13 @@ def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
         a = a._local_tensor
     if isinstance(b, DTensor):
         b = b._local_tensor
-    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+    try:
+        return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+    except RuntimeError:
+        # Some tensor subclasses (e.g. torchao's MXFP8 grouped-expert weight
+        # wrapper) do not expose an untyped storage; fall back to object
+        # identity (same param object => same storage, so no copy needed).
+        return a is b
 
 
 class ModelWrapper(Stateful):
