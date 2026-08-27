@@ -132,6 +132,11 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     if not cfg.layers:
         raise ValueError(f"ModelSpec {spec.name!r} has no layers")
     attn = cfg.first_attention
+    if attn is None:
+        raise ValueError(
+            f"ModelSpec {spec.name!r} has no full-attention layer. vLLM's engine "
+            "requires full-attention metadata before the model is built."
+        )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
 
@@ -250,6 +255,63 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
     model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
 
 
+def _configure_kda_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains KDA layers."""
+    kda_configs = [
+        layer.delta_attention
+        for layer in model_spec.model.layers
+        if getattr(layer, "delta_attention", None) is not None
+    ]
+    if not kda_configs:
+        return
+
+    state_shapes = {
+        (
+            kda_config.num_heads,
+            kda_config.head_dim,
+            kda_config.conv_kernel_size,
+        )
+        for kda_config in kda_configs
+    }
+    if len(state_shapes) != 1:
+        raise ValueError(
+            f"All KDA layers must use the same state shape, got {state_shapes}"
+        )
+    (state_shape,) = state_shapes
+
+    from vllm.model_executor.layers.mamba.mamba_utils import (
+        MambaStateCopyFuncCalculator,
+        MambaStateDtypeCalculator,
+        MambaStateShapeCalculator,
+    )
+
+    num_heads, head_dim, conv_kernel_size = state_shape
+
+    model_cls.is_hybrid = True
+    model_cls.get_mamba_state_shape_from_config = classmethod(
+        lambda cls, vllm_config: MambaStateShapeCalculator.kda_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_heads,
+            head_dim,
+            conv_kernel_size=conv_kernel_size,
+            num_spec=(
+                vllm_config.speculative_config.num_speculative_tokens
+                if vllm_config.speculative_config
+                else 0
+            ),
+        )
+    )
+    model_cls.get_mamba_state_dtype_from_config = classmethod(
+        lambda cls, vllm_config: MambaStateDtypeCalculator.kda_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+        )
+    )
+    model_cls.get_mamba_state_copy_func = classmethod(
+        lambda cls: MambaStateCopyFuncCalculator.kda_state_copy_func()
+    )
+
+
 def register_to_vllm(
     model_spec: ModelSpec,
     *,
@@ -323,10 +385,10 @@ def register_to_vllm(
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
     VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
-    # vLLM needs a model-level state contract to allocate shared attention/GDN
+    # vLLM needs model-level state contracts to allocate shared recurrent-state
     # cache pages before individual layers are constructed.
     _configure_gdn_hybrid_model(VLLMModelFromSpec, model_spec)
-
+    _configure_kda_hybrid_model(VLLMModelFromSpec, model_spec)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing ModelSpec in the closure. This
