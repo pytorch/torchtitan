@@ -33,10 +33,13 @@ GPUs. Scheduled and post-merge runs execute the complete suite with Real PG.
 - 1 GPU Fake PG cadence: pull requests on open, update, reopen, or
   ready-for-review. Reusable workflow callers run Fake PG by default.
 - 8 GPU Real PG cadence: every pull request event above runs tests marked
-  `use_real_pg=True`. Pushes and merges to `main`, six-hour schedules, and
-  manual dispatches run the complete suite with Real PG. Reusable workflow
-  callers can explicitly request `execution_mode: real_pg`, as the ROCm
-  workflow does.
+  `use_real_pg=True` in separate `required subset - features` and
+  `required subset - models` jobs. Adding the `ciflow/8gpu` pull request label
+  creates a `ciflow/8gpu/*` tag and runs separate `full suite - features` and
+  `full suite - models` jobs with Real PG. Pushes and merges to `main`,
+  six-hour schedules, and manual dispatches also run both full-suite jobs with
+  Real PG. Reusable workflow callers can explicitly request
+  `execution_mode: real_pg`, as the ROCm workflow does.
 - 8 GPU H100 cadence: opt-in pull requests carrying the `ciflow/h100.8` label.
   The lane always uses Real PG; updates and reopened events rerun it while the
   label remains attached.
@@ -45,8 +48,8 @@ Feature tests provide depth of infrastructure composability. Fake-PG runs check
 that feature combinations configure, transform, and complete training, while
 Real-PG runs additionally cover real collectives and distributed state. Model
 tests provide width across supported implementations. Their definitions remain
-separate for clarity, but CI executes both suites in one workflow to share setup
-time.
+separate for clarity. Each 8 GPU Real-PG suite runs as its own CI job with an
+independent timeout; the model job also runs the FLUX integration tests.
 
 ### Numerics tests (Goal: deterministic regression coverage)
 
@@ -57,10 +60,10 @@ case through `loss_compare.py`. Fake-PG execution skips seed-checkpoint creation
 and uses its fixed initialization path.
 
 - A10G cases run on one physical GPU with Fake PG for pull requests and eight
-  physical A10Gs with Real PG after merge or on schedule. Their golden paths can
-  use `{execution_mode}` to select the `fake_pg/` or `real_pg/` directory.
-  Fake-PG numerical cases may select a separate FSDP-only or FSDP+EP config to
-  avoid treating sequence-parallel synthetic values as a numerical oracle.
+  physical A10Gs with Real PG after merge, on schedule, or when triggered by
+  the `ciflow/8gpu` label. Their golden paths can use `{execution_mode}` to
+  select the `fake_pg/` or `real_pg/` directory.
+  Shared numerical cases use the same configuration in both modes.
 - Fake-PG goldens guard PyTorch FakeProcessGroup's deterministic synthetic
   numerical contract. They do not validate remote-rank values or EP load
   balance.
@@ -71,16 +74,19 @@ and uses its fixed initialization path.
   representative.
 - Golden directories identify the PG mode, filenames identify the model and
   hardware tier, and the exact parallelism plan is recorded in the header.
+- Qwen3.5 MoE FSDP 4 x TP 2, EP 4 does not have a numerical golden. Its A10G
+  Real-PG results are not bitwise deterministic, so the case provides
+  end-to-end coverage only.
 
-| A10G model | Fake-PG topology | Real-PG topology |
-| --- | --- | --- |
-| Llama 3 | FSDP 2 x TP 2 x CP 2 | FSDP 2 x TP 2 x CP 2 |
-| Llama 3 SFT | FSDP 2 | FSDP 2 |
-| DeepSeek V3 | FSDP 8, EP 8 | FSDP 2 x TP 2 x CP 2, EP 8 |
-| GPT-OSS | FSDP 4 x TP 2, EP 4 | FSDP 4 x TP 2, EP 4 |
-| Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 | FSDP 2 x TP 2 x CP 2, EP 8 |
-| Muse Glimmer text | FSDP 8 | FSDP 2 x TP 2 x CP 2 |
-| Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 | FSDP 4 x TP 2, EP 4 |
+| A10G model | Topology (Fake-PG and Real-PG) |
+| --- | --- |
+| Llama 3 | FSDP 2 x TP 2 x CP 2 |
+| Llama 3 SFT | FSDP 2 |
+| DeepSeek V3 | FSDP 8, EP 8 |
+| GPT-OSS | FSDP 4 x TP 2, EP 4 |
+| Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 |
+| Muse Glimmer text | FSDP 8 |
+| Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 |
 
 Kimi K2.5 continues to run as an FSDP 8, EP 8 integration case. Its multimodal
 backward uses bicubic upsampling, whose CUDA backward has no deterministic
@@ -88,10 +94,11 @@ implementation, so the case does not carry a numerical golden. For manual
 comparisons, `loss_compare.py` can create the model-only seed checkpoint with a
 model-equivalent AdamW config while the measured run continues to use DistMuon.
 
-Additional A10G Real-PG-only cases exercise pipeline communication:
+Additional A10G Real-PG-only cases exercise CP and pipeline communication:
 
 | A10G model | Pipeline-parallel topology |
 | --- | --- |
+| DeepSeek V3 | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
 | Llama 3 | FSDP 2 x TP 2 x PP 2, 1F1B |
 | GPT-OSS | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
 

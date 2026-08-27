@@ -2,6 +2,8 @@
 
 This enables HF transformers models to be trained with `4D parallelism + torch.compile`
 
+This backend requires `--parallelism.spmd_backend spmd_types`.
+
 ## Quick start
 
 - Requirements `transformers==5.9.0`
@@ -78,5 +80,4 @@ PP is not yet wired for the MoE path (see Further work).
 - Missing PP support for MoE
 - Load HF weights
 - Add LORA support
-- `spmd_types` backend support (move off the DTensor sharding path)
 - Support for Titan RL
