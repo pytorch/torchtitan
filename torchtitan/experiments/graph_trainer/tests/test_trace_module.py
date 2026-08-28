@@ -1553,12 +1553,17 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_deepseek_v3(self):
+        from torchtitan.models.common.moe import SeqwiseLoadBalanceLoss
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
         config = deepseekv3_configs["debugmodel"](
             attn_backend="flex", moe_comm_backend="standard"
         )
+        # SeqwiseLoadBalanceLoss needs its framework-set denominator; there is
+        # no training context here, so fill it like the trainer would.
+        for _, aux_loss_cfg, _, _ in config.traverse(SeqwiseLoadBalanceLoss.Config):
+            aux_loss_cfg.per_step_denominator = self.BATCH_SIZE
         self._run_model_test(
             DeepSeekV3Model,
             config,
@@ -1951,12 +1956,16 @@ class TestTraceFSDP(FSDPTest):
         )
 
     def test_deepseek_v3_fsdp(self):
+        from torchtitan.models.common.moe import SeqwiseLoadBalanceLoss
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
         config = deepseekv3_configs["debugmodel"](
             attn_backend="flex", moe_comm_backend="standard"
         )
+        for _, aux_loss_cfg, _, _ in config.traverse(SeqwiseLoadBalanceLoss.Config):
+            # 2 matches the batch used inside _run_fsdp_model_test.
+            aux_loss_cfg.per_step_denominator = 2
         self._run_fsdp_model_test(
             DeepSeekV3Model,
             config,
