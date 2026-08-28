@@ -103,11 +103,14 @@ def llama3_debugmodel_dist_gemm() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8() -> Trainer.Config:
+def llama3_debugmodel_float8(
+    model_compile_enabled: bool | None = None,
+) -> Trainer.Config:
     config = llama3_debugmodel()
-    model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
-    )
+    if model_compile_enabled is None:
+        model_compile_enabled = (
+            config.compile.enable and "model" in config.compile.components
+        )
     config.model_spec = model_registry(
         "debugmodel",
         converters=[

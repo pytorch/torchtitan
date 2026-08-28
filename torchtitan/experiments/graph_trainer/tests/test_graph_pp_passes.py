@@ -21,6 +21,8 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _MODULE_FQN,
+    _QUANTIZATION_KIND,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
@@ -263,6 +265,58 @@ def _assert_tensor_sequence_equal(
 
 
 class GraphPPPartitionTest(unittest.TestCase):
+    def test_partition_preserves_atomic_fp8_chains_and_metadata(self) -> None:
+        def stage_step(x: torch.Tensor):
+            forward_cast = x.sin()
+            forward_scale = forward_cast.cos()
+            forward_gemm = forward_scale.tanh()
+            backward_cast = x.neg()
+            backward_scale = backward_cast.sin()
+            backward_gemm = backward_scale.cos()
+            return [forward_gemm, backward_gemm]
+
+        traced = minimal_fx_tracer(stage_step)(torch.randn(2, 4))
+        compute_nodes = [
+            node for node in traced.gm.graph.nodes if node.op == "call_function"
+        ]
+        self.assertEqual(len(compute_nodes), 6)
+        expected_names_by_phase = {
+            "forward": {node.name for node in compute_nodes[:3]},
+            "backward": {node.name for node in compute_nodes[3:]},
+        }
+        for phase, nodes in (
+            ("forward", compute_nodes[:3]),
+            ("backward", compute_nodes[3:]),
+        ):
+            for node in nodes:
+                node.meta["custom"] = {
+                    _MODULE_FQN: "layers.0.feed_forward.w1",
+                    _QUANTIZATION_KIND: "float8_linear",
+                    "fp8_chain_phase": phase,
+                    "compile_with_inductor": {},
+                }
+
+        fw_module, bw_module, _ = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        def fp8_chain_names(gm: fx.GraphModule) -> set[str]:
+            return {
+                node.name
+                for node in gm.graph.nodes
+                if node.meta.get("custom", {}).get(_QUANTIZATION_KIND)
+                == "float8_linear"
+            }
+
+        self.assertEqual(fp8_chain_names(fw_module), expected_names_by_phase["forward"])
+        self.assertEqual(fp8_chain_names(bw_module), expected_names_by_phase["backward"])
+        for gm in (fw_module, bw_module):
+            for node in gm.graph.nodes:
+                custom = node.meta.get("custom", {})
+                if custom.get(_QUANTIZATION_KIND) == "float8_linear":
+                    self.assertEqual(custom["compile_with_inductor"], {})
+
     def test_real_dsv3_moe_block_partition_matches_joint_graph(self) -> None:
         traced_block = _trace_dsv3_moe_block_stage()
 

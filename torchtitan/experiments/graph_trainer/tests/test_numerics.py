@@ -22,6 +22,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.tools.utils import has_cuda_capability
 
 
 STEPS = 20
@@ -241,6 +242,29 @@ def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
         test_config="graph_trainer_llama3_debugmodel",
         baseline_options=LLAMA3_PARALLELISM,
         test_options=test_options,
+    )
+
+
+def _run_llama3_fp8_loss_compare(
+    test_config: str,
+    test_options_extra: str = "",
+    *,
+    rtol: float | None = None,
+) -> bool:
+    """Compare Trainer FP8 with a GraphTrainer FP8 compilation mode."""
+    test_options = LLAMA3_PARALLELISM
+    if test_options_extra:
+        test_options += f" {test_options_extra}"
+    compare_fn = run_loss_compare if rtol is None else run_loss_compare_close
+    compare_kwargs = {} if rtol is None else {"rtol": rtol}
+    return compare_fn(
+        baseline_module="llama3",
+        baseline_config="llama3_debugmodel_float8",
+        test_module="graph_trainer.llama3",
+        test_config=test_config,
+        baseline_options=LLAMA3_PARALLELISM,
+        test_options=test_options,
+        **compare_kwargs,
     )
 
 
@@ -642,6 +666,31 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             _run_qwen3_moe_loss_compare(
                 test_options_extra="--compile.mode aot_fx_trace"
             ),
+        )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and has_cuda_capability(9, 0)
+    and importlib.util.find_spec("torchao") is not None,
+    "FP8 numerics tests require TorchAO and an H100-class GPU",
+)
+class TestGraphTrainerFP8Numerics(unittest.TestCase):
+    """H100-only dense FP8 loss equivalence against the Trainer path."""
+
+    def test_dense_llama3_fp8_full_cudagraph_vs_trainer(self):
+        self.assertTrue(
+            _run_llama3_fp8_loss_compare(
+                "graph_trainer_llama3_debugmodel_float8",
+                rtol=1e-4,
+            )
+        )
+
+    def test_dense_llama3_fp8_regional_cudagraph_vs_trainer(self):
+        self.assertTrue(
+            _run_llama3_fp8_loss_compare(
+                "graph_trainer_llama3_debugmodel_float8_regional",
+            )
         )
 
 
