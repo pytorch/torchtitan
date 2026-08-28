@@ -175,15 +175,18 @@ For background, see [train/inference mismatch in asynchronous RL](https://yichua
 
 ## Observability
 
-TitanRL exposes three complementary views of a run:
+TitanRL exposes four complementary views of a run:
 
 - **System timelines.** The structured logger emits per-rank JSONL events. Its Gantt generator turns trace spans into a cross-actor timeline for finding idle time, overlap, and bottlenecks. [Read the structured logger guide](../../observability/structured_logger/README.md).
 - **Training curves.** Typed metrics from the rollout, controller, trainer, and loss are reduced once per step and sent to the console. [Read the RL metrics guide](./observability/metrics/README.md).
+- **Inference engine health.** vLLM engine metrics can be written to JSONL or exported to an OTLP collector. [Read the vLLM engine metrics guide](./observability/metrics/README.md#vllm-engine-metrics).
 - **Rollout inspection.** The rollout logger (`RolloutSampleRecorder`) writes selected training and validation rollouts to `rollout_samples.jsonl`. [Inspect the rollout recorder](./rollout_recorder.py).
 
-Together these answer three different debugging questions: what the distributed system was doing, how the run was learning, and what the model actually produced.
+Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
+
+> **TODO:** Add [`Profiler.Config`](https://github.com/pytorch/torchtitan/blob/d208df86f4259711d4ae502fcb54ab28b15297e7/torchtitan/trainer.py#L86) support to `PolicyTrainer`, matching the core trainer's GPU profiler support.
 
 ## Monarch specifics
 
