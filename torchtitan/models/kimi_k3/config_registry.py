@@ -92,3 +92,105 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def kimi_k3_debugmodel_lora() -> Trainer.Config:
+    """The multimodal debug model with LoRA adapters on the attention output.
+
+    Uses core's LoRAConverter rather than a model-local implementation. The
+    Targets are matched on the last segment of the FQN. The set mirrors the
+    reference tree's DEFAULT_LORA_TARGETS: the MLA projections, and -- the part
+    that matters structurally -- the dense FFN and latent-MoE projections.
+    Every decoder layer carries an FFN or MoE, while only one layer in four is
+    MLA (K3 is 3 KDA : 1 MLA), so an MLA-only target set leaves an all-KDA
+    pipeline stage with zero trainable parameters and the optimizer then raises
+    "param_groups pattern matched no parameters". That is what pp8 hit.
+
+    Not covered: the reference also adapts the MLA output gate. Here that module
+    is named ``gate``, which is also the router's gate in every MoE layer, and
+    last-segment matching cannot separate them -- adding it would silently adapt
+    the routers too. Left out rather than guessed.
+    """
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel", converters=[_kimi_k3_lora_converter()]
+    )
+    return config
+
+
+def _kimi_k3_lora_converter(
+    *, quantize_base: str | None = None, quantize_experts: str | None = None
+):
+    from torchtitan.components.lora import LoRAConverter
+
+    return LoRAConverter.Config(
+        rank=8,
+        alpha=16.0,
+        target_modules=[
+            # MLA
+            "wq_a",
+            "wq_b",
+            "wkv_a",
+            "wkv_b",
+            "wo",
+            # dense FFN and shared experts
+            "w1",
+            "w2",
+            "w3",
+            # latent MoE down/up projections
+            "routed_down",
+            "routed_up",
+        ],
+        quantize_base=quantize_base,
+        quantize_experts=quantize_experts,
+    )
+
+
+def kimi_k3_debugmodel_qlora_mxfp4_linear() -> Trainer.Config:
+    """QLoRA with only the base LINEARS packed (experts stay bf16).
+
+    The packed-TP forward covers colwise/rowwise linears; packed experts
+    under expert-TP need a shape-preserving layout and refuse -- this
+    flavor is the TP-composable subset.
+    """
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[_kimi_k3_lora_converter(quantize_base="mxfp4")],
+    )
+    return config
+
+
+def kimi_k3_debugmodel_mx_qat() -> Trainer.Config:
+    """The debug model under MXFP4-weight / MXFP8-activation fake-quant QAT.
+
+    K3's official quantization scope: the routed experts only, bf16 masters
+    training underneath (full-param QAT, no LoRA). Fake-quant is bf16
+    compute, so this runs on any GPU.
+    """
+    from torchtitan.components.quantization.mx_qat import MXFP4QATConverter
+
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel", converters=[MXFP4QATConverter.Config()]
+    )
+    return config
+
+
+def kimi_k3_debugmodel_qlora_mxfp4() -> Trainer.Config:
+    """The LoRA debug model with MXFP4-packed bases (QLoRA, K3's native
+    weight format).
+
+    The packing swaps the base for split storage AT BUILD, before
+    parallelize, so FSDP2 shards the packed bytes -- this is the
+    pack-then-shard order the nf4 path cannot reach, and the flavor trains
+    under the normal sharded flow.
+    """
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            _kimi_k3_lora_converter(quantize_base="mxfp4", quantize_experts="mxfp4")
+        ],
+    )
+    return config
