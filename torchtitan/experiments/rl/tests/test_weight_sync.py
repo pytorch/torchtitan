@@ -15,10 +15,35 @@ trainer actor, generator router, and group buffer (no GPU / Monarch / TorchStore
 import asyncio
 import contextlib
 
-from torchtitan.experiments.rl.components.weight_sync import WeightSyncManager
+import pytest
+import tyro
+
+from torchtitan.experiments.rl.components.weight_sync import (
+    WeightSyncConfig,
+    WeightSyncManager,
+)
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
+
+
+def test_weight_sync_config_preserves_defaults() -> None:
+    config = WeightSyncConfig()
+    assert config.mode == "controller"
+
+
+def test_routing_weight_sync_config() -> None:
+    assert WeightSyncConfig(mode="routing").mode == "routing"
+
+
+def test_weight_sync_mode_is_available_from_cli() -> None:
+    config = tyro.cli(WeightSyncConfig, args=["--mode", "routing"])
+    assert config.mode == "routing"
+
+
+def test_weight_sync_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="Unknown weight_sync.mode"):
+        WeightSyncConfig(mode="unknown")
 
 
 class _Endpoint:

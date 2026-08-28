@@ -493,9 +493,7 @@ class PolicyTrainer(Actor, Configurable):
             # Strip the AC wrapper's `_checkpoint_wrapped_module` segment so buffer FQNs match state_dict() keys.
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
-            buffer_names = {
-                canonical_fqn(name) for name, _ in self.model.named_buffers()
-            }
+            buffer_names = self._weight_sync_buffer_names()
             state_dict = {
                 name: (
                     tensor if name in buffer_names else tensor.to(self._transfer_dtype)
@@ -507,4 +505,22 @@ class PolicyTrainer(Actor, Configurable):
             state_dict,
             "model_state_dict",
             direct_rdma=False,
+        )
+
+    def _weight_sync_buffer_names(self) -> frozenset[str]:
+        return frozenset(canonical_fqn(name) for name, _ in self.model.named_buffers())
+
+    @concurrent_endpoint
+    async def attach_weight_sync(self) -> None:
+        """Hand this trainer's state dict to TorchStore to plan its routes.
+
+        Returns once every participant has registered and this rank's routes are
+        installed. Only tensor geometry is exchanged, no weights.
+        """
+        store = await ts.client(role="publisher")
+        await store.register_state_dict_locally(
+            self.model.state_dict(),
+            "model_state_dict",
+            transfer_dtype=self._transfer_dtype,
+            preserve_dtype_keys=self._weight_sync_buffer_names(),
         )
