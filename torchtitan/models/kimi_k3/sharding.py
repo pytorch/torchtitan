@@ -16,35 +16,31 @@ from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 
-from torchtitan.models.common.decoder_sharding import set_decoder_sharding_config
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 
 if TYPE_CHECKING:
     from torchtitan.models.kimi_k3.model import KimiK3Model
 
 
-def set_expert_parallel_sharding_config(config: "KimiK3Model.Config") -> None:
+def set_expert_parallel_sharding_config(
+    config: "KimiK3Model.Config", *, enable_sp: bool = False
+) -> None:
     """Declare the sharding expert parallel acts on.
 
-    * The routed experts shard on the expert axis; ``set_moe_sharding_config``
-      declares that layout.
-    * The decoder-level distribution makes the activations reaching the MoE
-      boundary DTensors it can redistribute onto the expert mesh.
+    The routed experts shard on the expert axis; ``set_moe_sharding_config``
+    declares that layout, and its input boundary lifts the plain incoming
+    activations itself -- no decoder-level declaration is needed (verified:
+    removing one changes nothing, to every printed digit).
     """
-    # The decoder-level distribution is what makes the activations reaching
-    # the MoE boundary DTensors this declaration can redistribute onto the
-    # expert mesh; without it the routed path sees plain tensors and the EP
-    # redistribution has nothing to act on. enable_sp=False because sequence
-    # parallel is not part of this PR.
-    set_decoder_sharding_config(config, enable_sp=False)
     for layer in config.layers:
         if layer.moe is not None:
             set_moe_sharding_config(
                 layer.moe,
                 enable_ep=True,
-                # TODO: enable TP/SP here once the tensor-parallel PR lands;
-                # with EP alone the internals run without sequence parallel.
-                enable_sp=False,
+                # TODO: flip to True from the caller once the
+                # tensor-parallel PR lands; with EP alone the internals run
+                # without sequence parallel.
+                enable_sp=enable_sp,
                 expert_param_layout={
                     "w1_EFD": spmd.S(1),
                     "w2_EDF": spmd.S(2),
