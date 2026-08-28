@@ -324,9 +324,30 @@ class TestSpmdLayout(DTensorTestBase):
                 )
             )
 
+    def test_allows_multi_axis_pure_reductions(self):
+        """P -> I on several axes is expressible as sequential all-reduces."""
+        spmd_validate_redistributions(
+            ShardingConfig(
+                out_src_shardings=SpmdType(
+                    {
+                        MeshAxisName.DP: spmd.V,
+                        MeshAxisName.CP: spmd.P,
+                        MeshAxisName.TP: spmd.P,
+                    }
+                ),
+                out_dst_shardings=SpmdType(
+                    {
+                        MeshAxisName.DP: spmd.V,
+                        MeshAxisName.CP: spmd.I,
+                        MeshAxisName.TP: spmd.I,
+                    }
+                ),
+            )
+        )
+
     def test_rejects_multi_axis_redistribute(self):
-        """Redistributing multiple mesh axes is unsupported."""
-        with self.assertRaises(ValueError) as cm:
+        """Multi-axis shard moves are still unsupported."""
+        with self.assertRaises(ValueError):
             spmd_validate_redistributions(
                 ShardingConfig(
                     in_src_shardings={

@@ -14,11 +14,9 @@ overwrites with the vision encoder's per-item features at the positions
 
 import contextlib
 
-import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.spmd_types import spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.spmd_types import dp_local_context
 
 
 def multimodal_context() -> contextlib.AbstractContextManager[None]:
@@ -30,9 +28,7 @@ def multimodal_context() -> contextlib.AbstractContextManager[None]:
     After the scatter the tensor is token-aligned again and global DP batch
     sharding resumes. A no-op outside ``spmd_types`` (or when DP is size 1).
     """
-    if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
-        return spmd.set_current_mesh(local_axes=("dp",))
-    return contextlib.nullcontext()
+    return dp_local_context()
 
 
 def get_vision_positions(
