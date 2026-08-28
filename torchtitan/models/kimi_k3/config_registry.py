@@ -13,7 +13,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -94,3 +94,20 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def kimi_k3_debugmodel_deepep() -> Trainer.Config:
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry("debugmodel", moe_comm_backend="deepep")
+    return config
+
+
+def kimi_k3_debugmodel_minimal_async_ep() -> Trainer.Config:
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel", moe_comm_backend="minimal_async_ep"
+    )
+    # MinimalAsyncEP requires full recompute (its dispatch buffers are reused
+    # across layers), as the deepseek_v3 H100 recipe sets it.
+    config.activation_checkpoint = FullAC.Config()
+    return config

@@ -375,7 +375,7 @@ def _kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config,
     attn_backend: str,
-    moe_comm_backend: str,
+    moe_comm_backend: str = "standard",
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
