@@ -49,6 +49,7 @@ from torchtitan.distributed.cudagraph import (
     wrap_with_cuda_graph,
 )
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -994,6 +995,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **collect_aux_loss_metrics(self.model_parts, parallel_dims),
         }
         self.metrics_processor.log(
             self.step,

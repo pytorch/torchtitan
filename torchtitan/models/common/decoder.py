@@ -27,6 +27,7 @@ from torchtitan.models.common.attention import (
     ScaledDotProductAttention,
     VarlenAttention,
 )
+from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
@@ -243,6 +244,19 @@ class Decoder(BaseModel):
                         layer_cfg.moe.router._debug_force_load_balance = (
                             debug.moe_force_load_balance
                         )
+
+                # Per-step normalization denominator, set before model build.
+                for _fqn, aux_loss_cfg, _parent, _attr in self.traverse(
+                    LoggedAuxLoss.Config
+                ):
+                    aux_loss_cfg.per_step_denominator = {
+                        "token": config.training.num_tokens_per_train_step,
+                        "sequence": (
+                            config.training.num_tokens_per_train_step
+                            // config.training.max_context_length
+                        ),
+                        "batch": 1,
+                    }[aux_loss_cfg.aggregation_level]
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
