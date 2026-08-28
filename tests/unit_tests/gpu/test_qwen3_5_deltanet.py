@@ -9,7 +9,9 @@ from unittest import mock
 
 import torch
 import torch.nn.functional as F
+from attn_gym.linear import l2norm, recurrent_gdn
 from torch import nn
+
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     VarlenMetadata,
@@ -103,8 +105,8 @@ def _reference_causal_conv1d_varlen(
     cu_seqlens: torch.Tensor,
     cu_seqlens_cpu: torch.Tensor,
 ) -> torch.Tensor:
-    """Per-document depthwise causal conv + silu, matching the model's FLA
-    varlen conv (which is triton/CUDA-only). Patched over
+    """Per-document depthwise causal conv + silu, matching the model's Attention
+    Gym varlen conv (which is CUDA-only). Patched over
     ``gdn._causal_conv1d_varlen`` for CPU runs.
     """
     conv_kernel_size = weight.shape[-1]
@@ -401,7 +403,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def _assert_packed_run_matches_per_document(self, model, x, positions, masks):
         """Packed forward under ``masks`` must equal stitched per-doc forwards.
 
-        The model's varlen conv is FLA (triton/CUDA-only); substitute the
+        The model's varlen conv is Attention Gym (CUDA-only); substitute the
         per-document torch reference for these CPU runs. The per-document
         forwards below take the non-varlen conv path, which runs on CPU.
         """
@@ -602,8 +604,112 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             "fla_fused_recurrent", atol=2e-2, rtol=2e-2
         )
 
+    def test_batch_invariant_recurrent_matches_paged_attention_gym(self):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA is unavailable")
+
+        from torchtitan.models.qwen3_5.gdn import _recurrent_gdn_fwd
+
+        torch.manual_seed(42)
+        num_tokens, num_heads, key_dim, value_dim = 12, 4, 64, 64
+        q = torch.randn(
+            1,
+            num_tokens,
+            num_heads,
+            key_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        k = torch.randn_like(q)
+        v = torch.randn(
+            1,
+            num_tokens,
+            num_heads,
+            value_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        decay = -torch.rand(
+            1,
+            num_tokens,
+            num_heads,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        update_gate = torch.rand(
+            1,
+            num_tokens,
+            num_heads,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        cu_seqlens = torch.tensor([0, 5, 12], device="cuda", dtype=torch.int32)
+
+        actual = _recurrent_gdn_fwd(
+            q,
+            k,
+            v,
+            decay,
+            update_gate,
+            cu_seqlens,
+            cu_seqlens.cpu(),
+        )
+
+        normalized_q = l2norm(q, cu_seqlens=cu_seqlens)
+        normalized_k = l2norm(k, cu_seqlens=cu_seqlens)
+        state_cache = torch.randn(
+            5,
+            num_heads,
+            value_dim,
+            key_dim,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        prefix_end = 2
+        prefix_cu_seqlens = torch.tensor(
+            [0, prefix_end], device="cuda", dtype=torch.int32
+        )
+        prefix_output, _ = recurrent_gdn(
+            normalized_q[:, :prefix_end],
+            normalized_k[:, :prefix_end],
+            v[:, :prefix_end],
+            decay[:, :prefix_end],
+            update_gate[:, :prefix_end],
+            state_cache,
+            cu_seqlens=prefix_cu_seqlens,
+            scale=key_dim**-0.5,
+            state_indices=torch.tensor([3], device="cuda", dtype=torch.int32),
+            has_initial_state=torch.tensor([False], device="cuda"),
+        )
+
+        state_indices = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
+        has_initial_state = torch.tensor([True, False], device="cuda")
+        remaining_cu_seqlens = torch.tensor(
+            [0, 5 - prefix_end, num_tokens - prefix_end],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        remaining_output, _ = recurrent_gdn(
+            normalized_q[:, prefix_end:],
+            normalized_k[:, prefix_end:],
+            v[:, prefix_end:],
+            decay[:, prefix_end:],
+            update_gate[:, prefix_end:],
+            state_cache,
+            cu_seqlens=remaining_cu_seqlens,
+            scale=key_dim**-0.5,
+            state_indices=state_indices,
+            has_initial_state=has_initial_state,
+        )
+        expected = torch.cat(
+            (prefix_output, remaining_output),
+            dim=1,
+        )
+
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_varlen_offsets_are_fresh_per_deltanet_invocation(self):
-        """Successive DeltaNet invocations must not share FLA's cache key."""
+        """Successive DeltaNet invocations must not share convolution metadata."""
         torch.manual_seed(42)
         model = self._make_deltanet()
         x_TD = torch.randn(8, 4)

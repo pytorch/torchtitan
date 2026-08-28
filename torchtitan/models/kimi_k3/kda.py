@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
-from attn_gym.linear.kda.short_conv import causal_conv1d
+from attn_gym.linear.short_conv import causal_conv1d
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
@@ -96,7 +96,6 @@ class KDAKernel(Module):
             A_log_H.float(),
             dt_bias_HK.float(),
             lower_bound=self.lower_bound,
-            impl="fused",
         )
         output_1THV, _ = chunk_kda(
             l2norm(q_1THK),
