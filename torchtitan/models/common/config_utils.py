@@ -411,6 +411,7 @@ def make_token_dispatcher_config(
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "standard":
