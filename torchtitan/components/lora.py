@@ -483,11 +483,15 @@ def _get_mxfp4_experts_cls(parent_cls: type) -> type:
             qdata = self._parameters[name + "_qdata"]
             scale = self._parameters[name + "_scale"]
             if isinstance(qdata, DTensor):
-                # Pre-unshard access (outside FSDP's forward window): gather
-                # explicitly. During forward FSDP2 exposes plain unsharded
-                # tensors.
-                qdata = qdata.full_tensor()
-                scale = scale.full_tensor()
+                # Mirror the parent forward's to_local: under EP the params
+                # stay expert-sharded DTensors during forward and the grouped
+                # GEMM consumes THIS RANK's experts (full_tensor here fed all
+                # E experts against local counts -- the matrix-batch mismatch
+                # the EP cells found). During FSDP-only forward the window
+                # exposes plain tensors and this branch is not taken; the
+                # merge gathers explicitly for export.
+                qdata = qdata.to_local()
+                scale = scale.to_local()
             mx = MXTensor.__tensor_unflatten__(
                 {"qdata": qdata, "scale": scale.view(self._mx_scale_dtype)},
                 self._mx_ctx,
@@ -884,7 +888,27 @@ def merge_lora_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
             for wname, shape in module._mxfp4_shapes.items():
                 # The property dequantizes; register the dense weight as a
                 # temporary param so state_dict emits the ORIGINAL key.
-                dense = getattr(module, wname).contiguous()
+                qd = module._parameters[wname + "_qdata"]
+                sc = module._parameters[wname + "_scale"]
+                if hasattr(qd, "full_tensor"):
+                    qd = qd.full_tensor()
+                    sc = sc.full_tensor()
+                from torchao.prototype.mx_formats.mx_tensor import MXTensor
+
+                dense = (
+                    MXTensor.__tensor_unflatten__(
+                        {
+                            "qdata": qd,
+                            "scale": sc.view(module._mx_scale_dtype),
+                        },
+                        module._mx_ctx,
+                        None,
+                        None,
+                    )
+                    .dequantize()
+                    .view(shape)
+                    .contiguous()
+                )
                 # Straight into _parameters: register_parameter refuses the
                 # name because the class dequant property answers hasattr.
                 module._parameters[wname] = nn.Parameter(dense, requires_grad=False)
