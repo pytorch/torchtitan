@@ -137,12 +137,12 @@ class TrainingBatch:
     """Packed microbatches for one optimizer step.
 
     Example:
-        # 5 training samples, effective length 5 each; seq_len=10, local_batch_size=2, dp_degree=1
-        # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
-        # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
+        # 5 training samples, effective length 5 each; seq_len=10,
+        # local_batch_size=2, dp_degree=1. Each rank has a 20-token budget,
+        # so the samples produce two flat microbatches:
         #    microbatches = [[TrainingMicrobatch(token_ids=[20])],
         #                    [TrainingMicrobatch(token_ids=[20])]]
-        # The second microbatch contains one real row and one pad row.
+        # The second microbatch contains five real tokens and 15 padding tokens.
         # num_global_valid_tokens = response tokens with finite generator logprobs
     """
 
