@@ -118,7 +118,16 @@ class RendererConfig(Configurable.Config):
             unused = sorted(
                 field.name
                 for field in fields(self)
-                if field.name not in ("name", "thinking_retention")
+                # The removed knobs are answered above and only when set to
+                # `True`; an explicit `False` on them means "defer to the chat
+                # template", which is what this path does anyway.
+                if field.name
+                not in (
+                    "name",
+                    "thinking_retention",
+                    "preserve_all_thinking",
+                    "preserve_thinking_between_tool_calls",
+                )
                 and getattr(self, field.name) is not None
             )
             if unused:
