@@ -413,3 +413,78 @@ def test_mxfp8_input_activation_formats_for_backward_match():
         rtol=0,
         atol=0,
     )
+
+
+class _StubMesh:
+    """Stands in for a DeviceMesh: fsdp_pre_all_gather only reads ``size()``."""
+
+    def __init__(self, size: int) -> None:
+        self._size = size
+
+    def size(self) -> int:
+        return self._size
+
+
+class _StubMixedPrecisionPolicy:
+    param_dtype = torch.bfloat16
+
+
+def test_fsdp_pre_all_gather_pads_an_uneven_shard():
+    """A dim-0 size that does not divide the mesh leaves the last rank short.
+
+    All-gather needs every rank to contribute the same number of elements, so
+    FSDP's contract is that the hook returns the *padded* shard and passes the
+    logical size through as metadata. Driven directly rather than through FSDP
+    because a dense MXFP8 weight cannot be unevenly sharded on two ranks: the
+    kernels require out_features divisible by 32, which always divides 2.
+    """
+    # Logical (96, 128) over five ranks: ceil(96 / 5) == 20 rows each, so the
+    # last rank holds only 16 and pads up to 20.
+    shard_NK = torch.randn(16, 128, device="cuda", dtype=torch.bfloat16)
+    sharded_weight = _LinearShardedTensorWithMXFP8Compute(shard_NK)
+
+    (comm_NK,), metadata = sharded_weight.fsdp_pre_all_gather(
+        _StubMesh(5),
+        torch.Size([96, 128]),
+        None,
+        None,
+        _StubMixedPrecisionPolicy(),
+    )
+
+    assert comm_NK.shape == (20, 128)
+    assert torch.equal(comm_NK[:16], shard_NK)
+    assert torch.count_nonzero(comm_NK[16:]) == 0
+    # The logical size rides along so post-all-gather can drop the padding.
+    assert tuple(metadata) == (96, 128)
+
+
+def test_fsdp_post_all_gather_drops_the_padding():
+    """The gathered buffer includes padding; quantization must not see it."""
+    sharded_weight = _LinearShardedTensorWithMXFP8Compute(
+        torch.randn(16, 128, device="cuda", dtype=torch.bfloat16)
+    )
+    # Five ranks contributing 20 padded rows each.
+    gathered_NK = torch.randn(100, 128, device="cuda", dtype=torch.bfloat16)
+
+    unsharded_tensor, managed_tensors = sharded_weight.fsdp_post_all_gather(
+        (gathered_NK,), torch.Size([96, 128]), torch.bfloat16
+    )
+
+    assert isinstance(unsharded_tensor, _UnshardedFSDPTensor)
+    assert unsharded_tensor.shape == (96, 128)
+    assert len(managed_tensors) == 3
+
+
+def test_fsdp_pre_all_gather_rejects_a_non_zero_shard_dim():
+    """Only dim 0 is supported; the all-gather concatenates along it."""
+    sharded_weight = _LinearShardedTensorWithMXFP8Compute(
+        torch.randn(96, 64, device="cuda", dtype=torch.bfloat16)
+    )
+    with pytest.raises(NotImplementedError, match="sharding dimension 0 only"):
+        sharded_weight.fsdp_pre_all_gather(
+            _StubMesh(2),
+            torch.Size([96, 128]),
+            None,
+            None,
+            _StubMixedPrecisionPolicy(),
+        )
