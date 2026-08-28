@@ -25,7 +25,7 @@ _RENDERER_BY_MODEL = {
     "gpt_oss": "gpt-oss",
     "deepseek_v3": "deepseek-v3",
     "default": "default",  # llama3
-    "auto": "auto",  # ignores knobs, resolves from tokenizer,
+    "auto": "auto",  # resolves from tokenizer; carries only thinking_retention
 }
 
 
