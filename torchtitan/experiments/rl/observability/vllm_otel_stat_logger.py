@@ -6,6 +6,9 @@
 
 """OpenTelemetry (OTLP) ``StatLoggerBase`` for the RL generator's vLLM engine.
 
+See ``torchtitan/experiments/rl/observability/metrics/README.md`` for setup and
+the exported metric definitions.
+
 The logger stays inert unless:
   - ``OTEL_METRICS_EXPORTER`` is set to ``jsonl``; or
   - ``OTEL_METRICS_EXPORTER`` is set to ``otlp`` and an OTLP endpoint is set.
@@ -164,38 +167,34 @@ class VllmOtelStatLogger(StatLoggerBase):
         if exporter_kind == "none":
             logger.info(
                 "VllmOtelStatLogger inactive: set OTEL_METRICS_EXPORTER to "
-                "jsonl or otlp"
+                "jsonl or otlp if you want to record vLLM metrics"
             )
             return
         if exporter_kind not in ("jsonl", "otlp"):
-            logger.warning(
-                "VllmOtelStatLogger inactive: unsupported "
-                "OTEL_METRICS_EXPORTER=%r; expected one of: jsonl, none, otlp",
-                configured_exporter,
+            raise ValueError(
+                "unsupported OTEL_METRICS_EXPORTER="
+                f"{configured_exporter!r}; expected one of: jsonl, none, otlp"
             )
-            return
         if os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true":
             logger.warning(
                 "VllmOtelStatLogger inactive: OTEL_SDK_DISABLED is set to true"
             )
             return
         if exporter_kind == "jsonl" and not context.output_dir:
-            logger.warning(
-                "VllmOtelStatLogger inactive: OTEL_METRICS_EXPORTER=jsonl "
-                "requires an output directory"
+            raise ValueError(
+                "OTEL_METRICS_EXPORTER=jsonl requires an output directory. "
+                f"Found {context.output_dir=}"
             )
-            return
         if exporter_kind == "otlp":
             endpoint = os.environ.get(
                 "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
             ) or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
             if not endpoint:
-                logger.warning(
-                    "VllmOtelStatLogger inactive: OTEL_METRICS_EXPORTER=otlp "
+                raise ValueError(
+                    "OTEL_METRICS_EXPORTER=otlp "
                     "requires OTEL_EXPORTER_OTLP_ENDPOINT or "
                     "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
                 )
-                return
             protocol = (
                 os.environ.get(
                     "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
@@ -205,13 +204,11 @@ class VllmOtelStatLogger(StatLoggerBase):
                 .lower()
             )
             if protocol != "http/protobuf":
-                logger.warning(
-                    "VllmOtelStatLogger inactive: configured OTLP protocol %r is "
-                    "unsupported; this logger uses the OTLP HTTP/protobuf exporter "
-                    "and requires http/protobuf",
-                    protocol,
+                raise ValueError(
+                    f"configured OTLP protocol {protocol!r} is unsupported; "
+                    "this logger uses the OTLP HTTP/protobuf exporter and requires "
+                    "http/protobuf"
                 )
-                return
 
         try:
             from opentelemetry.metrics import Observation

@@ -954,23 +954,27 @@ class VLLMGenerator(Actor, Configurable):
         # The default PG was initialized during engine build. Confirm the Monarch rank
         # we used for the layout above matches the torch-distributed global rank, so the
         # two views can't silently diverge.
-        assert self._rank == dist.get_rank(), (
-            f"rank mismatch: Monarch current_rank().rank ({self._rank}) != "
-            f"torch dist.get_rank() ({dist.get_rank()})"
-        )
+        torch_distributed_rank = dist.get_rank()
+        if self._rank != torch_distributed_rank:
+            raise RuntimeError(
+                f"rank mismatch: Monarch current_rank().rank ({self._rank}) != "
+                f"torch dist.get_rank() ({torch_distributed_rank})"
+            )
         # Confirm the DP layout we computed above matches what vLLM derived
         # independently during engine build, so the two views can't silently diverge.
         vllm_parallel_config = self._engine.vllm_config.parallel_config
-        assert vllm_parallel_config.data_parallel_size == self._dp_degree, (
-            f"DP layout mismatch on rank {self._rank}: our dp_size "
-            f"({self._dp_degree}) != vLLM data_parallel_size "
-            f"({vllm_parallel_config.data_parallel_size})"
-        )
-        assert vllm_parallel_config.data_parallel_rank == self._dp_rank, (
-            f"DP layout mismatch on rank {self._rank}: our dp_rank "
-            f"({self._dp_rank}) != vLLM data_parallel_rank "
-            f"({vllm_parallel_config.data_parallel_rank})"
-        )
+        if vllm_parallel_config.data_parallel_size != self._dp_degree:
+            raise RuntimeError(
+                f"DP layout mismatch on rank {self._rank}: our dp_size "
+                f"({self._dp_degree}) != vLLM data_parallel_size "
+                f"({vllm_parallel_config.data_parallel_size})"
+            )
+        if vllm_parallel_config.data_parallel_rank != self._dp_rank:
+            raise RuntimeError(
+                f"DP layout mismatch on rank {self._rank}: our dp_rank "
+                f"({self._dp_rank}) != vLLM data_parallel_rank "
+                f"({vllm_parallel_config.data_parallel_rank})"
+            )
 
         self.policy_version = 0
 

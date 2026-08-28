@@ -244,36 +244,34 @@ def test_sdk_disabled_is_inert(no_otel_env, monkeypatch, tmp_path, caplog):
 
 
 @pytest.mark.parametrize("exporter", ["console", "jsonl,otlp", "unknown"])
-def test_unsupported_exporter_is_inert(no_otel_env, monkeypatch, caplog, exporter):
+def test_unsupported_exporter_raises(no_otel_env, monkeypatch, exporter):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", exporter)
 
-    with caplog.at_level(logging.WARNING):
-        log = VllmOtelStatLogger(_vllm_config(), context=_context())
-
-    assert log._enabled is False
-    assert "unsupported OTEL_METRICS_EXPORTER" in caplog.text
+    with pytest.raises(ValueError, match="unsupported OTEL_METRICS_EXPORTER"):
+        VllmOtelStatLogger(_vllm_config(), context=_context())
 
 
-def test_jsonl_requires_output_dir(no_otel_env, monkeypatch, caplog):
+def test_jsonl_requires_output_dir(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
 
-    with caplog.at_level(logging.WARNING):
-        log = VllmOtelStatLogger(_vllm_config(), context=_context(output_dir=""))
-
-    assert log._enabled is False
-    assert "requires an output directory" in caplog.text
+    with pytest.raises(ValueError, match="requires an output directory.*output_dir=''"):
+        VllmOtelStatLogger(_vllm_config(), context=_context(output_dir=""))
 
 
-def test_otlp_requires_http_protobuf(no_otel_env, monkeypatch, caplog):
+def test_otlp_requires_endpoint(no_otel_env, monkeypatch):
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp")
+
+    with pytest.raises(ValueError, match="requires OTEL_EXPORTER_OTLP_ENDPOINT"):
+        VllmOtelStatLogger(_vllm_config(), context=_context())
+
+
+def test_otlp_requires_http_protobuf(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
 
-    with caplog.at_level(logging.WARNING):
-        log = VllmOtelStatLogger(_vllm_config(), context=_context())
-
-    assert log._enabled is False
-    assert "uses the OTLP HTTP/protobuf exporter" in caplog.text
+    with pytest.raises(ValueError, match="uses the OTLP HTTP/protobuf exporter"):
+        VllmOtelStatLogger(_vllm_config(), context=_context())
 
 
 def test_jsonl_export_is_asynchronous(
