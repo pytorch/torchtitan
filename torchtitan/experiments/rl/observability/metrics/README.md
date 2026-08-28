@@ -155,13 +155,14 @@ ranks see the same engine-aggregate statistics.
 
 The exported metrics are grouped by OpenTelemetry instrument type:
 
-```mermaid
-flowchart LR
-    logger["vLLM engine stats"]
-    logger --> counters["Counters<br/>vllm.generation_tokens<br/>vllm.prompt_tokens<br/>vllm.cached_prompt_tokens<br/>vllm.preempted_requests<br/>vllm.finished_requests<br/>vllm.prefix_cache_queries<br/>vllm.prefix_cache_hits"]
-    logger --> histograms["Histograms<br/>vllm.time_to_first_token<br/>vllm.inter_token_latency<br/>vllm.decode_time<br/>vllm.queue_time<br/>vllm.e2e_latency"]
-    logger --> gauges["Gauges<br/>vllm.kv_cache_usage<br/>vllm.num_running_requests<br/>vllm.num_waiting_requests"]
-```
+- Counters: `vllm.generation_tokens`, `vllm.prompt_tokens`,
+  `vllm.cached_prompt_tokens`, `vllm.preempted_requests`,
+  `vllm.finished_requests`, `vllm.prefix_cache_queries`, and
+  `vllm.prefix_cache_hits`.
+- Histograms: `vllm.time_to_first_token`, `vllm.inter_token_latency`,
+  `vllm.decode_time`, `vllm.queue_time`, and `vllm.e2e_latency`.
+- Gauges: `vllm.kv_cache_usage`, `vllm.num_running_requests`, and
+  `vllm.num_waiting_requests`.
 
 Counters are cumulative; derive throughput and prefix-cache hit rate from their
 rates in the backend. Histogram values use milliseconds. Gauges report the
