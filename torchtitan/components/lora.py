@@ -498,7 +498,10 @@ def _get_mxfp4_experts_cls(parent_cls: type) -> type:
                 None,
                 None,
             )
-            return mx.dequantize().view(self._mxfp4_shapes[name])
+            shape = self._mxfp4_shapes[name]
+            # Under EP the local shard holds E/ep experts: derive the leading
+            # dim from the actual rows instead of the full logical shape.
+            return mx.dequantize().view(-1, shape[1], shape[2])
 
         return fget
 
