@@ -253,11 +253,3 @@ OpenTelemetry environment variables remain available, including:
 
 The logger also attaches `model_name`, `hostname`, `rank`, `local_rank`,
 `world_size`, `dp_rank`, `tp_rank`, and `generator_name` resource attributes.
-
-vLLM currently installs the OpenTelemetry SDK dependencies. If they are not
-available, install them explicitly:
-
-```bash
-uv pip install opentelemetry-sdk
-uv pip install opentelemetry-exporter-otlp-proto-http
-```
