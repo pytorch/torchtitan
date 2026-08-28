@@ -16,6 +16,10 @@ from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
 
 class _TrainerActorEndpoints:
     @concurrent_endpoint
+    async def initialize_torchstore_client(self) -> None:
+        await super().initialize_torchstore_client()
+
+    @concurrent_endpoint
     async def get_policy_version(self) -> int:
         return await super().get_policy_version()
 

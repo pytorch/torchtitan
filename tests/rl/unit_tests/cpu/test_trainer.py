@@ -6,11 +6,12 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import torch
+from torchstore import RankRole
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
@@ -41,6 +42,17 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
 def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
         Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))
+
+
+def test_initialize_torchstore_client_uses_publisher_role() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        with patch("torchtitan.rl.trainer.ts.client", new_callable=AsyncMock) as client:
+            await trainer.initialize_torchstore_client()
+
+        client.assert_awaited_once_with(role=RankRole.PUBLISHER)
+
+    asyncio.run(run())
 
 
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
