@@ -1635,7 +1635,7 @@ class TestApplySACPass(TestCase):
                 NodePolicyKey(
                     target="torch.ops.aten.add.Tensor",
                     module_fqn="layers.0.attention",
-                    occurrence=2,
+                    occurrence=(2,),
                 ): CheckpointPolicy.MUST_SAVE,
             },
         )
