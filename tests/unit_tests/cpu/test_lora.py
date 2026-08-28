@@ -230,3 +230,233 @@ def test_lora_preserves_frozen_config_type_checks():
     assert not model.proj.weight.requires_grad
     assert model.proj.lora_a.weight.requires_grad
     assert model.proj.lora_b.weight.requires_grad
+
+
+def _lora_llama_model(rank=4, alpha=8.0):
+    model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            LoRAConverter.Config(rank=rank, alpha=alpha, target_modules=["wqkv", "wo"]),
+        ],
+    )
+    model = model_spec.model.build()
+    model.init_states()
+    return model
+
+
+def test_trainable_state_dict_is_exactly_the_adapters():
+    from torchtitan.components.lora import trainable_state_dict
+
+    model = _lora_llama_model()
+    trainable = trainable_state_dict(model)
+    assert set(trainable) == {
+        n for n, _ in model.named_parameters() if "lora_a" in n or "lora_b" in n
+    }
+    assert len(trainable) > 0
+
+
+def test_merge_lora_state_dict_keys_and_zero_init_identity():
+    """With lora_b zero-initialized the merged weights EQUAL the base, and the
+    merged dict carries the ORIGINAL key set -- no adapter keys, every base key
+    intact."""
+    from torchtitan.components.lora import merge_lora_state_dict
+
+    model = _lora_llama_model()
+    raw = model.state_dict()
+    merged = merge_lora_state_dict(model)
+
+    assert not any("lora_a" in k or "lora_b" in k for k in merged)
+    assert set(merged) == {k for k in raw if "lora_a" not in k and "lora_b" not in k}
+    for k, v in merged.items():
+        torch.testing.assert_close(v, raw[k], rtol=0, atol=0)
+
+
+def test_merge_lora_state_dict_folds_the_delta():
+    """After perturbing an adapter pair, merged W == W_base + (alpha/rank) B @ A,
+    and a plain linear loaded with the merged weight reproduces the LoRA
+    module's forward."""
+    torch.manual_seed(0)
+    from torchtitan.components.lora import LoRALinearBase, merge_lora_state_dict
+
+    model = _lora_llama_model(rank=4, alpha=8.0)
+    name, module = next(
+        (n, m)
+        for n, m in model.named_modules()
+        if isinstance(m, LoRALinearBase) and n.endswith("wo")
+    )
+    with torch.no_grad():
+        module.lora_a.weight.normal_()
+        module.lora_b.weight.normal_()
+    before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    merged = merge_lora_state_dict(model)
+    expected = (
+        module.weight.float()
+        + module._lora_scaling
+        * (module.lora_b.weight.float() @ module.lora_a.weight.float())
+    ).to(module.weight.dtype)
+    torch.testing.assert_close(merged[f"{name}.weight"], expected)
+
+    x = torch.randn(3, module.weight.shape[1])
+    plain = torch.nn.functional.linear(x, merged[f"{name}.weight"])
+    torch.testing.assert_close(plain, module(x), rtol=2e-5, atol=2e-5)
+
+    # The model itself is unchanged: merging happened on clones.
+    after = model.state_dict()
+    assert set(after) == set(before)
+    for k in before:
+        torch.testing.assert_close(after[k], before[k], rtol=0, atol=0)
+
+
+def test_merge_lora_state_dict_respects_serialization_hooks():
+    """The fused attention linear exports split wq/wk/wv keys through a
+    state-dict hook; the merged delta must land in THOSE keys, not a composed
+    wqkv.weight nothing recognises."""
+    torch.manual_seed(0)
+    from torchtitan.components.lora import LoRALinearBase, merge_lora_state_dict
+
+    model = _lora_llama_model(rank=4, alpha=8.0)
+    name, module = next(
+        (n, m)
+        for n, m in model.named_modules()
+        if isinstance(m, LoRALinearBase) and n.endswith("wqkv")
+    )
+    with torch.no_grad():
+        module.lora_a.weight.normal_()
+        module.lora_b.weight.normal_()
+    raw = model.state_dict()
+
+    merged = merge_lora_state_dict(model)
+    parent = name.rsplit(".", 1)[0]
+    assert f"{name}.weight" not in merged
+    changed = [
+        f"{parent}.{p}.weight"
+        for p in ("wq", "wk", "wv")
+        if not torch.equal(merged[f"{parent}.{p}.weight"], raw[f"{parent}.{p}.weight"])
+    ]
+    assert changed, "perturbed fused adapters left every split key unchanged"
+
+
+def test_merge_lora_state_dict_sees_through_wrappers():
+    """An activation-checkpoint wrapper changes named_modules() paths but not
+    state_dict() keys; the merge must key by the latter."""
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        CheckpointWrapper,
+    )
+
+    from torchtitan.components.lora import merge_lora_state_dict
+
+    model = _lora_llama_model()
+    model.layers["0"] = CheckpointWrapper(model.layers["0"])
+
+    merged = merge_lora_state_dict(model)
+    assert not any("lora_a" in k or "lora_b" in k for k in merged)
+    assert not any("_checkpoint_wrapped_module" in k for k in merged)
+    assert any(k.startswith("layers.0.") for k in merged)
+
+
+def test_qlora_nf4_pack_forward_merge():
+    """Packed bases: forward runs on NF4, and with zero-init lora_b the merge
+    equals the DEQUANTIZED base exactly (QLoRA is lossy vs bf16 by design)."""
+    torch.manual_seed(0)
+    pytest.importorskip("torchao.dtypes.nf4tensor")
+    from torchao.dtypes.nf4tensor import NF4Tensor
+
+    from torchtitan.components.lora import (
+        LoRALinearBase,
+        merge_lora_state_dict,
+        quantize_lora_bases,
+    )
+
+    model = _lora_llama_model(rank=4, alpha=8.0)
+    packed = quantize_lora_bases(model)
+    assert packed > 0
+    quantized = [
+        (n, m)
+        for n, m in model.named_modules()
+        if isinstance(m, LoRALinearBase) and isinstance(m.weight, NF4Tensor)
+    ]
+    assert len(quantized) == packed
+
+    name, module = next((n, m) for n, m in quantized if n.endswith("wo"))
+    x = torch.randn(3, module.lora_a.weight.shape[1])
+    y = module(x)
+    assert y.shape == (3, module.lora_b.weight.shape[0])
+
+    merged = merge_lora_state_dict(model)
+    dequant = module.weight.get_original_weight()
+    torch.testing.assert_close(merged[f"{name}.weight"], dequant, rtol=0, atol=0)
+    # The NF4 param object is back in place after the export.
+    assert isinstance(module.weight, NF4Tensor)
+
+
+def test_qlora_config_packs_at_init():
+    """quantize_base='nf4' on the converter packs the bases when init_states
+    runs (unparallelized build; FSDP-managed bases are refused by design)."""
+    pytest.importorskip("torchao.dtypes.nf4tensor")
+    from torchao.dtypes.nf4tensor import NF4Tensor
+
+    from torchtitan.components.lora import LoRALinearBase
+
+    model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            LoRAConverter.Config(
+                rank=4, alpha=8.0, target_modules=["wo"], quantize_base="nf4"
+            ),
+        ],
+    )
+    model = model_spec.model.build()
+    model.init_states()
+    mods = [m for _, m in model.named_modules() if isinstance(m, LoRALinearBase)]
+    assert mods and all(isinstance(m.weight, NF4Tensor) for m in mods)
+
+
+def test_qlora_mxfp4_packs_at_build_and_merges():
+    """quantize_base='mxfp4' swaps the base for split storage AT BUILD (the
+    pack-then-shard order), the forward dequantizes, and the merge emits the
+    original weight key with the packed keys gone."""
+    pytest.importorskip("torchao.prototype.mx_formats.mx_tensor")
+    torch.manual_seed(0)
+
+    from torchtitan.components.lora import LoRALinearBase, merge_lora_state_dict
+
+    model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            LoRAConverter.Config(
+                rank=4, alpha=8.0, target_modules=["wo"], quantize_base="mxfp4"
+            ),
+        ],
+    )
+    model = model_spec.model.build()
+    model.init_states()
+
+    mods = [(n, m) for n, m in model.named_modules() if isinstance(m, LoRALinearBase)]
+    assert mods
+    for _, m in mods:
+        assert "weight" not in m._parameters
+        assert m.base_qdata.dtype == torch.uint8
+        assert m.base_scale.dtype == torch.uint8
+        assert m.base_qdata.shape[1] * 2 == m.lora_a.weight.shape[1]
+
+    name, module = mods[0]
+    x = torch.randn(3, module.lora_a.weight.shape[1])
+    y = module(x)
+    assert y.shape == (3, module.lora_b.weight.shape[0])
+    # The packed base is not all zeros after init.
+    assert module.base_qdata.abs().sum() > 0
+
+    merged = merge_lora_state_dict(model)
+    assert f"{name}.weight" in merged
+    assert f"{name}.base_qdata" not in merged
+    assert f"{name}.base_scale" not in merged
+    # lora_b is zero-initialized, so merged == the dequantized base exactly,
+    # and the packed layout is back in place afterwards.
+    torch.testing.assert_close(
+        merged[f"{name}.weight"],
+        module._dequant_base_mxfp4().to(merged[f"{name}.weight"].dtype),
+        rtol=0,
+        atol=0,
+    )
+    assert "weight" not in module._parameters
