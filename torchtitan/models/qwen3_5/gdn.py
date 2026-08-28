@@ -6,13 +6,20 @@
 
 """Gated DeltaNet modules for Qwen3.5."""
 
+# Tensor dimensions: B = batch, T = tokens, N = heads, K = key dimension,
+# V = value dimension, S = state slots, D = channels.
+
 from dataclasses import dataclass
 from typing import Literal
 
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-from fla.modules.conv.triton.ops import CausalConv1dFunction
+from attn_gym.linear import (
+    causal_conv1d as _attn_gym_causal_conv1d,
+    l2norm as _attn_gym_l2norm,
+    recurrent_gdn as _attn_gym_recurrent_gdn,
+)
 from fla.ops.gated_delta_rule import (
     chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
@@ -30,7 +37,6 @@ GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 
 spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
 spmd.register_local_autograd_function(FusedRecurrentFunction)
-spmd.register_local_autograd_function(CausalConv1dFunction)
 
 
 @spmd.local_map(
@@ -48,28 +54,19 @@ def _causal_conv1d_varlen(
     cu_seqlens: torch.Tensor,
     cu_seqlens_cpu: torch.Tensor | None,
 ) -> torch.Tensor:
-    """FLA depthwise causal conv with per-document resets (CUDA-only).
+    """Depthwise causal conv with per-document resets (CUDA-only).
 
     A pure-torch per-document reference lives in
     ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
     """
-    if cu_seqlens_cpu is None:
-        raise ValueError(
-            "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor. "
-            "Build VarlenMetadata with include_host_offsets=True."
-        )
-
-    from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
-
-    out_BTD, _ = _fla_causal_conv1d(
-        x=x_TD.unsqueeze(0),
-        weight=weight.squeeze(1),
-        bias=None,
+    del cu_seqlens_cpu
+    out_BTD = _attn_gym_causal_conv1d(
+        x_TD.unsqueeze(0),
+        weight.squeeze(1),
         activation="silu",
-        backend="triton",
         cu_seqlens=cu_seqlens,
-        cu_seqlens_cpu=cu_seqlens_cpu,
     )
+    assert isinstance(out_BTD, torch.Tensor)
     return out_BTD.squeeze(0)
 
 
@@ -104,9 +101,9 @@ class RMSNormGated(Module):
     "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
 )
 def _recurrent_gdn_fwd(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
+    q_BTNK: torch.Tensor,
+    k_BTNK: torch.Tensor,
+    v_BTNV: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     cu_seqlens: torch.Tensor,
@@ -114,43 +111,62 @@ def _recurrent_gdn_fwd(
 ) -> torch.Tensor:
     """Run the batch-invariant GDN recurrent forward kernel.
 
-    The vLLM generator must use the recurrent kernel for per-token decode. The
-    trainer uses the same kernel with a materialized float32 initial state and
-    varlen metadata so its forward is bitwise identical to generation.
+    The vLLM generator uses Attention Gym's paging-aware recurrent kernel for
+    per-token decode. The trainer uses the same recurrence with a materialized
+    float32 initial state and varlen metadata so its forward is bitwise identical
+    to generation.
     """
     num_sequences = int(cu_seqlens.numel()) - 1
-    initial_state = q.new_zeros(
-        num_sequences,
-        q.shape[2],
-        q.shape[3],
-        v.shape[3],
+    # state_cache_SNVK: [num_sequences + 1, N, V, K].
+    state_cache_SNVK = q_BTNK.new_empty(
+        num_sequences + 1,
+        q_BTNK.shape[2],
+        v_BTNV.shape[3],
+        q_BTNK.shape[3],
         dtype=torch.float32,
     )
-    output, _ = _fla_fused_recurrent_gated_delta_rule(
-        q,
-        k,
-        v,
-        g,
-        beta=beta,
-        initial_state=initial_state,
-        output_final_state=True,
-        use_qk_l2norm_in_kernel=True,
-        cu_seqlens=cu_seqlens,
+    state_indices = torch.arange(
+        1,
+        num_sequences + 1,
+        dtype=torch.int32,
+        device=q_BTNK.device,
     )
-    return output.to(q.dtype)
+    has_initial_state = torch.zeros(
+        num_sequences,
+        dtype=torch.bool,
+        device=q_BTNK.device,
+    )
+    # FLA normalizes Q/K inside its kernels. Attention Gym's recurrent GDN
+    # expects normalized inputs, so apply the same normalization explicitly.
+    normalized_q_BTNK = _attn_gym_l2norm(q_BTNK, cu_seqlens=cu_seqlens)
+    normalized_k_BTNK = _attn_gym_l2norm(k_BTNK, cu_seqlens=cu_seqlens)
+    out_BTNV, _ = _attn_gym_recurrent_gdn(
+        normalized_q_BTNK,
+        normalized_k_BTNK,
+        v_BTNV,
+        g,
+        beta,
+        state_cache_SNVK,
+        cu_seqlens=cu_seqlens,
+        scale=q_BTNK.shape[-1] ** -0.5,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        autotune=False,
+    )
+    return out_BTNV.to(q_BTNK.dtype)
 
 
 @_recurrent_gdn_fwd.register_fake
 def _recurrent_gdn_fwd_fake(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
+    q_BTNK: torch.Tensor,
+    k_BTNK: torch.Tensor,
+    v_BTNV: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
     cu_seqlens: torch.Tensor,
     cu_seqlens_cpu: torch.Tensor,
 ) -> torch.Tensor:
-    return torch.empty_like(v, dtype=q.dtype)
+    return torch.empty_like(v_BTNV, dtype=q_BTNK.dtype)
 
 
 @torch.library.custom_op(
