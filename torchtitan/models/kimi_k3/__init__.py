@@ -12,10 +12,12 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
-from torchtitan.models.common.config_utils import get_attention_config
+from torchtitan.models.common.config_utils import (
+    get_attention_config,
+    make_token_dispatcher_config,
+)
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
-from torchtitan.models.common.config_utils import make_token_dispatcher_config
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -220,6 +222,7 @@ def _latent_moe_config(
     num_experts: int,
     top_k: int,
     num_shared_experts: int,
+    moe_comm_backend: str,
 ) -> KimiLatentMoE.Config:
     return KimiLatentMoE.Config(
         num_experts=num_experts,
@@ -245,13 +248,14 @@ def _latent_moe_config(
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
             ),
-            # core's dispatcher factory, pinned to the standard all-to-all; it
-            # falls back to local dispatch when the ep mesh is None, so EP=1 is
-            # unchanged. MoonEP is out of scope and deliberately not a choice.
+            # core's dispatcher factory: standard (PyTorch all-to-all), deepep,
+            # hybridep or minimal_async_ep, chosen per spec as deepseek_v3 does.
+            # It falls back to local dispatch when the ep mesh is None, so EP=1
+            # is unchanged.
             token_dispatcher=make_token_dispatcher_config(
                 num_experts=num_experts,
                 top_k=top_k,
-                comm_backend="standard",
+                comm_backend=moe_comm_backend,
             ),
         ),
         routed_norm=_norm(latent_dim),
@@ -371,6 +375,7 @@ def _kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config,
     attn_backend: str,
+    moe_comm_backend: str,
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
@@ -424,6 +429,7 @@ def _kimi_k3_config(
                         num_experts=num_experts,
                         top_k=top_k,
                         num_shared_experts=num_shared_experts,
+                        moe_comm_backend=moe_comm_backend,
                     )
                 ),
                 attention_norm=_norm(dim),
@@ -456,10 +462,11 @@ def _kimi_k3_config(
     )
 
 
-def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
+def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
         dim=dim,
+        moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=24,
         full_attention_layers={3, 7, 11, 15, 19, 23},
@@ -492,10 +499,11 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     )
 
 
-def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
+def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
         dim=dim,
+        moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
         full_attention_layers=set(range(3, 92, 4)) | {92},
@@ -538,8 +546,11 @@ def model_registry(
     flavor: str,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
+    moe_comm_backend: str = "standard",
 ) -> ModelSpec:
-    config = kimi_k3_configs[flavor](attn_backend=attn_backend)
+    config = kimi_k3_configs[flavor](
+        attn_backend=attn_backend, moe_comm_backend=moe_comm_backend
+    )
     if converters is not None:
         validate_converter_order(converters)
         for converter in converters:
