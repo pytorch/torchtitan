@@ -252,8 +252,6 @@ OpenTelemetry environment variables remain available, including:
 
 The logger also attaches `model_name`, `hostname`, `rank`, `local_rank`,
 `world_size`, `dp_rank`, `tp_rank`, and `generator_name` resource attributes.
-Backend-specific logger subclasses can extend these attributes by overriding
-`VllmOtelStatLogger._build_resource_attributes`.
 
 vLLM currently installs the OpenTelemetry SDK dependencies. If they are not
 available, install them explicitly:

@@ -23,14 +23,16 @@ import socket
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from opentelemetry.util.types import AttributeValue
 from vllm import envs
 from vllm.v1.metrics.loggers import StatLoggerBase
+
+from torchtitan.config import Configurable
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
-    from opentelemetry.util.types import AttributeValue
     from vllm.config import VllmConfig
     from vllm.v1.metrics.stats import (
         IterationStats,
@@ -143,19 +145,29 @@ def _compact_json(metrics_data) -> str:
     return metrics_data.to_json(indent=None) + "\n"
 
 
-class VllmOtelStatLogger(StatLoggerBase):
+class VllmOtelStatLogger(Configurable, StatLoggerBase):
     """Per-engine vLLM stat logger that exports OpenTelemetry metrics.
 
     Metric selection and stat extraction are based on vLLM's ``PrometheusStatLogger``.
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        extra_resource_attributes: dict[str, AttributeValue] = field(
+            default_factory=dict
+        )
+        """Additional OpenTelemetry resource attributes. Values are applied after
+        automatically generated attributes and override them when keys collide."""
+
     def __init__(
         self,
+        config: Config,
         vllm_config: VllmConfig,
         engine_index: int = 0,
         *,
         context: StatLoggerContext,
     ) -> None:
+        self._config = config
         self._enabled = False
 
         self._kv_cache_usage_last = 0.0
@@ -261,8 +273,8 @@ class VllmOtelStatLogger(StatLoggerBase):
     def _build_resource_attributes(
         self, vllm_config: VllmConfig, context: StatLoggerContext
     ) -> dict[str, AttributeValue]:
-        """Build resource attributes, allowing subclasses to add backend tags."""
-        return {
+        """Build resource attributes."""
+        attributes: dict[str, AttributeValue] = {
             "model_name": vllm_config.model_config.model,
             "hostname": socket.gethostname(),
             "rank": context.rank,
@@ -272,6 +284,8 @@ class VllmOtelStatLogger(StatLoggerBase):
             "tp_rank": context.tp_rank,
             "generator_name": context.generator_name,
         }
+        attributes.update(self._config.extra_resource_attributes)
+        return attributes
 
     def _create_counters(self, meter: Meter) -> None:
         """Monotonic counters; the backend derives throughput/rates via rate()."""

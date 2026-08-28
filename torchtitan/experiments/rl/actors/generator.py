@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import functools
 import gc
 import logging
 import math
@@ -763,10 +762,10 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
-        vllm_stat_loggers: list[type[VllmOtelStatLogger]] = field(
-            default_factory=lambda: [VllmOtelStatLogger]
+        vllm_stat_logger: VllmOtelStatLogger.Config = field(
+            default_factory=VllmOtelStatLogger.Config
         )
-        """Loggers instantiated on TP rank 0 to export vLLM metrics."""
+        """Logger instantiated on TP rank 0 to export vLLM metrics."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -934,7 +933,7 @@ class VLLMGenerator(Actor, Configurable):
         with sl.log_trace_span("vllm_init"):
             logger.info("Initializing LLMEngine from EngineArgs...")
             stat_loggers = None
-            if self._tp_rank == 0 and config.vllm_stat_loggers:
+            if self._tp_rank == 0:
                 logger_context = StatLoggerContext(
                     rank=self._rank,
                     tp_rank=self._tp_rank,
@@ -942,10 +941,15 @@ class VLLMGenerator(Actor, Configurable):
                     generator_name=context().actor_instance.actor_id.actor_name,
                     output_dir=output_dir,
                 )
-                stat_loggers = [
-                    functools.partial(cls, context=logger_context)
-                    for cls in config.vllm_stat_loggers
-                ]
+
+                def build_stat_logger(vllm_config, engine_index):
+                    return config.vllm_stat_logger.build(
+                        vllm_config=vllm_config,
+                        engine_index=engine_index,
+                        context=logger_context,
+                    )
+
+                stat_loggers = [build_stat_logger]
             self._engine = LLMEngine.from_engine_args(
                 engine_args, stat_loggers=stat_loggers
             )
