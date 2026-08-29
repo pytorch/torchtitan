@@ -105,15 +105,5 @@ def kimi_k3_debugmodel_32l() -> Trainer.Config:
     return config
 
 
-def kimi_k3_debugmodel_32l_naive() -> Trainer.Config:
-    """The 32-layer text flavor with the delta block transport turned off.
-
-    The transport is the default under pipeline parallelism; this flavor
-    selects the fallback, so a matrix can put the two side by side.
-    """
-    config = kimi_k3_debugmodel_32l()
-    config.model_spec.model.attn_res_cache = False
-    return config
-
 
 
