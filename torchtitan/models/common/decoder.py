@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
-from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
+from torch.nn.attention.flex_attention import BlockMask, _mask_mod_signature, and_masks
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -28,6 +28,12 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.rope import (
+    RoPE,
+    _RoPECacheRegistry,
+    _current_rope_cache_registry,
+    _rope_cache_registry_context,
+)
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
@@ -81,6 +87,17 @@ class Decoder(BaseModel):
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
+
+        def build(self, **kwargs):
+            # Keep one registry active for the complete owner construction so
+            # subclass-added modules (for example DeepSeek MTP layers) observe
+            # the same cache namespace. The public build signature and the
+            # per-layer Config copy semantics remain unchanged.
+            registry = _RoPECacheRegistry()
+            with _rope_cache_registry_context(registry):
+                # ``slots=True`` prevents zero-argument ``super()`` from
+                # resolving reliably on dataclass-generated Config classes.
+                return Module.Config.build(self, **kwargs)
 
         @property
         def first_attention(self) -> BaseAttention.Config | None:
@@ -249,11 +266,22 @@ class Decoder(BaseModel):
         super().__init__()
         self.config = config
 
+        registry = _current_rope_cache_registry()
+        if registry is None:
+            registry = _RoPECacheRegistry()
+        # The registry is a private child module so its canonical buffers follow
+        # model transforms and are copied with pipeline-stage model chunks.
+        self._rope_cache_registry = registry
+
         self.tok_embeddings = config.tok_embeddings.build()
 
-        self.layers = ModuleDict()
-        for i, layer_config in enumerate(config.layers):
-            self.layers[str(i)] = layer_config.build()
+        # Direct model construction (outside Config.build()) still receives a
+        # local registry for its layer RoPE modules. Config.build() establishes
+        # the same context around the complete subclass constructor.
+        with _rope_cache_registry_context(registry):
+            self.layers = ModuleDict()
+            for i, layer_config in enumerate(config.layers):
+                self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
@@ -275,6 +303,21 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
+
+    def _prune_rope_cache_registry(self) -> None:
+        """Drop cache slots unused after pipeline-stage module pruning."""
+        slots = set()
+        for module in self.modules():
+            if not isinstance(module, RoPE):
+                continue
+            reader = module.__dict__.get("_cache_reader")
+            if reader is not None and reader._registry is self._rope_cache_registry:
+                slots.add(reader._slot_name)
+        self._rope_cache_registry._retain_slots(slots)
+
+    def _rope_cache_context(self):
+        """Return a context that exposes this model's private cache registry."""
+        return _rope_cache_registry_context(self._rope_cache_registry)
 
     def forward(
         self,
