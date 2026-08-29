@@ -75,7 +75,11 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
-            x = self.moe(self.ffn_norm(x), input_ids_T=input_ids_T)
+            ffn_input = self.ffn_norm(x)
+            if getattr(self.moe.router, "hash", False):
+                x = self.moe(ffn_input, input_ids_T=input_ids_T)
+            else:
+                x = self.moe(ffn_input)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
@@ -192,7 +196,6 @@ class DeepSeekV4Model(Decoder):
     def get_attention_masks(self, positions):
         return None
 
-
     def forward(
         self,
         tokens: torch.Tensor,
@@ -235,7 +238,6 @@ class DeepSeekV4Model(Decoder):
             self.lm_head(item) if self.lm_head is not None else item
             for item in outputs
         ]
-
 
     def mtp_forward(
         self,

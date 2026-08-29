@@ -21,9 +21,11 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
-from torchtitan.models.common.config_utils import make_experts_config, make_ffn_config
+from torchtitan.models.common.config_utils import (
+    make_ffn_config,
+    make_routed_experts_config,
+)
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.moe import MoE
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -347,7 +349,7 @@ def _make_v4_moe_config(
             n_hash_layers=n_hash_layers,
             layer_id=layer_id,
         ),
-        experts=make_experts_config(
+        routed_experts=make_routed_experts_config(
             dim=dim,
             hidden_dim=moe_inter_dim,
             num_experts=num_experts,
@@ -550,7 +552,7 @@ def _build_mtp_layers(
         if block_cfg.moe is not None:
             block_cfg.moe.router.gate.param_init = _depth_init(layer_id)
             block_cfg.moe.router.layer_id = layer_id
-            block_cfg.moe.experts.param_init = _depth_experts_init(layer_id)
+            block_cfg.moe.routed_experts.inner_experts.param_init = _depth_experts_init(layer_id)
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
                 block_cfg.moe.shared_experts.w2.param_init = depth_init

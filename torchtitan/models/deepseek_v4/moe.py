@@ -95,5 +95,11 @@ class DeepSeekV4MoE(MoE):
     class Config(MoE.Config):
         pass
 
-    def forward(self, x_TD: torch.Tensor, input_ids_T: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        input_ids_T: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_ids_T is None:
+            return super().forward(x_TD)
         return super().forward(x_TD, input_ids_T=input_ids_T)

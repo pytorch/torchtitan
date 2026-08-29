@@ -38,9 +38,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.attn_norm.weight": "layers.{}.attention_norm.weight",
             "layers.{}.ffn_norm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.experts.w1_EFD",
-            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.experts.w3_EFD",
-            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.experts.w2_EDF",
+            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
+            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
+            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
             "layers.{}.ffn.gate.weight": "layers.{}.moe.router.gate.weight",
             "layers.{}.ffn.gate.bias": "layers.{}.moe.expert_bias_E",
             "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.moe.shared_experts.w1.weight",
@@ -138,7 +138,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return any(t in key for t in ("compressor", "indexer", "tid2eid"))
 
     def _can_delegate_titan_key(self, key: str, to_hf_map: dict[str, str]) -> bool:
-        if key in to_hf_map or "moe.experts" in key:
+        if key in to_hf_map or "moe.routed_experts.inner_experts" in key:
             return True
         if key.startswith("mtp_layers."):
             abstract_key = self._abstract_key(key, count=1).replace(

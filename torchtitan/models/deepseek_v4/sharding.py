@@ -283,21 +283,25 @@ def set_deepseek_v4_layer_sharding(
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
-        input_ids_src_placement = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        input_ids_dst_placement = (
-            dense_token_ids_sequence_parallel_placement()
-            if enable_ep
-            else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        )
-        layer_cfg.moe.sharding_config.in_src_shardings[
-            "input_ids_T"
-        ] = input_ids_src_placement
-        layer_cfg.moe.sharding_config.in_dst_shardings[
-            "input_ids_T"
-        ] = input_ids_dst_placement
-        router_sharding = layer_cfg.moe.router.sharding_config or ShardingConfig()
-        router_sharding.state_shardings["tid2eid"] = _replicated_layout
-        layer_cfg.moe.router.sharding_config = router_sharding
+        router_cfg = layer_cfg.moe.router
+        if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
+            input_ids_src_placement = dense_activation_placement(
+                tp=spmd.R, cp=spmd.S(0)
+            )
+            input_ids_dst_placement = (
+                dense_token_ids_sequence_parallel_placement()
+                if enable_ep
+                else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+            )
+            layer_cfg.moe.sharding_config.in_src_shardings[
+                "input_ids_T"
+            ] = input_ids_src_placement
+            layer_cfg.moe.sharding_config.in_dst_shardings[
+                "input_ids_T"
+            ] = input_ids_dst_placement
+            router_sharding = router_cfg.sharding_config or ShardingConfig()
+            router_sharding.state_shardings["tid2eid"] = _replicated_layout
+            router_cfg.sharding_config = router_sharding
 
 
 def set_deepseek_v4_sharding_config(
@@ -357,8 +361,12 @@ def set_deepseek_v4_sharding_config(
                 in_src_shardings={
                     "mtp_input_embed": replicated_activation,
                     "prev_hc_hidden": replicated_activation,
-                    "mtp_input_ids_T": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-                    "mtp_input_valid_mask": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+                    "mtp_input_ids_T": dense_activation_placement(
+                        tp=spmd.R, cp=spmd.S(0)
+                    ),
+                    "mtp_input_valid_mask": dense_activation_placement(
+                        tp=spmd.R, cp=spmd.S(0)
+                    ),
                 },
                 out_src_shardings=replicated_activation,
             )
