@@ -1243,9 +1243,8 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
             )
 
         if token_dispatcher_cfg.hidden_dim is None:
-            # The model registry sets hidden_dim when the dispatched rows are
-            # not model-dim wide (Kimi K3 routes a latent stream through its
-            # experts); model dim is only the default.
+            # A model whose dispatched rows are not model-dim wide sets
+            # hidden_dim on the config; model dim is only the default.
             token_dispatcher_cfg.hidden_dim = model_config.dim
         configured_capacity = token_dispatcher_cfg.num_max_tokens_per_rank
         if configured_capacity is not None and configured_capacity <= 0:
