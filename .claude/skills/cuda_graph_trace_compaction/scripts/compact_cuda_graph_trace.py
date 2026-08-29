@@ -805,11 +805,16 @@ def _remap_related_events(
     return retained, flow_events_mapped, annotation_events_mapped
 
 
-def compact_trace(trace: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def compact_trace(
+    trace: dict[str, Any],
+    *,
+    include_local_pp_flows: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Compact CUDA graph streams in a parsed PyTorch profiler trace.
 
     Args:
         trace: Parsed profiler trace.
+        include_local_pp_flows: Add same-rank PP dependency arrows.
 
     Returns:
         Pair of compacted trace and verification summary.
@@ -869,6 +874,8 @@ def compact_trace(trace: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]
     summary["cuda_graph_launches"] = sum(
         event.get("name") == "cudaGraphLaunch" for event in retained
     )
+    if include_local_pp_flows:
+        _add_single_rank_pp_flows(compacted, summary)
     return compacted, summary
 
 
@@ -893,7 +900,10 @@ def _pp_rank_mapping(traces: list[dict[str, Any]]) -> dict[int, int]:
     for trace in traces:
         distributed_info = trace["distributedInfo"]
         for group in distributed_info.get("pg_config", []):
-            if group.get("pg_name") != "torchtitan_real_pp":
+            if (
+                group.get("pg_name") != "torchtitan_real_pp"
+                and group.get("pg_desc") != "mesh_pp"
+            ):
                 continue
             ranks = group.get("ranks")
             if isinstance(ranks, list) and all(rank in ranks for rank in global_ranks):
@@ -941,7 +951,9 @@ def _ranked_compacted_traces(
     ranked = []
     for trace in traces:
         global_rank = _global_rank(trace)
-        compacted, summaries[global_rank] = compact_trace(trace)
+        compacted, summaries[global_rank] = compact_trace(
+            trace, include_local_pp_flows=False
+        )
         aligned, offsets[global_rank] = _aligned_trace_copy(compacted, common_base_ns)
         ranked.append(RankedTrace(pp_ranks[global_rank], global_rank, aligned))
     return (
@@ -1419,6 +1431,70 @@ def _unshard_dependency_flow_events(
     return flows, len(flows) // 2, unmatched
 
 
+def _rank_local_flow_events(
+    blocks: list[PPAnnotationBlock],
+    unshards: list[PPAnnotationBlock],
+    pid_to_pp_rank: dict[int, int],
+    first_flow_id: int,
+) -> tuple[list[dict[str, Any]], int, int, int, int]:
+    """Build compute and unshard dependency flows within one PP rank."""
+
+    local, local_pairs, local_unmatched, next_flow_id = _local_dependency_flow_events(
+        blocks, pid_to_pp_rank, first_flow_id
+    )
+    unshard, unshard_pairs, unshard_unmatched = _unshard_dependency_flow_events(
+        unshards, blocks, pid_to_pp_rank, next_flow_id
+    )
+    return (
+        local + unshard,
+        local_pairs,
+        local_unmatched,
+        unshard_pairs,
+        unshard_unmatched,
+    )
+
+
+def _single_trace_pp_rank(trace: dict[str, Any]) -> int:
+    """Return the trace's PP rank, or zero when rank metadata is absent."""
+
+    try:
+        global_rank = _global_rank(trace)
+        return _pp_rank_mapping([trace])[global_rank]
+    except ValueError:
+        return 0
+
+
+def _add_single_rank_pp_flows(trace: dict[str, Any], summary: dict[str, Any]) -> None:
+    """Add rank-local PP dependency arrows to a compacted trace."""
+
+    events = trace["traceEvents"]
+    pp_rank = _single_trace_pp_rank(trace)
+    pid_to_pp_rank = {
+        int(event["pid"]): pp_rank
+        for event in events
+        if isinstance(event.get("pid"), int)
+    }
+    blocks = _pp_annotation_blocks(events)
+    unshards = _unshard_annotation_blocks(events)
+    (
+        flows,
+        local_pairs,
+        local_unmatched,
+        unshard_pairs,
+        unshard_unmatched,
+    ) = _rank_local_flow_events(blocks, unshards, pid_to_pp_rank, 1_000_000_000_000)
+    events.extend(flows)
+    flow_summary = {
+        "pp_rank": pp_rank,
+        "pp_compute_dependency_pairs": local_pairs,
+        "pp_compute_dependency_unmatched": local_unmatched,
+        "pp_unshard_compute_pairs": unshard_pairs,
+        "pp_unshard_compute_unmatched": unshard_unmatched,
+    }
+    trace["cuda_graph_pp_local_flows"] = flow_summary
+    summary.update(flow_summary)
+
+
 def _communication_flow_events(
     events: list[dict[str, Any]], pid_to_pp_rank: dict[int, int]
 ) -> tuple[list[dict[str, Any]], int, int, int, int, int, int]:
@@ -1432,14 +1508,15 @@ def _communication_flow_events(
         send_recv_unmatched,
         next_flow_id,
     ) = _send_recv_flow_events(blocks, pid_to_pp_rank, 1_000_000_000_000)
-    local, local_pairs, local_unmatched, next_flow_id = _local_dependency_flow_events(
-        blocks, pid_to_pp_rank, next_flow_id
-    )
-    unshard, unshard_pairs, unshard_unmatched = _unshard_dependency_flow_events(
-        unshards, blocks, pid_to_pp_rank, next_flow_id
-    )
+    (
+        local,
+        local_pairs,
+        local_unmatched,
+        unshard_pairs,
+        unshard_unmatched,
+    ) = _rank_local_flow_events(blocks, unshards, pid_to_pp_rank, next_flow_id)
     return (
-        send_recv + local + unshard,
+        send_recv + local,
         send_recv_pairs,
         send_recv_unmatched,
         local_pairs,

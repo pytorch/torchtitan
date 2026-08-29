@@ -323,6 +323,105 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
         self.assertEqual(4, summary["pp_unshard_compute_pairs"])
         self.assertEqual(0, summary["pp_unshard_compute_unmatched"])
 
+    def test_compacts_single_rank_with_local_pp_flows(self) -> None:
+        trace = self._rank_trace(
+            rank=4,
+            base_time_ns=1_000_000,
+            events=[
+                self._kernel(
+                    "ncclDevKernel_AllGather",
+                    stream=6,
+                    timestamp=1,
+                    duration=4,
+                    annotation="PP:1UNSHARD",
+                ),
+                self._kernel(
+                    "ncclDevKernel_AllGather",
+                    stream=7,
+                    timestamp=2,
+                    duration=2,
+                    annotation="PP:1UNSHARD",
+                ),
+                self._kernel(
+                    "ncclDevKernel_SendRecv",
+                    stream=1,
+                    timestamp=4,
+                    duration=3,
+                    annotation="PP:1RECV_F0",
+                ),
+                self._kernel(
+                    "compute",
+                    stream=2,
+                    timestamp=8,
+                    duration=2,
+                    annotation="PP:1F0",
+                ),
+                self._kernel(
+                    "ncclDevKernel_SendRecv",
+                    stream=1,
+                    timestamp=11,
+                    annotation="PP:1SEND_F0",
+                ),
+            ],
+        )
+        trace["distributedInfo"]["pg_config"] = [
+            {
+                "pg_name": "recorded-group-id",
+                "pg_desc": "mesh_pp",
+                "ranks": [0, 4],
+            }
+        ]
+
+        compacted, summary = compact_trace(trace)
+
+        events = compacted["traceEvents"]
+        dependency_flows = [
+            event for event in events if event.get("cat") == "pp_compute_dependency"
+        ]
+        unshard_flows = [
+            event for event in events if event.get("cat") == "pp_unshard_dependency"
+        ]
+        thread_names = {
+            (event["pid"], event["tid"]): event["args"]["name"]
+            for event in events
+            if event.get("name") == "thread_name"
+        }
+        self.assertFalse(any(event.get("cat") == "pp_send_recv" for event in events))
+        self.assertEqual(
+            {"1RECV_F0 -> 1F0", "1F0 -> 1SEND_F0"},
+            {event["name"] for event in dependency_flows},
+        )
+        self.assertEqual(
+            {
+                "NCCL all-gather 1 annotations",
+                "NCCL all-gather 2 annotations",
+            },
+            {
+                thread_names[(event["pid"], event["tid"])]
+                for event in unshard_flows
+                if event["ph"] == "s"
+            },
+        )
+        self.assertTrue(
+            all(
+                thread_names[(event["pid"], event["tid"])] == "Compute annotations"
+                for event in unshard_flows
+                if event["ph"] == "f"
+            )
+        )
+        self.assertTrue(
+            all(
+                event["args"]["source_pp_rank"] == 1
+                and event["args"]["destination_pp_rank"] == 1
+                for event in dependency_flows + unshard_flows
+            )
+        )
+        self.assertEqual(1, summary["pp_rank"])
+        self.assertEqual(2, summary["pp_compute_dependency_pairs"])
+        self.assertEqual(0, summary["pp_compute_dependency_unmatched"])
+        self.assertEqual(2, summary["pp_unshard_compute_pairs"])
+        self.assertEqual(0, summary["pp_unshard_compute_unmatched"])
+
     def test_converts_neighbor_kernel_annotations_to_spans(self) -> None:
         trace = {
             "traceEvents": [
