@@ -40,6 +40,10 @@ def _build_fused_grouped_experts() -> FusedGroupedExperts:
     return fused
 
 
+_ACCELERATOR = torch.accelerator.current_accelerator()
+DEVICE = _ACCELERATOR.type if _ACCELERATOR is not None else "cpu"
+
+
 class TestFusedSwiGLUOverride(unittest.TestCase):
     def test_minimal_async_ep_config_imports_override(self):
         config = deepseek_v3_debugmodel_minimal_async_ep()
@@ -190,12 +194,12 @@ class TestFusedGroupedExpertsNumerics(unittest.TestCase):
         torch.testing.assert_close(x_fused.grad, x_stock.grad, atol=2e-2, rtol=2e-2)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(torch.accelerator.is_available(), "accelerator required")
 class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
     def test_silu_and_mul_custom_op_matches_reference_with_offsets(self):
-        gate = torch.randn(3, 2, device="cuda", requires_grad=True)
-        up = torch.randn(3, 2, device="cuda", requires_grad=True)
-        offsets = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+        gate = torch.randn(3, 2, device=DEVICE, requires_grad=True)
+        up = torch.randn(3, 2, device=DEVICE, requires_grad=True)
+        offsets = torch.tensor([1, 2], device=DEVICE, dtype=torch.int32)
 
         out = silu_and_mul_op(gate, up, offsets)
         out[:2].sum().backward()
@@ -214,8 +218,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         torch.testing.assert_close(up.grad[:2], ref_up.grad[:2])
 
     def test_silu_and_mul_custom_op_matches_reference_without_offsets(self):
-        gate = torch.randn(3, 2, device="cuda", requires_grad=True)
-        up = torch.randn(3, 2, device="cuda", requires_grad=True)
+        gate = torch.randn(3, 2, device=DEVICE, requires_grad=True)
+        up = torch.randn(3, 2, device=DEVICE, requires_grad=True)
 
         out = silu_and_mul_op(gate, up)
         out.sum().backward()
@@ -240,7 +244,7 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
                 [2.0, -3.0],
                 [4.0, 5.0],
             ],
-            device="cuda",
+            device=DEVICE,
             requires_grad=True,
         )
         up = torch.tensor(
@@ -249,10 +253,10 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
                 [5.0, 7.0],
                 [11.0, 13.0],
             ],
-            device="cuda",
+            device=DEVICE,
             requires_grad=True,
         )
-        offsets = torch.tensor([1, 2], device="cuda", dtype=torch.int32)
+        offsets = torch.tensor([1, 2], device=DEVICE, dtype=torch.int32)
 
         out = silu_and_mul_forward_kernel(gate, up, offsets)
         expected = torch.nn.functional.silu(gate) * up
@@ -264,7 +268,7 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
                 [23.0, 29.0],
                 [31.0, 37.0],
             ],
-            device="cuda",
+            device=DEVICE,
         )
         grad_gate, grad_up = silu_and_mul_backward_kernel(
             grad_out,
@@ -277,3 +281,56 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         assert up.grad is not None
         torch.testing.assert_close(grad_gate[:2], gate.grad[:2])
         torch.testing.assert_close(grad_up[:2], up.grad[:2])
+
+    def test_fused_experts_forward_matches_base_grouped_experts(self):
+        # Guards against the override drifting out of sync with the base
+        # GroupedExperts.forward signature that RoutedExperts calls, and checks
+        # the fused activation matches the base SiLU-and-mul grouped-GEMM path
+        # within bf16 tolerance.
+        dim = 128
+        hidden_dim = 256
+        num_experts = 8
+
+        def build(cls):
+            return (
+                cls.Config(
+                    dim=dim,
+                    hidden_dim=hidden_dim,
+                    num_experts=num_experts,
+                )
+                .build()
+                .to(DEVICE)
+            )
+
+        fused = build(FusedGroupedExperts)
+        base = build(GroupedExperts)
+        # Expert weights are allocated with torch.empty; initialize them and
+        # share across both paths so the comparison is meaningful.
+        with torch.no_grad():
+            for p in fused.parameters():
+                p.normal_(0.0, 0.02)
+        base.load_state_dict(fused.state_dict())
+
+        num_tokens_per_expert = torch.tensor(
+            [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device=DEVICE
+        )
+        total_tokens = int(num_tokens_per_expert.sum().item())
+        x = torch.randn(total_tokens, dim, device=DEVICE, requires_grad=True)
+        x_ref = x.detach().clone().requires_grad_(True)
+
+        out = fused(x, num_tokens_per_expert)
+        out_ref = base(x_ref, num_tokens_per_expert)
+
+        self.assertEqual(out.shape, (total_tokens, dim))
+        torch.testing.assert_close(out, out_ref, atol=5e-2, rtol=5e-2)
+
+        out.sum().backward()
+        out_ref.sum().backward()
+        assert x.grad is not None
+        assert x_ref.grad is not None
+        torch.testing.assert_close(x.grad, x_ref.grad, atol=5e-2, rtol=5e-2)
+
+        # The fused variant deletes w1_EFD/w3_EFD in favour of a fused w13, so
+        # MoE metrics can only cover it if it reports the same logical GEMM
+        # extents as the stock experts.
+        self.assertEqual(fused.grouped_gemm_shapes(), base.grouped_gemm_shapes())

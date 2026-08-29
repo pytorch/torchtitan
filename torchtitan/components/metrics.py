@@ -4,21 +4,59 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import os
 import time
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
 import torch
+import tyro
 from torch.utils.tensorboard import SummaryWriter
+from torchtitan.components.moe_metrics import (
+    MoEMetricCollector,
+    MoEMetricsConfig,
+    set_active_moe_metric_collector,
+)
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
+
+
+def _extract_model_metadata(model_config: Any | None) -> dict[str, Any]:
+    """Best-effort architecture hyperparameters for the metrics manifest.
+
+    Reads only model-agnostic fields exposed by every ``Decoder.Config``: the
+    top-level ``dim`` and layer count, plus the scalar attention hyperparameters
+    (``n_heads``, head dims, LoRA ranks, mask type, ...) from the first
+    transformer block's ``attention`` sub-config. Nested sub-configs (Linear /
+    RMSNorm projections) are skipped. Returns an empty dict when the config does
+    not expose these attributes, so it is safe for any model.
+    """
+    if model_config is None:
+        return {}
+    meta: dict[str, Any] = {}
+    dim = getattr(model_config, "dim", None)
+    if isinstance(dim, int):
+        meta["dim"] = dim
+    layers = getattr(model_config, "layers", None)
+    if isinstance(layers, (list, tuple)) and layers:
+        meta["num_layers"] = len(layers)
+        attention = getattr(layers[0], "attention", None)
+        if attention is not None and dataclasses.is_dataclass(attention):
+            attn = {
+                f.name: getattr(attention, f.name)
+                for f in dataclasses.fields(attention)
+                if isinstance(getattr(attention, f.name), (bool, int, float, str))
+            }
+            if attn:
+                meta["attention"] = attn
+    return meta
 
 
 # named tuple for passing device memory stats for logging
@@ -116,6 +154,7 @@ class TensorBoardLogger(BaseLogger):
 
     def __init__(self, log_dir: str, tag: str | None = None):
         self.tag = tag
+        self.log_dir = log_dir
         self.writer = SummaryWriter(log_dir, max_queue=1000)
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
@@ -190,6 +229,14 @@ class LoggerContainer(BaseLogger):
     @property
     def number_of_loggers(self) -> int:
         return len(self._loggers)
+
+    @property
+    def tb_log_dir(self) -> str | None:
+        """Log directory of the TensorBoard logger, if one is enabled."""
+        for logger_instance in self._loggers:
+            if isinstance(logger_instance, TensorBoardLogger):
+                return logger_instance.log_dir
+        return None
 
     def close(self) -> None:
         for logger_instance in self._loggers:
@@ -299,6 +346,15 @@ class MetricsProcessor(Configurable):
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
 
+        moe: Annotated[MoEMetricsConfig, tyro.conf.Suppress] = field(
+            default_factory=MoEMetricsConfig
+        )
+        """
+        MoE grouped-GEMM metrics collection settings. Suppressed from the
+        command line: the CLI surface is frozen, so this is set from a
+        configuration instead. See torchtitan/config/README.md.
+        """
+
         def __post_init__(self) -> None:
             if self.log_freq <= 0:
                 raise ValueError("metrics.log_freq must be greater than 0.")
@@ -331,6 +387,7 @@ class MetricsProcessor(Configurable):
         config_dict: dict[str, Any] | None = None,
         tag: str | None = None,
         has_quantization: bool = False,
+        model_config: Any | None = None,
     ):
         self.logger = self._build_metric_logger(
             config=config,
@@ -347,7 +404,6 @@ class MetricsProcessor(Configurable):
         self.device_memory_monitor = build_device_memory_monitor()
         # used for colorful printing
         self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
-
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name
         )
@@ -358,10 +414,125 @@ class MetricsProcessor(Configurable):
 
         self.has_quantization = has_quantization
 
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+        else:
+            rank = 0
+            world_size = 1
+
         # These variables have to be set later as they depend on other components or model.
         self.num_flops_per_token = -1
         self.optimizers = None
         self.model_parts = None
+        training_cfg = (config_dict or {}).get("training", {})
+        model_spec_cfg = (config_dict or {}).get("model_spec", {})
+        # Per-rank (per-microbatch) batch size is local_batch_size; the global
+        # batch is split into `gradient_accumulation_steps` such microbatches.
+        batch_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+        local_batch_size = training_cfg.get("local_batch_size")
+        global_batch_size = training_cfg.get("global_batch_size")
+        gradient_accumulation_steps = None
+        if local_batch_size:
+            if not global_batch_size or global_batch_size < 0:
+                global_batch_size = local_batch_size * batch_degree
+            gradient_accumulation_steps = global_batch_size // (
+                local_batch_size * batch_degree
+            )
+        run_metadata = {
+            "model_name": model_spec_cfg.get("name"),
+            "model_flavor": model_spec_cfg.get("flavor"),
+            "seq_len": training_cfg.get("seq_len"),
+            "local_batch_size": local_batch_size,
+            "global_batch_size": global_batch_size,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "tp": parallel_dims.tp,
+            "ep": parallel_dims.ep,
+            "cp": parallel_dims.cp,
+            "pp": parallel_dims.pp,
+            "dp_shard": parallel_dims.dp_shard,
+            "dp_replicate": parallel_dims.dp_replicate,
+            "mixed_precision_param": training_cfg.get("mixed_precision_param"),
+            **_extract_model_metadata(model_config),
+        }
+        # The TensorBoard SummaryWriter lives only on the metrics rank (rank 0
+        # without PP, the last-stage rank otherwise). The MoE collector writes
+        # from rank 0, so broadcast the log dir to every rank to keep the MoE
+        # event file in the same TB run as the training scalars.
+        moe_tb_log_dir = self._resolve_tb_log_dir(
+            parallel_dims=parallel_dims, pp_schedule=pp_schedule
+        )
+        # The grouped-GEMM metrics hook runs inside GroupedExperts._experts_forward,
+        # which is compiled with fullgraph=True when the model is compiled. Its
+        # active-collector body (ContextVar read, record construction) is not
+        # traceable, so an enabled collector is incompatible with model compile.
+        # The disabled path is compile-safe (dead-code-eliminated), so this only
+        # blocks the both-on combination.
+        compile_cfg = (config_dict or {}).get("compile", {})
+        compiles_model = compile_cfg.get("enable", False) and "model" in (
+            compile_cfg.get("components", ["model", "loss"])
+        )
+        if config.moe.enabled and compiles_model:
+            raise ValueError(
+                "MoE metrics collection (metrics.moe.enabled=true) is incompatible "
+                "with model compilation (compile.enable=true with 'model' in "
+                "compile.components): the grouped-GEMM metrics hook runs inside the "
+                "fullgraph-compiled expert forward and cannot be traced. To collect "
+                "metrics, set compile.enable=false (or remove 'model' from "
+                "compile.components); otherwise set metrics.moe.enabled=false."
+            )
+        self.moe_metric_collector = MoEMetricCollector(
+            config=config.moe,
+            dump_folder=dump_folder,
+            rank=rank,
+            world_size=world_size,
+            run_metadata=run_metadata,
+            tb_log_dir=moe_tb_log_dir,
+        )
+
+    def _resolve_tb_log_dir(
+        self, *, parallel_dims: ParallelDims, pp_schedule: str
+    ) -> str | None:
+        """Resolve the TensorBoard log dir and make it visible on every rank.
+
+        ``self.logger`` only holds a ``TensorBoardLogger`` on the metrics rank
+        (rank 0 without PP, the last pipeline stage's first rank otherwise);
+        non-metrics ranks get a bare ``BaseLogger`` with no log dir. The MoE
+        collector writes from rank 0 and the ``tb`` sink runs a collective
+        ``gather_object`` on every rank, so all ranks must agree on whether the
+        sink is built. Broadcast the metrics rank's log dir to all ranks so the
+        decision (and the target directory) is identical everywhere. Returns
+        ``None`` when TensorBoard is disabled.
+        """
+        local_dir = (
+            self.logger.tb_log_dir if isinstance(self.logger, LoggerContainer) else None
+        )
+        # When the MoE collector is disabled it never builds the tb sink, so
+        # ranks do not need to agree on the log dir. Skip the broadcast to keep
+        # MetricsProcessor construction collective-free when the feature is off.
+        # config.moe.enabled is identical on every rank, so all ranks either
+        # skip together or broadcast together.
+        if not self.config.moe.enabled:
+            return local_dir
+        if not (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        ):
+            return local_dir
+        src = _get_metrics_rank(parallel_dims=parallel_dims, pp_schedule=pp_schedule)
+        payload = [local_dir]
+        torch.distributed.broadcast_object_list(payload, src=src)
+        return payload[0]
+
+    def begin_step(self, step: int) -> None:
+        """Mark the beginning of a train step for step-scoped collectors."""
+        self.moe_metric_collector.begin_step(step)
+        if self.moe_metric_collector.is_enabled():
+            set_active_moe_metric_collector(self.moe_metric_collector)
+
+    def end_step(self) -> None:
+        """Flush step-scoped collectors after a completed train step."""
+        self.moe_metric_collector.flush()
+        set_active_moe_metric_collector(None)
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.config.log_freq == 0
@@ -493,6 +664,10 @@ class MetricsProcessor(Configurable):
             mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
+        # Feed the per-step wall time to the MoE collector so its TB sink can
+        # overlay end_to_end(s) against the summed per-layer peak expert load.
+        # No-op unless MoE metrics collection is enabled.
+        self.moe_metric_collector.record_step_end_to_end(step, time_end_to_end)
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
@@ -580,4 +755,6 @@ class MetricsProcessor(Configurable):
         self.device_memory_monitor.reset_peak_stats()
 
     def close(self):
+        set_active_moe_metric_collector(None)
+        self.moe_metric_collector.close()
         self.logger.close()
