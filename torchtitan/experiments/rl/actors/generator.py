@@ -908,13 +908,7 @@ class VLLMGenerator(Actor, Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        # TODO: model_spec.model.max_context_length is the RoPE cache size, which
-        # core config_registry functions now build from their seq_len parameter
-        # rather than from the architecture's full context. Once a model registry
-        # in torchtitan/models is used here, this reads the training sequence
-        # length, not the model's generation capacity. Give ModelSpec a dedicated
-        # capacity field and read that instead.
-        engine_kwargs["max_model_len"] = model_spec.model.max_context_length
+        engine_kwargs["max_model_len"] = model_spec.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens

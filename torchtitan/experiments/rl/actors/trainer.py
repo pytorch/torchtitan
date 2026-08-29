@@ -272,14 +272,7 @@ class PolicyTrainer(Actor, Configurable):
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
 
-        # Check if the requested context exceeds the model context length.
-        # TODO: model_spec.model.max_context_length is the RoPE cache size, which
-        # core config_registry functions now build from their seq_len parameter
-        # rather than from the architecture's full context. Once a model registry
-        # in torchtitan/models is used here, this reads the training sequence
-        # length, not the model's generation capacity. Give ModelSpec a dedicated
-        # capacity field and read that instead.
-        max_context_length = model_spec.model.max_context_length
+        max_context_length = model_spec.max_context_length
         seq_len = config.training.max_context_length
         if seq_len > max_context_length:
             raise ValueError(
