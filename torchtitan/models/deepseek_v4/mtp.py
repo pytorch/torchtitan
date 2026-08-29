@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 
 from .model import DeepSeekV4TransformerBlock
@@ -44,28 +45,28 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         self,
         mtp_input_embed: torch.Tensor,
         prev_hc_hidden: torch.Tensor,
-        mtp_input_ids: torch.Tensor,
+        mtp_input_ids_T: torch.Tensor,
         mtp_input_valid_mask: torch.Tensor,
         attention_masks: "AttentionMasksType | None",
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if prev_hc_hidden.ndim != 4:
+        if prev_hc_hidden.ndim != 3:
             raise ValueError(
                 "DeepSeek V4 MTP expects an HC hidden state with shape "
-                "[batch, sequence, hc_mult, hidden], got "
+                "[tokens, hc_mult, hidden], got "
                 f"{tuple(prev_hc_hidden.shape)}."
             )
 
-        valid_mask = mtp_input_valid_mask.unsqueeze(-1).unsqueeze(-1).to(
+        valid_mask = mtp_input_valid_mask.view(-1, 1, 1).to(
             dtype=prev_hc_hidden.dtype
         )
         prev_hc_hidden = prev_hc_hidden * valid_mask
 
-        hidden = self.e_proj(self.enorm(mtp_input_embed)).unsqueeze(2)
+        hidden = self.e_proj(self.enorm(mtp_input_embed)).unsqueeze(1)
         hidden = hidden + self.h_proj(self.hnorm(prev_hc_hidden))
         next_hc_hidden = super().forward(
             hidden,
-            mtp_input_ids,
+            mtp_input_ids_T,
             attention_masks,
             positions,
         )

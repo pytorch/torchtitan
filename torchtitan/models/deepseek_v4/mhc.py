@@ -36,18 +36,18 @@ class HcSplitSinkhorn(Module):
             hc_base: Bias tensor of shape ``[(2 + hc_mult) * hc_mult]``.
 
         Returns:
-            ``pre`` and ``post`` tensors of shape ``[B, L, hc_mult]`` and
-            ``comb`` of shape ``[B, L, hc_mult, hc_mult]``.
+            ``pre`` and ``post`` tensors of shape ``[T, hc_mult]`` and
+            ``comb`` of shape ``[T, hc_mult, hc_mult]``.
         """
         hc_mult = self.hc_mult
         pre, post, comb = mixes.split([hc_mult, hc_mult, hc_mult * hc_mult], dim=-1)
         comb = comb.unflatten(-1, (hc_mult, hc_mult))
 
         pre = torch.sigmoid(
-            pre * hc_scale[0] + hc_base[:hc_mult].unsqueeze(0).unsqueeze(0)
+            pre * hc_scale[0] + hc_base[:hc_mult].view(*([1] * (pre.ndim - 1)), hc_mult)
         ) + self.eps
         post = 2 * torch.sigmoid(
-            post * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult].unsqueeze(0).unsqueeze(0)
+            post * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult].view(*([1] * (post.ndim - 1)), hc_mult)
         )
         comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(
             hc_mult, hc_mult
@@ -94,20 +94,20 @@ class HcPre(Module):
         """Project multi-branch hidden states into a single branch.
 
         Args:
-            x: Hidden states of shape ``[B, L, hc_mult, D]``.
+            x: Hidden states of shape ``[T, hc_mult, D]``.
 
         Returns:
-            Tuple ``(y, post, comb)`` where ``y`` has shape ``[B, L, D]`` and
+            Tuple ``(y, post, comb)`` where ``y`` has shape ``[T, D]`` and
             ``post``/``comb`` are consumed by ``HcPost``.
         """
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(2).float()
+        x = x.flatten(-2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
         mixes = F.linear(x, self.hc_fn.float()) * rsqrt
         pre, post, comb = self.sinkhorn(
             mixes.float(), self.hc_scale.float(), self.hc_base.float()
         )
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype), post, comb
 
 
@@ -125,13 +125,13 @@ class HcPost(Module):
         """Apply HC post mixing.
 
         Args:
-            x: Single-branch output of shape ``[B, L, D]``.
-            residual: Residual branches of shape ``[B, L, hc_mult, D]``.
-            post: Post weights of shape ``[B, L, hc_mult]``.
-            comb: Branch combination weights of shape ``[B, L, hc_mult, hc_mult]``.
+            x: Single-branch output of shape ``[T, D]``.
+            residual: Residual branches of shape ``[T, hc_mult, D]``.
+            post: Post weights of shape ``[T, hc_mult]``.
+            comb: Branch combination weights of shape ``[T, hc_mult, hc_mult]``.
 
         Returns:
-            Hidden states of shape ``[B, L, hc_mult, D]``.
+            Hidden states of shape ``[T, hc_mult, D]``.
         """
         y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
             comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
@@ -166,15 +166,15 @@ class HcHead(Module):
         """Merge HC branches.
 
         Args:
-            x: Hidden states of shape ``[B, L, hc_mult, D]``.
+            x: Hidden states of shape ``[T, hc_mult, D]``.
 
         Returns:
-            Hidden states of shape ``[B, L, D]``.
+            Hidden states of shape ``[T, D]``.
         """
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(2).float()
+        x = x.flatten(-2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
         mixes = F.linear(x, self.hc_fn.float()) * rsqrt
         pre = torch.sigmoid(mixes * self.hc_scale + self.hc_base) + self.eps
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype)

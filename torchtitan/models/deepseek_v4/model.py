@@ -52,21 +52,21 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        input_ids: torch.Tensor,
+        input_ids_T: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
         Args:
-            x: Hidden states of shape ``[B, L, hc_mult, D]``.
-            input_ids: Token IDs of shape ``[B, L]`` used by hash routing.
+            x: Hidden states of shape ``[T, hc_mult, D]``.
+            input_ids_T: Token IDs of shape ``[T]`` used by hash routing.
             attention_masks: Optional decoder mask handle; sparse attention may
                 ignore it and build masks internally.
-            positions: Optional position IDs of shape ``[B, L]``.
+            positions: Optional position IDs of shape ``[T]``.
 
         Returns:
-            Hidden states of shape ``[B, L, hc_mult, D]``.
+            Hidden states of shape ``[T, hc_mult, D]``.
         """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
@@ -75,7 +75,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
-            x = self.moe(self.ffn_norm(x), input_ids=input_ids)
+            x = self.moe(self.ffn_norm(x), input_ids_T=input_ids_T)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
@@ -107,27 +107,27 @@ class DeepSeekV4Model(Decoder):
                 )
 
             if hasattr(config, "training"):
-                seq_len = config.training.seq_len
+                seq_len = config.training.max_context_length
                 for layer_cfg in self.layers:
                     attention = layer_cfg.attention
                     if attention.compressor is not None:
                         attention.compressor.rope = dc.replace(
                             attention.compressor.rope,
-                            max_seq_len=seq_len,
+                            max_context_length=seq_len,
                         )
                     if attention.compressor_128 is not None:
                         attention.compressor_128.rope = dc.replace(
                             attention.compressor_128.rope,
-                            max_seq_len=seq_len,
+                            max_context_length=seq_len,
                         )
                     if attention.indexer is not None:
                         attention.indexer.rope = dc.replace(
                             attention.indexer.rope,
-                            max_seq_len=seq_len,
+                            max_context_length=seq_len,
                         )
                         attention.indexer.compressor.rope = dc.replace(
                             attention.indexer.compressor.rope,
-                            max_seq_len=seq_len,
+                            max_context_length=seq_len,
                         )
 
             tp = parallelism.tensor_parallel_degree
@@ -208,13 +208,13 @@ class DeepSeekV4Model(Decoder):
                 "cross entropy is not supported."
             )
 
-        input_ids = tokens.detach().long()
+        input_ids_T = tokens.detach().long()
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
+        h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
 
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
-            h = layer(h, input_ids, attention_masks, positions)
+            h = layer(h, input_ids_T, attention_masks, positions)
 
         prev_hc_hidden = h
         main_hidden = self.hc_head(h)
@@ -223,7 +223,7 @@ class DeepSeekV4Model(Decoder):
         if not self.mtp_layers:
             if self._skip_lm_head or self.lm_head is None:
                 return main_hidden
-            return self.lm_head(main_hidden.float())
+            return self.lm_head(main_hidden)
 
         outputs = [main_hidden] + self.mtp_forward(
             prev_hc_hidden,
@@ -232,7 +232,7 @@ class DeepSeekV4Model(Decoder):
             positions,
         )
         return [
-            self.lm_head(item.float()) if self.lm_head is not None else item
+            self.lm_head(item) if self.lm_head is not None else item
             for item in outputs
         ]
 
@@ -264,4 +264,3 @@ class DeepSeekV4Model(Decoder):
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs
-

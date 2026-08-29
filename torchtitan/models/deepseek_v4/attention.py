@@ -12,7 +12,8 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import BaseAttention, FlexAttention
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
@@ -204,21 +205,7 @@ class DSV4FlexAttention(FlexAttention):
         idx_w=None,
         attention_masks=None,
     ) -> torch.Tensor:
-        """Run DeepSeek V4 sparse attention over window, compressed, and sink KV.
-
-        Args:
-            q: Query tensor of shape ``[B, L, H, D]``.
-            swa_k: Sliding-window KV tensor of shape ``[B, L, D]``.
-            cmp_k: Optional compressed KV tensor of shape ``[B, C, D]``.
-            idx_q: Optional CSA indexer query tensor ``[B, L, Ih, Id]``.
-            idx_k: Optional CSA indexer key tensor ``[B, C, Id]``.
-            idx_w: Optional CSA per-head weight tensor ``[B, L, Ih]``.
-            attn_sink: Per-query-head sink scores of shape ``[H]``.
-            attention_masks: Must be ``None``; this module builds its own mask.
-
-        Returns:
-            Attention output of shape ``[B, L, H, D]``.
-        """
+        """Run DSV4 sparse attention over a folded token stream."""
         if attention_masks is not None:
             raise ValueError(
                 "DSV4FlexAttention does not accept attention_masks; "
@@ -227,19 +214,20 @@ class DSV4FlexAttention(FlexAttention):
         if attn_sink is None:
             raise ValueError("DSV4FlexAttention requires attn_sink")
 
-        bsz, seqlen, _, head_dim = q.size()
-        n_cmp = 0 if cmp_k is None else cmp_k.size(1)
+        seqlen, _, head_dim = q.size()
+        n_cmp = 0 if cmp_k is None else cmp_k.size(0)
         sink_idx = seqlen + n_cmp
 
-        kv = swa_k.unsqueeze(2)
+        kv = swa_k.unsqueeze(1)
         if cmp_k is not None:
-            kv = torch.cat([kv, cmp_k.unsqueeze(2)], dim=1)
-        sink_kv = kv.new_zeros((bsz, 1, 1, head_dim))
-        kv = torch.cat([kv, sink_kv], dim=1)
+            kv = torch.cat([kv, cmp_k.unsqueeze(1)], dim=0)
+        sink_kv = kv.new_zeros((1, 1, head_dim))
+        kv = torch.cat([kv, sink_kv], dim=0)
+        kv = kv.expand(-1, q.size(1), -1)
 
         with spmd.no_typecheck():
             selected_indices = [
-                self.get_window_topk_idxs(bsz=bsz, seqlen=seqlen, device=q.device)
+                self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=q.device)
             ]
             if self.compress_ratio == 4:
                 if idx_q is None or idx_k is None or idx_w is None:
@@ -254,29 +242,29 @@ class DSV4FlexAttention(FlexAttention):
                     seqlen=seqlen,
                     ratio=self.compress_ratio,
                     topk=self.index_topk,
-                )
+                ).unsqueeze(0)
                 causal_limit = (
                     torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
                     // self.compress_ratio
                 )
                 cmp_topk = torch.where(
-                    cmp_topk < causal_limit, seqlen + cmp_topk, -1
+                    cmp_topk < causal_limit.unsqueeze(0), seqlen + cmp_topk, -1
                 )
                 selected_indices.append(cmp_topk)
             elif self.compress_ratio > 1:
                 selected_indices.append(
                     self.get_compress_topk_idxs(
-                        bsz=bsz, seqlen=seqlen, n_cmp=n_cmp, device=q.device
+                        bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=q.device
                     )
                 )
             sink_indices = torch.full(
-                (bsz, seqlen, 1), sink_idx, dtype=torch.int64, device=q.device
+                (1, seqlen, 1), sink_idx, dtype=torch.int64, device=q.device
             )
             selected_indices.append(sink_indices)
             selected_indices = torch.cat(selected_indices, dim=-1)
 
             block_mask = self._build_block_mask(
-                bsz, seqlen, kv.size(1), selected_indices, q.device
+                1, seqlen, kv.size(0), selected_indices, q.device
             )
 
             def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
@@ -289,7 +277,6 @@ class DSV4FlexAttention(FlexAttention):
                 attention_masks=block_mask,
                 score_mod=v4_sink_score_mod,
                 scale=self.softmax_scale,
-                enable_gqa=True,
             )
 
 
@@ -445,35 +432,24 @@ class Attention(BaseAttention):
         self.inner_attention = cfg.inner_attention.build()
 
     def forward(self, x, attention_masks=None, positions=None):
-        """Apply one DeepSeek V4 attention layer.
-
-        Args:
-            x: Hidden states of shape ``[B, L, D]``.
-            attention_masks: Optional mask argument kept for the decoder API;
-                sparse attention builds its own mask internally.
-            positions: Position IDs of shape ``[B, L]`` used by RoPE.
-
-        Returns:
-            Hidden states of shape ``[B, L, D]``.
-        """
-        bsz, seqlen, _ = x.size()
+        """Apply one DeepSeek V4 attention layer over folded tokens."""
+        num_tokens = x.size(0)
         rd = self.rope_head_dim
 
         qr = self.q_norm(self.wq_a(x))
         q = self.wq_b(qr)
         with spmd.local():
-            q = q.view(bsz, seqlen, -1, self.head_dim)
-            _assert_spmd_attention_type(q, tp=spmd.S(2))
+            q = q.view(num_tokens, -1, self.head_dim)
+            _assert_spmd_attention_type(q, tp=spmd.S(1))
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
 
-        kv = self.wkv(x)
-        kv = self.kv_norm(kv)
+        kv = self.kv_norm(self.wkv(x))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
 
-        q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(2), positions)
+        q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(1), positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
-        kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
+        kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
         cmp_k = idx_q = idx_k = idx_w = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
@@ -514,23 +490,22 @@ class Attention(BaseAttention):
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.rope(o_rope, positions=positions, inverse=True)
+        o_rope = self.rope(o_rope, o_rope, positions)[0]
         o = torch.cat([o_nope, o_rope], dim=-1)
 
         with spmd.local():
-            n_local_groups = self.n_groups // (self.n_heads // o.shape[2])
-            o = o.view(bsz, seqlen, n_local_groups, -1)
-            _assert_spmd_attention_type(o, tp=spmd.S(2))
-            # wo_a is a Linear module; access its weight directly for the grouped
-            # einsum (not a standard Linear forward).
+            n_local_heads = o.shape[1]
+            n_local_groups = self.n_groups // (self.n_heads // n_local_heads)
+            o = o.view(num_tokens, n_local_groups, -1)
+            _assert_spmd_attention_type(o, tp=spmd.S(1))
             wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
             if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
                 spmd.assert_type(
                     wo_a,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.S(0)},
                 )
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        o = torch.einsum("tgd,grd->tgr", o, wo_a)
         with spmd.local():
-            o = o.reshape(bsz, seqlen, -1)
-            _assert_spmd_attention_type(o, tp=spmd.S(2))
+            o = o.reshape(num_tokens, -1)
+            _assert_spmd_attention_type(o, tp=spmd.S(1))
         return self.wo_b(o)

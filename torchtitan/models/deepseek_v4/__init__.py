@@ -40,7 +40,7 @@ from .attention import (
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .mtp import MTPBlock
-from .moe import DeepSeekV4Router
+from .moe import DeepSeekV4MoE, DeepSeekV4Router
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 __all__ = [
@@ -329,7 +329,7 @@ def _make_v4_moe_config(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ):
-    return MoE.Config(
+    return DeepSeekV4MoE.Config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,
@@ -637,19 +637,19 @@ def _debugmodel(
     sinkhorn_iters = 20
     hc_eps = 1e-6
     dense_layers = set()
-    max_seq_len = 4096 * 4
+    max_context_length = 4096 * 4
     compress_rope_theta = 40000.0
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=max_seq_len,
+        max_context_length=max_context_length,
         theta=10000.0,
         scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=max_seq_len,
+        max_context_length=max_context_length,
         theta=compress_rope_theta,
         scaling="yarn",
         rope_factor=4.0,
@@ -769,19 +769,19 @@ def _deepseek_v4_flash(
     sinkhorn_iters = 20
     hc_eps = 1e-6
     dense_layers = set()
-    max_seq_len = 4096
+    max_context_length = 4096
     compress_rope_theta = 160000.0
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=max_seq_len,
+        max_context_length=max_context_length,
         theta=10000.0,
         scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=max_seq_len,
+        max_context_length=max_context_length,
         theta=compress_rope_theta,
         scaling="yarn",
         rope_factor=16.0,
@@ -901,19 +901,19 @@ def _deepseek_v4_pro(
     sinkhorn_iters = 20
     hc_eps = 1e-6
     dense_layers = set()
-    max_seq_len = 4096
+    max_context_length = 4096
     compress_rope_theta = 160000.0
     original_seq_len = 65536
 
     rope = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=max_seq_len,
+        max_context_length=max_context_length,
         theta=10000.0,
         scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
-        max_seq_len=max_seq_len,
+        max_context_length=max_context_length,
         theta=compress_rope_theta,
         scaling="yarn",
         rope_factor=16.0,

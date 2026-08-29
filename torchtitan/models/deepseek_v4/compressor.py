@@ -12,7 +12,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
-from torchtitan.models.common.nn_modules import Linear, RMSNorm
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
@@ -73,13 +74,13 @@ class Compressor(Module):
         ratio, d = self.compress_ratio, self.head_dim
         prev = torch.cat(
             [
-                torch.full_like(tensor[:, :1, :, :d], value),
-                tensor[:, :-1, :, :d],
+                torch.full_like(tensor[:1, :, :d], value),
+                tensor[:-1, :, :d],
             ],
             dim=1,
         )
-        curr = tensor[:, :, :, d:]
-        return torch.cat([prev, curr], dim=2)
+        curr = tensor[:, :, d:]
+        return torch.cat([prev, curr], dim=1)
 
     def forward(self, x, positions):
         """Compress hidden states into compressed KV states.
@@ -91,7 +92,7 @@ class Compressor(Module):
         Returns:
             Compressed KV tensor of shape ``[B, L // compress_ratio, head_dim]``.
         """
-        _, seqlen, _ = x.size()
+        seqlen = x.size(0)
         rd = self.rope_head_dim
         ratio = self.compress_ratio
         dtype = x.dtype
@@ -102,17 +103,17 @@ class Compressor(Module):
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
             )
-        comp_positions = positions[:, ::ratio]
-        kv = kv.unflatten(1, (-1, ratio))
-        score = score.unflatten(1, (-1, ratio)) + self.ape
+        comp_positions = positions[::ratio] if positions is not None else None
+        kv = kv.unflatten(0, (-1, ratio))
+        score = score.unflatten(0, (-1, ratio)) + self.ape
         if self.overlap:
             kv = self._overlap_transform(kv, 0)
             score = self._overlap_transform(score, float("-inf"))
-        kv = (kv * score.softmax(dim=2)).sum(dim=2)
+        kv = (kv * score.softmax(dim=1)).sum(dim=1)
         kv = self.norm(kv.to(dtype))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
-        kv_rope = self.rope(kv_rope.unsqueeze(2), positions=comp_positions)
-        kv = torch.cat([kv_nope, kv_rope.squeeze(2)], dim=-1)
+        kv_rope = self.rope(kv_rope.unsqueeze(1), kv_rope.unsqueeze(1), comp_positions)[0]
+        kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
         return kv
 
 
@@ -162,26 +163,13 @@ class Indexer(Module):
         *,
         positions,
     ):
-        """Project raw indexer queries, keys, and per-head weights.
-
-        Args:
-            x: Hidden states of shape ``[B, L, D_model]``.
-            qr: Query LoRA states of shape ``[B, L, q_lora_rank]``.
-            positions: Position IDs of shape ``[B, L]``.
-
-        Returns:
-            idx_q: Indexer queries ``[B, L, num_index_heads, index_head_dim]``
-                with RoPE applied and Hadamard-rotated.
-            idx_k: Indexer compressed keys ``[B, L // ratio, index_head_dim]``
-                (from the indexer's own compressor), Hadamard-rotated.
-            idx_w: Per-head indexer weights ``[B, L, num_index_heads]``.
-        """
-        bsz, seqlen, _ = x.size()
+        """Project raw indexer queries, keys, and per-head weights."""
+        seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
-        q = q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
+        q = q.view(seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
-        q_rope = self.rope(q_rope, positions=positions)
+        q_rope = self.rope(q_rope, q_rope, positions)[0]
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
@@ -201,26 +189,10 @@ class Indexer(Module):
         ratio: int,
         topk: int,
     ) -> torch.Tensor:
-        """Select the top-k compressed positions per query from indexer scores.
-
-        Args:
-            idx_q: Indexer queries of shape ``[B, L, Ih, Id]``.
-            idx_k: Indexer compressed keys of shape ``[B, C, Id]``.
-            idx_w: Per-head indexer weights of shape ``[B, L, Ih]``.
-            seqlen: Query sequence length ``L``.
-            ratio: Compression ratio used to map query positions to compressed
-                causal limits.
-            topk: Maximum number of compressed positions to select per query.
-
-        Returns ``topk_indices`` of shape ``[B, L, K]``, ``K = min(topk,
-        seqlen // ratio)``, with 0-based indices into the compressed region
-        (compressed token ``c`` lives at KV position ``seqlen + c``).
-        Non-causal positions are excluded by the causal score mask before the
-        ``topk``, so all returned indices are attendable.
-        """
-        index_score = torch.einsum("bshd,btd->bsht", idx_q, idx_k)
+        """Select top-k compressed positions per folded query token."""
+        index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
         index_score = index_score.relu_() * idx_w.unsqueeze(-1)
-        index_score = index_score.sum(dim=2)
+        index_score = index_score.sum(dim=1)
 
         compress_causal_limit = (
             torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio

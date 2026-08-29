@@ -43,15 +43,12 @@ from torchtitan.distributed.activation_checkpoint import (
     MemoryBudgetAC,
     SelectiveAC,
 )
-from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.distributed.cudagraph import (
     cudagraph_teardown,
     ForwardBackwardFn,
     wrap_with_cuda_graph,
 )
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
-from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -121,21 +118,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Batch-invariant mode is not supported in pre-training."
                 )
 
-            pp_microbatch_size = self.parallelism.pipeline_parallel_microbatch_size
-            if pp_microbatch_size <= 0:
+            num_pp_microbatches = self.parallelism.num_pp_microbatches
+            if num_pp_microbatches <= 0:
                 raise ValueError(
-                    "parallelism.pipeline_parallel_microbatch_size must be "
-                    "greater than 0."
-                )
-            if (
-                self.parallelism.pipeline_parallel_degree > 1
-                and self.training.local_batch_size % pp_microbatch_size != 0
-            ):
-                raise ValueError(
-                    f"training.local_batch_size ({self.training.local_batch_size}) "
-                    "must be evenly divisible by "
-                    "parallelism.pipeline_parallel_microbatch_size "
-                    f"({pp_microbatch_size}) when pipeline parallelism is enabled."
+                    "parallelism.num_pp_microbatches must be greater than 0."
                 )
 
             self._validate_cuda_graphs()
@@ -275,7 +261,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     train_context: dist_utils.SpmdContext
     fwd_bwd_fn: ForwardBackwardFn
     gradient_accumulation_steps: int
-    num_pipeline_parallel_microbatches: int
+    num_pp_microbatches: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
 
@@ -303,13 +289,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
 
-        # validate dense activation sequence length evenness
+        # Validate dense activation token-count evenness.
+        num_tokens_per_pp_microbatch = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+        )
         seq_len_divisor = (
             parallel_dims.tp if config.parallelism.enable_sequence_parallel else 1
         ) * (2 * parallel_dims.cp if parallel_dims.cp > 1 else 1)
-        if config.training.seq_len % seq_len_divisor != 0:
+        if num_tokens_per_pp_microbatch % seq_len_divisor != 0:
             raise ValueError(
-                f"Training sequence length ({config.training.seq_len}) must be "
+                "The number of tokens per pipeline microbatch "
+                f"({num_tokens_per_pp_microbatch}) must be "
                 f"divisible by {seq_len_divisor} for the configured "
                 "sequence/context parallelism."
             )
@@ -322,15 +312,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         config.maybe_log()
 
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
+            dp_mesh = parallel_dims.get_mesh("batch")
+            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
-            batch_degree, batch_rank = 1, 0
-
-        if config.training.global_batch_size < 0:
-            config.training.global_batch_size = (
-                config.training.local_batch_size * batch_degree
-            )
+            dp_degree, dp_rank = 1, 0
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -393,7 +378,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(
+            model, config.training.max_context_length
+        )
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
@@ -416,29 +403,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             compile_config=config.compile,
         )
 
-        # verify batch sizes
-        global_batch_size = config.training.global_batch_size
-        assert global_batch_size > 0
-        assert (
-            global_batch_size % (config.training.local_batch_size * batch_degree) == 0
-        ), (
-            f"global batch size must be multiple of local batch size times "
-            f"data-parallel degree ({global_batch_size} "
-            f"% ({config.training.local_batch_size} * {batch_degree}) != 0)"
+        self.num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
-
-        # calculate gradient accumulation steps
-        self.gradient_accumulation_steps = global_batch_size // (
-            config.training.local_batch_size * batch_degree
+        num_tokens_per_dp_rank = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+            * self.num_pp_microbatches
         )
-        assert self.gradient_accumulation_steps > 0
-        self.num_pipeline_parallel_microbatches = (
-            config.training.local_batch_size
-            // config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else 1
+        num_tokens_per_train_step = config.training.num_tokens_per_train_step
+        if num_tokens_per_train_step < 0:
+            num_tokens_per_train_step = num_tokens_per_dp_rank * dp_degree
+        if num_tokens_per_train_step % (num_tokens_per_dp_rank * dp_degree) != 0:
+            raise ValueError(
+                "training.num_tokens_per_train_step "
+                f"({num_tokens_per_train_step}) must be divisible by the number "
+                "of tokens processed globally in one gradient accumulation "
+                f"iteration ({num_tokens_per_dp_rank * dp_degree})."
+            )
+        self.gradient_accumulation_steps = num_tokens_per_train_step // (
+            num_tokens_per_dp_rank * dp_degree
         )
-
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
@@ -568,17 +552,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
         # build dataloader
-        dataloader_batch_size = (
-            config.parallelism.pipeline_parallel_microbatch_size
-            if parallel_dims.pp_enabled
-            else config.training.local_batch_size
-        )
+        num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
         self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
+            dp_world_size=dp_degree,
+            dp_rank=dp_rank,
             tokenizer=self.tokenizer,
-            seq_len=config.training.seq_len,
-            local_batch_size=dataloader_batch_size,
+            max_context_length=config.training.max_context_length,
+            num_tokens_per_batch=num_tokens_per_batch,
         )
 
         # build checkpointer
@@ -621,15 +601,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.validator = config.validator.build(
                 parallelism=config.parallelism,
-                dp_world_size=batch_degree,
-                dp_rank=batch_rank,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
-                seq_len=config.training.seq_len,
-                local_batch_size=config.training.local_batch_size,
+                seq_len=config.training.max_context_length,
+                num_tokens_per_batch=num_tokens_per_batch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -637,10 +617,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {config.training.local_batch_size}, "
-            f"global batch size {global_batch_size}, "
+            f"{num_tokens_per_dp_rank} tokens per DP rank, "
+            f"{num_tokens_per_train_step} tokens per train step, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {config.training.seq_len}, "
+            f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
@@ -685,85 +665,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
-    @sl.log_trace_span("post_dataloading_process")
-    def post_dataloading_process(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """
-        Post-processing hook after data loading and before model forward pass.
-
-        This method processes the raw data from the dataloader and prepares it for
-        the model's forward pass. It separates the main input tensor from auxiliary
-        inputs and constructs additional keyword arguments (e.g., attention masks).
-
-        This method can be overridden in subclasses to customize data processing
-        for different training strategies (e.g., converting tensors to DTensors,
-        applying custom transformations, etc.).
-
-        Args:
-            input_dict: Dictionary containing tensors from the dataloader. Must
-                contain an "input" key with the main input tensor. May contain
-                additional keys for auxiliary inputs (e.g., position ids).
-            labels: Target labels for the batch.
-
-        Returns:
-            A tuple of (inputs, labels, extra_kwargs) where:
-                - inputs: Main input tensor extracted from input_dict["input"].
-                - labels: Target labels (unchanged from input parameter).
-                - extra_kwargs: Additional keyword arguments for the model forward
-                    (e.g. positions, attention_masks), forwarded to every
-                    pipeline-parallel stage.
-        """
-        inputs = input_dict["input"]
-        # Everything else becomes a model-forward kwarg, forwarded to all PP
-        # stages by the schedule. positions is read here so we can build masks.
-        extra_kwargs: dict[str, Any] = {
-            k: v for k, v in input_dict.items() if k != "input"
-        }
-
-        positions = extra_kwargs.get("positions", None)
-
-        # positions and attention_masks are optional (Decoder.forward defaults
-        # both to None). Build attention masks only for the masked backends
-        # (Flex/Varlen), which is where get_attention_masks is defined. A
-        # maskless backend (e.g. the SDPA config used by the graph_trainer
-        # tests) still receives positions for RoPE but no masks — it relies on
-        # is_causal instead.
-        if isinstance(self.model_config, Decoder.Config) and positions is not None:
-            attention_backend = self.model_config.first_full_attention_backend
-            if isinstance(
-                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
-            ):
-                model = cast(Decoder, self.model_parts[0])
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    positions=positions,
-                )
-
-        if self.parallel_dims.cp_enabled:
-            inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs,
-                labels,
-                extra_kwargs,
-                self.parallel_dims.get_mesh("cp"),
-                self.device,
-                self.config.parallelism.context_parallel_load_balancer,
-                self.config.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        # Accumulate after CP sharding so labels.numel() reflects the actual
-        # unique tokens this rank processes (not the full pre-split sequence).
-        self.ntokens_seen += labels.numel()
-
-        if self.config.parallelism.spmd_backend == "spmd_types":
-            inputs, labels, extra_kwargs = annotate_input_spmd_types(
-                self.parallel_dims,
-                inputs,
-                labels,
-                extra_kwargs,
-            )
-
-        return inputs, labels, extra_kwargs
-
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
         self,
@@ -786,7 +687,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         assert isinstance(input_dict, dict)
         assert isinstance(labels, torch.Tensor)
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        with sl.log_trace_span("preprocess_inputs"):
+            inputs, labels, extra_kwargs = cast(
+                BaseModel, self.model_parts[0]
+            ).preprocess_inputs(
+                {**input_dict, "labels": labels},
+                parallel_dims=self.parallel_dims,
+                parallelism=self.config.parallelism,
+            )
+            self.ntokens_seen += labels.numel()
 
         assert len(model_parts) == 1
         return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
@@ -829,9 +738,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         kwarg_mbs: list[dict[str, Any]] = []
         target_mbs: list[torch.Tensor] | None = [] if self.pp_has_last_stage else None
         for input_dict, labels in zip(input_dict_mbs, label_mbs, strict=True):
-            inputs, labels, extra_kwargs = self.post_dataloading_process(
-                input_dict, labels
-            )
+            with sl.log_trace_span("preprocess_inputs"):
+                inputs, labels, extra_kwargs = cast(
+                    BaseModel, self.model_parts[0]
+                ).preprocess_inputs(
+                    {**input_dict, "labels": labels},
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.config.parallelism,
+                )
+                self.ntokens_seen += labels.numel()
             if self.pp_has_first_stage:
                 arg_mbs.append((inputs,))
             kwarg_mbs.append(extra_kwargs)
@@ -872,7 +787,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
-            for _ in range(self.num_pipeline_parallel_microbatches):
+            for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
                     input_dict, labels = next(data_iterator)
                 local_valid_tokens += (labels != IGNORE_INDEX).sum()
@@ -883,9 +798,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
+            dp_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum_tensor(
-                local_valid_tokens.to(self.device), batch_mesh
+                local_valid_tokens.to(self.device), dp_mesh
             )
         else:
             global_valid_tokens = local_valid_tokens.to(self.device)
