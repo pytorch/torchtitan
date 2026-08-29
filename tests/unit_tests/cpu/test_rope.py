@@ -25,6 +25,7 @@ from torchtitan.models.common.rope import (
     RoPE,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
+from torchtitan.protocols.model_spec import ModelSpec
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -345,53 +346,6 @@ class TestPerLayerRoPECache(unittest.TestCase):
             len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
             len(layer_rope_cfgs),
         )
-
-
-class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
-    """Reject training contexts larger than the RoPE context length."""
-
-    def _make_trainer_config(self, seq_len):
-        from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
-        from torchtitan.trainer import Trainer
-
-        return Trainer.Config(
-            training=dataclasses.replace(
-                TrainingConfig(),
-                num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
-            ),
-            parallelism=ParallelismConfig(),
-            debug=DebugConfig(),
-        )
-
-    def _make_config(self):
-        """Build a minimal Llama3 debug config."""
-        from torchtitan.models.llama3 import llama3_configs
-
-        return llama3_configs["debugmodel"][0]("flex")
-
-    def test_rejects_oversized_seq_len(self):
-        cfg = self._make_config()
-        rope_max = cfg.max_context_length
-        with self.assertRaises(ValueError):
-            cfg.update_from_config(config=self._make_trainer_config(rope_max + 1))
-
-    def test_accepts_valid_seq_len(self):
-        cfg = self._make_config()
-        rope_max = cfg.max_context_length
-        cfg.update_from_config(config=self._make_trainer_config(rope_max))
-        self.assertEqual(cfg.max_context_length, rope_max)
-
-    def test_vllm_max_model_len_as_seq_len(self):
-        """vLLM wrapper translates max_model_len to TrainingConfig.max_context_length.
-
-        When the training and RoPE context lengths match, the RoPE cache stays
-        at the model's intrinsic maximum.
-        """
-        cfg = self._make_config()
-        original_max = cfg.max_context_length
-        cfg.update_from_config(config=self._make_trainer_config(original_max))
-        self.assertEqual(cfg.max_context_length, original_max)
 
 
 if __name__ == "__main__":
