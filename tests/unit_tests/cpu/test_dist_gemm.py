@@ -239,7 +239,9 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
 class TestFusedFeedForwardNumerics(DTensorTestBase):
     """The fused FFN must match the stock one under TP+SP.
 
