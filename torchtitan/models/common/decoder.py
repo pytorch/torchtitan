@@ -137,7 +137,7 @@ class Decoder(BaseModel):
             return rope_cfg.max_context_length
 
         def _validate_cp_backend(self, parallelism) -> None:
-            """Overridable CP backend check. TODO: remove after KDA becomes torch-native and Kimi K3 migrates to spmd_types."""
+            """Overridable CP backend check. TODO: remove once linear-attention CP kernels are torch-native and models migrate to spmd_types."""
             from torchtitan.distributed.context_parallel import validate_cp_backend
 
             validate_cp_backend(parallelism)
