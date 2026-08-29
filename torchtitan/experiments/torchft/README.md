@@ -82,12 +82,47 @@ MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel CUDA_VISIBLE_DEVICES=4,5,
 
 For complete configuration options, run `NGPU=1 ./run_train.sh --help`.
 
+The `--fault-tolerance.process-group` option selects the cross-replica
+process-group backend. TorchTitan provides `gloo`, `nccl`, and `mccl` by
+default. `--fault-tolerance.process-group-timeout-ms` is passed to the selected
+factory.
+
 [Optional] Only for semi-synchronous training:
 
 - `--fault_tolerance.sync_steps`: The number of training steps before synchronization.
 - `--fault_tolerance.semi_sync_method`: Synchronization method (e.g., "local_sgd", "diloco")
 
 For more semi-synchronouse configuration options, see [config/job_config.py](config/job_config.py).
+
+### Registering Additional Process-Group Backends
+
+Device integrations can add another backend without subclassing
+`TorchFTManager` by registering a factory before the manager is constructed:
+
+```python
+from datetime import timedelta
+
+from torchtitan.experiments.torchft import register_process_group_factory
+
+
+def create_custom_process_group(timeout: timedelta):
+    # Keep optional device dependencies lazy so importing TorchFT support does
+    # not require every backend runtime to be installed.
+    from custom_torchft_backend import CustomProcessGroup
+
+    return CustomProcessGroup(timeout=timeout)
+
+
+register_process_group_factory("custom", create_custom_process_group)
+```
+
+The factory accepts one `datetime.timedelta` positional argument and returns a
+TorchFT-compatible process-group object. Backend names are stripped and
+normalized to lowercase. Re-registering the same callable is a no-op;
+registering a different callable under an existing name raises `ValueError`.
+`registered_process_group_names()` provides introspection and
+`create_process_group(name, timeout)` creates a registered backend. See
+[`process_group_registry.py`](process_group_registry.py) for the complete API.
 
 ## Environment Variables
 
