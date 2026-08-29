@@ -58,12 +58,6 @@ def _causal_conv1d_varlen(
     A pure-torch per-document reference lives in
     ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
     """
-    if cu_seqlens_cpu is None:
-        raise ValueError(
-            "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor. "
-            "Build VarlenMetadata with include_host_offsets=True."
-        )
-
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
 
     out_1TD, _ = _fla_causal_conv1d(
@@ -297,10 +291,6 @@ class GatedDeltaKernel(Module):
             ).squeeze(0)
 
         if self.backend == "fla_chunked":
-            if cu_seqlens is not None and cu_seqlens_cpu is None:
-                raise ValueError(
-                    "Qwen3.5 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
-                )
             result = _fla_chunk_gated_delta_rule(
                 xq_1THK,
                 xk_1THK,
@@ -363,25 +353,16 @@ class InnerGatedDeltaNet(Module):
         *,
         key_head_dim: int,
         value_head_dim: int,
-        cu_seqlens_host: tuple[int, ...] | None = None,
+        cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run separate Q/K/V convolutions and recurrence on local heads."""
         num_tokens = query_TC.shape[0]
-
-        if cu_seqlens_host is not None:
-            cu_seqlens_cpu = torch.tensor(
-                cu_seqlens_host,
-                dtype=cu_seqlens.dtype,
-                device="cpu",
-            )
-        else:
-            cu_seqlens_cpu = None
 
         def causal_conv(
             x_TC: torch.Tensor,
             weight_C1W: torch.Tensor,
         ) -> torch.Tensor:
-            if cu_seqlens_host is not None:
+            if cu_seqlens_cpu is not None:
                 return _causal_conv1d_varlen(
                     x_TC,
                     weight_C1W,
@@ -423,7 +404,7 @@ class InnerGatedDeltaNet(Module):
             xv_THV,
             g_TH,
             beta_TH,
-            cu_seqlens=cu_seqlens if cu_seqlens_host is not None else None,
+            cu_seqlens=cu_seqlens if cu_seqlens_cpu is not None else None,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
 
@@ -491,15 +472,13 @@ class GatedDeltaNet(Module):
         attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
-        cu_seqlens_host = None
+        cu_seqlens_cpu = None
         if attention_masks is not None:
-            # FLA caches varlen index helpers by tensor identity. A fresh
-            # tensor ensures forward and activation-checkpoint recompute both
-            # execute the helpers instead of taking different cache paths.
-            with spmd.local():
-                cu_seqlens = attention_masks.cu_seq_q.clone()
-            cu_seqlens_host = attention_masks.cu_seq_q_host
-            if cu_seqlens_host is None:
+            # Both come straight from the metadata, so every layer hands FLA
+            # the same objects and its memoized index helpers stay warm.
+            cu_seqlens = attention_masks.cu_seq_q
+            cu_seqlens_cpu = attention_masks.cu_seq_q_cpu
+            if cu_seqlens_cpu is None:
                 raise ValueError(
                     "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
                     "metadata. Build VarlenMetadata with include_host_offsets=True."
@@ -513,7 +492,7 @@ class GatedDeltaNet(Module):
                 device=x_TD.device,
             )
             if is_in_batch_invariant_mode():
-                cu_seqlens_host = (0, num_tokens)
+                cu_seqlens_cpu = cu_seqlens.cpu()
 
         query_TC = self.in_proj_q(x_TD)
         key_TC = self.in_proj_k(x_TD)
@@ -536,7 +515,7 @@ class GatedDeltaNet(Module):
             cu_seqlens,
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
-            cu_seqlens_host=cu_seqlens_host,
+            cu_seqlens_cpu=cu_seqlens_cpu,
         )
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
