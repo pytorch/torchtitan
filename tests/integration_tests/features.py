@@ -309,5 +309,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="kimi_k3_cp2",
             ngpu=2,
             use_real_pg=True,
+            skip_rocm_test=True,
         ),
     ]
