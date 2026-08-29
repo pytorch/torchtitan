@@ -65,7 +65,7 @@ def parallelize_kimi_k3(
 
     assert isinstance(model, KimiK3Model)
     if parallel_dims.cp_enabled:
-        apply_cp_kimi_k3(model, parallel_dims, training.max_context_length)
+        apply_cp_kimi_k3(model, parallel_dims)
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
@@ -105,7 +105,6 @@ def parallelize_kimi_k3(
 def apply_cp_kimi_k3(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    max_context_length: int | None = None,
 ) -> None:
     """Wire context parallelism: KCP on the KDA layers, Ulysses on the MLA layers.
 
@@ -122,9 +121,6 @@ def apply_cp_kimi_k3(
     kda_modules = []
     for module in model.modules():
         if isinstance(module, KimiMLAAttention):
-            # The CP mask rebuild is causal-only; the layer uses the context
-            # window to reject a folded stream holding several documents.
-            module._cp_max_context_length = max_context_length
             if module.n_heads % cp_degree != 0:
                 raise ValueError(
                     f"MLA n_heads={module.n_heads} must be divisible by "

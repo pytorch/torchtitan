@@ -29,7 +29,7 @@ import torch.distributed.nn.functional as dist_nn
 from torchtitan.distributed.parallel_dims import MeshAxisName, SpmdLayout
 from torchtitan.models.common.attention import (
     create_attention_mask,
-    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
 )
 
 
@@ -173,27 +173,32 @@ def cp_all_to_all_headseq(
     return out.permute(1, 0, 2, 3).reshape(t_loc, cp * h_loc, K).contiguous()
 
 
-def full_sequence_causal_mask(attn, num_tokens: int, device):
-    """Causal-only mask for the sequence Ulysses reassembles, cached on
-    ``attn`` per (length, device). Correct only while the folded stream holds
-    ONE document, so a stream wider than the context window is rejected -- a
-    causal-only rebuild cannot see document boundaries."""
-    limit = getattr(attn, "_cp_max_context_length", None)
-    if limit is not None and num_tokens > limit:
-        raise NotImplementedError(
-            f"context parallel folds {num_tokens} tokens into one stream "
-            f"but the context window is {limit}, so the "
-            "stream holds more than one document. The CP path rebuilds a "
-            "causal-only mask and cannot see document boundaries; use a "
-            "microbatch no wider than the context window."
+def full_sequence_document_mask(attn, positions_L, cp_group):
+    """Document-aware mask for the sequence Ulysses reassembles.
+
+    Each rank holds the full sequence after the all-to-all, so the global
+    packed-document mask applies as-is; only the positions must be gathered
+    (contiguous shards, no load balancer under CP). Rebuilt per call: the
+    mask follows the data, not the shape.
+    """
+    if positions_L is None:
+        raise ValueError(
+            "context parallel needs positions to rebuild the packed-document "
+            "mask for the reassembled sequence, but the attention layer "
+            "received None."
         )
-    key = (num_tokens, device)
-    if attn._cp_mask is None or attn._cp_mask[0] != key:
-        mask = create_attention_mask(
-            get_causal_mask_mod(), None, None, num_tokens, num_tokens, device=device
-        )
-        attn._cp_mask = (key, mask)
-    return attn._cp_mask[1]
+    gathered = [torch.empty_like(positions_L) for _ in range(dist.get_world_size(cp_group))]
+    dist.all_gather(gathered, positions_L.contiguous(), group=cp_group)
+    positions_full = torch.cat(gathered, dim=0)
+    num_tokens = positions_full.shape[0]
+    return create_attention_mask(
+        get_efficient_causal_mask_mod_for_packed_document(positions_full),
+        None,
+        None,
+        num_tokens,
+        num_tokens,
+        device=positions_full.device,
+    )
 
 
 def mla_ulysses_attention(
@@ -202,6 +207,7 @@ def mla_ulysses_attention(
     kv_LHC: torch.Tensor,
     k_rope_LR: torch.Tensor,
     cp_group,
+    positions_L: torch.Tensor | None,
 ) -> torch.Tensor:
     """MLA attention over the full sequence for this rank's head subset.
 
@@ -250,7 +256,7 @@ def mla_ulysses_attention(
         q_TGQ,
         k_TGQ,
         v_TGV,
-        attention_masks=full_sequence_causal_mask(attn, t_full, q_TGQ.device),
+        attention_masks=full_sequence_document_mask(attn, positions_L, cp_group),
         scale=attn.scale,
     )
     out_src_dim, out_dst_dim = ULYSSES.out_dims()
