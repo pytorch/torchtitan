@@ -326,11 +326,21 @@ class Decoder(BaseModel):
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        # The padding mask describes the batch, not the model input: it is
+        # consumed here to build masks and never forwarded to the model.
+        padding_mask = batch.pop("padding_mask", None)
         positions = batch.get("positions", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+            # A None backend means the model has no full-attention layer at
+            # all; its linear-attention layers still need document offsets.
+            if inner is None or isinstance(
+                inner, (FlexAttention.Config, VarlenAttention.Config)
+            ):
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                )
 
         input_sharding = decoder_input_sharding()
         if parallel_dims.cp_enabled:
@@ -351,7 +361,20 @@ class Decoder(BaseModel):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
     ) -> AttentionMasksType | None:
+        """Build the attention masks for one token batch.
+
+        Args:
+            positions: Per-token positions, resetting to 0 at each document.
+            padding_mask: Optional boolean tensor, True on tokens the collator
+                padded the batch with. Without it, padded tokens look like
+                document starts to the position-based boundary rules.
+
+        Returns:
+            The masks for the configured attention backend, or None when this
+            model (or pipeline stage) has no full-attention layer.
+        """
         attn_config = self.config.first_attention
         if attn_config is None:
             # No full-attention layers (e.g. a pure linear-attention model, or a
@@ -361,7 +384,9 @@ class Decoder(BaseModel):
         if isinstance(inner_attn, FlexAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)
         elif isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions, padding_mask=padding_mask
+            )
         else:
             raise TypeError(
                 f"Only VarlenAttention and FlexAttention support attention masks, "

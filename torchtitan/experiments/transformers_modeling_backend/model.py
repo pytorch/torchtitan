@@ -1180,10 +1180,16 @@ class HFTransformerModel(BaseModel):
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        # The padding mask describes the batch, not the model input: it is
+        # consumed here to build masks and never forwarded to the model.
+        padding_mask = batch.pop("padding_mask", None)
         if "attention_masks" not in batch:
             positions = batch.get("positions")
             if positions is not None:
-                masks = self.get_attention_masks(positions=positions)
+                masks = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                )
                 if masks is not None:
                     batch["attention_masks"] = masks
 
@@ -1212,7 +1218,11 @@ class HFTransformerModel(BaseModel):
         labels = batch.pop("labels")
         return inputs, labels, batch
 
-    def get_attention_masks(self, positions: torch.Tensor):
+    def get_attention_masks(
+        self,
+        positions: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+    ):
         """Build a flex BlockMask (causal or document-causal).
 
         ``forward`` (or the trainer under CP) calls this and passes the result

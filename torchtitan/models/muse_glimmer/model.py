@@ -416,12 +416,17 @@ class MuseGlimmerModel(Decoder):
                     placeholder_id=special_tokens["image_id"],
                 )
         batch.pop("special_tokens", None)
-
+        # The padding mask describes the batch, not the model input: it is
+        # consumed here to build masks and never forwarded to the model.
+        padding_mask = batch.pop("padding_mask", None)
         positions = batch.get("positions", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                )
 
         input_sharding = {
             **decoder_input_sharding(),
@@ -543,6 +548,7 @@ class MuseGlimmerModel(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
     ) -> AttentionMasksType:
         attn_config = self.config.first_attention
         assert attn_config is not None
@@ -551,7 +557,9 @@ class MuseGlimmerModel(Decoder):
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
         if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions, padding_mask=padding_mask
+            )
         if not isinstance(inner_attn, FlexAttention.Config):
             raise TypeError(
                 "Muse Glimmer requires FlexAttention or VarlenAttention for "

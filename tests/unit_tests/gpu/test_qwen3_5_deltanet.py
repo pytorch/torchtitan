@@ -79,11 +79,11 @@ def _torch_native_gated_delta_varlen(
     v_BLHV: torch.Tensor,
     g_BLH: torch.Tensor,
     beta_BLH: torch.Tensor,
-    cu_seqlens_cpu: torch.Tensor,
+    cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
     """Varlen reference: run each packed document through the batched reference."""
     out_segments_BLHV: list[torch.Tensor] = []
-    cu_seqlens_list = cu_seqlens_cpu.tolist()
+    cu_seqlens_list = cu_seqlens.tolist()
     for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
         out_segments_BLHV.append(
             _torch_native_gated_delta(
@@ -101,7 +101,7 @@ def _reference_causal_conv1d_varlen(
     x_TD: torch.Tensor,
     weight: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    cu_seqlens_cpu: torch.Tensor,
+    cu_seqlens_cpu: torch.Tensor | None,
 ) -> torch.Tensor:
     """Per-document depthwise causal conv + silu, matching the model's FLA
     varlen conv (which is triton/CUDA-only). Patched over
@@ -109,7 +109,7 @@ def _reference_causal_conv1d_varlen(
     """
     conv_kernel_size = weight.shape[-1]
     out_segments_1TD: list[torch.Tensor] = []
-    cu_seqlens_list = cu_seqlens_cpu.tolist()
+    cu_seqlens_list = cu_seqlens.tolist()
     for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
         x_segment_1DT = F.pad(
             x_TD[start:end].transpose(0, 1).unsqueeze(0),
@@ -161,9 +161,8 @@ class ReferenceGatedDeltaKernel(nn.Module):
             return _torch_native_gated_delta(
                 xq_1THK, xk_1THK, xv_1THV, g_1TH, beta_1TH
             ).squeeze(0)
-        assert cu_seqlens_cpu is not None
         return _torch_native_gated_delta_varlen(
-            xq_1THK, xk_1THK, xv_1THV, g_1TH, beta_1TH, cu_seqlens_cpu
+            xq_1THK, xk_1THK, xv_1THV, g_1TH, beta_1TH, cu_seqlens
         ).squeeze(0)
 
 
@@ -181,11 +180,13 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             build_config, max_context_length = qwen3_5_configs["debugmodel"]
             model = build_config("flex", seq_len=max_context_length).build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
+        padding_mask = torch.tensor([False, False, False, True, True])
 
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
-            attention_masks = model.get_attention_masks(positions)
+            attention_masks = model.get_attention_masks(positions, padding_mask)
 
-        self.assertIsNone(attention_masks["deltanet"])
+        # The padded tail is one segment, not one document per reset token.
+        self.assertEqual(attention_masks["deltanet"].cu_seq_q_host, (0, 3, 5))
 
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
@@ -313,15 +314,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def _main_forward_reference(self, model, x_TD, attention_masks=None):
         """Run the current main-branch GatedDeltaNet forward structure."""
         num_tokens = x_TD.shape[0]
-        cu_seqlens = None
-        cu_seqlens_cpu = None
-        if attention_masks is not None:
-            cu_seqlens = attention_masks.cu_seq_q.clone()
-            cu_seqlens_cpu = torch.tensor(
-                attention_masks.cu_seq_q_host,
-                dtype=cu_seqlens.dtype,
-                device="cpu",
-            )
+        cu_seqlens = attention_masks.cu_seq_q if attention_masks is not None else None
+        cu_seqlens_cpu = (
+            attention_masks.cu_seq_q_cpu if attention_masks is not None else None
+        )
 
         def causal_conv(tensor, conv):
             if cu_seqlens is not None:
@@ -602,8 +598,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             "fla_fused_recurrent", atol=2e-2, rtol=2e-2
         )
 
-    def test_varlen_offsets_are_fresh_per_deltanet_invocation(self):
-        """Successive DeltaNet invocations must not share FLA's cache key."""
+    def test_varlen_offsets_are_shared_across_deltanet_invocations(self):
+        """Every conv must see the metadata's own offsets object.
+
+        FLA memoizes its varlen index helpers on argument identity, so handing
+        the kernels a per-layer copy would make every layer recompute them.
+        """
         torch.manual_seed(42)
         model = self._make_deltanet()
         x_TD = torch.randn(8, 4)
@@ -620,10 +620,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         def record_cu_seqlens(x_TD, weight, cu_seqlens, cu_seqlens_cpu):
             captured_cu_seqlens.append(cu_seqlens)
             return _reference_causal_conv1d_varlen(
-                x_TD,
-                weight,
-                cu_seqlens,
-                cu_seqlens_cpu,
+                x_TD, weight, cu_seqlens, cu_seqlens_cpu
             )
 
         with mock.patch(
@@ -633,15 +630,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             model(x_TD, attention_masks)
             model(x_TD, attention_masks)
 
-        # Main runs separate Q/K/V convolutions, so each invocation uses the
-        # same cloned offsets three times.
+        # Separate Q/K/V convolutions, twice over.
         self.assertEqual(len(captured_cu_seqlens), 6)
-        first_invocation = captured_cu_seqlens[0]
-        second_invocation = captured_cu_seqlens[3]
-        self.assertTrue(all(x is first_invocation for x in captured_cu_seqlens[:3]))
-        self.assertTrue(all(x is second_invocation for x in captured_cu_seqlens[3:]))
-        self.assertIsNot(first_invocation, attention_masks.cu_seq_q)
-        self.assertIsNot(second_invocation, first_invocation)
+        self.assertTrue(all(x is attention_masks.cu_seq_q for x in captured_cu_seqlens))
 
 
 if __name__ == "__main__":

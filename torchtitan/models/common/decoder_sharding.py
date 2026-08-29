@@ -112,6 +112,9 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     return {
         "input": token_id_placement(),
         "positions": token_id_placement(),
+        # Per-token batch metadata, laid out like positions. Consumed when the
+        # trainer builds attention masks, so it never reaches model.forward.
+        "padding_mask": token_id_placement(),
         "labels": SpmdType(
             {DP: spmd.V, CP: spmd.V, TP: spmd.I},
             partition_spec=spmd.PartitionSpec((DP, CP)),

@@ -49,11 +49,15 @@ class TextSequence:
     """Target for each input token, with `IGNORE_INDEX` where loss is disabled."""
     positions: np.ndarray | None = None
     """Per-token positions; `None` until packing or collation materializes them."""
+    padding_mask: np.ndarray | None = None
+    """True on tokens a packer padded the row with; `None` when nothing is padded."""
 
     def __post_init__(self) -> None:
         lengths = [len(self.input_ids), len(self.labels)]
         if self.positions is not None:
             lengths.append(len(self.positions))
+        if self.padding_mask is not None:
+            lengths.append(len(self.padding_mask))
         if len(set(lengths)) != 1:
             raise ValueError(
                 f"TextSequence fields must have equal lengths, got {lengths}"

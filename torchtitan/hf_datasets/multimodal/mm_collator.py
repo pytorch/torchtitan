@@ -81,11 +81,23 @@ class MultiModalCollator(Collator):
     def collate_text(
         self,
         batch: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Concatenate whole samples and pad only the token-batch tail."""
         input_ids = torch.cat([sample["input_ids"] for sample in batch])
         labels = torch.cat([sample["labels"] for sample in batch])
         positions = torch.cat([sample["positions"] for sample in batch])
+        # Sample packing pads inside each row, so carry the packer's own mask
+        # through and extend it with this batch's tail padding.
+        padding_mask = torch.cat(
+            [
+                (
+                    sample["padding_mask"]
+                    if "padding_mask" in sample
+                    else torch.zeros(sample["input_ids"].shape[0], dtype=torch.bool)
+                )
+                for sample in batch
+            ]
+        )
         pad_len = self._num_tokens_per_batch - input_ids.shape[0]
         if pad_len < 0:
             raise ValueError("multimodal rows exceed the configured token batch")
@@ -101,8 +113,11 @@ class MultiModalCollator(Collator):
                 torch.arange(pad_len, dtype=positions.dtype) % self._max_context_length
             )
             positions = torch.cat([positions, padding_positions])
+            padding_mask = torch.nn.functional.pad(
+                padding_mask, (0, pad_len), value=True
+            )
 
-        return input_ids, labels, positions
+        return input_ids, labels, positions, padding_mask
 
     def _build_mrope_positions(
         self,
@@ -314,10 +329,11 @@ class MultiModalCollator(Collator):
         )
 
         # Pad text.
-        input_ids, labels, positions = self.collate_text(batch)
+        input_ids, labels, positions, padding_mask = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
             "positions": positions,
+            "padding_mask": padding_mask,
             "pixel_values": patches,
             "grid_thw": grids,
             "pixel_values_videos": video_patches,

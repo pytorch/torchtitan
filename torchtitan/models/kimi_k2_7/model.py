@@ -117,6 +117,9 @@ class KimiK25Model(DeepSeekV3Model):
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        # The padding mask describes the batch, not the model input: it is
+        # consumed here to build masks and never forwarded to the model.
+        padding_mask = batch.pop("padding_mask", None)
         positions = batch.get("positions", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
