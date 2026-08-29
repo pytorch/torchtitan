@@ -31,9 +31,43 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
             events=[
                 self._thread_metadata(pid=100, tid=100, name="thread 100 (python) 100"),
                 self._kernel(
+                    "ncclDevKernel_AllGather",
+                    stream=6,
+                    timestamp=1,
+                    duration=4,
+                    annotation="PP:0UNSHARD",
+                ),
+                self._kernel(
+                    "ncclDevKernel_AllGather",
+                    stream=7,
+                    timestamp=2,
+                    duration=2,
+                    annotation="PP:0UNSHARD",
+                ),
+                self._kernel(
                     "compute",
                     stream=2,
                     timestamp=4,
+                    duration=1,
+                    annotation="PP:0F0",
+                ),
+                self._kernel(
+                    "compute",
+                    stream=3,
+                    timestamp=4.5,
+                    duration=4,
+                    annotation="PP:0F0",
+                ),
+                self._kernel("compute", stream=5, timestamp=6),
+                self._kernel(
+                    "compute",
+                    stream=2,
+                    timestamp=8,
+                    annotation="PP:0F0",
+                ),
+                self._memcpy(
+                    stream=4,
+                    timestamp=3.5,
                     duration=2,
                     annotation="PP:0F0",
                 ),
@@ -52,6 +86,20 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
             base_time_ns=1_001_000,
             events=[
                 self._kernel(
+                    "ncclDevKernel_AllGather",
+                    stream=6,
+                    timestamp=1,
+                    duration=4,
+                    annotation="PP:1UNSHARD",
+                ),
+                self._kernel(
+                    "ncclDevKernel_AllGather",
+                    stream=7,
+                    timestamp=2,
+                    duration=2,
+                    annotation="PP:1UNSHARD",
+                ),
+                self._kernel(
                     "ncclDevKernel_SendRecv",
                     stream=1,
                     timestamp=8,
@@ -63,6 +111,26 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
                     "compute",
                     stream=2,
                     timestamp=14,
+                    duration=1,
+                    annotation="PP:1F0",
+                ),
+                self._kernel(
+                    "compute",
+                    stream=3,
+                    timestamp=14.5,
+                    duration=4,
+                    annotation="PP:1F0",
+                ),
+                self._kernel("compute", stream=5, timestamp=16),
+                self._kernel(
+                    "compute",
+                    stream=2,
+                    timestamp=18,
+                    annotation="PP:1F0",
+                ),
+                self._memcpy(
+                    stream=4,
+                    timestamp=13.5,
                     duration=2,
                     annotation="PP:1F0",
                 ),
@@ -74,7 +142,7 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
         kernels = {
             event["args"]["name"]: event
             for event in merged["traceEvents"]
-            if event.get("cat") == "kernel"
+            if event.get("cat") == "kernel" and "name" in event.get("args", {})
         }
         send_recv_flows = [
             event
@@ -85,6 +153,11 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
             event
             for event in merged["traceEvents"]
             if event.get("cat") == "pp_compute_dependency"
+        ]
+        unshard_flows = [
+            event
+            for event in merged["traceEvents"]
+            if event.get("cat") == "pp_unshard_dependency"
         ]
         annotations = {
             event["name"]: event
@@ -97,6 +170,11 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
         ]
         thread_names = {
             event["args"]["name"]
+            for event in merged["traceEvents"]
+            if event.get("name") == "thread_name"
+        }
+        thread_names_by_lane = {
+            (event["pid"], event["tid"]): event["args"]["name"]
             for event in merged["traceEvents"]
             if event.get("name") == "thread_name"
         }
@@ -118,6 +196,7 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
             kernels["PP:0SEND_F0"]["pid"], kernels["PP:1RECV_F0"]["pid"]
         )
         self.assertEqual(["s", "f"], [event["ph"] for event in send_recv_flows])
+        self.assertLess(send_recv_flows[0]["ts"], send_recv_flows[1]["ts"])
         self.assertIsInstance(send_recv_flows[0]["id"], int)
         self.assertEqual(send_recv_flows[0]["id"], send_recv_flows[1]["id"])
         self.assertEqual(2, len({event["id"] for event in original_flows}))
@@ -129,15 +208,42 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
             {"0F0 -> 0SEND_F0", "1RECV_F0 -> 1F0"},
             {event["name"] for event in dependency_flows},
         )
-        self.assertEqual(
-            {
-                annotations["PP:0F0"]["tid"],
-                annotations["PP:0SEND_F0"]["tid"],
-                annotations["PP:1RECV_F0"]["tid"],
-                annotations["PP:1F0"]["tid"],
-            },
-            {event["tid"] for event in dependency_flows},
+        compute_flow_endpoints = [
+            event
+            for event in dependency_flows
+            if (event["ph"] == "s" and event["args"]["source_operation"] in {"F", "B"})
+            or (
+                event["ph"] == "f"
+                and event["args"]["destination_operation"] in {"F", "B"}
+            )
+        ]
+        self.assertEqual(2, len(compute_flow_endpoints))
+        self.assertTrue(
+            all(
+                thread_names_by_lane[(event["pid"], event["tid"])].endswith(
+                    "Compute 1 annotations"
+                )
+                for event in compute_flow_endpoints
+            )
         )
+        for event in compute_flow_endpoints:
+            args = event["args"]
+            endpoint = "source" if event["ph"] == "s" else "destination"
+            operation = args[f"{endpoint}_operation"]
+            stage = args[f"{endpoint}_stage"]
+            annotation_name = f"PP:{stage}{operation}{args['microbatch']}"
+            self.assertTrue(
+                any(
+                    annotation.get("pid") == event["pid"]
+                    and annotation.get("tid") == event["tid"]
+                    and annotation.get("name") == annotation_name
+                    and annotation["ts"]
+                    <= event["ts"]
+                    <= annotation["ts"] + annotation["dur"]
+                    for annotation in merged["traceEvents"]
+                    if annotation.get("cat") == "gpu_user_annotation"
+                )
+            )
         self.assertLess(
             process_sort_indices[cpu_thread["pid"]],
             process_sort_indices[kernels["PP:0F0"]["pid"]],
@@ -150,6 +256,72 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
         self.assertEqual(0, summary["pp_send_recv_unmatched"])
         self.assertEqual(2, summary["pp_compute_dependency_pairs"])
         self.assertEqual(0, summary["pp_compute_dependency_unmatched"])
+        self.assertEqual(
+            {"0UNSHARD -> 0F0", "1UNSHARD -> 1F0"},
+            {event["name"] for event in unshard_flows},
+        )
+        self.assertTrue(
+            {
+                thread_names_by_lane[(event["pid"], event["tid"])].rsplit(
+                    " | ", maxsplit=1
+                )[-1]
+                for event in unshard_flows
+                if event["ph"] == "s"
+            }
+            == {
+                "NCCL all-gather 1 annotations",
+                "NCCL all-gather 2 annotations",
+            }
+        )
+        self.assertTrue(
+            all(
+                thread_names_by_lane[(event["pid"], event["tid"])].endswith(
+                    "Compute 1 annotations"
+                )
+                for event in unshard_flows
+                if event["ph"] == "f"
+            )
+        )
+        for event in unshard_flows:
+            args = event["args"]
+            endpoint = "source" if event["ph"] == "s" else "destination"
+            operation = args[f"{endpoint}_operation"]
+            stage = args[f"{endpoint}_stage"]
+            annotation_name = (
+                f"PP:{stage}UNSHARD"
+                if operation == "UNSHARD"
+                else f"PP:{stage}{operation}{args['microbatch']}"
+            )
+            self.assertTrue(
+                any(
+                    annotation.get("pid") == event["pid"]
+                    and annotation.get("tid") == event["tid"]
+                    and annotation.get("name") == annotation_name
+                    and annotation["ts"]
+                    <= event["ts"]
+                    <= annotation["ts"] + annotation["dur"]
+                    for annotation in merged["traceEvents"]
+                    if annotation.get("cat") == "gpu_user_annotation"
+                )
+            )
+        for name in {"0UNSHARD -> 0F0", "1UNSHARD -> 1F0"}:
+            destinations = [
+                event
+                for event in unshard_flows
+                if event["name"] == name and event["ph"] == "f"
+            ]
+            self.assertEqual(2, len(destinations))
+            self.assertEqual(
+                1,
+                len(
+                    {
+                        (event["pid"], event["tid"], event["ts"])
+                        for event in destinations
+                    }
+                ),
+            )
+        self.assertEqual(4, summary["pp_unshard_compute_pairs"])
+        self.assertEqual(0, summary["pp_unshard_compute_unmatched"])
 
     def test_converts_neighbor_kernel_annotations_to_spans(self) -> None:
         trace = {
@@ -343,6 +515,24 @@ class TestCompactCudaGraphTrace(unittest.TestCase):
             "ts": timestamp,
             "dur": duration,
             "args": {"External id": external_id},
+        }
+
+    def _memcpy(
+        self,
+        stream: int,
+        timestamp: float,
+        duration: float,
+        annotation: str,
+    ) -> dict[str, Any]:
+        return {
+            "name": "Memcpy DtoD",
+            "cat": "gpu_memcpy",
+            "ph": "X",
+            "pid": 0,
+            "tid": stream,
+            "ts": timestamp,
+            "dur": duration,
+            "args": {"stream": stream, "name": annotation},
         }
 
     def _flow(self, stream: int, timestamp: float) -> dict[str, Any]:

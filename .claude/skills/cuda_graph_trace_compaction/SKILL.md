@@ -35,6 +35,9 @@ Merging aligns ranks on a common `baseTimeNanoseconds`, stacks them in
 pipeline order, and draws flow arrows between the
 `PP:<stage><op><microbatch>` annotations that `torch.distributed.pipelining`
 emits (`SEND_F -> RECV_F` across ranks, `RECV_F -> F -> SEND_F` within one).
+It also connects each `PP:<stage>UNSHARD` annotation on the first two
+all-gather lanes to the first subsequent same-stage compute annotation on the
+first compute lane.
 No annotations means no arrows, but the merge still works.
 
 The script prints a JSON summary and validates itself, raising if a measured

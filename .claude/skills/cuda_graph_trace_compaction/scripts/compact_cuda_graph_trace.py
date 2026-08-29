@@ -30,6 +30,7 @@ import bisect
 import gzip
 import heapq
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -64,6 +65,7 @@ PP_ANNOTATION_PATTERN = re.compile(
     r"^PP:(?P<stage>\d+)(?P<operation>SEND_F|RECV_F|SEND_B|RECV_B|F|B)"
     r"(?P<microbatch>\d+)$"
 )
+PP_UNSHARD_ANNOTATION_PATTERN = re.compile(r"^PP:(?P<stage>\d+)UNSHARD$")
 
 
 @dataclass(frozen=True)
@@ -107,7 +109,7 @@ class PPAnnotationBlock:
 
     stage: int
     operation: str
-    microbatch: int
+    microbatch: int | None
     pid: int
     tid: int
     start: float
@@ -117,7 +119,8 @@ class PPAnnotationBlock:
     def label(self) -> str:
         """Return the concise PP operation label shown on flow arrows."""
 
-        return f"{self.stage}{self.operation}{self.microbatch}"
+        microbatch = "" if self.microbatch is None else self.microbatch
+        return f"{self.stage}{self.operation}{microbatch}"
 
 
 def _load_trace(path: Path) -> dict[str, Any]:
@@ -1046,10 +1049,58 @@ def _pp_annotation_key(event: dict[str, Any]) -> tuple[int, str, int] | None:
     )
 
 
+def _named_annotation_lanes(
+    events: list[dict[str, Any]],
+    lane_names: set[str],
+) -> set[tuple[int, int]]:
+    """Return annotation tracks with one of the requested display names."""
+
+    lanes = set()
+    for event in events:
+        if event.get("ph") != "M" or event.get("name") != "thread_name":
+            continue
+        pid = event.get("pid")
+        tid = event.get("tid")
+        name = event.get("args", {}).get("name")
+        if not (
+            isinstance(pid, int) and isinstance(tid, int) and isinstance(name, str)
+        ):
+            continue
+        lane_name = name.rsplit(" | ", maxsplit=1)[-1]
+        if lane_name in lane_names:
+            lanes.add((pid, tid))
+    return lanes
+
+
+def _main_compute_annotation_lanes(
+    events: list[dict[str, Any]],
+) -> set[tuple[int, int]]:
+    """Return the primary compute annotation track for each GPU process."""
+
+    return _named_annotation_lanes(
+        events, {"Compute annotations", "Compute 1 annotations"}
+    )
+
+
+def _unshard_annotation_lanes(
+    events: list[dict[str, Any]],
+) -> set[tuple[int, int]]:
+    """Return the first two all-gather annotation tracks for each process."""
+
+    return _named_annotation_lanes(
+        events,
+        {
+            "NCCL all-gather annotations",
+            "NCCL all-gather 1 annotations",
+            "NCCL all-gather 2 annotations",
+        },
+    )
+
+
 def _annotation_block(
     key: tuple[int, str, int], events: list[dict[str, Any]]
 ) -> PPAnnotationBlock:
-    """Build one PP block, coalescing parallel compute annotation lanes."""
+    """Build one PP block from overlapping annotations on one lane."""
 
     representative = min(events, key=lambda event: (event["ts"], event["tid"]))
     stage, operation, microbatch = key
@@ -1065,14 +1116,26 @@ def _annotation_block(
 
 
 def _compute_annotation_blocks(
-    key: tuple[int, str, int], events: list[dict[str, Any]]
+    key: tuple[int, str, int],
+    events: list[dict[str, Any]],
+    main_compute_lanes: set[tuple[int, int]],
 ) -> list[PPAnnotationBlock]:
-    """Group overlapping parallel lanes from one PP compute operation."""
+    """Group parallel spans and represent them on the primary compute lane."""
 
     ordered = sorted(events, key=lambda event: (event["ts"], event["dur"]))
     clusters = []
     cluster = [ordered[0]]
     cluster_end = float(ordered[0]["ts"]) + float(ordered[0]["dur"])
+
+    def append_cluster(values: list[dict[str, Any]]) -> None:
+        main_compute_values = [
+            event
+            for event in values
+            if (int(event["pid"]), int(event["tid"])) in main_compute_lanes
+        ]
+        if main_compute_values:
+            clusters.append(_annotation_block(key, main_compute_values))
+
     for event in ordered[1:]:
         start = float(event["ts"])
         end = start + float(event["dur"])
@@ -1080,16 +1143,17 @@ def _compute_annotation_blocks(
             cluster.append(event)
             cluster_end = max(cluster_end, end)
         else:
-            clusters.append(_annotation_block(key, cluster))
+            append_cluster(cluster)
             cluster = [event]
             cluster_end = end
-    clusters.append(_annotation_block(key, cluster))
+    append_cluster(cluster)
     return clusters
 
 
 def _pp_annotation_blocks(events: list[dict[str, Any]]) -> list[PPAnnotationBlock]:
     """Extract logical PP blocks from lane-local GPU annotations."""
 
+    main_compute_lanes = _main_compute_annotation_lanes(events)
     grouped: dict[tuple[int, int, str, int], list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         key = _pp_annotation_key(event)
@@ -1099,10 +1163,50 @@ def _pp_annotation_blocks(events: list[dict[str, Any]]) -> list[PPAnnotationBloc
     for (_, stage, operation, microbatch), values in sorted(grouped.items()):
         key = (stage, operation, microbatch)
         if operation in {"F", "B"}:
-            blocks.extend(_compute_annotation_blocks(key, values))
+            blocks.extend(_compute_annotation_blocks(key, values, main_compute_lanes))
         else:
             blocks.extend(_annotation_block(key, [event]) for event in values)
     return blocks
+
+
+def _unshard_annotation_blocks(
+    events: list[dict[str, Any]],
+) -> list[PPAnnotationBlock]:
+    """Extract PP unshard blocks from the first two all-gather lanes."""
+
+    unshard_lanes = _unshard_annotation_lanes(events)
+    blocks = []
+    for event in events:
+        pid = event.get("pid")
+        tid = event.get("tid")
+        name = event.get("name")
+        match = (
+            PP_UNSHARD_ANNOTATION_PATTERN.fullmatch(name)
+            if isinstance(name, str)
+            else None
+        )
+        required = (pid, tid, event.get("ts"), event.get("dur"))
+        if (
+            event.get("cat") != "gpu_user_annotation"
+            or event.get("ph") != "X"
+            or match is None
+            or not all(isinstance(value, (int, float)) for value in required)
+            or (int(pid), int(tid)) not in unshard_lanes
+        ):
+            continue
+        start = float(event["ts"])
+        blocks.append(
+            PPAnnotationBlock(
+                stage=int(match.group("stage")),
+                operation="UNSHARD",
+                microbatch=None,
+                pid=int(pid),
+                tid=int(tid),
+                start=start,
+                end=start + float(event["dur"]),
+            )
+        )
+    return sorted(blocks, key=lambda block: (block.pid, block.start, block.stage))
 
 
 def _pair_nearest_blocks(
@@ -1137,10 +1241,14 @@ def _annotation_flow_pair(
     pid_to_pp_rank: dict[int, int],
     category: str,
     flow_id: int,
+    *,
+    strictly_forward: bool = False,
 ) -> list[dict[str, Any]]:
     """Build a flow whose endpoints bind to PP GPU annotation blocks."""
 
     destination_timestamp = max(source.start, destination.start)
+    if strictly_forward and destination_timestamp == source.start:
+        destination_timestamp = math.nextafter(source.start, math.inf)
     if destination_timestamp > destination.end:
         return []
     name = f"{source.label} -> {destination.label}"
@@ -1151,7 +1259,11 @@ def _annotation_flow_pair(
         "destination_stage": destination.stage,
         "source_operation": source.operation,
         "destination_operation": destination.operation,
-        "microbatch": source.microbatch,
+        "microbatch": (
+            source.microbatch
+            if source.microbatch is not None
+            else destination.microbatch
+        ),
     }
     return [
         {
@@ -1204,7 +1316,12 @@ def _send_recv_flow_events(
         unmatched += len(sends) + len(recvs) - 2 * len(pairs)
         for send, recv in pairs:
             pair_flow = _annotation_flow_pair(
-                send, recv, pid_to_pp_rank, "pp_send_recv", next_flow_id
+                send,
+                recv,
+                pid_to_pp_rank,
+                "pp_send_recv",
+                next_flow_id,
+                strictly_forward=True,
             )
             flows.extend(pair_flow)
             unmatched += 2 if not pair_flow else 0
@@ -1221,7 +1338,7 @@ def _local_dependency_flow_events(
     blocks: list[PPAnnotationBlock],
     pid_to_pp_rank: dict[int, int],
     first_flow_id: int,
-) -> tuple[list[dict[str, Any]], int, int]:
+) -> tuple[list[dict[str, Any]], int, int, int]:
     """Connect receive, compute, and send annotation blocks within each stage."""
 
     grouped: dict[tuple[int, int, str, int], list[PPAnnotationBlock]] = defaultdict(
@@ -1255,30 +1372,80 @@ def _local_dependency_flow_events(
                 flows.extend(pair_flow)
                 unmatched += 2 if not pair_flow else 0
                 next_flow_id += 1
+    return flows, len(flows) // 2, unmatched, next_flow_id
+
+
+def _unshard_dependency_flow_events(
+    unshards: list[PPAnnotationBlock],
+    blocks: list[PPAnnotationBlock],
+    pid_to_pp_rank: dict[int, int],
+    first_flow_id: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Connect each unshard to the first same-stage compute that follows it."""
+
+    computes: dict[tuple[int, int], list[PPAnnotationBlock]] = defaultdict(list)
+    for block in blocks:
+        if block.operation in {"F", "B"}:
+            computes[(block.pid, block.stage)].append(block)
+    for values in computes.values():
+        values.sort(key=lambda block: (block.start, block.end))
+
+    flows = []
+    unmatched = 0
+    next_flow_id = first_flow_id
+    for unshard in unshards:
+        destination = next(
+            (
+                block
+                for block in computes.get((unshard.pid, unshard.stage), [])
+                if block.start >= unshard.start
+            ),
+            None,
+        )
+        if destination is None:
+            unmatched += 1
+            continue
+        pair_flow = _annotation_flow_pair(
+            unshard,
+            destination,
+            pid_to_pp_rank,
+            "pp_unshard_dependency",
+            next_flow_id,
+        )
+        flows.extend(pair_flow)
+        if not pair_flow:
+            unmatched += 1
+        next_flow_id += 1
     return flows, len(flows) // 2, unmatched
 
 
 def _communication_flow_events(
     events: list[dict[str, Any]], pid_to_pp_rank: dict[int, int]
-) -> tuple[list[dict[str, Any]], int, int, int, int]:
+) -> tuple[list[dict[str, Any]], int, int, int, int, int, int]:
     """Build cross-rank and rank-local PP annotation flows."""
 
     blocks = _pp_annotation_blocks(events)
+    unshards = _unshard_annotation_blocks(events)
     (
         send_recv,
         send_recv_pairs,
         send_recv_unmatched,
         next_flow_id,
     ) = _send_recv_flow_events(blocks, pid_to_pp_rank, 1_000_000_000_000)
-    local, local_pairs, local_unmatched = _local_dependency_flow_events(
+    local, local_pairs, local_unmatched, next_flow_id = _local_dependency_flow_events(
         blocks, pid_to_pp_rank, next_flow_id
     )
+    unshard, unshard_pairs, unshard_unmatched = _unshard_dependency_flow_events(
+        unshards, blocks, pid_to_pp_rank, next_flow_id
+    )
     return (
-        send_recv + local,
+        send_recv + local + unshard,
         send_recv_pairs,
         send_recv_unmatched,
         local_pairs,
         local_unmatched,
+        unshard_pairs,
+        unshard_unmatched,
     )
 
 
@@ -1301,6 +1468,8 @@ def merge_pp_traces(
         unmatched,
         local_pairs,
         local_unmatched,
+        unshard_pairs,
+        unshard_unmatched,
     ) = _communication_flow_events(events, pid_to_pp_rank)
     events.extend(flows)
     merged = dict(ranked[0].trace)
@@ -1323,6 +1492,8 @@ def merge_pp_traces(
         "pp_send_recv_unmatched": unmatched,
         "pp_compute_dependency_pairs": local_pairs,
         "pp_compute_dependency_unmatched": local_unmatched,
+        "pp_unshard_compute_pairs": unshard_pairs,
+        "pp_unshard_compute_unmatched": unshard_unmatched,
         "per_rank_compaction": compaction,
     }
     merged["cuda_graph_pp_merge"] = summary
