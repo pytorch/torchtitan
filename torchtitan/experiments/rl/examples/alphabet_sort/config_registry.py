@@ -30,7 +30,6 @@ from torchtitan.experiments.rl.actors.generator import (
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
@@ -89,9 +88,6 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -108,7 +104,10 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -148,9 +147,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -162,7 +158,11 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+                dtype="bfloat16",
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -218,7 +218,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
         # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
-        training=TrainingConfig(),
+        training=dataclasses.replace(config.trainer.training, dtype="float32"),
         parallelism=dataclasses.replace(
             config.trainer.parallelism, enable_sequence_parallel=False
         ),
@@ -245,9 +245,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -264,7 +261,10 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -304,9 +304,6 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -324,7 +321,10 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -369,9 +369,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -391,7 +388,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
             # forward (mixed_precision_param="bfloat16" is the default).
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -432,9 +432,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -446,7 +443,10 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
@@ -486,9 +486,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -500,7 +497,11 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+                dtype="bfloat16",
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
@@ -545,9 +546,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -564,7 +562,10 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
@@ -669,9 +670,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -690,7 +688,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
             # forward (mixed_precision_param="bfloat16" is the default).
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
@@ -741,9 +742,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
@@ -755,7 +753,11 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
+                dtype="bfloat16",
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 data_parallel_replicate_degree=1,
@@ -848,9 +850,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=2, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
@@ -861,6 +860,10 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
+            ),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+                max_context_length=2048,
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
@@ -922,9 +925,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=1, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
@@ -936,7 +936,11 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 warmup_steps=0,
                 min_lr_factor=1.0,
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2048,
+                max_context_length=2048,
+                dtype="bfloat16",
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
@@ -1002,9 +1006,6 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=1, seq_len=2048),
-            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
@@ -1016,7 +1017,11 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
                 warmup_steps=0,
                 min_lr_factor=1.0,
             ),
-            training=TrainingConfig(dtype="bfloat16"),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=2048,
+                max_context_length=2048,
+                dtype="bfloat16",
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
