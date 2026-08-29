@@ -71,6 +71,9 @@ def parallelize_kimi_k3(
 
     assert isinstance(model, KimiK3Model)
     if parallel_dims.ep_enabled:
+        # model_registry's moe_comm_backend picks the dispatcher: standard
+        # (default), deepep and minimal_async_ep run on this model; hybridep
+        # needs GB200-class hardware.
         model.parallelize(parallel_dims)
 
     if ac_config is not None:
