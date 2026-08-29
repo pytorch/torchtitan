@@ -490,7 +490,7 @@ class Attention(BaseAttention):
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.rope(o_rope, o_rope, positions)[0]
+        o_rope = self.rope(o_rope, positions=positions, inverse=True)
         o = torch.cat([o_nope, o_rope], dim=-1)
 
         with spmd.local():
