@@ -29,7 +29,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import (
-    RoPE,
     _rope_cache_registry_context,
     _RoPECacheRegistry,
 )
@@ -275,10 +274,6 @@ class Decoder(BaseModel):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.lm_head.weight
 
-    def parallelize(self, parallel_dims) -> None:
-        super().parallelize(parallel_dims)
-        self._rope_cache_registry.parallelize(parallel_dims)
-
     def init_states(
         self,
         *,
@@ -292,17 +287,6 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
-
-    def _prune_rope_cache_registry(self) -> None:
-        """Drop cache slots unused after pipeline-stage module pruning."""
-        slots = set()
-        for module in self.modules():
-            if not isinstance(module, RoPE):
-                continue
-            reader = module._cache_reader
-            if reader is not None and reader._registry is self._rope_cache_registry:
-                slots.add(reader._slot_name)
-        self._rope_cache_registry._retain_slots(slots)
 
     def _rope_cache_context(self):
         """Return a context that exposes this model's private cache registry."""
