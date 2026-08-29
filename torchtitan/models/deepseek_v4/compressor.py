@@ -66,18 +66,18 @@ class Compressor(Module):
 
         Args:
             tensor: Grouped tensor of shape ``[B, L // R, R, D]``.
-            value: Fill value for the first group's missing previous candidate.
+            value: Fill value for the first previous group.
 
         Returns:
             Tensor of shape ``[B, L // R, 2 * R, D]``.
         """
-        ratio, d = self.compress_ratio, self.head_dim
+        d = self.head_dim
         prev = torch.cat(
             [
                 torch.full_like(tensor[:1, :, :d], value),
                 tensor[:-1, :, :d],
             ],
-            dim=1,
+            dim=0,
         )
         curr = tensor[:, :, d:]
         return torch.cat([prev, curr], dim=1)
@@ -112,7 +112,7 @@ class Compressor(Module):
         kv = (kv * score.softmax(dim=1)).sum(dim=1)
         kv = self.norm(kv.to(dtype))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
-        kv_rope = self.rope(kv_rope.unsqueeze(1), kv_rope.unsqueeze(1), comp_positions)[0]
+        kv_rope = self.rope(kv_rope.unsqueeze(1), positions=comp_positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
         return kv
 
@@ -169,7 +169,7 @@ class Indexer(Module):
         q = self.wq_b(qr)
         q = q.view(seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
-        q_rope = self.rope(q_rope, q_rope, positions)[0]
+        q_rope = self.rope(q_rope, positions=positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)

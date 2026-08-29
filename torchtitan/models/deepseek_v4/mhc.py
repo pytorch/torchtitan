@@ -50,8 +50,8 @@ class HcSplitSinkhorn(Module):
             post * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult].view(*([1] * (post.ndim - 1)), hc_mult)
         )
         comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(
-            hc_mult, hc_mult
-        ).unsqueeze(0).unsqueeze(0)
+            *([1] * (comb.ndim - 2)), hc_mult, hc_mult
+        )
 
         row_max = comb.max(dim=-1, keepdim=True).values
         comb = torch.exp(comb - row_max)
