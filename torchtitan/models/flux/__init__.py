@@ -546,18 +546,25 @@ def _flux_debug() -> FluxModel.Config:
     )
 
 
+# The default lengths are ``_flux_seq_len(img_size, max_t5_encoding_len)`` for
+# the img_size / T5 length each shipped trainer config uses.
 flux_configs = {
-    "flux-dev": _flux_dev,
-    "flux-schnell": _flux_schnell,
-    "flux-debug": _flux_debug,
+    "flux-dev": (_flux_dev, 768),
+    "flux-schnell": (_flux_schnell, 512),
+    "flux-debug": (_flux_debug, 512),
 }
 
 
 def model_registry(
     flavor: str,
     converters: list[ModelConfigConverter.Config] | None = None,
+    *,
+    seq_len: int | None = None,
 ) -> ModelSpec:
-    config = flux_configs[flavor]()
+    # Flux has no RoPE cache to size, so seq_len only reports the context
+    # length (latent patches + T5 encodings) on the ModelSpec.
+    get_config, default_len = flux_configs[flavor]
+    config = get_config()
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
@@ -566,6 +573,7 @@ def model_registry(
         name="flux",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         post_optimizer_build_fn=None,

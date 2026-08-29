@@ -65,7 +65,7 @@ _LAYER0_ANCHORS = (
 
 
 def _build_debugmodel() -> Llama3Model:
-    config = llama3_configs["debugmodel"](attn_backend="flex")
+    config = llama3_configs["debugmodel"][0](attn_backend="flex")
     model = Llama3Model(config)
     model.init_states()
     return model

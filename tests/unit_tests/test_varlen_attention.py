@@ -80,7 +80,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
         from torchtitan.models.llama3 import llama3_configs
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-        model_config = llama3_configs["debugmodel"]("varlen")
+        model_config = llama3_configs["debugmodel"][0]("varlen")
         set_llama3_sharding_config(model_config, enable_sp=False)
 
         sharding = model_config.layers[0].attention.inner_attention.sharding_config
@@ -130,7 +130,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
     def test_llama_decoder_preserves_td_shape(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        model = llama3_configs["debugmodel"]("varlen").build()
+        model = llama3_configs["debugmodel"][0]("varlen").build()
         model.init_states()
         num_tokens = 6
         tokens_T = torch.randint(0, 2048, (num_tokens,))

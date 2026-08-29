@@ -8,7 +8,7 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Any, Literal
+from typing import Literal
 
 import torch.nn as nn
 
@@ -614,10 +614,10 @@ def _671b(
 
 
 deepseekv3_configs = {
-    "debugmodel": _debugmodel,
-    "16B": _16b,
-    "236B": _236b,
-    "671B": _671b,
+    "debugmodel": (_debugmodel, 16384),
+    "16B": (_16b, 16384),
+    "236B": (_236b, 16384),
+    "671B": (_671b, 16384),
 }
 
 
@@ -631,15 +631,13 @@ def model_registry(
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> ModelSpec:
-    # seq_len is forwarded only when the caller sets it, so each flavor
-    # builder keeps its architecture's full context as the default.
-    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
-    config = deepseekv3_configs[flavor](
+    get_config, default_len = deepseekv3_configs[flavor]
+    config = get_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
-        **seq_len_kwarg,
+        seq_len=seq_len or default_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -649,6 +647,7 @@ def model_registry(
         name="deepseek_v3",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

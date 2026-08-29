@@ -6,7 +6,6 @@
 
 
 from collections.abc import Callable
-from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -602,17 +601,17 @@ def _235b_a22b(
 
 
 qwen3_configs = {
-    "debugmodel": _debugmodel,
-    "debugmodel_non_fused_qkv": _debugmodel_non_fused_qkv,
-    "0.6B": _0_6b,
-    "1.7B": _1_7b,
-    "4B": _4b,
-    "8B": _8b,
-    "14B": _14b,
-    "32B": _32b,
-    "debugmodel_moe": _debugmodel_moe,
-    "30B-A3B": _30b_a3b,
-    "235B-A22B": _235b_a22b,
+    "debugmodel": (_debugmodel, 4096),
+    "debugmodel_non_fused_qkv": (_debugmodel_non_fused_qkv, 4096),
+    "0.6B": (_0_6b, 40960),
+    "1.7B": (_1_7b, 40960),
+    "4B": (_4b, 40960),
+    "8B": (_8b, 40960),
+    "14B": (_14b, 40960),
+    "32B": (_32b, 40960),
+    "debugmodel_moe": (_debugmodel_moe, 4096),
+    "30B-A3B": (_30b_a3b, 40960),
+    "235B-A22B": (_235b_a22b, 40960),
 }
 
 
@@ -627,10 +626,8 @@ def model_registry(
     kwargs = dict(attn_backend=attn_backend)
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
-    # seq_len is forwarded only when the caller sets it, so each flavor
-    # builder keeps its architecture's full context as the default.
-    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
-    config = qwen3_configs[flavor](**kwargs, **seq_len_kwarg)
+    get_config, default_len = qwen3_configs[flavor]
+    config = get_config(**kwargs, seq_len=seq_len or default_len)
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
@@ -639,6 +636,7 @@ def model_registry(
         name="qwen3",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

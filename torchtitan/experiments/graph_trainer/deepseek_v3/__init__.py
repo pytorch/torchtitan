@@ -33,8 +33,9 @@ def model_registry(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> ModelSpec:
+    get_config, default_len = deepseekv3_configs[flavor]
     base = build_decoder_config_for_backend(
-        deepseekv3_configs[flavor],
+        get_config,
         attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -46,6 +47,7 @@ def model_registry(
         name="graph_trainer/deepseek_v3",
         flavor=flavor,
         model=config,
+        max_context_length=default_len,
         parallelize_fn=_parallelize_fn,
         pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

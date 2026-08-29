@@ -36,7 +36,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         cls._temporary_directory.cleanup()
 
     def test_to_hf_handles_replicated_grouped_experts(self) -> None:
-        config = deepseekv3_configs["debugmodel"](
+        config = deepseekv3_configs["debugmodel"][0](
             attn_backend="flex",
             moe_comm_backend="standard",
         )

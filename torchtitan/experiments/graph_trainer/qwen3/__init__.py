@@ -24,9 +24,8 @@ def model_registry(
     kwargs = {}
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
-    base = build_decoder_config_for_backend(
-        qwen3_configs[flavor], attn_backend, **kwargs
-    )
+    get_config, default_len = qwen3_configs[flavor]
+    base = build_decoder_config_for_backend(get_config, attn_backend, **kwargs)
     config = GraphTrainerQwen3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
@@ -34,6 +33,7 @@ def model_registry(
         name="graph_trainer/qwen3",
         flavor=flavor,
         model=config,
+        max_context_length=default_len,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=None,

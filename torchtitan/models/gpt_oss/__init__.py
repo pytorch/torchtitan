@@ -6,7 +6,6 @@
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -383,9 +382,9 @@ def _120b(
 
 
 gptoss_configs = {
-    "debugmodel": _debugmodel,
-    "20b": _20b,
-    "120b": _120b,
+    "debugmodel": (_debugmodel, 131072),
+    "20b": (_20b, 131072),
+    "120b": (_120b, 131072),
 }
 
 
@@ -397,13 +396,11 @@ def model_registry(
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    # seq_len is forwarded only when the caller sets it, so each flavor
-    # builder keeps its architecture's full context as the default.
-    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
-    config = gptoss_configs[flavor](
+    get_config, default_len = gptoss_configs[flavor]
+    config = get_config(
         moe_comm_backend=moe_comm_backend,
         attn_backend=attn_backend,
-        **seq_len_kwarg,
+        seq_len=seq_len or default_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -413,6 +410,7 @@ def model_registry(
         name="gpt_oss",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

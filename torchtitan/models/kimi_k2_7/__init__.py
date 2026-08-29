@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -493,10 +492,10 @@ def _kimi_k2_5(
 
 
 kimi_k2_5_configs = {
-    "debugmodel": _debugmodel,
-    "moonlight-16B-A3B": _moonlight_16b_a3b,
-    "Kimi-VL-A3B": _kimi_vl_a3b,
-    "Kimi-K2.5": _kimi_k2_5,
+    "debugmodel": (_debugmodel, 16384),
+    "moonlight-16B-A3B": (_moonlight_16b_a3b, 8192),
+    "Kimi-VL-A3B": (_kimi_vl_a3b, 131072),
+    "Kimi-K2.5": (_kimi_k2_5, 262144),
 }
 
 
@@ -509,14 +508,12 @@ def model_registry(
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    # seq_len is forwarded only when the caller sets it, so each flavor
-    # builder keeps its architecture's full context as the default.
-    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
-    config = kimi_k2_5_configs[flavor](
+    get_config, default_len = kimi_k2_5_configs[flavor]
+    config = get_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        **seq_len_kwarg,
+        seq_len=seq_len or default_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -526,6 +523,7 @@ def model_registry(
         name="kimi_k2_5",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_kimi_k2_5,
         pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=_register_optimizer_hooks,

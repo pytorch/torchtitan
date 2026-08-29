@@ -54,7 +54,7 @@ def run_worker(args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    config = qwen3_5_configs["debugmodel_moe"](
+    config = qwen3_5_configs["debugmodel_moe"][0](
         attn_backend="flex",
         moe_comm_backend="standard",
     )

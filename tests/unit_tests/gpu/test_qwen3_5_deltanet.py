@@ -178,7 +178,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            model = qwen3_5_configs["debugmodel"]("flex").build()
+            model = qwen3_5_configs["debugmodel"][0]("flex").build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
 
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
@@ -196,7 +196,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            model = qwen3_5_configs["debugmodel"]("flex").build()
+            model = qwen3_5_configs["debugmodel"][0]("flex").build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
 

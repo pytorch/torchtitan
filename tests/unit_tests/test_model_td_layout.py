@@ -54,7 +54,7 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TNH.shape, q_TNH.shape)
 
     def test_gpt_oss_attention_preserves_td_shape(self):
-        config = gptoss_configs["debugmodel"]("standard", "varlen")
+        config = gptoss_configs["debugmodel"][0]("standard", "varlen")
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -65,7 +65,7 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_deepseek_attention_preserves_td_shape(self):
-        config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        config = deepseekv3_configs["debugmodel"][0]("flex", "standard")
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -76,7 +76,7 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_muse_attention_preserves_td_shape(self):
-        config = muse_glimmer_configs["debugmodel"]("varlen")
+        config = muse_glimmer_configs["debugmodel"][0]("varlen")
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -88,7 +88,7 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_qwen35_attention_preserves_td_shape(self):
-        config = qwen3_5_configs["debugmodel"]("varlen")
+        config = qwen3_5_configs["debugmodel"][0]("varlen")
         attention_config = next(
             layer.attention for layer in config.layers if layer.attention is not None
         )

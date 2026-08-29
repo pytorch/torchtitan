@@ -25,6 +25,7 @@ def model_registry(
         name="graph_trainer/muse_glimmer",
         flavor=flavor,
         model=config,
+        max_context_length=base.max_context_length,
         parallelize_fn=parallelize_muse_glimmer,
         pipelining_fn=None,
         post_optimizer_build_fn=None,

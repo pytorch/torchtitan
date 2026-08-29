@@ -7,7 +7,6 @@
 import dataclasses
 import math
 from collections.abc import Callable
-from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -516,10 +515,10 @@ def _muse_glimmer_debugmodel_mm(
 
 
 muse_glimmer_configs = {
-    "debugmodel": _debugmodel,
-    "30B": _muse_glimmer_30b,
-    "debugmodel_mm": _muse_glimmer_debugmodel_mm,
-    "30B_mm": partial(_muse_glimmer_30b, with_vision=True),
+    "debugmodel": (_debugmodel, 4096),
+    "30B": (_muse_glimmer_30b, 16384),
+    "debugmodel_mm": (_muse_glimmer_debugmodel_mm, 4096),
+    "30B_mm": (partial(_muse_glimmer_30b, with_vision=True), 16384),
 }
 
 
@@ -530,10 +529,8 @@ def model_registry(
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    # seq_len is forwarded only when the caller sets it, so each flavor
-    # builder keeps its architecture's full context as the default.
-    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
-    config = muse_glimmer_configs[flavor](attn_backend=attn_backend, **seq_len_kwarg)
+    get_config, default_len = muse_glimmer_configs[flavor]
+    config = get_config(attn_backend=attn_backend, seq_len=seq_len or default_len)
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
@@ -542,6 +539,7 @@ def model_registry(
         name="muse_glimmer",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_muse_glimmer,
         pipelining_fn=pipeline_muse_glimmer,
         post_optimizer_build_fn=None,

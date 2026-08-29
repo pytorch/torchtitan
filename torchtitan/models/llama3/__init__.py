@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from typing import Any
 from functools import partial
 
 import torch.nn as nn
@@ -370,12 +369,12 @@ def _405b(
 
 
 llama3_configs = {
-    "debugmodel": _debugmodel,
-    "1B": _1b,
-    "3B": _3b,
-    "8B": _8b,
-    "70B": _70b,
-    "405B": _405b,
+    "debugmodel": (_debugmodel, 131072),
+    "1B": (_1b, 131072),
+    "3B": (_3b, 131072),
+    "8B": (_8b, 131072),
+    "70B": (_70b, 131072),
+    "405B": (_405b, 131072),
 }
 
 
@@ -387,13 +386,11 @@ def model_registry(
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    # seq_len is forwarded only when the caller sets it, so each flavor
-    # builder keeps its architecture's full context as the default.
-    seq_len_kwarg: dict[str, Any] = {} if seq_len is None else {"seq_len": seq_len}
-    config = llama3_configs[flavor](
+    get_config, default_len = llama3_configs[flavor]
+    config = get_config(
         attn_backend=attn_backend,
         tp_gemm_backend=tp_gemm_backend,
-        **seq_len_kwarg,
+        seq_len=seq_len or default_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -403,6 +400,7 @@ def model_registry(
         name="llama3",
         flavor=flavor,
         model=config,
+        max_context_length=seq_len or default_len,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,

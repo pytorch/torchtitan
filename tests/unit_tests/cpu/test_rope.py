@@ -276,7 +276,7 @@ class TestYaRNScaling(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import Attention
 
-        model_config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        model_config = deepseekv3_configs["debugmodel"][0]("flex", "standard")
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)
         attention_config.rope = dataclasses.replace(
@@ -329,7 +329,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        model = llama3_configs["debugmodel"]("flex").build()
+        model = llama3_configs["debugmodel"][0]("flex").build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
@@ -338,7 +338,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        cfg = llama3_configs["debugmodel"]("flex")
+        cfg = llama3_configs["debugmodel"][0]("flex")
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
         self.assertEqual(
@@ -368,7 +368,7 @@ class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
         """Build a minimal Llama3 debug config."""
         from torchtitan.models.llama3 import llama3_configs
 
-        return llama3_configs["debugmodel"]("flex")
+        return llama3_configs["debugmodel"][0]("flex")
 
     def test_rejects_oversized_seq_len(self):
         cfg = self._make_config()

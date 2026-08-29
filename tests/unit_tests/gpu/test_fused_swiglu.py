@@ -152,7 +152,7 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         feed_forward.w1/w3 FQNs, which the fused module emits and consumes via
         its state_dict hooks.
         """
-        config = llama3_configs["debugmodel"](attn_backend="flex")
+        config = llama3_configs["debugmodel"][0](attn_backend="flex")
         # Apply the fused override factory directly, independent of the global
         # override registry (which other tests may clear).
         for layer in config.layers:

@@ -1521,7 +1521,7 @@ class TestTraceModels(unittest.TestCase):
     def test_llama3(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"](attn_backend="flex")
+        config = llama3_configs["debugmodel"][0](attn_backend="flex")
         self._run_model_test(
             Llama3Model, config, use_attn_masks=True, use_regional_inductor=True
         )
@@ -1530,7 +1530,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["debugmodel"](attn_backend="flex")
+        config = qwen3_configs["debugmodel"][0](attn_backend="flex")
         self._run_model_test(
             Qwen3Model,
             config,
@@ -1543,7 +1543,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["debugmodel_moe"](attn_backend="flex")
+        config = qwen3_configs["debugmodel_moe"][0](attn_backend="flex")
         self._run_model_test(
             Qwen3Model,
             config,
@@ -1556,7 +1556,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        config = deepseekv3_configs["debugmodel"](
+        config = deepseekv3_configs["debugmodel"][0](
             attn_backend="flex", moe_comm_backend="standard"
         )
         self._run_model_test(
@@ -1710,7 +1710,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](
+        config = gptoss_configs["debugmodel"][0](
             moe_comm_backend="standard", attn_backend="flex"
         )
         vocab_size = config.vocab_size
@@ -1758,7 +1758,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](
+        config = gptoss_configs["debugmodel"][0](
             moe_comm_backend="standard", attn_backend="flex"
         )
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1932,7 +1932,7 @@ class TestTraceFSDP(FSDPTest):
     def test_llama3_fsdp(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"](attn_backend="flex")
+        config = llama3_configs["debugmodel"][0](attn_backend="flex")
         self._run_fsdp_model_test(
             Llama3Model, config, use_attn_masks=True, use_regional_inductor=True
         )
@@ -1941,7 +1941,7 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        config = qwen3_configs["debugmodel"](attn_backend="flex")
+        config = qwen3_configs["debugmodel"][0](attn_backend="flex")
         self._run_fsdp_model_test(
             Qwen3Model,
             config,
@@ -1954,7 +1954,7 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        config = deepseekv3_configs["debugmodel"](
+        config = deepseekv3_configs["debugmodel"][0](
             attn_backend="flex", moe_comm_backend="standard"
         )
         self._run_fsdp_model_test(
@@ -1978,7 +1978,7 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.gpt_oss import gptoss_configs
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        config = gptoss_configs["debugmodel"](
+        config = gptoss_configs["debugmodel"][0](
             moe_comm_backend="standard", attn_backend="flex"
         )
         seq_len = 128
@@ -2172,7 +2172,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
-        config = llama3_configs["debugmodel"](attn_backend="flex")
+        config = llama3_configs["debugmodel"][0](attn_backend="flex")
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         prev_deterministic = torch.are_deterministic_algorithms_enabled()

@@ -15,11 +15,13 @@ from torchtitan.models.llama3 import (
 
 
 def model_registry(flavor: str, attn_backend: str = "flex") -> FaultTolerantModelSpec:
-    config = llama3_configs[flavor](attn_backend=attn_backend)
+    get_config, default_len = llama3_configs[flavor]
+    config = get_config(attn_backend=attn_backend)
     return FaultTolerantModelSpec(
         name="torchft/llama3",
         flavor=flavor,
         model=config,
+        max_context_length=default_len,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
