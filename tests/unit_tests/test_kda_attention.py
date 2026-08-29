@@ -15,10 +15,8 @@ from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 
-_HAS_BLACKWELL = (
-    importlib.util.find_spec("attn_gym") is not None
-    and torch.cuda.is_available()
-    and torch.cuda.get_device_capability() in {(10, 0), (10, 3)}
+_HAS_ATTN_GYM_CUDA = (
+    importlib.util.find_spec("attn_gym") is not None and torch.cuda.is_available()
 )
 
 
@@ -65,7 +63,9 @@ def _kda_config() -> KDA.Config:
 
 
 @unittest.skipUnless(
-    _HAS_BLACKWELL, "KDA requires Attention Gym on CUDA capability 10.0 or 10.3"
+    _HAS_ATTN_GYM_CUDA,
+    "KDA requires Attention Gym on a CUDA device (impl='auto' selects the "
+    "fused kernel on SM100/SM103 and the reference implementation elsewhere)",
 )
 class TestKDA(unittest.TestCase):
     def _make_kda(self):

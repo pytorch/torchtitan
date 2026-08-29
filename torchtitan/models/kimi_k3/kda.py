@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadat
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 
 class KimiRMSNormGated(Module):
@@ -51,6 +52,10 @@ class KDAKernel(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         lower_bound: float = -5.0
+        # "fused" is the SM100/SM103 kernel; "reference" is Attention Gym's
+        # pure-PyTorch implementation and runs on any CUDA device. "auto"
+        # picks fused where the hardware supports it and reference elsewhere.
+        impl: str = "auto"
 
         def __post_init__(self):
             if not -5.0 <= self.lower_bound < 0.0:
@@ -58,10 +63,40 @@ class KDAKernel(Module):
                     "KDA lower_bound must be in the safe range [-5, 0), "
                     f"got {self.lower_bound}."
                 )
+            if self.impl not in ("auto", "fused", "reference"):
+                raise ValueError(
+                    "KDA impl must be 'auto', 'fused' or 'reference', "
+                    f"got {self.impl!r}."
+                )
 
     def __init__(self, config: Config):
         super().__init__()
         self.lower_bound = config.lower_bound
+        self.impl = config.impl
+        self._resolved_impl: str | None = None
+
+    def _resolve_impl(self, device: torch.device) -> str:
+        if self._resolved_impl is not None:
+            return self._resolved_impl
+        capability = torch.cuda.get_device_capability(device)
+        fused_capable = capability in {(10, 0), (10, 3)}
+        if self.impl == "fused" and not fused_capable:
+            raise RuntimeError(
+                "Attention Gym fused KDA requires Blackwell SM100/SM103; "
+                f"got CUDA capability {capability}. Use impl='reference' "
+                "(or the default 'auto') on other hardware."
+            )
+        if self.impl == "auto":
+            self._resolved_impl = "fused" if fused_capable else "reference"
+            if self._resolved_impl == "reference":
+                logger.info(
+                    "KDA: CUDA capability %s has no fused kernel; using "
+                    "Attention Gym's reference implementation.",
+                    capability,
+                )
+        else:
+            self._resolved_impl = self.impl
+        return self._resolved_impl
 
     def forward(
         self,
@@ -77,12 +112,7 @@ class KDAKernel(Module):
     ) -> torch.Tensor:
         if not q_BTNK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
-        capability = torch.cuda.get_device_capability(q_BTNK.device)
-        if capability not in {(10, 0), (10, 3)}:
-            raise RuntimeError(
-                "Attention Gym KDA requires Blackwell SM100/SM103; "
-                f"got CUDA capability {capability}."
-            )
+        impl = self._resolve_impl(q_BTNK.device)
 
         gate_BTNK = bound_gate(
             raw_gate_BTNK,
@@ -91,7 +121,7 @@ class KDAKernel(Module):
             A_log_N.float(),
             dt_bias_NK.float(),
             lower_bound=self.lower_bound,
-            impl="fused",
+            impl=impl,
         )
         output_BTNV, _ = chunk_kda(
             l2norm(q_BTNK),
@@ -100,6 +130,7 @@ class KDAKernel(Module):
             gate_BTNK,
             raw_beta_BTN.float().sigmoid(),
             cu_seqlens=cu_seqlens,
+            impl=impl,
         )
         return output_BTNV
 

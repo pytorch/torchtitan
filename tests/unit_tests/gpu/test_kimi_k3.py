@@ -114,9 +114,10 @@ class TestKimiK3(unittest.TestCase):
         self.assertIsInstance(attention_masks, BlockMask)
 
     @unittest.skipIf(
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
-        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
+        not torch.cuda.is_available(),
+        "Attention Gym KDA requires a CUDA device (impl='auto' selects the "
+        "fused kernel on SM100/SM103 and the reference implementation "
+        "elsewhere).",
     )
     def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
