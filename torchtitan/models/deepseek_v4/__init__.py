@@ -18,6 +18,7 @@ from torchtitan.models.common import (
     Linear,
     RMSNorm,
     RoPE,
+    SingleComplexRoPE,
 )
 from torchtitan.models.common.config_utils import (
     make_experts_config,
@@ -30,7 +31,6 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .attention import (
     Attention,
-    collect_dsa_indexer_loss_metrics,
     DSAIndexerAuxLoss,
     DSAFlexAttention,
 )
@@ -91,6 +91,7 @@ def _make_compressor_config(
     return Compressor.Config(
         dim=dim,
         rope=dataclasses.replace(rope),
+        single_rope=SingleComplexRoPE.Config(**dataclasses.asdict(rope)),
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
@@ -133,6 +134,7 @@ def _make_indexer_config(
     return Indexer.Config(
         dim=dim,
         rope=dataclasses.replace(rope),
+        single_rope=SingleComplexRoPE.Config(**dataclasses.asdict(rope)),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
@@ -245,6 +247,7 @@ def _make_v4_attn_config(
         layer_id=layer_id,
         inner_attention=inner_attention_cfg,
         rope=dataclasses.replace(rope),
+        single_rope=SingleComplexRoPE.Config(**dataclasses.asdict(rope)),
         wq_a=Linear.Config(
             in_features=dim, out_features=q_lora_rank, bias=False,
             param_init=_LINEAR_INIT,
@@ -836,6 +839,5 @@ def model_registry(
         parallelize_fn=parallelize_deepseek_v4,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
-        metrics_fn=collect_dsa_indexer_loss_metrics,
         state_dict_adapter=DeepSeekV4StateDictAdapter,
     )
