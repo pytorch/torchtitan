@@ -1,10 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
 import dataclasses
+from collections.abc import Callable
 from functools import partial
 
 import torch.nn as nn
@@ -19,24 +20,24 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
 )
-from torchtitan.models.common.config_utils import (
-    make_experts_config,
-    make_ffn_config,
-)
+from torchtitan.models.common.config_utils import make_experts_config, make_ffn_config
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.models.deepseek_v3.parallelize import (
+    parallelize_deepseekv3 as parallelize_deepseek_v4,
+)
 
 from .attention import (
     Attention,
-    DSAIndexerAuxLoss,
-    DSAFlexAttention,
+    CompressedSparseAttention,
+    HeavilyCompressedAttention,
+    SlidingWindowAttention,
 )
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4MoE, DeepSeekV4Router
-from .parallelize import parallelize_deepseek_v4
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 __all__ = [
@@ -73,6 +74,7 @@ def _depth_init(layer_id: int) -> dict[str, Callable]:
         "bias": nn.init.zeros_,
     }
 
+
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
@@ -92,21 +94,27 @@ def _make_compressor_config(
     rope: RoPE.Config,
 ) -> "Compressor.Config":
     from .compressor import Compressor
+
     return Compressor.Config(
         rope=dataclasses.replace(rope),
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
         wkv=Linear.Config(
-            in_features=dim, out_features=coff * head_dim, bias=False,
+            in_features=dim,
+            out_features=coff * head_dim,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         wgate=Linear.Config(
-            in_features=dim, out_features=coff * head_dim, bias=False,
+            in_features=dim,
+            out_features=coff * head_dim,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         norm=RMSNorm.Config(
-            normalized_shape=head_dim, eps=norm_eps,
+            normalized_shape=head_dim,
+            eps=norm_eps,
             param_init=_NORM_INIT,
         ),
         param_init={
@@ -120,22 +128,20 @@ def _make_indexer_config(
     dim: int,
     num_index_heads: int,
     index_head_dim: int,
-    index_topk: int,
     rope_head_dim: int,
     q_lora_rank: int,
     compress_ratio: int,
     norm_eps: float,
     rope: RoPE.Config,
 ) -> "Indexer.Config":
-    from .compressor import Compressor, Indexer
+    from .compressor import Indexer
+
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
         rope=dataclasses.replace(rope),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
-        index_topk=index_topk,
         rope_head_dim=rope_head_dim,
-        compress_ratio=compress_ratio,
         wq_b=Linear.Config(
             in_features=q_lora_rank,
             out_features=num_index_heads * index_head_dim,
@@ -143,7 +149,9 @@ def _make_indexer_config(
             param_init=_LINEAR_INIT,
         ),
         weights_proj=Linear.Config(
-            in_features=dim, out_features=num_index_heads, bias=False,
+            in_features=dim,
+            out_features=num_index_heads,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         compressor=_make_compressor_config(
@@ -176,7 +184,6 @@ def _make_v4_attn_config(
     index_topk: int,
     n_layers: int,
     rope: RoPE.Config,
-    enable_indexer_loss: bool = True,
 ) -> Attention.Config:
     hd = head_dim
     per_group_in = (n_heads * hd) // n_groups
@@ -185,41 +192,51 @@ def _make_v4_attn_config(
     # Conditionally build compressor/indexer configs.
     compressor_cfg = None
     indexer_cfg = None
-    indexer_aux_loss_cfg = None
     compressor_128_cfg = None
-    from .compressor import Compressor, Indexer
 
     if compress_ratio == 4:
         coff = 2  # 1 + overlap (overlap=True when compress_ratio==4)
         compressor_cfg = _make_compressor_config(
-            dim=dim, head_dim=hd, rope_head_dim=rope_head_dim,
+            dim=dim,
+            head_dim=hd,
+            rope_head_dim=rope_head_dim,
             compress_ratio=compress_ratio,
-            norm_eps=norm_eps, coff=coff, rope=rope,
+            norm_eps=norm_eps,
+            coff=coff,
+            rope=rope,
         )
         indexer_cfg = _make_indexer_config(
-            dim=dim, num_index_heads=index_n_heads,
-            index_head_dim=index_head_dim, index_topk=index_topk,
-            rope_head_dim=rope_head_dim, q_lora_rank=q_lora_rank,
-            compress_ratio=compress_ratio, norm_eps=norm_eps, rope=rope,
+            dim=dim,
+            num_index_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            rope_head_dim=rope_head_dim,
+            q_lora_rank=q_lora_rank,
+            compress_ratio=compress_ratio,
+            norm_eps=norm_eps,
+            rope=rope,
         )
-        if enable_indexer_loss:
-            indexer_aux_loss_cfg = DSAIndexerAuxLoss.Config(
-                num_heads=n_heads,
-                softmax_scale=softmax_scale,
-                window_size=window_size,
-            )
     elif compress_ratio > 1:
         coff = 1  # no overlap
         compressor_128_cfg = _make_compressor_config(
-            dim=dim, head_dim=hd, rope_head_dim=rope_head_dim,
+            dim=dim,
+            head_dim=hd,
+            rope_head_dim=rope_head_dim,
             compress_ratio=compress_ratio,
-            norm_eps=norm_eps, coff=coff, rope=rope,
+            norm_eps=norm_eps,
+            coff=coff,
+            rope=rope,
         )
-    inner_attention_cfg = DSAFlexAttention.Config(
+    if compress_ratio == 4:
+        inner_attention_cls = CompressedSparseAttention
+    elif compress_ratio > 1:
+        inner_attention_cls = HeavilyCompressedAttention
+    else:
+        inner_attention_cls = SlidingWindowAttention
+    inner_attention_cfg = inner_attention_cls.Config(
         window_size=window_size,
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
-        return_lse=indexer_aux_loss_cfg is not None,
+        index_topk=index_topk,
     )
 
     return Attention.Config(
@@ -231,54 +248,65 @@ def _make_v4_attn_config(
         o_lora_rank=o_lora_rank,
         n_groups=n_groups,
         compress_ratio=compress_ratio,
-        window_size=window_size,
         norm_eps=norm_eps,
         index_n_heads=index_n_heads,
         index_head_dim=index_head_dim,
-        index_topk=index_topk,
         n_layers=n_layers,
         layer_id=layer_id,
         inner_attention=inner_attention_cfg,
         rope=dataclasses.replace(rope),
         wq_a=Linear.Config(
-            in_features=dim, out_features=q_lora_rank, bias=False,
+            in_features=dim,
+            out_features=q_lora_rank,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         q_norm=RMSNorm.Config(
-            normalized_shape=q_lora_rank, eps=norm_eps,
+            normalized_shape=q_lora_rank,
+            eps=norm_eps,
             param_init=_NORM_INIT,
         ),
         wq_b=Linear.Config(
-            in_features=q_lora_rank, out_features=n_heads * hd, bias=False,
+            in_features=q_lora_rank,
+            out_features=n_heads * hd,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         wkv=Linear.Config(
-            in_features=dim, out_features=hd, bias=False,
+            in_features=dim,
+            out_features=hd,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         kv_norm=RMSNorm.Config(
-            normalized_shape=hd, eps=norm_eps,
+            normalized_shape=hd,
+            eps=norm_eps,
             param_init=_NORM_INIT,
         ),
         wo_a=Linear.Config(
-            in_features=per_group_in, out_features=per_group_out, bias=False,
+            in_features=per_group_in,
+            out_features=per_group_out,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         wo_b=Linear.Config(
-            in_features=per_group_out, out_features=dim, bias=False,
+            in_features=per_group_out,
+            out_features=dim,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         # attn_sink uses a Linear wrapper to hold a (n_heads, 1) weight; the
         # forward path squeezes it back to (n_heads,) to match the original
         # parameter semantics.
         attn_sink=Linear.Config(
-            in_features=1, out_features=n_heads, bias=False,
+            in_features=1,
+            out_features=n_heads,
+            bias=False,
             param_init=_LINEAR_INIT,
         ),
         compressor=compressor_cfg,
         compressor_128=compressor_128_cfg,
         indexer=indexer_cfg,
-        indexer_aux_loss=indexer_aux_loss_cfg,
     )
 
 
@@ -387,7 +415,6 @@ def _build_v4_layers(
     hc_eps: float = 1e-6,
     dense_hidden_dim: int | None = None,
     dense_layers: set[int] | None = None,
-    enable_indexer_loss: bool = True,
 ) -> list[DeepSeekV4TransformerBlock.Config]:
     if dense_layers is None:
         dense_layers = set()
@@ -415,7 +442,6 @@ def _build_v4_layers(
             index_topk=index_topk,
             n_layers=n_layers,
             rope=rope_compress if cr > 1 else rope,
-            enable_indexer_loss=enable_indexer_loss,
         )
 
         if layer_id in dense_layers:
@@ -483,7 +509,6 @@ def _build_v4_layers(
 def _debugmodel(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
-    enable_indexer_loss: bool = True,
 ) -> DeepSeekV4Model.Config:
     dim = 256
     n_layers = 4
@@ -565,7 +590,6 @@ def _debugmodel(
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
-        enable_indexer_loss=enable_indexer_loss,
     )
 
     return DeepSeekV4Model.Config(
@@ -577,9 +601,7 @@ def _debugmodel(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        norm=RMSNorm.Config(
-            normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
-        ),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -602,7 +624,6 @@ def _debugmodel(
 def _deepseek_v4_flash(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
-    enable_indexer_loss: bool = True,
 ) -> DeepSeekV4Model.Config:
     dim = 4096
     n_layers = 43
@@ -684,7 +705,6 @@ def _deepseek_v4_flash(
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
-        enable_indexer_loss=enable_indexer_loss,
     )
 
     return DeepSeekV4Model.Config(
@@ -696,9 +716,7 @@ def _deepseek_v4_flash(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        norm=RMSNorm.Config(
-            normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
-        ),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -721,7 +739,6 @@ def _deepseek_v4_flash(
 def _deepseek_v4_pro(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
-    enable_indexer_loss: bool = True,
 ) -> DeepSeekV4Model.Config:
     dim = 7168
     n_layers = 61
@@ -803,7 +820,6 @@ def _deepseek_v4_pro(
         sinkhorn_iters=sinkhorn_iters,
         hc_eps=hc_eps,
         dense_layers=dense_layers,
-        enable_indexer_loss=enable_indexer_loss,
     )
 
     return DeepSeekV4Model.Config(
@@ -815,9 +831,7 @@ def _deepseek_v4_pro(
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
         ),
-        norm=RMSNorm.Config(
-            normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
-        ),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -848,7 +862,6 @@ def model_registry(
     flavor: str,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
-    enable_indexer_loss: bool = True,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     if flavor not in deepseek_v4_configs:
@@ -859,7 +872,6 @@ def model_registry(
     config = deepseek_v4_configs[flavor](
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        enable_indexer_loss=enable_indexer_loss,
     )
     if converters is not None:
         validate_converter_order(converters)

@@ -1,10 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
 import dataclasses as dc
+from dataclasses import dataclass
 
 import torch
 from torchtitan.models.common.attention import AttentionMasksType
@@ -14,6 +15,8 @@ from .mhc import HcHead, HcPost, HcPre
 
 
 class DeepSeekV4TransformerBlock(TransformerBlock):
+    """Transformer block with HC pre/post mixing around attention and FFN."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
         hc_attn_pre: HcPre.Config
@@ -28,9 +31,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self.attention_norm = (
             cfg.attention_norm.build() if cfg.attention_norm is not None else None
         )
-        self.ffn_norm = (
-            cfg.ffn_norm.build() if cfg.ffn_norm is not None else None
-        )
+        self.ffn_norm = cfg.ffn_norm.build() if cfg.ffn_norm is not None else None
         if cfg.moe is not None:
             self.moe = cfg.moe.build()
             self.feed_forward = None
@@ -53,6 +54,18 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
+        """Run one DeepSeek V4 decoder block.
+
+        Args:
+            x: Hidden states of shape ``[B, L, hc_mult, D]``.
+            input_ids: Token IDs of shape ``[B, L]`` used by hash routing.
+            attention_masks: Optional decoder mask handle; sparse attention may
+                ignore it and build masks internally.
+            positions: Optional position IDs of shape ``[B, L]``.
+
+        Returns:
+            Hidden states of shape ``[B, L, hc_mult, D]``.
+        """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
         x = self.attention(self.attention_norm(x), attention_masks, positions)
@@ -68,6 +81,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
 
 class DeepSeekV4Model(Decoder):
+    """DeepSeek V4 decoder model with HC branches and sparse attention."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int
@@ -127,6 +142,7 @@ class DeepSeekV4Model(Decoder):
                 )
 
             from .sharding import set_deepseek_v4_sharding_config
+
             set_deepseek_v4_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
@@ -143,7 +159,9 @@ class DeepSeekV4Model(Decoder):
             n_layers = self.n_layers
             head_dim = self.layers[0].attention.head_dim
             n_heads = self.layers[0].attention.n_heads
-            flops_per_token = 6 * non_embed_params + 12 * n_layers * n_heads * head_dim * seq_len
+            flops_per_token = (
+                6 * non_embed_params + 12 * n_layers * n_heads * head_dim * seq_len
+            )
             return total_params, int(flops_per_token)
 
     def __init__(self, config: Config):
@@ -156,13 +174,6 @@ class DeepSeekV4Model(Decoder):
 
         self.hc_head = cfg.hc_head.build()
 
-        self._dsa_loss_tracker = {}
-
-    def get_dsa_losses(self):
-        losses = dict(self._dsa_loss_tracker)
-        self._dsa_loss_tracker.clear()
-        return losses
-
     def get_attention_masks(self, positions):
         return None
 
@@ -172,6 +183,19 @@ class DeepSeekV4Model(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
     ):
+        """Run the DeepSeek V4 decoder.
+
+        Args:
+            tokens: Token IDs of shape ``[B, L]`` when embeddings are enabled,
+                or hidden states when embeddings are skipped.
+            positions: Optional position IDs of shape ``[B, L]``.
+            attention_masks: Optional decoder attention mask handle.
+
+        Returns:
+            Logits of shape ``[B, L, vocab_size]`` unless the LM head is
+            skipped, in which case hidden states of shape ``[B, L, D]`` are
+            returned.
+        """
         input_ids = tokens.detach().long()
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
@@ -179,11 +203,10 @@ class DeepSeekV4Model(Decoder):
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
             h = layer(h, input_ids, attention_masks, positions)
-        
+
         h = self.hc_head(h)
         h = self.norm(h) if self.norm is not None else h
         if self._skip_lm_head:
             return h
         output = self.lm_head(h.float()) if self.lm_head is not None else h
         return output
-

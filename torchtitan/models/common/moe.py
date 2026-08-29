@@ -24,12 +24,12 @@ from .token_dispatcher import LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
-#   T = num tokens, D = model dimension,
+#   B = batch, L = sequence length, D = model dimension,
 #   F = hidden (FFN intermediate) dimension, E = num experts,
 #   e = num local experts (E / EP, used in token dispatcher for
 #       per-local-expert token counts after EP dispatch /_permute),
-#   K = top-k, N = routed tokens (T*K),
-#   R = routed tokens assigned to local experts
+#   K = top-k, T = num tokens (B*L flattened),
+#   N = routed tokens (T*K), R = routed tokens assigned to local experts
 
 
 class GroupedExperts(Module):
@@ -136,9 +136,9 @@ class RoutedExperts(Module):
 
     def forward(
         self,
-        x_TD: torch.Tensor,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
+        x_BLD: torch.Tensor,
+        topk_scores_BLK: torch.Tensor,
+        topk_expert_ids_BLK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
@@ -147,6 +147,13 @@ class RoutedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
+        B, L, D = x_BLD.shape
+        K = topk_scores_BLK.size(-1)
+        T = B * L
+        x_TD = x_BLD.view(T, D)
+
+        topk_scores_TK = topk_scores_BLK.view(T, K)
+        topk_expert_ids_TK = topk_expert_ids_BLK.view(T, K)
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -166,7 +173,9 @@ class RoutedExperts(Module):
             metadata,
             x_TD,
         )
-        return out_TD
+        # Un-flatten back to 3-D (B, *, D) so the local_map output sharding
+        # won't cause _StridedShard in the downstream view (e.g., CP is used).
+        return out_TD.view(B, -1, D)
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize the grouped experts, then wire the EP mesh on the
@@ -196,7 +205,7 @@ class TokenChoiceTopKRouter(Module):
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
-        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
         _debug_force_load_balance: bool = False
@@ -214,36 +223,34 @@ class TokenChoiceTopKRouter(Module):
         self._debug_force_load_balance = config._debug_force_load_balance
 
     def _debug_force_load_balance_routing(
-        self, scores_TE: torch.Tensor
+        self, scores_BLE: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced round-robin expert assignment.
-        Returns expert IDs and scores with shape ``(T, K)``.
+        Returns (topk_expert_ids_BLK ``(B, L, K)`` LongTensor, topk_scores_BLK ``(B, L, K)`` FloatTensor).
         """
-        num_tokens = scores_TE.shape[0]
+        bs, slen, _ = scores_BLE.shape
         # Round-robin indices with exact balance
-        topk_expert_ids_TK = (
+        topk_expert_ids_BLK = (
             torch.arange(
-                num_tokens * self.top_k,
-                device=scores_TE.device,
-                dtype=torch.int64,
-            ).reshape(num_tokens, self.top_k)
+                bs * slen * self.top_k, device=scores_BLE.device, dtype=torch.int64
+            ).reshape(bs, slen, self.top_k)
             % self.num_experts
         )
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        return topk_expert_ids_TK, topk_scores_TK
+        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_expert_ids_BLK)
+        return topk_expert_ids_BLK, topk_scores_BLK
 
     def _get_node_limited_routing_scores(
         self,
-        scores_for_choice_TE: torch.Tensor,
+        scores_for_choice_BLE: torch.Tensor,
     ) -> torch.Tensor:
         """Select num_limited_groups groups based on group scores,
         and set expert scores in non-selected groups as -inf.
 
         Args:
-            scores_for_choice_TE: Router scores with expert_bias, shape ``(T, E)``.
+            scores_for_choice_BLE: Router scores with expert_bias (if any), shape ``(B, L, E)``.
 
         Returns:
-            Router scores with shape ``(T, E)``.
+            scores_for_choice_BLE: shape ``(B, L, E)``.
         """
         if self.num_limited_groups is None:
             raise ValueError(
@@ -257,7 +264,7 @@ class TokenChoiceTopKRouter(Module):
         experts_per_group = self.num_experts // self.num_expert_groups
         if experts_per_group < 2:
             raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
-        scores_grouped = scores_for_choice_TE.unflatten(
+        scores_grouped = scores_for_choice_BLE.unflatten(
             -1, (self.num_expert_groups, experts_per_group)
         )
         top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
@@ -268,70 +275,82 @@ class TokenChoiceTopKRouter(Module):
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
         group_mask.scatter_(-1, group_idx, False)  # False = selected groups (keep)
         # Mask out experts from non-selected groups
-        scores_for_choice_TE = scores_grouped.masked_fill(
+        scores_for_choice_BLE = scores_grouped.masked_fill(
             group_mask.unsqueeze(-1), float("-inf")
         ).flatten(-2)
 
-        return scores_for_choice_TE
+        return scores_for_choice_BLE
+
+    def _select_experts(
+        self,
+        scores_BLE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        scores_for_choice_BLE = (
+            scores_BLE if expert_bias_E is None else scores_BLE + expert_bias_E
+        )
+        if self.num_expert_groups is not None:
+            scores_for_choice_BLE = self._get_node_limited_routing_scores(
+                scores_for_choice_BLE
+            )
+        return torch.topk(
+            scores_for_choice_BLE, k=self.top_k, dim=-1, sorted=False
+        ).indices
 
     def forward(
-        self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
+        self, x_BLD: torch.Tensor, expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            x_TD: Input ``(T, D)``.
+            x_BLD: Input ``(B, L, D)``.
             expert_bias_E: Optional load-balancing bias ``(E,)``.
 
         Returns:
-            topk_scores_TK: Routing scores ``(T, K)``.
-            topk_expert_ids_TK: Expert indices ``(T, K)``.
-            scores_TE: Full routing scores ``(T, E)``.
+            topk_scores_BLK: Routing scores ``(B, L, K)``.
+            topk_expert_ids_BLK: Expert indices ``(B, L, K)``.
+            scores_BLE: Full routing scores ``(B, L, E)``.
         """
         # Compute gate in float32 to help stability of expert load balancing.
-        with torch.autocast(device_type=x_TD.device.type, dtype=torch.float32):
-            scores_TE = self.gate(x_TD)
+        with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
+            scores_BLE = self.gate(x_BLD)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
-        # scores_TE is already float32 from the autocast above.
+        # scores_BLE is already float32 from the autocast above.
         if self.score_func == "sigmoid":
-            scores_TE = torch.sigmoid(scores_TE)
+            scores_BLE = torch.sigmoid(scores_BLE)
         elif self.score_func == "softmax":
-            scores_TE = F.softmax(scores_TE, dim=-1)
+            scores_BLE = F.softmax(scores_BLE, dim=-1)
+        elif self.score_func == "sqrtsoftplus":
+            scores_BLE = F.softplus(scores_BLE).sqrt()
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice_TE = (
-            scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
-        )
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
-        _, topk_expert_ids_TK = torch.topk(
-            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        topk_expert_ids_BLK = self._select_experts(
+            scores_BLE, expert_bias_E, **router_kwargs
         )
 
         # NOTE: The expert_bias is only used for routing. The gating value
-        #       topk_scores_TK is still derived from the original scores.
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        #       topk_scores_BLK is still derived from the original scores.
+        topk_scores_BLK = scores_BLE.gather(dim=-1, index=topk_expert_ids_BLK)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
             (
-                topk_expert_ids_TK,
-                topk_scores_TK,
-            ) = self._debug_force_load_balance_routing(scores_TE)
+                topk_expert_ids_BLK,
+                topk_scores_BLK,
+            ) = self._debug_force_load_balance_routing(scores_BLE)
 
         if self.route_norm:
-            denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
-            topk_scores_TK = topk_scores_TK / denominator
-        topk_scores_TK = topk_scores_TK * self.route_scale
+            denominator = topk_scores_BLK.sum(dim=-1, keepdim=True) + 1e-20
+            topk_scores_BLK = topk_scores_BLK / denominator
+        topk_scores_BLK = topk_scores_BLK * self.route_scale
 
         return (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            scores_TE,
+            topk_scores_BLK,
+            topk_expert_ids_BLK,
+            scores_BLE,
         )
 
 
@@ -393,13 +412,13 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_BLD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         """
         Args:
-            x_TD: Input ``(T, D)``.
+            x_BLD: Input ``(B, L, D)``.
 
         Returns:
-            Output ``(T, D)``.
+            Output ``(B, L, D)``.
 
         Under TP, the MoE wrapper's ``sharding_config`` (set by
         ``set_moe_sharding_config``) handles input/output redistribution:
@@ -408,25 +427,26 @@ class MoE(Module):
         DTensors; the DTensor->local conversion happens at the GroupedExperts
         boundary. GroupedExperts operates on local tensors. When EP internally
         sequence-shards tokens across TP, the caller must provide a TP-divisible
-        token count.
+        sequence length.
         """
-        # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
+        # topk_scores_BLK and topk_expert_ids_BLK shape (B, L, K)
+        # scores_BLE shape (B, L, E)
         (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E)
+            topk_scores_BLK,
+            topk_expert_ids_BLK,
+            scores_BLE,
+        ) = self.router(x_BLD, self.expert_bias_E, **router_kwargs)
 
-        # Build a one-hot routing map (T, E) marking the experts each token
+        # Build a one-hot routing map (B, L, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on
         # the token dim; scatter_ writes along the (replicated) expert dim, so
         # DTensor runs it as a local op with no redistribution.
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+        routing_map_BLE = torch.zeros_like(scores_BLE, dtype=torch.bool).scatter_(
             -1,
-            topk_expert_ids_TK,
+            topk_expert_ids_BLK,
             True,
         )
-        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+        num_local_tokens_per_expert_E = routing_map_BLE.sum(dim=(0, 1))
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
@@ -437,20 +457,20 @@ class MoE(Module):
             with torch.no_grad():
                 self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
-        out_TD = self.routed_experts(
-            x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
+        out_BLD = self.routed_experts(
+            x_BLD,
+            topk_scores_BLK,
+            topk_expert_ids_BLK,
             num_local_tokens_per_expert_E,
         )
 
-        shared_out_TD = (
-            self.shared_experts(x_TD) if self.shared_experts is not None else None
+        shared_out_BLD = (
+            self.shared_experts(x_BLD) if self.shared_experts is not None else None
         )
 
-        if shared_out_TD is not None:
-            out_TD = out_TD + shared_out_TD
-        return out_TD
+        if shared_out_BLD is not None:
+            out_BLD = out_BLD + shared_out_BLD
+        return out_BLD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

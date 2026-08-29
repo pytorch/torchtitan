@@ -6,7 +6,6 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 
@@ -26,6 +25,8 @@ def _build_hash_routing_table(vocab_size, num_experts, top_k, device=None, chunk
 
 
 class DeepSeekV4Router(TokenChoiceTopKRouter):
+    """DeepSeek V4 router with optional hash-based expert selection."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(TokenChoiceTopKRouter.Config):
         vocab_size: int
@@ -57,48 +58,39 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                     device=buffer_device,
                 )
 
-    def forward(self, x_BLD, expert_bias_E=None, *, input_ids=None):
-        with torch.autocast(device_type=x_BLD.device.type, dtype=torch.float32):
-            scores = self.gate(x_BLD)
-        if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores)
-        elif self.score_func == "softmax":
-            scores = F.softmax(scores, dim=-1)
-        elif self.score_func == "sqrtsoftplus":
-            scores = F.softplus(scores).sqrt()
-        else:
-            raise NotImplementedError(f"Unknown score function {self.score_func}")
-
+    def _select_experts(
+        self,
+        scores_BLE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
         if self.hash:
             if input_ids is None:
                 raise ValueError("input_ids is required for DeepSeek V4 hash routing.")
-            selected_experts_indices = self.tid2eid.to(input_ids.device)[input_ids]
-        else:
-            scores_for_choice_BLE = (
-                scores if expert_bias_E is None else scores + expert_bias_E
-            )
-            selected_experts_indices = scores_for_choice_BLE.topk(
-                self.top_k, dim=-1
-            )[1]
+            return self.tid2eid.to(input_ids.device)[input_ids]
+        return super()._select_experts(
+            scores_BLE, expert_bias_E, **router_kwargs
+        )
 
-        top_scores = scores.gather(dim=-1, index=selected_experts_indices)
-
-        if self._debug_force_load_balance:
-            selected_experts_indices, top_scores = self._debug_force_load_balance_routing(
-                scores
-            )
-
-        if self.route_norm:
-            top_scores /= top_scores.sum(dim=-1, keepdim=True) + 1e-20
-        top_scores *= self.route_scale
-
-        return top_scores, selected_experts_indices, scores
 
 
 class DeepSeekV4MoE(MoE):
+    """MoE wrapper that forwards token IDs to the DeepSeek V4 router."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):
         pass
 
     def forward(self, x_BLD: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        """Run MoE dispatch, expert computation, and combine.
+
+        Args:
+            x_BLD: Token hidden states of shape ``[B, L, D]``.
+            input_ids: Token IDs of shape ``[B, L]`` used by hash routing.
+
+        Returns:
+            MoE output tensor of shape ``[B, L, D]``.
+        """
         return super().forward(x_BLD, input_ids=input_ids)

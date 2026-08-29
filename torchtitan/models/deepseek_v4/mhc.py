@@ -13,6 +13,8 @@ from torchtitan.protocols.module import Module
 
 
 class HcSplitSinkhorn(Module):
+    """Convert HC mix logits into pre, post, and combination weights."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hc_mult: int = 4
@@ -26,6 +28,17 @@ class HcSplitSinkhorn(Module):
         self.eps = config.eps
 
     def forward(self, mixes, hc_scale, hc_base):
+        """Split and normalize HC mixing logits.
+
+        Args:
+            mixes: HC logits of shape ``[B, L, (2 + hc_mult) * hc_mult]``.
+            hc_scale: Scale tensor of shape ``[3]``.
+            hc_base: Bias tensor of shape ``[(2 + hc_mult) * hc_mult]``.
+
+        Returns:
+            ``pre`` and ``post`` tensors of shape ``[B, L, hc_mult]`` and
+            ``comb`` of shape ``[B, L, hc_mult, hc_mult]``.
+        """
         hc_mult = self.hc_mult
         pre, post, comb = mixes.split([hc_mult, hc_mult, hc_mult * hc_mult], dim=-1)
         comb = comb.unflatten(-1, (hc_mult, hc_mult))
@@ -51,6 +64,8 @@ class HcSplitSinkhorn(Module):
 
 
 class HcPre(Module):
+    """Reduce HC branches before attention or FFN computation."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hc_mult: int = 4
@@ -76,6 +91,15 @@ class HcPre(Module):
         ).build()
 
     def forward(self, x):
+        """Project multi-branch hidden states into a single branch.
+
+        Args:
+            x: Hidden states of shape ``[B, L, hc_mult, D]``.
+
+        Returns:
+            Tuple ``(y, post, comb)`` where ``y`` has shape ``[B, L, D]`` and
+            ``post``/``comb`` are consumed by ``HcPost``.
+        """
         shape, dtype = x.size(), x.dtype
         x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
@@ -88,6 +112,8 @@ class HcPre(Module):
 
 
 class HcPost(Module):
+    """Expand a single-branch output back to HC branches with residual mixing."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         pass
@@ -96,6 +122,17 @@ class HcPost(Module):
         super().__init__()
 
     def forward(self, x, residual, post, comb):
+        """Apply HC post mixing.
+
+        Args:
+            x: Single-branch output of shape ``[B, L, D]``.
+            residual: Residual branches of shape ``[B, L, hc_mult, D]``.
+            post: Post weights of shape ``[B, L, hc_mult]``.
+            comb: Branch combination weights of shape ``[B, L, hc_mult, hc_mult]``.
+
+        Returns:
+            Hidden states of shape ``[B, L, hc_mult, D]``.
+        """
         y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
             comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
         )
@@ -103,6 +140,8 @@ class HcPost(Module):
 
 
 class HcHead(Module):
+    """Merge final HC branches before the output norm and LM head."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         hc_mult: int = 4
@@ -124,6 +163,14 @@ class HcHead(Module):
         self.hc_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
     def forward(self, x):
+        """Merge HC branches.
+
+        Args:
+            x: Hidden states of shape ``[B, L, hc_mult, D]``.
+
+        Returns:
+            Hidden states of shape ``[B, L, D]``.
+        """
         shape, dtype = x.size(), x.dtype
         x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)

@@ -154,7 +154,8 @@ class RoPE(Module):
                 ``query`` is rotated and returned.
             rope_cache: Prepared cache broadcastable to ``query`` and ``key``
                 according to the concrete RoPE format.
-            inverse: Whether to apply the inverse rotation.
+            inverse: Whether to apply the inverse rotation. DeepSeek V4 uses
+                this path to rotate attention outputs back before projection.
 
         Returns:
             Rotated query tensor when ``key`` is ``None``; otherwise rotated
