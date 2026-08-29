@@ -6,9 +6,8 @@
 
 import contextlib
 import contextvars
-import copy
 import math
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import spmd_types as spmd
@@ -51,14 +50,6 @@ class _RoPECacheKey:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _RoPECacheEntry:
-    slot_name: str
-    shape: tuple[int, ...]
-    dtype: torch.dtype
-    tensor_type: type
-
-
 _CURRENT_ROPE_CACHE_REGISTRY: contextvars.ContextVar[object | None] = (
     contextvars.ContextVar("current_rope_cache_registry", default=None)
 )
@@ -80,14 +71,6 @@ class RoPECacheReader:
 
     def read(self) -> torch.Tensor:
         return self._registry._read(self._slot_name)
-
-    def __deepcopy__(self, memo: dict[int, object]):
-        # ``copy.deepcopy`` of a full model must bind readers to the copied
-        # registry, not leave them pointing at the source model's buffers.
-        registry = copy.deepcopy(self._registry, memo)
-        reader = type(self)(registry, self._slot_name)
-        memo[id(self)] = reader
-        return reader
 
 
 @contextlib.contextmanager
@@ -124,14 +107,14 @@ def register_rope_cache(
     return registry._register(cache_key, cache_tensor)
 
 
-class _RoPECacheRegistry(Module):
-    """Private module that owns canonical, non-persistent RoPE buffers."""
+class _RoPECacheRegistry:
+    """Private cache table that registers canonical buffers on its owner."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._entries: dict[_RoPECacheKey, _RoPECacheEntry] = {}
-        self._slot_keys: dict[str, _RoPECacheKey] = {}
+    def __init__(self, owner: Module) -> None:
+        self._owner = owner
+        self._entries: dict[_RoPECacheKey, str] = {}
         self._next_slot = 0
+        self._parallelized = False
 
     @staticmethod
     def _logical_metadata(cache: torch.Tensor) -> tuple[tuple[int, ...], torch.dtype]:
@@ -143,37 +126,27 @@ class _RoPECacheRegistry(Module):
         cache_tensor: torch.Tensor,
     ) -> RoPECacheReader:
         shape, dtype = self._logical_metadata(cache_tensor)
-        entry = self._entries.get(cache_key)
-        if entry is not None:
-            if (shape, dtype) != (entry.shape, entry.dtype):
+        slot_name = self._entries.get(cache_key)
+        if slot_name is not None:
+            current = self._read(slot_name)
+            current_metadata = self._logical_metadata(current)
+            if (shape, dtype) != current_metadata:
                 raise ValueError(
                     "Equivalent RoPE cache key produced incompatible tensors: "
-                    f"expected shape/dtype {(entry.shape, entry.dtype)}, got "
+                    f"expected shape/dtype {current_metadata}, got "
                     f"{(shape, dtype)}. Include the missing cache-producing "
                     "configuration in the cache key."
                 )
-            if type(cache_tensor) is not entry.tensor_type:
-                raise ValueError(
-                    "Equivalent RoPE cache key produced different tensor types: "
-                    f"expected {entry.tensor_type.__name__}, got "
-                    f"{type(cache_tensor).__name__}."
-                )
-            return RoPECacheReader(self, entry.slot_name)
+            return RoPECacheReader(self, slot_name)
 
-        slot_name = f"_cache_{self._next_slot}"
+        slot_name = f"_rope_cache_{self._next_slot}"
         self._next_slot += 1
-        self.register_buffer(slot_name, cache_tensor, persistent=False)
-        self._entries[cache_key] = _RoPECacheEntry(
-            slot_name=slot_name,
-            shape=shape,
-            dtype=dtype,
-            tensor_type=type(cache_tensor),
-        )
-        self._slot_keys[slot_name] = cache_key
+        self._owner.register_buffer(slot_name, cache_tensor, persistent=False)
+        self._entries[cache_key] = slot_name
         return RoPECacheReader(self, slot_name)
 
     def _read(self, slot_name: str) -> torch.Tensor:
-        cache = self._buffers.get(slot_name)
+        cache = self._owner._buffers.get(slot_name)
         if cache is None:
             raise RuntimeError(f"RoPE cache slot {slot_name!r} is not materialized")
         return cache
@@ -183,15 +156,17 @@ class _RoPECacheRegistry(Module):
         reader: RoPECacheReader,
         cache_tensor: torch.Tensor,
     ) -> None:
-        entry = self._entry_for_reader(reader)
+        if reader._registry is not self or reader._slot_name not in self._owner._buffers:
+            raise ValueError("RoPECacheReader does not belong to this registry")
         shape, dtype = self._logical_metadata(cache_tensor)
-        if (shape, dtype) != (entry.shape, entry.dtype):
+        current = self._read(reader._slot_name)
+        current_metadata = self._logical_metadata(current)
+        if (shape, dtype) != current_metadata:
             raise ValueError(
                 "RoPE cache materialization changed shape or dtype: "
-                f"expected {(entry.shape, entry.dtype)}, got {(shape, dtype)}."
+                f"expected {current_metadata}, got {(shape, dtype)}."
             )
 
-        current = self._read(entry.slot_name)
         if isinstance(current, DTensor) and not isinstance(cache_tensor, DTensor):
             cache_tensor = distribute_tensor(
                 cache_tensor,
@@ -205,23 +180,12 @@ class _RoPECacheRegistry(Module):
         if (
             type(current) is type(cache_tensor)
             and current.device == cache_tensor.device
-            and tuple(current.shape) == tuple(cache_tensor.shape)
-            and current.dtype == cache_tensor.dtype
         ):
             with torch.no_grad():
                 current.copy_(cache_tensor)
             return
 
-        persistent = entry.slot_name not in self._non_persistent_buffers_set
-        self.register_buffer(entry.slot_name, cache_tensor, persistent=persistent)
-
-    def _entry_for_reader(self, reader: RoPECacheReader) -> _RoPECacheEntry:
-        if reader._registry is not self:
-            raise ValueError("RoPECacheReader belongs to a different registry")
-        for entry in self._entries.values():
-            if entry.slot_name == reader._slot_name:
-                return entry
-        raise KeyError(f"Unknown RoPE cache slot {reader._slot_name!r}")
+        self._owner.register_buffer(reader._slot_name, cache_tensor, persistent=False)
 
     def parallelize(self, parallel_dims) -> None:
         """Distribute canonical slots using the layout carried by each key."""
@@ -232,15 +196,15 @@ class _RoPECacheRegistry(Module):
             )
         self._parallelized = True
 
-        for cache_key, entry in self._entries.items():
+        for cache_key, slot_name in self._entries.items():
             layout = cache_key.cache_layout
             if layout is None:
                 continue
-            cache = self._read(entry.slot_name)
+            cache = self._read(slot_name)
             if parallel_dims.spmd_backend == "spmd_types":
-                self._spmd_distribute_state(
+                self._owner._spmd_distribute_state(
                     parallel_dims,
-                    entry.slot_name,
+                    slot_name,
                     cache,
                     layout,
                     is_param=False,
@@ -253,25 +217,24 @@ class _RoPECacheRegistry(Module):
             if isinstance(cache, DTensor):
                 if tuple(cache.placements) != tuple(placements):
                     raise ValueError(
-                        f"RoPE cache {entry.slot_name} has placements "
+                        f"RoPE cache {slot_name} has placements "
                         f"{cache.placements}, expected {placements}."
                     )
                 continue
-            self.register_buffer(
-                entry.slot_name,
+            self._owner.register_buffer(
+                slot_name,
                 distribute_tensor(cache, mesh, list(placements)),
                 persistent=False,
             )
 
     def _retain_slots(self, slot_names: set[str]) -> None:
         """Drop canonical buffers that are not used by a PP model chunk."""
-        for key, entry in list(self._entries.items()):
-            if entry.slot_name in slot_names:
+        for key, slot_name in list(self._entries.items()):
+            if slot_name in slot_names:
                 continue
             self._entries.pop(key)
-            self._slot_keys.pop(entry.slot_name, None)
-            self._buffers.pop(entry.slot_name, None)
-            self._non_persistent_buffers_set.discard(entry.slot_name)
+            self._owner._buffers.pop(slot_name, None)
+            self._owner._non_persistent_buffers_set.discard(slot_name)
 
 
 # pyrefly: ignore [not-callable]
@@ -379,7 +342,7 @@ class RoPE(Module):
         registry's canonical buffer. Standalone RoPE modules retain the
         historical direct ``cache`` buffer.
         """
-        reader = self.__dict__.get("_cache_reader")
+        reader = self._cache_reader
         if reader is not None:
             return reader.read()
         if "cache" not in self._buffers:
@@ -387,15 +350,6 @@ class RoPE(Module):
             # report the pre-registration state as a missing attribute.
             raise AttributeError("cache")
         return self._buffers["cache"]
-
-    @cache.setter
-    def cache(self, cache: torch.Tensor) -> None:
-        reader = self.__dict__.get("_cache_reader")
-        if reader is not None:
-            registry = reader._registry
-            registry._materialize(reader, cache)
-            return
-        self.register_buffer("cache", cache, persistent=False)
 
     def _cache_key(self) -> _RoPECacheKey:
         """Identify cache-equivalent RoPE modules without sharing the modules.
@@ -408,42 +362,22 @@ class RoPE(Module):
         different cache representation.
         """
 
-        def freeze(value):
-            if is_dataclass(value):
-                return (
-                    type(value),
-                    tuple(
-                        (field.name, freeze(getattr(value, field.name)))
-                        for field in fields(value)
-                        if field.name not in {"param_init", "sharding_config"}
-                    ),
-                )
-            if isinstance(value, dict):
-                items = [(freeze(key), freeze(item)) for key, item in value.items()]
-                return tuple(sorted(items, key=repr))
-            if isinstance(value, (list, tuple)):
-                return tuple(freeze(item) for item in value)
-            if isinstance(value, set):
-                return tuple(sorted((freeze(item) for item in value), key=repr))
-            # Tensor-valued config fields are uncommon, but tensor equality is
-            # not a scalar operation and therefore cannot be used in a dict key.
-            if isinstance(value, torch.Tensor):
-                return type(value), id(value)
-            try:
-                hash(value)
-            except TypeError:
-                # Unknown mutable values are conservatively treated as unique.
-                return type(value), id(value)
-            return value
-
         sharding = getattr(self.config, "sharding_config", None)
         cache_layout = (
             sharding.state_shardings.get("cache")
             if sharding is not None
             else None
         )
+        # RoPE configs contain scalar values and a small number of list fields;
+        # repr gives us a compact, stable key while excluding runtime-only
+        # initialization and sharding metadata.
+        cache_config = replace(
+            self.config,
+            param_init=None,
+            sharding_config=None,
+        )
         return _RoPECacheKey(
-            value=(type(self), freeze(self.config)),
+            value=(type(self), repr(cache_config)),
             cache_layout=cache_layout,
         )
 
@@ -508,7 +442,11 @@ class RoPE(Module):
             # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
         with torch.device(buffer_device):
-            self.cache = self._precompute_cache()
+            cache = self._precompute_cache()
+            if self._cache_reader is None:
+                self.register_buffer("cache", cache, persistent=False)
+            else:
+                self._cache_reader._registry._materialize(self._cache_reader, cache)
 
 
 class ComplexRoPE(RoPE):

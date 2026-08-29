@@ -15,13 +15,13 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    create_attention_mask,
-    create_varlen_metadata_for_document,
     FlexAttention,
-    get_causal_mask_mod,
-    get_efficient_causal_mask_mod_for_packed_document,
     ScaledDotProductAttention,
     VarlenAttention,
+    create_attention_mask,
+    create_varlen_metadata_for_document,
+    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
 )
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
@@ -30,9 +30,8 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import (
     RoPE,
-    _RoPECacheRegistry,
-    _current_rope_cache_registry,
     _rope_cache_registry_context,
+    _RoPECacheRegistry,
 )
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
@@ -87,17 +86,6 @@ class Decoder(BaseModel):
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
         enable_weight_tying: bool = False
-
-        def build(self, **kwargs):
-            # Keep one registry active for the complete owner construction so
-            # subclass-added modules (for example DeepSeek MTP layers) observe
-            # the same cache namespace. The public build signature and the
-            # per-layer Config copy semantics remain unchanged.
-            registry = _RoPECacheRegistry()
-            with _rope_cache_registry_context(registry):
-                # ``slots=True`` prevents zero-argument ``super()`` from
-                # resolving reliably on dataclass-generated Config classes.
-                return Module.Config.build(self, **kwargs)
 
         @property
         def first_attention(self) -> BaseAttention.Config | None:
@@ -266,18 +254,15 @@ class Decoder(BaseModel):
         super().__init__()
         self.config = config
 
-        registry = _current_rope_cache_registry()
-        if registry is None:
-            registry = _RoPECacheRegistry()
-        # The registry is a private child module so its canonical buffers follow
-        # model transforms and are copied with pipeline-stage model chunks.
+        registry = _RoPECacheRegistry(self)
+        # The registry is a private owner for canonical non-persistent buffers;
+        # the registry object itself is not part of the module tree.
         self._rope_cache_registry = registry
 
         self.tok_embeddings = config.tok_embeddings.build()
 
-        # Direct model construction (outside Config.build()) still receives a
-        # local registry for its layer RoPE modules. Config.build() establishes
-        # the same context around the complete subclass constructor.
+        # Direct model construction and Config.build() both pass through this
+        # constructor, so the layer RoPE modules use the same local registry.
         with _rope_cache_registry_context(registry):
             self.layers = ModuleDict()
             for i, layer_config in enumerate(config.layers):
@@ -289,6 +274,10 @@ class Decoder(BaseModel):
         self.enable_weight_tying = config.enable_weight_tying
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.lm_head.weight
+
+    def parallelize(self, parallel_dims) -> None:
+        super().parallelize(parallel_dims)
+        self._rope_cache_registry.parallelize(parallel_dims)
 
     def init_states(
         self,
@@ -310,7 +299,7 @@ class Decoder(BaseModel):
         for module in self.modules():
             if not isinstance(module, RoPE):
                 continue
-            reader = module.__dict__.get("_cache_reader")
+            reader = module._cache_reader
             if reader is not None and reader._registry is self._rope_cache_registry:
                 slots.add(reader._slot_name)
         self._rope_cache_registry._retain_slots(slots)
