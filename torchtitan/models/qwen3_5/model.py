@@ -387,8 +387,6 @@ class Qwen35Model(Decoder):
         )
 
         batch: dict[str, Any] = dict(input_dict)
-        # The padding mask describes the batch, not the model input: it is
-        # consumed here to build masks and never forwarded to the model.
         padding_mask = batch.pop("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.

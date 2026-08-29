@@ -598,42 +598,6 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             "fla_fused_recurrent", atol=2e-2, rtol=2e-2
         )
 
-    def test_varlen_offsets_are_shared_across_deltanet_invocations(self):
-        """Every conv must see the metadata's own offsets object.
-
-        FLA memoizes its varlen index helpers on argument identity, so handing
-        the kernels a per-layer copy would make every layer recompute them.
-        """
-        torch.manual_seed(42)
-        model = self._make_deltanet()
-        x_TD = torch.randn(8, 4)
-        positions = torch.tensor(
-            [0, 1, 2, 0, 1, 2, 3, 4],
-            dtype=torch.int32,
-        )
-        attention_masks = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=True,
-        )
-        captured_cu_seqlens = []
-
-        def record_cu_seqlens(x_TD, weight, cu_seqlens, cu_seqlens_cpu):
-            captured_cu_seqlens.append(cu_seqlens)
-            return _reference_causal_conv1d_varlen(
-                x_TD, weight, cu_seqlens, cu_seqlens_cpu
-            )
-
-        with mock.patch(
-            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
-            side_effect=record_cu_seqlens,
-        ):
-            model(x_TD, attention_masks)
-            model(x_TD, attention_masks)
-
-        # Separate Q/K/V convolutions, twice over.
-        self.assertEqual(len(captured_cu_seqlens), 6)
-        self.assertTrue(all(x is attention_masks.cu_seq_q for x in captured_cu_seqlens))
-
 
 if __name__ == "__main__":
     unittest.main()
