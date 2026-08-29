@@ -111,7 +111,88 @@ class TestKimiK3(unittest.TestCase):
         model = config.build()
         positions = torch.arange(4, dtype=torch.int32)
         attention_masks = model.get_attention_masks(positions)
-        self.assertIsInstance(attention_masks, BlockMask)
+        # MLA layers read the BlockMask; KDA layers read document offsets.
+        self.assertIsInstance(attention_masks["quadratic_attention"], BlockMask)
+        self.assertEqual(attention_masks["kda"].cu_seq_q_host, (0, 4))
+
+    def test_padding_run_becomes_one_segment(self):
+        config = _small_model_config()
+        model = config.build()
+        # Two documents (3 and 4 tokens) then the packer's constant-0 padding.
+        positions = torch.cat(
+            [torch.arange(3), torch.arange(4), torch.zeros(5, dtype=torch.long)]
+        )
+        padding_mask = torch.zeros(12, dtype=torch.bool)
+        padding_mask[7:] = True
+        masks = model.get_attention_masks(positions, padding_mask)
+        self.assertEqual(masks["kda"].cu_seq_q_host, (0, 3, 7, 12))
+        # Without the mask the padded tail reads as one document per token.
+        self.assertEqual(
+            model.get_attention_masks(positions)["kda"].cu_seq_q_host,
+            (0, 3, 7, 8, 9, 10, 11, 12),
+        )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "KDA reference needs CUDA.")
+    def test_document_offsets_isolate_packed_documents(self):
+        """Offsets must make a packed row reproduce the per-document runs.
+
+        Uses Attention Gym's eager ``reference`` implementation so this runs on
+        any CUDA device; the fused kernel it ships alongside is compiled for
+        sm_100 only. What is under test is the segmentation the offsets encode,
+        which is implementation independent.
+        """
+        from attn_gym.linear.kda import chunk_kda
+
+        torch.manual_seed(0)
+        doc_lengths = (96, 160)
+        total = sum(doc_lengths)
+        num_heads, head_dim = 2, 64
+
+        def tensor(*shape: int) -> torch.Tensor:
+            return torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.5
+
+        q, k, v = (tensor(1, total, num_heads, head_dim) for _ in range(3))
+        # The gate is a log decay, so it has to stay non-positive.
+        gate = (
+            -torch.rand(
+                1, total, num_heads, head_dim, device="cuda", dtype=torch.float32
+            )
+            * 0.1
+        )
+        beta = torch.rand(1, total, num_heads, device="cuda", dtype=torch.float32)
+
+        offsets = torch.tensor(
+            [0, doc_lengths[0], total], dtype=torch.int32, device="cuda"
+        )
+        packed, _ = chunk_kda(q, k, v, gate, beta, cu_seqlens=offsets, impl="reference")
+
+        def one_document(start: int, stop: int) -> torch.Tensor:
+            return chunk_kda(
+                q[:, start:stop],
+                k[:, start:stop],
+                v[:, start:stop],
+                gate[:, start:stop],
+                beta[:, start:stop],
+                impl="reference",
+            )[0]
+
+        expected = torch.cat(
+            [one_document(0, doc_lengths[0]), one_document(doc_lengths[0], total)],
+            dim=1,
+        )
+        torch.testing.assert_close(packed, expected, atol=0, rtol=0)
+
+        # Control: the same row without offsets runs as one stream, so the
+        # second document picks up the first document's recurrent state.
+        merged, _ = chunk_kda(q, k, v, gate, beta, impl="reference")
+        boundary = doc_lengths[0]
+        torch.testing.assert_close(
+            merged[:, :boundary], expected[:, :boundary], atol=0, rtol=0
+        )
+        self.assertFalse(
+            torch.equal(merged[:, boundary:], expected[:, boundary:]),
+            "expected cross-document leakage without offsets",
+        )
 
     @unittest.skipIf(
         not torch.cuda.is_available()
