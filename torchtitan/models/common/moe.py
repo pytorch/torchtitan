@@ -196,7 +196,7 @@ class TokenChoiceTopKRouter(Module):
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
-        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
         _debug_force_load_balance: bool = False
@@ -274,8 +274,28 @@ class TokenChoiceTopKRouter(Module):
 
         return scores_for_choice_TE
 
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        scores_for_choice_TE = (
+            scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
+        )
+        if self.num_expert_groups is not None:
+            scores_for_choice_TE = self._get_node_limited_routing_scores(
+                scores_for_choice_TE
+            )
+        return torch.topk(
+            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        ).indices
+
     def forward(
-        self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
+        self,
+        x_TD: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -297,19 +317,13 @@ class TokenChoiceTopKRouter(Module):
             scores_TE = torch.sigmoid(scores_TE)
         elif self.score_func == "softmax":
             scores_TE = F.softmax(scores_TE, dim=-1)
+        elif self.score_func == "sqrtsoftplus":
+            scores_TE = F.softplus(scores_TE).sqrt()
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice_TE = (
-            scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
-        )
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
-        _, topk_expert_ids_TK = torch.topk(
-            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        topk_expert_ids_TK = self._select_experts(
+            scores_TE, expert_bias_E, **router_kwargs
         )
 
         # NOTE: The expert_bias is only used for routing. The gating value
@@ -393,7 +407,7 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
@@ -415,7 +429,7 @@ class MoE(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E)
+        ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
 
         # Build a one-hot routing map (T, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on

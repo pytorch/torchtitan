@@ -7,7 +7,6 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 
@@ -70,55 +69,23 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                     device=buffer_device,
                 )
 
-    def forward(
+    def _select_experts(
         self,
-        x_TD: torch.Tensor,
+        scores_TE: torch.Tensor,
         expert_bias_E: torch.Tensor | None = None,
         *,
         input_ids_T: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        with torch.autocast(device_type=x_TD.device.type, dtype=torch.float32):
-            scores_TE = self.gate(x_TD)
-
-        if self.score_func == "sqrtsoftplus":
-            scores_TE = torch.sqrt(F.softplus(scores_TE))
-        elif self.score_func == "sigmoid":
-            scores_TE = torch.sigmoid(scores_TE)
-        elif self.score_func == "softmax":
-            scores_TE = F.softmax(scores_TE, dim=-1)
-        else:
-            raise NotImplementedError(f"Unknown score function {self.score_func}")
-
+        **router_kwargs,
+    ) -> torch.Tensor:
         if self.hash:
             if input_ids_T is None:
                 raise ValueError("input_ids_T is required for DeepSeek V4 hash routing.")
-            topk_expert_ids_TK = self.tid2eid.to(input_ids_T.device)[input_ids_T]
-        else:
-            scores_for_choice_TE = (
-                scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
-            )
-            if self.num_expert_groups is not None:
-                scores_for_choice_TE = self._get_node_limited_routing_scores(
-                    scores_for_choice_TE
-                )
-            _, topk_expert_ids_TK = torch.topk(
-                scores_for_choice_TE,
-                k=self.top_k,
-                dim=-1,
-                sorted=False,
-            )
-
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        if self._debug_force_load_balance:
-            topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
-                scores_TE
-            )
-        if self.route_norm:
-            topk_scores_TK = topk_scores_TK / (
-                topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
-            )
-        topk_scores_TK = topk_scores_TK * self.route_scale
-        return topk_scores_TK, topk_expert_ids_TK, scores_TE
+            return self.tid2eid.to(input_ids_T.device)[input_ids_T]
+        return super()._select_experts(
+            scores_TE,
+            expert_bias_E,
+            **router_kwargs,
+        )
 
 
 class DeepSeekV4MoE(MoE):
@@ -129,30 +96,4 @@ class DeepSeekV4MoE(MoE):
         pass
 
     def forward(self, x_TD: torch.Tensor, input_ids_T: torch.Tensor) -> torch.Tensor:
-        topk_scores_TK, topk_expert_ids_TK, scores_TE = self.router(
-            x_TD,
-            self.expert_bias_E,
-            input_ids_T=input_ids_T,
-        )
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1,
-            topk_expert_ids_TK,
-            True,
-        )
-        num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
-
-        out_TD = self.routed_experts(
-            x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
-        )
-        shared_out_TD = (
-            self.shared_experts(x_TD) if self.shared_experts is not None else None
-        )
-        if shared_out_TD is not None:
-            out_TD = out_TD + shared_out_TD
-        return out_TD
+        return super().forward(x_TD, input_ids_T=input_ids_T)
