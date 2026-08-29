@@ -212,13 +212,14 @@ class MTPDecoder(Decoder):
             return
 
         self.mtp_layers = ModuleList()
-        for layer_config in config.mtp_layers:
-            if not isinstance(layer_config, MTPTransformerBlock.Config):
-                raise ValueError(
-                    "MTPDecoder requires Config.mtp_layers to contain "
-                    "MTPTransformerBlock.Config instances."
-                )
-            self.mtp_layers.append(layer_config.build())
+        with self._rope_cache_context():
+            for layer_config in config.mtp_layers:
+                if not isinstance(layer_config, MTPTransformerBlock.Config):
+                    raise ValueError(
+                        "MTPDecoder requires Config.mtp_layers to contain "
+                        "MTPTransformerBlock.Config instances."
+                    )
+                self.mtp_layers.append(layer_config.build())
 
     def forward(
         self,

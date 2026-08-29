@@ -523,9 +523,15 @@ def _split_module(
                 elif isinstance(module_value, (nn.ModuleList, ModuleList)):
                     setattr(model, module_name, ModuleList())
         # Handle simple module attributes (e.g., "linear", "norm")
-        elif module_name not in modules_to_keep:
+        elif (
+            module_name not in modules_to_keep
+            and module_name != "_rope_cache_registry"
+        ):
             # Replace with None
             setattr(model, module_name, None)
+    prune_rope_caches = getattr(model, "_prune_rope_cache_registry", None)
+    if callable(prune_rope_caches):
+        prune_rope_caches()
     return model
 
 
