@@ -133,10 +133,7 @@ class Decoder(BaseModel):
         ) -> None:
             """Apply runtime config to model config.
 
-            When *config* is a ``Trainer.Config``, validates
-            ``training.max_context_length`` against each attention layer's intrinsic
-            RoPE max context length, resizes RoPE caches when present, and
-            propagates debug flags. Non-trainer callers may pass any config-like
+            Non-trainer callers may pass any config-like
             object with a ``ParallelismConfig`` in its ``parallelism`` field; in
             that case the training/debug setup is skipped.
             """
