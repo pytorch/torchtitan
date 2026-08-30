@@ -11,6 +11,7 @@ This directory contains tests for the torchtitan project, including unit tests a
   - `features.py`: Tests for torchtitan features and composability
   - `flux.py`: Tests for the FLUX model
   - `h100.py`: Tests cases for H100 GPUs
+  - `b200.py`: Test cases that require SM100 or SM103 GPUs
   - `models.py`: Tests for model architectures
 - `assets/`: Contains test assets and fixtures used by the tests
   - `losses/`: Golden loss and gradient norm curves for the numerics guards
@@ -43,6 +44,9 @@ GPUs. Scheduled and post-merge runs execute the complete suite with Real PG.
 - 8 GPU H100 cadence: opt-in pull requests carrying the `ciflow/h100.8` label.
   The lane always uses Real PG; updates and reopened events rerun it while the
   label remains attached.
+- B200 cadence: opt-in pull requests carrying the `ciflow/b200` label and
+  pushes affecting Kimi K3 on `main`. The lane uses Real PG and currently runs
+  the Kimi K3 multimodal FSDP test.
 
 Feature tests provide depth of infrastructure composability. Fake-PG runs check
 that feature combinations configure, transform, and complete training, while
@@ -108,7 +112,8 @@ Real-PG lanes run the complete selected suite. A selected configuration fails
 validation if it uses checkpointing, pipeline parallelism, an explicit non-Fake
 communication backend, or another known incompatibility without
 `use_real_pg=True`. Hardware is encoded by suite: `features` and `models` run in
-A10G lanes, while `h100` runs only with Real PG in the H100 workflow.
+A10G lanes, while `h100` and `b200` run only with Real PG in their
+hardware-specific workflows.
 
 ### Unit tests (Goal: module functionality)
 
@@ -159,10 +164,10 @@ Examples:
 # Run all feature integration tests (features is the default suite)
 python -m tests.integration_tests.run_tests test_output
 
-# Run the complete non-H100 matrix with Fake PG on one physical GPU
+# Run the complete A10G matrix with Fake PG on one physical GPU
 python -m tests.integration_tests.run_tests test_output --test_suite features,models --execution_mode fake_pg --ngpu 1
 
-# Run the complete non-H100 matrix with real process groups
+# Run the complete A10G matrix with real process groups
 python -m tests.integration_tests.run_tests test_output --test_suite features,models --execution_mode real_pg --ngpu 8
 
 # Run only cases that explicitly require real process groups
@@ -170,6 +175,9 @@ python -m tests.integration_tests.run_tests test_output --test_suite features,mo
 
 # Run H100-only cases with real process groups
 python -m tests.integration_tests.run_tests test_output --test_suite h100 --execution_mode real_pg --ngpu 8
+
+# Run B200-only cases with real process groups
+python -m tests.integration_tests.run_tests test_output --test_suite b200 --execution_mode real_pg --ngpu 8
 ```
 
 ### Running Unit Tests
