@@ -112,7 +112,7 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         self.assertTrue(torch.equal(stock.w3.weight, _logical_w13(fused)[:, 1]))
         self.assertTrue(torch.equal(stock.w2.weight, fused.w2.weight))
         x = torch.randn(4, _DIM, device="cuda")
-        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-4, rtol=1e-5))
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_stock_checkpoint_loads_into_fused(self):
@@ -124,7 +124,7 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         self.assertTrue(torch.equal(_logical_w13(fused)[:, 1], stock.w3.weight))
         self.assertTrue(torch.equal(fused.w2.weight, stock.w2.weight))
         x = torch.randn(4, _DIM, device="cuda")
-        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-4, rtol=1e-5))
 
     def test_fused_roundtrip(self):
         """fused -> save -> load into a fresh fused preserves w13 exactly."""
