@@ -135,14 +135,15 @@ def apply_cp_kimi_k3(
         # Checked at wiring time so the message is actionable, rather than an
         # ImportError from inside a layer's first forward.
         try:
-            from fla.modules.conv.cp.ops import causal_conv1d_cp  # noqa: F401
-            from fla.ops.cp.context import build_cp_context  # noqa: F401
+            from attn_gym.linear.kda.fla_cp import (  # noqa: F401
+                build_fla_cp_context,
+                causal_conv1d_cp,
+            )
         except ImportError as err:
             raise ValueError(
-                "KDA context parallelism needs fla-core's CP ops "
-                "(fla.ops.cp.context.build_cp_context and "
-                "fla.modules.conv.cp.ops.causal_conv1d_cp), which ship in "
-                f"fla-core >= 0.5.1; import failed with: {err}."
+                "KDA context parallelism needs attention-gym's fla CP wrappers "
+                "(attn_gym.linear.kda.fla_cp), which wrap fla-core >= 0.5.1; "
+                f"import failed with: {err}."
             ) from err
 
     for module in kda_modules:
