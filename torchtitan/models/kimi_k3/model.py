@@ -9,10 +9,11 @@ from dataclasses import dataclass, field
 import torch
 import torch.distributed as dist
 from torch import nn
-
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
+from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.fsdp import add_zero_valued_dependency
+
+from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -27,6 +28,7 @@ from torchtitan.models.common.multimodal import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
+from torchtitan.tools.logging import logger
 
 from .kda import KimiDeltaAttention
 from .moe import KimiFeedForward, KimiLatentMoE
@@ -143,6 +145,7 @@ class KimiMLAAttention(BaseAttention):
         out_TD = out_THV.reshape(num_tokens, h_local * self.v_head_dim)
         out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
         return self.wo(out_TD)
+
 
 def _apply_attention_residual(
     prefix_sum_TD: torch.Tensor,
@@ -275,6 +278,29 @@ class KimiK3TransformerBlock(Module):
         return prefix_sum_TD + h_TD, block_residual_TND
 
 
+class _PlainGradBoundary(torch.autograd.Function):
+    """Identity forward; forces the incoming gradient to be a plain tensor.
+
+    The vision tower must stay plain in BOTH directions. Its dynamic CP is a
+    separate mechanism from the decoder's, and the CP path runs hand-written
+    collectives whose transpose is a reduce_scatter --
+    _c10d_functional.reduce_scatter_tensor has no DTensor sharding strategy.
+
+    to_local() alone is not enough and grad_placements is the wrong knob: the
+    first re-wraps the gradient with the forward placements, the second states
+    which placements to re-wrap WITH. Neither can say "do not re-wrap". That is
+    what this states, and only an autograd.Function can.
+    """
+
+    @staticmethod
+    def forward(ctx, x):  # type: ignore[override]
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):  # type: ignore[override]
+        return grad.to_local() if isinstance(grad, DTensor) else grad
+
+
 class KimiK3Model(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
@@ -282,6 +308,9 @@ class KimiK3Model(Decoder):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        # Smallest image worth partitioning across CP ranks. Below it the
+        # replicated encode is cheaper: splitting buys one gather per layer.
+        dynamic_cp_min_patches: int = 256
 
         def _validate_cp_backend(self, parallelism) -> None:
             """This model's CP is not ShardingConfig-driven -- the KDA kernels
@@ -343,6 +372,42 @@ class KimiK3Model(Decoder):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+        self.dynamic_cp_min_patches = config.dynamic_cp_min_patches
+        self._dyncp_logged = False
+
+    def _tower_needs_collectives(self) -> bool:
+        """Is the tower wrapped in something that issues per-forward collectives?
+
+        True once FSDP has sharded it, which is when skipping it desynchronizes
+        the process group. A replicated DTensor -- what a tp-invariant module
+        holds -- issues no all-gather to match, so the test is on the placement
+        and not merely on the type.
+        """
+        return any(
+            isinstance(p, DTensor) and any(pl.is_shard() for pl in p.placements)
+            for p in self.vision_encoder.parameters()
+        )
+
+    def _tower_placeholder(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """The smallest input the tower accepts, for a rank with no images."""
+        kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+        grid = torch.tensor(
+            [[1, kernel_h, kernel_w]], dtype=torch.long, device=self._device()
+        )
+        weight = self.vision_encoder.patch_embed.weight
+        # A plain tensor, not weight.new_zeros: once FSDP has sharded the
+        # tower the weight is a DTensor, and a placeholder inheriting that
+        # meets the tower's own plain tensors as "aten.mm got mixed".
+        patches = torch.zeros(
+            kernel_h * kernel_w,
+            weight.shape[-1],
+            dtype=weight.dtype,
+            device=self._device(),
+        )
+        return patches, grid
+
+    def _device(self) -> torch.device:
+        return next(self.parameters()).device
 
     def _prepare_multimodal_embeds(
         self,
@@ -359,6 +424,13 @@ class KimiK3Model(Decoder):
                 "both be omitted."
             )
         if pixel_values is None:
+            # An image-free batch is normal, but FSDP2 issues the tower's
+            # all-gather from its pre-forward hook, so every rank must run it.
+            # A zero-valued placeholder keeps collectives and the DP average right.
+            if self.vision_encoder is not None and self._tower_needs_collectives():
+                placeholder, placeholder_grid = self._tower_placeholder()
+                unused = self.vision_encoder(placeholder, grid_thw=placeholder_grid)
+                return add_zero_valued_dependency(embeddings_TD, unused)
             return embeddings_TD
         assert grid_thw is not None
         if self.vision_encoder is None:
@@ -367,7 +439,7 @@ class KimiK3Model(Decoder):
             raise ValueError("special_tokens are required for multimodal inputs.")
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        vision_embeds = self._encode_images(pixel_values, grid_thw)
         # MoonViT collapses time and merges spatially, so the text-side token
         # count per item is (h/kh)*(w/kw), independent of t.
         kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
@@ -444,6 +516,186 @@ class KimiK3Model(Decoder):
         start = int(counts[:rank].sum().item())
         local = int(counts[rank].item())
         return vision_embeds[start : start + local]
+
+    def _encode_images(
+        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+    ) -> torch.Tensor:
+        """Encode every image, partitioning the large ones (report sec 5.2.3).
+
+        Report 5.2.3 has two halves and both are needed: a single large image
+        is split along the patch dimension with attention gathering key-value
+        pairs across ranks, AND each CP group is divided into sub-CP groups
+        with the large images distributed across them, which is what keeps the
+        communication fraction from growing with scale.
+
+        Every large image is encoded by one sub-CP group, with its patches split
+        across that sub-group's ranks. Images below the threshold, or whose grid
+        height does not divide the merge kernel, stay whole and are encoded
+        replicated -- splitting one buys a gather per layer and saves nothing.
+        """
+        import torch.distributed._functional_collectives as funcol
+
+        from torchtitan.models.kimi_k3.vision_encoder import CPPatchPlan
+        from torchtitan.models.kimi_k3.vit_cp_plan import (
+            balance_images,
+            classify,
+            merged_tokens,
+            row_partition,
+            subgroup_layout,
+        )
+
+        grids = grid_thw.tolist()
+        counts = [t * h * w for t, h, w in grids]
+        kh, kw = self.vision_encoder.merge_kernel_size
+        offsets = [0]
+        for c in counts:
+            offsets.append(offsets[-1] + c)
+
+        def _replicated(which: list[int]) -> dict[int, torch.Tensor]:
+            """Encode a subset redundantly on every rank."""
+            out = {}
+            for i in which:
+                item = pixel_values[offsets[i] : offsets[i + 1]]
+                item_grid = torch.tensor(
+                    [grids[i]], dtype=grid_thw.dtype, device=grid_thw.device
+                )
+                out[i] = self.vision_encoder(item, grid_thw=item_grid)
+            return out
+
+        subgroups = getattr(self, "_cp_subgroups", None)
+        group_all = self._cp_group
+        cp_size = dist.get_world_size(group_all) if group_all is not None else 1
+        if not subgroups or cp_size <= 1:
+            return torch.cat(
+                [_replicated(list(range(len(counts))))[i] for i in range(len(counts))],
+                dim=0,
+            )
+
+        large = classify(counts, cp_size, min_patches=self.dynamic_cp_min_patches)
+        # Grid heights must divide the merge kernel for a partition to be legal.
+        # An image that fails it is left replicated instead of being cut unsafely.
+        large = [i for i in large if grids[i][1] % kh == 0]
+        if not large:
+            return torch.cat(
+                [_replicated(list(range(len(counts))))[i] for i in range(len(counts))],
+                dim=0,
+            )
+
+        n_sub, g = subgroup_layout(len(large), cp_size)
+        group = subgroups.get(n_sub)
+        if group is None or g <= 1:
+            # No usable sub-group of size > 1 means there is nothing to partition
+            # across.
+            return torch.cat(
+                [_replicated(list(range(len(counts))))[i] for i in range(len(counts))],
+                dim=0,
+            )
+
+        cp_rank = dist.get_rank(group_all)
+        my_sub = cp_rank // g
+        rank_in_sub = cp_rank % g
+        group_of = balance_images([counts[i] for i in large], n_sub)
+        my_large = [img for img, sub in zip(large, group_of) if sub == my_sub]
+
+        if not self._dyncp_logged:
+            self._dyncp_logged = True
+            logger.info(
+                "Dynamic CP: %d large image(s) of %d over %d sub-CP group(s) of "
+                "%d rank(s); min_patches=%d.",
+                len(large),
+                len(counts),
+                n_sub,
+                g,
+                self.dynamic_cp_min_patches,
+            )
+
+        out: dict[int, torch.Tensor] = {}
+        # Every sub-group must run the same NUMBER of passes or the collectives
+        # inside them desynchronise. The count is the max over sub-groups, and a
+        # sub-group with fewer images pads with an empty pass.
+        per_sub = [sum(1 for s in group_of if s == k) for k in range(n_sub)]
+        n_passes = max(per_sub) if per_sub else 0
+
+        for p in range(n_passes):
+            img = my_large[p] if p < len(my_large) else None
+            if img is None:
+                # An empty pass still joins this sub-group's collectives. One
+                # merge block keeps every shape valid; the output is discarded.
+                local = pixel_values.new_zeros(kh * kw, *pixel_values.shape[1:])
+                local_grid = torch.tensor(
+                    [[1, kh, kw]], dtype=grid_thw.dtype, device=grid_thw.device
+                )
+                plan = CPPatchPlan(
+                    group=group,
+                    valid_total=kh * kw * g,
+                    full_grid=(1, kh * g, kw),
+                    row_start=0,
+                    band=kh,
+                    real_rows=kh,
+                )
+            else:
+                t, h, w = grids[img]
+                shards = row_partition(t, h, w, kh=kh, group_size=g)
+                sh = shards[rank_in_sub]
+                bands = [s.row_end - s.row_start for s in shards]
+                band = max(bands)
+                # The ceiling split keeps any deficit on the TRAILING ranks, so
+                # every rank's padding lands at the end of the gathered stream
+                # rather than inside it. Taking a prefix below depends on that.
+                if bands != sorted(bands, reverse=True):
+                    raise AssertionError(
+                        f"bands {bands} are not non-increasing; padding would land "
+                        "inside the gathered token stream and corrupt the order"
+                    )
+                flat = pixel_values[offsets[img] : offsets[img + 1]]
+                # This rank's rows of EVERY frame: the projector's temporal mean
+                # spans all frames, so splitting by frame would give each rank the
+                # mean of its own frames instead.
+                pad_rows = band - (sh.row_end - sh.row_start)
+                pieces = []
+                for a, b in sh.ranges:
+                    pieces.append(flat[a:b])
+                    if pad_rows:
+                        pieces.append(flat.new_zeros(pad_rows * w, *flat.shape[1:]))
+                local = torch.cat(pieces, dim=0)
+                local_grid = torch.tensor(
+                    [[t, band, w]], dtype=grid_thw.dtype, device=grid_thw.device
+                )
+                plan = CPPatchPlan(
+                    group=group,
+                    valid_total=counts[img],
+                    full_grid=(t, h, w),
+                    row_start=sh.row_start,
+                    band=band,
+                    real_rows=sh.row_end - sh.row_start,
+                )
+
+            local = local.to(self.vision_encoder.patch_embed.weight.dtype)
+            feats = self.vision_encoder(local, grid_thw=local_grid, cp_plan=plan)
+            # to_local unwraps the value but its backward re-wraps the gradient,
+            # and the all_gather below has a reduce_scatter transpose with no
+            # DTensor rule.
+            if isinstance(feats, DTensor):
+                feats = feats.to_local()
+            local_feat = _PlainGradBoundary.apply(feats)
+            # The boundary belongs on the OUTPUT too: the gradient arrives from
+            # downstream, so sealing only the input leaves the transpose
+            # receiving a DTensor.
+            gathered = _PlainGradBoundary.apply(
+                funcol.all_gather_tensor(
+                    local_feat.contiguous(), gather_dim=0, group=group
+                )
+            )
+            if img is not None:
+                t, h, w = grids[img]
+                # NOT counts // merge: the projector collapses time, so a video's
+                # token count carries no t.
+                out[img] = gathered[: merged_tokens(h, w, kh, kw)]
+
+        rest = [i for i in range(len(counts)) if i not in out]
+        if rest:
+            out.update(_replicated(rest))
+        return torch.cat([out[i] for i in range(len(counts))], dim=0)
 
     def forward(  # pyrefly: ignore [bad-override]
         self,

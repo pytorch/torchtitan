@@ -127,7 +127,13 @@ class VisionAttention(Module):
         rope_cache: torch.Tensor,
         rope_apply: RopeApply,
         attention_mask: BlockMask,
+        cp_plan: object | None = None,
     ) -> torch.Tensor:
+        # cp_plan is ignored here and consumed by subclasses that partition an
+        # image across ranks. It travels as an argument, not as module state,
+        # because activation checkpointing recomputes this forward from the
+        # arguments it saved -- state set around the call is gone by then.
+        del cp_plan
         num_tokens = x.shape[0]
 
         # -1 infers the head count locally (= num_heads / TP under tensor
@@ -170,12 +176,14 @@ class VisionTransformerBlock(Module):
         rope_cache: torch.Tensor,
         rope_apply: RopeApply,
         attention_mask: BlockMask,
+        cp_plan: object | None = None,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
+            cp_plan=cp_plan,
         )
         x = x + self.mlp(self.norm2(x))
         return x
