@@ -10,9 +10,6 @@ on:
       - 'torchtitan_recipes/tests/b200.py'
       - 'tests/integration_tests/b200.py'
       - '.github/workflows/integration_test_b200.yaml'
-  pull_request:
-    paths:
-      - '.github/workflows/integration_test_b200.yaml'
   workflow_dispatch:
 
 concurrency:
