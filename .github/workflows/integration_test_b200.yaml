@@ -58,7 +58,7 @@ jobs:
           uv pip install --pre torch torchvision \
             --index-url https://download.pytorch.org/whl/nightly/cu130
           uv pip install -r requirements.txt
-          uv pip install -r torchtitan/models/kimi_k3/requirements.txt
+          uv pip install -r .ci/docker/requirements-vlm.txt
 
           python - <<'PY'
           import torch
