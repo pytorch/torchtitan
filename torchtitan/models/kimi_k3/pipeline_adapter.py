@@ -17,12 +17,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import inspect
 import math
 import threading
 import warnings
+
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -48,78 +48,26 @@ from torchtitan.distributed.pipeline_parallel import (
     get_schedule_class as _tt_get_schedule_class,
     pipeline_llm,
 )
+from torchtitan.models.kimi_k3.dep_bubble_backward import (
+    GradQueue,
+    install_backward_slots,
+)
+from torchtitan.models.kimi_k3.dep_bubble_plan import build_plans
+from torchtitan.models.kimi_k3.dep_bubble_runtime import install_bubble_runtime
+from torchtitan.models.kimi_k3.dep_vision_stage import KimiK3ViTStage
+from torchtitan.models.kimi_k3.knobs import register_topology, topology
 from torchtitan.models.kimi_k3.layout import (
     _infer_block_layout_tables_from_stages,
     BlockLayoutTables,
     unstack_blocks,
 )
+from torchtitan.models.kimi_k3.vit_prefetch import (
+    install_step_hook,
+    prefetch_depth,
+    VisionPrefetcher,
+    VisionStepInputs,
+)
 from torchtitan.tools.logging import logger
-
-
-# ----- Topology knobs, resolved once from config --------------------------- #
-# These decide the pipeline topology, so every rank must resolve them
-# identically; a per-rank disagreement hangs a collective with nothing
-# pointing at the cause. They are read from call sites deep in the split
-# where no config is in scope, so the resolved record is module-global:
-# registered once at the pipelining entry, read back below.
-
-@dataclass
-class _TopologyKnobs:
-    """Resolved topology."""
-
-    attn_res_cache: bool = False
-
-
-_TOPOLOGY: _TopologyKnobs | None = None
-_WARNED_UNREGISTERED = False
-
-
-def _register_topology(config) -> _TopologyKnobs:
-    """Resolve the topology from ``config`` once. Idempotent, first call wins.
-
-    A field the config does not carry keeps its default.
-    """
-    global _TOPOLOGY
-
-    defaults = _TopologyKnobs()
-    resolved = _TopologyKnobs(
-        attn_res_cache=bool(
-            getattr(config, "attn_res_cache", defaults.attn_res_cache)
-        ),
-    )
-    if _TOPOLOGY is not None and _TOPOLOGY != resolved:
-        logger.warning(
-            "topology re-registered with a different resolution: keeping %r, "
-            "ignoring %r. Two entry points were handed different configs.",
-            _TOPOLOGY,
-            resolved,
-        )
-        return _TOPOLOGY
-    _TOPOLOGY = resolved
-    return _TOPOLOGY
-
-
-def _topology() -> _TopologyKnobs:
-    """The resolved topology, or the defaults with a warning."""
-    global _WARNED_UNREGISTERED
-
-    if _TOPOLOGY is not None:
-        return _TOPOLOGY
-    if not _WARNED_UNREGISTERED:
-        _WARNED_UNREGISTERED = True
-        logger.warning(
-            "topology knob read before register_topology(); using defaults. "
-            "Config fields are NOT being honoured on this path."
-        )
-    return _TopologyKnobs()
-
-
-def _reset_topology_for_testing() -> None:
-    """Tests need to re-resolve; production code must not call this."""
-    global _TOPOLOGY, _WARNED_UNREGISTERED
-
-    _TOPOLOGY = None
-    _WARNED_UNREGISTERED = False
 
 
 def adapter_enabled() -> bool:
@@ -131,7 +79,7 @@ def adapter_enabled() -> bool:
     (pipeline_parallel_first_stage_less_layers and _last_stage_less_layers both
     0); anything else passes through on the naive transport.
     """
-    return _topology().attn_res_cache
+    return topology().attn_res_cache
 
 
 # ----- Rank-shared cache across virtual stages ----------------------------- #
@@ -812,9 +760,7 @@ class CrossStageCacheAdapter(nn.Module):
         out_blocks_tensor = (
             torch.stack(send_pieces, dim=1)
             if send_pieces
-            else partial_out.new_zeros(
-                (partial_out.shape[0], 0, partial_out.shape[-1])
-            )
+            else partial_out.new_zeros((partial_out.shape[0], 0, partial_out.shape[-1]))
         )
         partial_out = self._keepalive_touch(partial_out, prev_recv_tensor)
         return partial_out, out_blocks_tensor
@@ -1027,6 +973,167 @@ def _kimi_llm_fqns(
     return [[rename.get(n, n) for n in stage] for stage in raw]
 
 
+def _unwrap_multimodal_for_pp(model: nn.Module, kwargs: dict) -> nn.Module:
+    """Reject the wrapper layout; pass a tower-as-child model through.
+
+    Core's ``_split_module`` iterates only top-level ``named_children()``, so a
+    wrapper holding ``vision_encoder`` beside a ``language_model`` child is
+    unsplittable: no FQN scheme reaches the text stack and every stage comes
+    back parameterless. This model carries the tower as its own child, which
+    the FQN split handles directly.
+    """
+    tower = getattr(model, "vision_encoder", None)
+    inner = getattr(model, "language_model", None)
+    if tower is None or inner is None:
+        # A model whose tower is its own child needs no re-wrapping: core's
+        # _split_module sees the tower directly, so DEP is the FQN split alone
+        # (see _inject_kimi_k3_fqns) -- and that is every layout this model ships.
+        return model
+    raise NotImplementedError(
+        "a multimodal wrapper layout (vision_encoder beside a language_model "
+        "child) is not supported: the pipeline split cannot see through it. "
+        "This model carries the tower as its own child."
+    )
+
+
+def _install_vision_stage_wiring(pp_schedule, step_inputs) -> int:
+    """Give every vision stage its micro-batch index, and the step its ``kwarg_mbs``.
+
+    Required whenever the tower spans stages, not just for the run-ahead: a body or
+    tail share reads ``grid_thw`` by micro-batch index, and without the index it takes
+    the metadata-inference path -- passing activations through unprocessed, with no
+    error. A silently unsplit tower and a silently un-spliced batch are exactly the
+    failure shape to design out, so this is installed unconditionally under DEP and its
+    count is logged.
+
+    Returns how many stages were wired, so a caller can assert engagement instead of
+    inferring it from numerics.
+    """
+    if step_inputs is not None:
+        install_step_hook(pp_schedule, step_inputs)
+
+    wired = 0
+    for stage in _iter_schedule_stages(pp_schedule):
+        submod = getattr(stage, "submod", None)
+        # Holds a tower, rather than is a particular class: the folded layout
+        # never constructs KimiK3ViTStage, so a type test wired nothing and the
+        # count check below then raised on a correct run.
+        if not (isinstance(submod, KimiK3ViTStage) or _holds_vision_tower(submod)):
+            continue
+        orig_fwd = stage.forward_one_chunk
+
+        def patched(fwd_chunk_id, args, kwargs=None, _f=orig_fwd, _m=submod, **kw):
+            _m._dep_current_mb = fwd_chunk_id
+            try:
+                return _f(fwd_chunk_id, args, kwargs, **kw)
+            finally:
+                _m._dep_current_mb = None
+
+        stage.forward_one_chunk = patched
+        wired += 1
+
+    if wired:
+        logger.info(
+            "DEP vision stage wiring: %d stage(s) on this rank, roles %s",
+            wired,
+            [
+                getattr(s.submod, "_dep_role", "?")
+                for s in _iter_schedule_stages(pp_schedule)
+                if isinstance(getattr(s, "submod", None), KimiK3ViTStage)
+            ],
+        )
+    return wired
+
+
+_DEP_VISION_FQN = "__kimi_dep_vision__"
+"""A name no text module has, so its PP chunk comes back parameterless."""
+
+
+def dep_enabled() -> bool:
+    """DEP is opt-in while it is being brought up.
+
+    Off by default because it changes the stage count, so a run that enables it
+    silently would report a different pipeline shape than the config asked for.
+    """
+    return topology().vit_dep
+
+
+def _install_bubble_runtime_for(pp_schedule, prefetcher) -> None:
+    """Wire the bubble planner and runtime to one vision stage's prefetcher.
+
+    The plan is rebuilt per step from the schedule's own shape rather than cached,
+    because the micro-batch count can change between steps (a short final batch) and a
+    stale plan would anchor on actions the schedule no longer runs. Rebuilding is pure
+    Python over a list of actions, so it is not worth caching against that risk.
+    """
+    cost_ratio = float(topology().vit_bubble_cost_ratio)
+
+    def plan_for_step():
+        n_mb = int(getattr(pp_schedule, "_n_microbatches", 0) or 0)
+        pp_size = int(getattr(pp_schedule, "pp_group_size", 0) or 0)
+        n_stages = int(getattr(pp_schedule, "_num_stages", 0) or 0)
+        rank = int(getattr(pp_schedule, "rank", -1))
+        if not (n_mb and pp_size and n_stages) or rank < 0:
+            return None
+        vp, rem = divmod(n_stages, pp_size)
+        if rem or vp < 1:
+            # A non-looped schedule has no interleaved action list to plan against.
+            return None
+        try:
+            plans = build_plans(
+                pp_size=pp_size,
+                vp=vp,
+                n_microbatches=n_mb,
+                cost_ratio=cost_ratio,
+            )
+        except ValueError as err:
+            # e.g. a micro-batch count Interleaved1F1B rejects. Saying so beats
+            # silently running without the mechanism under test.
+            logger.warning("DEP bubble plan unavailable: %s", err)
+            return None
+        return plans.get(rank)
+
+    def encode_now(microbatches):
+        # Synchronous on the CURRENT stream: this is the bubble, so the point is to
+        # occupy it, not to overlap with it.
+        for mb in microbatches:
+            prefetcher.ensure_sync(mb)
+
+    install_bubble_runtime(
+        pp_schedule,
+        plan_for_step=plan_for_step,
+        encode_now=encode_now,
+        upfront_encode=encode_now,
+    )
+
+    # The queue lives on the OWNER module: the seam that cuts the graph is inside
+    # its forward, the only place the micro-batch index and the features meet.
+    queue = GradQueue(max_pending=int(topology().vit_bubble_max_pending))
+    prefetcher._owner._vision_grad_queue = queue
+    install_backward_slots(pp_schedule, queue)
+
+
+def dep_vision_stages() -> int:
+    """How many stages the vision tower occupies.
+
+    * Vision stages come OUT of the text budget (total must stay divisible by
+      ``pp_degree``), so growing this trades text stages for vision stages.
+    * Above 1 the tower would be split across stages; that split cannot reach
+      into ``vision_encoder.layers`` on this layout, so values above 1 raise
+      instead of silently running the one-stage form.
+    """
+    stages = max(1, topology().vit_dep_stages)
+    if stages > 1:
+        raise NotImplementedError(
+            f"vit_dep_stages={stages} splits the vision tower across pipeline "
+            "stages (report sec 5.2.3 clause 2), which this model layout does "
+            "not support yet: the tower is a child of the model, and the stage "
+            "split cannot reach into vision_encoder.layers. Use "
+            "vit_dep_stages=1, which gives the tower its own stage (clause 1)."
+        )
+    return stages
+
+
 def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
     """Populate ``parallelism.module_fqns_per_model_part`` so the PP
     split uses Kimi module names and the last stage includes the
@@ -1066,6 +1173,19 @@ def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
         stages_per_rank = 1 if issubclass(schedule_class, PipelineScheduleSingle) else 2
         num_virtual_stages = pp * stages_per_rank
 
+    n_vit = dep_vision_stages() if dep_enabled() else 0
+    if n_vit:
+        # Taken out of the text budget, not added on top: the schedule asserts
+        # num_stages % pp_degree == 0, so appending would break pp=2 at the first
+        # vision stage.
+        if num_virtual_stages - n_vit < 1:
+            raise ValueError(
+                f"DEP wants {n_vit} vision stage(s) but only {num_virtual_stages} "
+                "stages exist; raise pipeline_parallel_degree or lower "
+                "vit_dep_stages"
+            )
+        num_virtual_stages -= n_vit
+
     fqns = _kimi_llm_fqns(num_virtual_stages, num_layers, input_weight, output_weight)
     # ``_kimi_llm_fqns`` emits this folder's historical spellings; map them
     # back for a model using core's names. FQNs matching no child mean core
@@ -1073,10 +1193,7 @@ def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
     core_names = {"embed_tokens": "tok_embeddings", "lm_head": "lm_head"}
     present = {n for n, _ in model.named_children()}
     fqns = [
-        [
-            core_names[n] if n in core_names and n not in present else n
-            for n in stage
-        ]
+        [core_names[n] if n in core_names and n not in present else n for n in stage]
         for stage in fqns
     ]
     # Append AttnRes tail modules if present (last stage only).
@@ -1084,12 +1201,20 @@ def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
     if extras:
         fqns[-1].extend(extras)
     # The tower belongs with whichever chunk kept the embedding: vision
-    # features are spliced into the embeddings, so nothing vision-side crosses
-    # a stage boundary. Naming it matters -- core sets every child not named by
-    # some stage to None, so leaving it out gives every stage a None tower and
-    # the first multimodal batch reports "pixel_values were provided without a
-    # vision encoder".
-    if getattr(model, "vision_encoder", None) is not None:
+    # features splice into the embeddings, so nothing vision-side crosses a
+    # stage boundary. It must be NAMED -- core sets every child not named by
+    # some stage to None. DEP is the exception and gets its own stage below.
+    if dep_enabled() and hasattr(model, "vision_encoder"):
+        # DEP (report sec 5.2.3): the tower gets its own stage ahead of the text
+        # stages, so its compute hides in pipeline bubbles; forward already
+        # treats missing tok_embeddings as "input IS the hidden state". It rides
+        # WITH the embedding: the splice needs ids, which only stage 0 receives.
+        embed = "tok_embeddings" if hasattr(model, "tok_embeddings") else "embed_tokens"
+        for stage in fqns:
+            if embed in stage:
+                stage.remove(embed)
+        fqns = [[embed, "vision_encoder"]] + fqns
+    elif hasattr(model, "vision_encoder"):
         embed_stage = next(
             (
                 stage
@@ -1099,7 +1224,120 @@ def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
             fqns[0],
         )
         embed_stage.append("vision_encoder")
+
+    if dep_enabled() and not hasattr(model, "vision_encoder"):
+        # Marker-based split for the wrapper layout, where the tower is a
+        # sibling of the language model. The ViT stage FQN matches NOTHING on
+        # purpose: core's _split_module yields a zero-parameter chunk, which
+        # parallelize_fn replaces with the ViT stage module -- no core change.
+        # The vision stage owns embed_tokens too: PP's metadata inference pushes
+        # dummy values through the pipe and indexing an embedding with them
+        # asserts, so the pipe carries the spliced EMBEDDING stream and the
+        # first text stage must NOT keep embed_tokens.
+        fqns[0] = [f for f in fqns[0] if f != "embed_tokens"]
+        vision = [[f"{_DEP_VISION_FQN}{i}"] for i in range(n_vit)]
+        vision[0].append("embed_tokens")
+        fqns = vision + fqns
     parallelism.module_fqns_per_model_part = fqns
+
+
+def _holds_vision_tower(module) -> bool:
+    """Whether this stage owns the vision tower, through any wrapper.
+
+    FSDP2 replaces the module's class (KimiK3Model becomes FSDPKimiK3Model), and
+    a plain getattr for ``vision_encoder`` on the wrapper misses it -- which read
+    as "this rank has no vision stage" on a rank that owns one. Walk the modules
+    instead of trusting either the type or a direct attribute.
+    """
+    if getattr(module, "vision_encoder", None) is not None:
+        return True
+    return any(getattr(m, "vision_encoder", None) is not None for m in module.modules())
+
+
+def _install_vision_prefetch(pp_schedule, model_parts) -> None:
+    """Give the DEP vision stage a prefetcher and tell it which micro-batch it serves.
+
+    The vision stage is NOT wrapped by :class:`CrossStageCacheAdapter` -- it holds the
+    tower and embed_tokens, not AttnRes blocks -- so it does not get that wrapper's
+    mb-index patch and needs its own. Same shape, and for the same reason: the index
+    is schedule-owned and there is no other way to learn it from inside a forward.
+
+    A no-op when the prefetch depth is 0, which is the default, so enabling DEP alone
+    changes nothing here.
+    """
+    bubble = bool(topology().vit_bubble)
+    if prefetch_depth() <= 0 and not bubble:
+        return
+    if prefetch_depth() > 0 and bubble:
+        # Alternatives, not layers: the prefetch issues ahead on a side stream,
+        # the bubble runtime places encodes in main-stream idle intervals. Both
+        # at once satisfies every slot early -- green for the wrong mechanism.
+        raise ValueError(
+            "vit_prefetch and vit_bubble are alternatives; set exactly one. "
+            f"Got prefetch={prefetch_depth()}, bubble={bubble}."
+        )
+
+    if dep_vision_stages() > 1 and prefetch_depth() > 0:
+        # The run-ahead prefetches via encode_images, which assumes one stage
+        # performs the whole encode; with the tower split that defeats the
+        # split, so refuse. The bubble runtime is independent of the split.
+        warnings.warn(
+            f"vit_prefetch={prefetch_depth()} ignored: the run-ahead has no "
+            f"cross-stage form yet, and vit_dep_stages="
+            f"{dep_vision_stages()} splits the tower. Running without the run-ahead."
+        )
+        if not bool(topology().vit_bubble):
+            return
+
+    # A stage owns the tower if it HOLDS one, not if it is a particular class:
+    # in the folded layout the tower is a child of KimiK3Model on stage 0 and
+    # no KimiK3ViTStage exists -- keying on type leaves the run-ahead off.
+    vision_stage_modules = [
+        m
+        for m in model_parts
+        if isinstance(m, KimiK3ViTStage) or _holds_vision_tower(m)
+    ]
+    if not vision_stage_modules:
+        # Normal on a text-only rank: only one rank holds global stage 0. Logged
+        # because "did not install" and "did nothing" read the same otherwise --
+        # but WARN only where the stage was expected, or text ranks cry wolf.
+        owns_vision_stage = any(
+            getattr(s, "stage_index", None) == 0
+            for s in _iter_schedule_stages(pp_schedule)
+        )
+        message = (
+            "DEP vision prefetch NOT installed: depth=%d, this rank's model parts "
+            "are %s"
+        )
+        parts = [type(m).__name__ for m in model_parts]
+        if owns_vision_stage:
+            warnings.warn(
+                f"vit_prefetch={prefetch_depth()} requested and this rank "
+                f"owns pipeline stage 0, but no KimiK3ViTStage is present in its "
+                f"model parts ({parts}); the run-ahead is OFF."
+            )
+        else:
+            logger.info(message, prefetch_depth(), parts)
+        return
+
+    for module in vision_stage_modules:
+        prefetcher = VisionPrefetcher(module)
+        module._vision_prefetcher = prefetcher
+        install_step_hook(pp_schedule, prefetcher)
+        if bubble:
+            _install_bubble_runtime_for(pp_schedule, prefetcher)
+
+    # The micro-batch index patch lives in _install_vision_stage_wiring, which runs
+    # first and unconditionally under DEP -- patching it here too would wrap
+    # forward_one_chunk twice.
+    for stage in _iter_schedule_stages(pp_schedule):
+        if not isinstance(getattr(stage, "submod", None), KimiK3ViTStage):
+            continue
+        logger.info(
+            "DEP vision prefetch installed: depth=%d on stage %s",
+            prefetch_depth(),
+            getattr(stage, "stage_index", "?"),
+        )
 
 
 def pipeline_kimi_k3(model: nn.Module, **kwargs):
@@ -1119,12 +1357,48 @@ def pipeline_kimi_k3(model: nn.Module, **kwargs):
     # before parallelize, so whichever comes first registers; register_topology is
     # idempotent and reports a disagreement rather than letting order decide.
     if hasattr(model, "config"):
-        _register_topology(model.config)
+        register_topology(model.config)
 
+    model = _unwrap_multimodal_for_pp(model, kwargs)
+    step_inputs = getattr(model, "_dep_step_inputs_holder", None)
+    if (
+        step_inputs is None
+        and dep_enabled()
+        and getattr(model, "vision_encoder", None) is not None
+    ):
+        # The folded layout has no wrapper to build this, but the run-ahead
+        # still needs it: shares and the prefetcher read grid_thw by micro-batch
+        # index, and pipelining hands batch kwargs to the first stage only.
+        step_inputs = VisionStepInputs()
+        model._dep_step_inputs_holder = step_inputs
     _inject_kimi_k3_fqns(model, kwargs)
     pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
         model, **kwargs
     )
+    # Every kimi_k3 flavor registers THIS pipelining_fn, so the DEP wiring has to
+    # be installed here to be reachable at all.
+    if dep_enabled() and step_inputs is not None:
+        # Wire first and unconditionally: unwired shares pass activations
+        # through, no error.
+        wired = _install_vision_stage_wiring(pp_schedule, step_inputs)
+        # A tower stage whose wiring never engaged would run the
+        # metadata-inference path for real micro-batches -- no tower, no splice,
+        # no error -- so assert engagement, against what THIS rank should own:
+        # the first dep_vision_stages() stages, so a text-only rank wires zero.
+        n_vit = dep_vision_stages()
+        expected = sum(
+            1
+            for stage in _iter_schedule_stages(pp_schedule)
+            if getattr(stage, "stage_index", None) is not None
+            and stage.stage_index < n_vit
+        )
+        if wired != expected:
+            raise RuntimeError(
+                f"vit_dep_stages={n_vit}: this rank owns {expected} vision "
+                f"stage(s) by stage index but {wired} were wired; an unwired share "
+                "passes activations through unprocessed and reports no error"
+            )
+        _install_vision_prefetch(pp_schedule, model_parts)
     passthrough = (pp_schedule, model_parts, has_first_stage, has_last_stage)
 
     if not adapter_enabled():
