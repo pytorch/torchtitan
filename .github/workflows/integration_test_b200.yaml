@@ -29,19 +29,12 @@ permissions:
 
 jobs:
   build-test:
-    # Docker Hub credentials are unavailable to pull_request runs from forks.
-    # Those PRs run through the ciflow/b200 tag after workflow approval instead.
-    if: >-
-      github.repository_owner == 'pytorch' &&
-      (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork)
+    if: github.repository_owner == 'pytorch'
     runs-on: linux.dgx.b200.8
     timeout-minutes: 60
     container:
       image: nvidia/cuda:12.9.1-devel-ubuntu24.04
       options: --gpus all
-      credentials:
-        username: pytorchbot
-        password: ${{ secrets.DOCKER_HUB_READONLY_TOKEN }}
     steps:
       - name: Check out repo
         uses: actions/checkout@v7
