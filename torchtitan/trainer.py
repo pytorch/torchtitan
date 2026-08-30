@@ -54,6 +54,7 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
+from torchtitan.models.utils import get_vision_flops
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -658,6 +659,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels = batch
             ntokens_batch = labels.numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
+            if getattr(self.model_config, "vision_encoder", None) is not None:
+                self.metrics_processor.has_vision = True
+                self.metrics_processor.vision_flops_since_last_log += get_vision_flops(
+                    self.model_config, input_dict
+                )
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
