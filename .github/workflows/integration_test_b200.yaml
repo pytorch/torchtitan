@@ -33,7 +33,7 @@ jobs:
     runs-on: linux.dgx.b200.8
     timeout-minutes: 60
     container:
-      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
       options: --gpus all
     steps:
       - name: Check out repo
@@ -56,7 +56,7 @@ jobs:
           echo "CUDA driver version: ${DRIVER_VERSION}"
 
           uv pip install --pre torch torchvision \
-            --index-url https://download.pytorch.org/whl/nightly/cu129
+            --index-url https://download.pytorch.org/whl/nightly/cu130
           uv pip install -r requirements.txt
           uv pip install -r torchtitan/models/kimi_k3/requirements.txt
 
