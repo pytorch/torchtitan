@@ -97,8 +97,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     This class loads tokenizer files and automatically infers BOS/EOS tokens from
     a configuration file (tokenizer_config.json) as well as specific formatting related to
-    chat templates. It provides an encode method that adds BOS/EOS tokens based on whether the
-    underlying tokenizer adds them automatically.
+    chat templates. Its encode method suppresses the tokenizer's own special tokens
+    and adds BOS/EOS itself, controlled by the add_bos/add_eos arguments.
 
     Args:
         config (Config): Configurable config (currently empty).
@@ -391,9 +391,11 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     def _infer_should_add_bos_eos(self):
         """
-        Determine if we should add BOS/EOS tokens based on config settings.
-        If config explicitly specifies add_bos_token/add_eos_token, follow that.
-        Otherwise, determine if the underlying tokenizer automatically adds them.
+        Determine the default BOS/EOS behavior for ``encode``.
+
+        ``encode`` suppresses the tokenizer's own special tokens, so these
+        defaults are the only ones applied when the caller does not pass
+        add_bos/add_eos explicitly.
         """
         self.default_add_bos = False
         self.default_add_eos = False
@@ -407,7 +409,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         if self.eos_id is not None and self.eos_id in encoded_empty_str:
             self.hf_adds_eos = True
 
-        # Check tokenizer_config.json for explicit settings - these override empirical detection
+        # Check tokenizer_config.json for explicit settings
         if self._hf_config:
             config_add_bos = self._hf_config.get("add_bos_token")
             config_add_eos = self._hf_config.get("add_eos_token")
@@ -422,8 +424,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         Args:
             text (str): The text to encode
-            add_bos (bool): Whether to add BOS token (if not already added by tokenizer)
-            add_eos (bool): Whether to add EOS token (if not already added by tokenizer)
+            add_bos (bool): Whether to add BOS token
+            add_eos (bool): Whether to add EOS token
 
         Returns:
             list[int]: List of token IDs
@@ -434,21 +436,19 @@ class HuggingFaceTokenizer(BaseTokenizer):
         else:
             text = kwargs.get("text", "")
 
-        add_bos = kwargs.get("add_bos", self.default_add_bos)
-        add_eos = kwargs.get("add_eos", self.default_add_eos)
+        add_bos = kwargs.get("add_bos", self.default_add_bos or self.hf_adds_bos)
+        add_eos = kwargs.get("add_eos", self.default_add_eos or self.hf_adds_eos)
 
         # Get base token IDs from the underlying tokenizer
-        token_ids = self.tokenizer.encode(text).ids
+        token_ids = self.tokenizer.encode(text, add_special_tokens=False).ids
 
-        # Add BOS token if requested and not already added by tokenizer
-        if not self.hf_adds_bos and add_bos:
-            if self.bos_id is not None:
-                token_ids.insert(0, self.bos_id)
+        # Add BOS token if requested
+        if add_bos and self.bos_id is not None:
+            token_ids.insert(0, self.bos_id)
 
-        # Add EOS token if requested and not already added by tokenizer
-        if not self.hf_adds_eos and add_eos:
-            if self.eos_id is not None:
-                token_ids.append(self.eos_id)
+        # Add EOS token if requested
+        if add_eos and self.eos_id is not None:
+            token_ids.append(self.eos_id)
 
         return token_ids
 
