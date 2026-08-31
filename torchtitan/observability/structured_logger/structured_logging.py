@@ -40,6 +40,7 @@ _structured_logger.propagate = False
 # Used to check if handler has been already initialized. If so, re-initializing
 # is a no-op
 _is_initialized: bool = False
+_structured_logger_init_args: tuple[str, str, int] | None = None
 
 # Set by ``init_structured_logger(enable=False)`` to make all trace calls no-ops.
 _disabled: bool = False
@@ -78,9 +79,37 @@ class ExtraFields(enum.StrEnum):
     LOG_TYPE_NAME = "log_type_name"
     EVENT_NAME = "event_name"
     STEP = "step"
+    CONTEXT = "context"
     VALUE = "value"
     RELATIVE_STEP = "relative_step"
     TASK_NAME = "task_name"
+
+
+class _StructuredRecordForwarder(logging.Handler):
+    """Forward structured records from the root logger to trace handlers."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name == _structured_logger.name:
+            return
+        if getattr(record, str(ExtraFields.LOG_TYPE_NAME), None) is None:
+            return
+        _structured_logger.handle(record)
+
+
+_root_forwarder = _StructuredRecordForwarder()
+
+
+def _ensure_root_forwarder() -> None:
+    root_logger = logging.getLogger()
+    if _root_forwarder not in root_logger.handlers:
+        root_logger.addHandler(_root_forwarder)
+
+
+def _get_structured_logger_init_args() -> tuple[str, str, int] | None:
+    if _disabled or not _is_initialized or not _structured_logger.handlers:
+        return None
+    assert _structured_logger_init_args is not None
+    return _structured_logger_init_args
 
 
 def event_extra(
@@ -158,8 +187,7 @@ def init_structured_logger(
     JSONL handler is registered; when set, ONLY the listed factories run.
 
     ``rank`` defaults to ``$RANK`` (set by torchrun), so this can run
-    before ``torch.distributed`` init. Idempotent: second and later calls
-    are a no-op.
+    before ``torch.distributed`` init. Repeated calls do not duplicate handlers.
 
     When ``enable=False``, all subsequent ``log_trace_*`` calls become
     no-ops (no handlers are attached).
@@ -171,10 +199,11 @@ def init_structured_logger(
         init_structured_logger(source="trainer", output_dir="./outputs")
         log_trace_instant("structured_logger_started")
     """
-    global _is_initialized, _disabled
+    global _is_initialized, _disabled, _structured_logger_init_args
 
     if not enable:
         _disabled = True
+        _structured_logger_init_args = None
         console_logger.info(
             "Structured logging disabled via DebugConfig.enable_structured_logging=False"
         )
@@ -182,6 +211,7 @@ def init_structured_logger(
 
     # Avoids re-initializing
     if _is_initialized:
+        _ensure_root_forwarder()
         return
 
     if rank is None:
@@ -209,7 +239,9 @@ def init_structured_logger(
     ):
         _structured_logger.setLevel(logging.INFO)
 
+    _structured_logger_init_args = (source, output_dir, rank)
     _is_initialized = True
+    _ensure_root_forwarder()
 
 
 def log_trace_scalar(scalars: dict[str, float | int], *, stacklevel: int = 2) -> None:
