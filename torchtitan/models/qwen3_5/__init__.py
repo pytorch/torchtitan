@@ -1117,9 +1117,13 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
-        attn_backend=attn_backend, 
+        attn_backend=attn_backend,
         seq_len=context_len,
-        **({"moe_comm_backend": moe_comm_backend} if moe_comm_backend is not None else {})
+        **(
+            {"moe_comm_backend": moe_comm_backend}
+            if moe_comm_backend is not None
+            else {}
+        ),
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -1130,7 +1134,7 @@ def model_registry(
         name="qwen3_5",
         flavor=flavor,
         model=config,
-        max_context_length=seq_len or default_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_qwen3_5,
         pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

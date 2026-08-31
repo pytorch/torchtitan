@@ -557,7 +557,7 @@ def model_registry(
         name="kimi_k3",
         flavor=flavor,
         model=config,
-        max_context_length=seq_len or default_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k3,
         pipelining_fn=None,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

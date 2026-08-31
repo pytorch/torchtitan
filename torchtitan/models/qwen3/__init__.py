@@ -631,9 +631,11 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
-        attn_backend=attn_backend, 
+        attn_backend=attn_backend,
         seq_len=context_len,
-        **{"moe_comm_backend": moe_comm_backend} if moe_comm_backend is not None else {}
+        **{"moe_comm_backend": moe_comm_backend}
+        if moe_comm_backend is not None
+        else {},
     )
     if converters is not None:
         validate_converter_order(converters)

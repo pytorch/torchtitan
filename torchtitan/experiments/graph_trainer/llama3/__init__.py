@@ -32,7 +32,7 @@ def model_registry(
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> ModelSpec:
-    get_config, default_len = llama3_configs[flavor]
+    get_config, max_context_len = llama3_configs[flavor]
     base = build_decoder_config_for_backend(
         get_config, attn_backend, tp_gemm_backend=tp_gemm_backend
     )
@@ -43,7 +43,7 @@ def model_registry(
         name="graph_trainer/llama3",
         flavor=flavor,
         model=config,
-        max_context_length=default_len,
+        max_context_length=max_context_len,
         parallelize_fn=_parallelize_fn,
         pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=None,

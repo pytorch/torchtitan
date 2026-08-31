@@ -406,7 +406,7 @@ def model_registry(
     config = get_config(
         moe_comm_backend=moe_comm_backend,
         attn_backend=attn_backend,
-        seq_len=context_len
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
