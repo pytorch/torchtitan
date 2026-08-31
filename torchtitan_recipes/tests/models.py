@@ -343,3 +343,21 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.training.disable_cuda_graphs = True
     return config
+
+
+def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
+    from torchtitan.models.muse_glimmer.config_registry import (
+        muse_glimmer_debugmodel_mm,
+    )
+
+    config = muse_glimmer_debugmodel_mm()
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.training.disable_cuda_graphs = True
+    return config
