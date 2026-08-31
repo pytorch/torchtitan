@@ -39,27 +39,27 @@ class GeneratorModelAdapter:
         model: str,
         max_model_len: int,
     ) -> None:
-        self._host = host
-        self._requested_port = port
-        self._model = model
-        self._max_model_len = max_model_len
-        self._generate_fn: GenerateFn | None = None
-        self._runner: web.AppRunner | None = None
-        self._port: int | None = None
-        self._turn_counts: dict[str, int] = {}
-        self._evidence: dict[str, list[GenerationEvidence]] = {}
+        self.host = host
+        self.requested_port = port
+        self.model = model
+        self.max_model_len = max_model_len
+        self.generate_fn: GenerateFn | None = None
+        self.runner: web.AppRunner | None = None
+        self.bound_port: int | None = None
+        self.turn_counts: dict[str, int] = {}
+        self.evidence: dict[str, list[GenerationEvidence]] = {}
 
     @property
     def port(self) -> int:
-        if self._port is None:
+        if self.bound_port is None:
             raise RuntimeError("GeneratorModelAdapter has not started")
-        return self._port
+        return self.bound_port
 
     def set_generate_fn(self, generate_fn: GenerateFn) -> None:
-        self._generate_fn = generate_fn
+        self.generate_fn = generate_fn
 
     async def start(self) -> None:
-        if self._runner is not None:
+        if self.runner is not None:
             return
         app = web.Application()
         app.router.add_get("/healthz", self._health)
@@ -67,32 +67,32 @@ class GeneratorModelAdapter:
         app.router.add_post("/inference/v1/generate", self._generate)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, self._host, self._requested_port)
+        site = web.TCPSite(runner, self.host, self.requested_port)
         await site.start()
         sockets = getattr(site._server, "sockets", None)
         if not sockets:
             await runner.cleanup()
             raise RuntimeError("model adapter did not bind a listening socket")
-        self._runner = runner
-        self._port = int(sockets[0].getsockname()[1])
+        self.runner = runner
+        self.bound_port = int(sockets[0].getsockname()[1])
         logger.info(
             "Verifiers model adapter listening on http://%s:%d",
-            self._host,
-            self._port,
+            self.host,
+            self.bound_port,
         )
 
     async def close(self) -> None:
-        runner = self._runner
+        runner = self.runner
         if runner is not None:
             await runner.cleanup()
-        self._runner = None
-        self._port = None
-        self._turn_counts.clear()
-        self._evidence.clear()
+        self.runner = None
+        self.bound_port = None
+        self.turn_counts.clear()
+        self.evidence.clear()
 
     def take_evidence(self, session_id: str) -> list[GenerationEvidence]:
-        self._turn_counts.pop(session_id, None)
-        return self._evidence.pop(session_id, [])
+        self.turn_counts.pop(session_id, None)
+        return self.evidence.pop(session_id, [])
 
     async def _health(self, request: web.Request) -> web.Response:
         del request
@@ -105,17 +105,17 @@ class GeneratorModelAdapter:
                 "object": "list",
                 "data": [
                     {
-                        "id": self._model,
+                        "id": self.model,
                         "object": "model",
                         "owned_by": "torchtitan",
-                        "max_model_len": self._max_model_len,
+                        "max_model_len": self.max_model_len,
                     }
                 ],
             }
         )
 
     async def _generate(self, request: web.Request) -> web.Response:
-        if self._generate_fn is None:
+        if self.generate_fn is None:
             return web.json_response(
                 {"error": "TorchTitan GenerateFn is not ready"}, status=503
             )
@@ -127,7 +127,7 @@ class GeneratorModelAdapter:
 
         try:
             body = await request.json()
-            prompt_token_ids = _token_id_list(
+            prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
             sampling = _sampling_config(body.get("sampling_params"))
@@ -136,11 +136,11 @@ class GeneratorModelAdapter:
         except (TypeError, ValueError) as error:
             return web.json_response({"error": str(error)}, status=400)
 
-        turn_id = self._turn_counts.get(session_id, 0)
-        self._turn_counts[session_id] = turn_id + 1
+        turn_id = self.turn_counts.get(session_id, 0)
+        self.turn_counts[session_id] = turn_id + 1
         request_id = f"{session_id}/turn={turn_id}"
         try:
-            completion = await self._generate_fn(
+            completion = await self.generate_fn(
                 prompt_token_ids,
                 request_id=request_id,
                 routing_session_id=session_id,
@@ -171,7 +171,7 @@ class GeneratorModelAdapter:
                 status=502,
             )
 
-        self._evidence.setdefault(session_id, []).append(
+        self.evidence.setdefault(session_id, []).append(
             GenerationEvidence(
                 min_policy_version=completion.min_policy_version,
                 max_policy_version=completion.max_policy_version,
@@ -207,7 +207,8 @@ class GeneratorModelAdapter:
         )
 
 
-def _token_id_list(value: object, *, field_name: str) -> list[int]:
+def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
+    """Validate an untyped JSON value as integer token IDs and return a copy."""
     if not isinstance(value, list) or any(
         isinstance(token_id, bool) or not isinstance(token_id, int)
         for token_id in value
@@ -240,7 +241,7 @@ def _sampling_config(value: object):
 
     stop_token_ids = value.get("stop_token_ids")
     if stop_token_ids is not None:
-        stop_token_ids = _token_id_list(
+        stop_token_ids = _validate_token_ids(
             stop_token_ids,
             field_name="stop_token_ids",
         )

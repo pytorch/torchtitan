@@ -63,8 +63,11 @@ class VerifiersEnvServer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        # TOML file defining the Verifiers environment and server pool.
         config_path: str
+        # ZMQ address for the local server; port 0 requests an ephemeral port.
         bind_address: str = "tcp://127.0.0.1:0"
+        # Maximum time to wait for the server process to publish its address.
         startup_timeout_sec: float = 120.0
 
         def __post_init__(self) -> None:
@@ -76,16 +79,16 @@ class VerifiersEnvServer(Configurable):
                 raise ValueError("startup_timeout_sec must be positive")
 
     def __init__(self, config: Config) -> None:
-        self._config = config
-        self._process: Any = None
-        self._address_queue: Any = None
-        self._parent_conn: Any = None
-        self._address: str | None = None
+        self.config = config
+        self.process: Any = None
+        self.address_queue: Any = None
+        self.parent_conn: Any = None
+        self.address: str | None = None
 
     async def start(self) -> str:
         """Start the server and return its resolved ZMQ address."""
-        if self._address is not None:
-            return self._address
+        if self.address is not None:
+            return self.address
 
         context = multiprocessing.get_context("spawn")
         address_queue = context.Queue()
@@ -93,8 +96,8 @@ class VerifiersEnvServer(Configurable):
         process = context.Process(
             target=_serve_env_from_config,
             args=(
-                self._config.config_path,
-                self._config.bind_address,
+                self.config.config_path,
+                self.config.bind_address,
                 address_queue,
                 child_conn,
             ),
@@ -103,7 +106,7 @@ class VerifiersEnvServer(Configurable):
         process.start()
         child_conn.close()
 
-        deadline = asyncio.get_running_loop().time() + self._config.startup_timeout_sec
+        deadline = asyncio.get_running_loop().time() + self.config.startup_timeout_sec
         while True:
             try:
                 address = address_queue.get_nowait()
@@ -127,25 +130,25 @@ class VerifiersEnvServer(Configurable):
                     )
                     raise TimeoutError(
                         "Verifiers EnvServer did not publish its address within "
-                        f"{self._config.startup_timeout_sec} seconds"
+                        f"{self.config.startup_timeout_sec} seconds"
                     ) from None
                 await asyncio.sleep(0.1)
 
-        self._process = process
-        self._address_queue = address_queue
-        self._parent_conn = parent_conn
-        self._address = address
+        self.process = process
+        self.address_queue = address_queue
+        self.parent_conn = parent_conn
+        self.address = address
         return address
 
     async def close(self) -> None:
         """Stop the EnvServer and release its multiprocessing resources."""
-        process = self._process
-        address_queue = self._address_queue
-        parent_conn = self._parent_conn
-        self._process = None
-        self._address_queue = None
-        self._parent_conn = None
-        self._address = None
+        process = self.process
+        address_queue = self.address_queue
+        parent_conn = self.parent_conn
+        self.process = None
+        self.address_queue = None
+        self.parent_conn = None
+        self.address = None
         await self._close_resources(
             process=process,
             address_queue=address_queue,

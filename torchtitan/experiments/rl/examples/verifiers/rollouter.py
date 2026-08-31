@@ -52,5 +52,4 @@ class VerifiersMathRollouter(VerifiersRollouter):
                 error_reward=0.0,
             )
         )
-        model_name: str = "Qwen/Qwen3-4B-Base"
         max_model_len: int = 10240

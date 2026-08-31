@@ -9,7 +9,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, fields
 
-from renderers import config_from_name, create_renderer, Renderer
+from renderers import (
+    config_from_name,
+    create_renderer,
+    Renderer,
+    RendererConfig as RenderersConfig,
+)
 
 from torchtitan.config import Configurable
 
@@ -70,13 +75,8 @@ class RendererConfig(Configurable.Config):
     preserve_all_thinking: bool | None = None
     preserve_thinking_between_tool_calls: bool | None = None
 
-    def build(self, *, tokenizer_path: str) -> Renderer:
-        # TODO(renderers#70): use TorchTitan's tokenizer once `renderers` supports
-        # bring-your-own-tokenizer (PR adds a Tokenizer protocol; drops transformers).
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-
+    def as_renderers_config(self) -> RenderersConfig | None:
+        """Convert this TorchTitan config to the underlying renderers config."""
         # `name=None` (or "auto") -> let `create_renderer` resolve from the tokenizer.
         renderer_name = _RENDERER_BY_MODEL.get(self.name, self.name)
         if renderer_name == "muse_glimmer":
@@ -96,7 +96,7 @@ class RendererConfig(Configurable.Config):
             _muse_glimmer_renderer.register()
         renderer_config = config_from_name(renderer_name) if renderer_name else None
         if renderer_config is None:
-            return create_renderer(tokenizer, None)
+            return None
 
         # Rebuild the typed config and pass parameters
         # that are not None and are supported
@@ -111,4 +111,12 @@ class RendererConfig(Configurable.Config):
         logger.info(
             f"Using renderer {renderer_name}, of type {config_type}, with args {args}"
         )
-        return create_renderer(tokenizer, config_type(**args))
+        return config_type(**args)
+
+    def build(self, *, tokenizer_path: str) -> Renderer:
+        # TODO(renderers#70): use TorchTitan's tokenizer once `renderers` supports
+        # bring-your-own-tokenizer (PR adds a Tokenizer protocol; drops transformers).
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        return create_renderer(tokenizer, self.as_renderers_config())
