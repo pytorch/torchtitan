@@ -18,6 +18,7 @@ from torchtitan.experiments.rl.rollout.verifiers import (
 from torchtitan.experiments.rl.rubrics import Rubric
 
 
+# Dotted module path registered as this example's local Verifiers taskset plugin.
 _TASKSET_ID = "torchtitan.experiments.rl.examples.verifiers.taskset"
 
 
