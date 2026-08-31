@@ -16,10 +16,12 @@ from queue import Empty
 from typing import Any
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.rollout.verifiers.dataset import _load_taskset_id
+from torchtitan.experiments.rl.rollout.verifiers.dataset import (
+    register_local_taskset_alias,
+)
 
 
-def _serve_env_from_config(
+def _run_env_server_process(
     config_path: str,
     address: str,
     address_queue: Any,
@@ -43,7 +45,7 @@ def _serve_env_from_config(
         data = tomllib.load(file)
     taskset = data.get("env", {}).get("taskset", {})
     if taskset_id := taskset.get("id"):
-        taskset["id"] = _load_taskset_id(taskset_id)
+        taskset["id"] = register_local_taskset_alias(taskset_id)
     env_config = resolve_env_config(data.get("env"))
     serve_config = ServeConfig.model_validate(data.get("serve", {}))
     serve_env(
@@ -94,7 +96,7 @@ class VerifiersEnvServer(Configurable):
         address_queue = context.Queue()
         parent_conn, child_conn = context.Pipe()
         process = context.Process(
-            target=_serve_env_from_config,
+            target=_run_env_server_process,
             args=(
                 self.config.config_path,
                 self.config.bind_address,
@@ -114,7 +116,7 @@ class VerifiersEnvServer(Configurable):
             except Empty:
                 if not process.is_alive():
                     exit_code = process.exitcode
-                    await self._close_resources(
+                    await self._close_server_process_resources(
                         process=process,
                         address_queue=address_queue,
                         parent_conn=parent_conn,
@@ -123,7 +125,7 @@ class VerifiersEnvServer(Configurable):
                         f"Verifiers EnvServer exited with code {exit_code}"
                     ) from None
                 if asyncio.get_running_loop().time() >= deadline:
-                    await self._close_resources(
+                    await self._close_server_process_resources(
                         process=process,
                         address_queue=address_queue,
                         parent_conn=parent_conn,
@@ -149,14 +151,14 @@ class VerifiersEnvServer(Configurable):
         self.address_queue = None
         self.parent_conn = None
         self.address = None
-        await self._close_resources(
+        await self._close_server_process_resources(
             process=process,
             address_queue=address_queue,
             parent_conn=parent_conn,
         )
 
     @staticmethod
-    async def _close_resources(
+    async def _close_server_process_resources(
         *,
         process: Any,
         address_queue: Any,

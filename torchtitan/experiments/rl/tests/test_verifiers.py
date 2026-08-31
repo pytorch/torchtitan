@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from aiohttp import ClientSession
 
 from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
-    GenerationEvidence,
+    GenerationMetadata,
     GeneratorModelAdapter,
 )
 from torchtitan.experiments.rl.rollout.verifiers.rollouter import (
@@ -31,7 +31,7 @@ def test_trainable_token_spans() -> None:
     ]
 
 
-def test_verifiers_trace_preserves_generation_evidence() -> None:
+def test_verifiers_trace_preserves_generation_metadata() -> None:
     node = SimpleNamespace(
         token_ids=[10, 11, 12, 13],
         mask=[False, False, True, True],
@@ -50,8 +50,8 @@ def test_verifiers_trace_preserves_generation_evidence() -> None:
     )
     turns = VerifiersRollouter.trace_to_rollout_turns(
         trace=trace,
-        evidence=[
-            GenerationEvidence(
+        generation_metadata=[
+            GenerationMetadata(
                 min_policy_version=3,
                 max_policy_version=4,
                 metrics=[],
@@ -121,7 +121,7 @@ def test_model_adapter_forwards_token_request() -> None:
                 )
                 assert response.status == 200
                 payload = await response.json()
-            evidence = adapter.take_evidence("group=1/rollout=2")
+            generation_metadata = adapter.pop_generation_metadata("group=1/rollout=2")
         finally:
             await adapter.close()
 
@@ -131,7 +131,8 @@ def test_model_adapter_forwards_token_request() -> None:
         assert received["sampling_config"].seed == 4
         assert payload["choices"][0]["token_ids"] == [31, 32]
         assert [
-            (item.min_policy_version, item.max_policy_version) for item in evidence
+            (item.min_policy_version, item.max_policy_version)
+            for item in generation_metadata
         ] == [(7, 8)]
 
     asyncio.run(run_test())
@@ -172,13 +173,13 @@ def test_model_adapter_rejects_aborted_generation() -> None:
                 )
                 assert response.status == 502
                 payload = await response.json()
-            evidence = adapter.take_evidence("group=1/rollout=2")
+            generation_metadata = adapter.pop_generation_metadata("group=1/rollout=2")
         finally:
             await adapter.close()
 
         assert payload == {
             "error": "generation finished without a usable completion: abort"
         }
-        assert evidence == []
+        assert generation_metadata == []
 
     asyncio.run(run_test())

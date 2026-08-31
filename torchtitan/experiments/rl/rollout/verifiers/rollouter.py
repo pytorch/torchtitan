@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
     from torchtitan.experiments.rl.renderer import RendererConfig
     from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
-        GenerationEvidence,
+        GenerationMetadata,
         GeneratorModelAdapter,
     )
 
@@ -259,10 +259,10 @@ class VerifiersRollouter(Rollouter):
                 f"{len(traces)}"
             )
         trace = traces[0]
-        evidence = self._adapter.take_evidence(trace.id)
+        generation_metadata = self._adapter.pop_generation_metadata(trace.id)
         turns = self.trace_to_rollout_turns(
             trace=trace,
-            evidence=evidence,
+            generation_metadata=generation_metadata,
             group_id=group_id,
             rollout_id=rollout_id,
         )
@@ -292,19 +292,21 @@ class VerifiersRollouter(Rollouter):
     def trace_to_rollout_turns(
         *,
         trace: Any,
-        evidence: list[GenerationEvidence],
+        generation_metadata: list[GenerationMetadata],
         group_id: int,
         rollout_id: int,
     ) -> list[RolloutTurn]:
         successful_calls = [call for call in trace.calls if call.node is not None]
-        if len(successful_calls) != len(evidence):
+        if len(successful_calls) != len(generation_metadata):
             raise ValueError(
                 "Verifiers trace/model-adapter call count mismatch: "
-                f"trace={len(successful_calls)}, adapter={len(evidence)}"
+                f"trace={len(successful_calls)}, adapter={len(generation_metadata)}"
             )
-        evidence_by_node = {
-            call.node: call_evidence
-            for call, call_evidence in zip(successful_calls, evidence, strict=True)
+        metadata_by_node = {
+            call.node: call_metadata
+            for call, call_metadata in zip(
+                successful_calls, generation_metadata, strict=True
+            )
         }
         node_index = {id(node): index for index, node in enumerate(trace.nodes)}
         trained_nodes: set[int] = set()
@@ -323,10 +325,10 @@ class VerifiersRollouter(Rollouter):
                     else:
                         trained_nodes.add(index)
                 for start, end in _trainable_token_spans(mask):
-                    call_evidence = evidence_by_node.get(index)
-                    if call_evidence is None:
+                    call_metadata = metadata_by_node.get(index)
+                    if call_metadata is None:
                         raise ValueError(
-                            f"sampled Verifiers node {index} has no generation evidence"
+                            f"sampled Verifiers node {index} has no generation metadata"
                         )
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
@@ -344,9 +346,9 @@ class VerifiersRollouter(Rollouter):
                             completion_logprobs=list(
                                 logprobs[absolute_start:absolute_end]
                             ),
-                            min_policy_version=call_evidence.min_policy_version,
-                            max_policy_version=call_evidence.max_policy_version,
-                            metrics=list(call_evidence.metrics),
+                            min_policy_version=call_metadata.min_policy_version,
+                            max_policy_version=call_metadata.max_policy_version,
+                            metrics=list(call_metadata.metrics),
                         )
                     )
                 branch_offset += len(node.token_ids)
