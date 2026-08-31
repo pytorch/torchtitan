@@ -31,10 +31,17 @@ python3 .claude/skills/cuda_graph_trace_compaction/scripts/compact_cuda_graph_tr
 
 `-o` sets the output path, `--overwrite` replaces an existing one.
 
+Single-rank compaction includes rank-local PP arrows (`UNSHARD -> compute`,
+`RECV -> compute`, and `compute -> SEND`). Cross-rank `SEND -> RECV` arrows
+are added only when merging PP ranks.
+
 Merging aligns ranks on a common `baseTimeNanoseconds`, stacks them in
 pipeline order, and draws flow arrows between the
 `PP:<stage><op><microbatch>` annotations that `torch.distributed.pipelining`
 emits (`SEND_F -> RECV_F` across ranks, `RECV_F -> F -> SEND_F` within one).
+It also connects each `PP:<stage>UNSHARD` annotation on the first two
+all-gather lanes to the first subsequent same-stage compute annotation on the
+first compute lane.
 No annotations means no arrows, but the merge still works.
 
 The script prints a JSON summary and validates itself, raising if a measured
@@ -43,9 +50,9 @@ slice changed or a lane ended up with overlapping slices. Worth a look:
 `pp_send_recv_unmatched` (nonzero usually means a truncated capture window,
 not a pipeline bug).
 
-Rank order comes from a `torchtitan_real_pp` group in
-`distributedInfo.pg_config`; absent that it sorts by global rank, which is
-only correct when PP rank order matches global rank order.
+Rank order comes from a `torchtitan_real_pp` group or a `mesh_pp` group
+description in `distributedInfo.pg_config`; absent that it sorts by global
+rank, which is only correct when PP rank order matches global rank order.
 
 ## Tests
 
