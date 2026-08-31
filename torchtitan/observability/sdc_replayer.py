@@ -345,9 +345,9 @@ class SDCReplayer(Configurable):
 
         def __post_init__(self) -> None:
             if self.num_steps != -1 and self.num_steps < 1:
-                raise ValueError("sdc_replay.num_steps must be -1 or at least 1.")
+                raise ValueError("sdc_replayer.num_steps must be -1 or at least 1.")
             if self.num_replays < 1:
-                raise ValueError("sdc_replay.num_replays must be at least 1.")
+                raise ValueError("sdc_replayer.num_replays must be at least 1.")
 
     def __init__(
         self,
