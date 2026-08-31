@@ -201,6 +201,20 @@ class MXFP8LinearQATConverter(QuantizationConverter):
         return model_config
 
 
+def _mxfp8_wrapper_of(param: torch.Tensor) -> torch.Tensor:
+    """Return the torchao mxfp8 weight-wrapper tensor behind ``param``.
+
+    The wrapper can sit under a ``DTensor`` (EP/TP shards the outer tensor) and/or
+    under ``nn.Parameter`` (``quantize_`` stores it as the parameter's ``.data``).
+    The generator's spmd sharding produces plain local shards, so the DTensor level
+    is not always present -- unwrap whichever levels exist.
+    """
+    inner = param.to_local() if isinstance(param, DTensor) else param
+    if not hasattr(inner, "config") and hasattr(inner, "data"):
+        inner = inner.data
+    return inner
+
+
 class _MXFP8GroupedExpertsWeightCacheMixin:
     """Mixin adding an inference weight cache to an mxfp8 grouped-experts module.
 
@@ -241,11 +255,38 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
         # (E, F, D) -> (E, D, F) == (E, K, N).
         return hp.bfloat16().transpose(-2, -1)
 
+    def _ensure_mxfp8_wrapped(self) -> None:
+        """Re-apply the torchao mxfp8 weight wrapper if parallelism dropped it.
+
+        ``quantize_`` in ``__init__`` swaps each expert weight for an
+        ``MXFP8TrainingWeightWrapperTensor`` carrying the op config. The generator
+        shards via ``spmd_distribute_tensor`` -> ``spmd.shard``, which returns a
+        plain sliced tensor and so discards the subclass, leaving a bare
+        ``Parameter`` with no ``.config``. Re-wrap the (already sharded) weights so
+        the cached forward matches the dynamic one. No-op if the wrapper survived.
+        """
+        op_config = getattr(self, "_mxfp8_wrapper_op_config", None)
+        if op_config is None:
+            return
+        for name in self._mxfp8_cached_weights:
+            param = getattr(self, name, None)
+            if param is None:
+                continue
+            if hasattr(_mxfp8_wrapper_of(param), "config"):
+                continue
+            from torchao.quantization.quant_api import quantize_
+
+            quantize_(self, config=op_config, filter_fn=lambda mod, _fqn: mod is self)
+            return
+
     def update_mxfp8_weight_cache(self) -> None:
         from torchao.prototype.moe_training.mxfp8_grouped_mm import (
             quantize_grouped_weight_for_cache,
         )
+
         from torchao.prototype.moe_training.utils import unwrap_weight
+
+        self._ensure_mxfp8_wrapped()
 
         # Reuse the existing cache tensors in place when present so their storage
         # (and thus device pointers) stays stable across weight syncs. A CUDA graph
@@ -267,7 +308,7 @@ class _MXFP8GroupedExpertsWeightCacheMixin:
                 param = getattr(self, name)
                 # DTensor (outer) wraps the mxfp8 weight-wrapper (local) under EP/TP;
                 # mirror GroupedExperts.forward, which uses the local tensor.
-                wrapper = param.to_local() if isinstance(param, DTensor) else param
+                wrapper = _mxfp8_wrapper_of(param)
                 # The mxfp8 op config (kernel preference, scale mode) lives on the
                 # weight wrapper; read it so the cached forward matches the dynamic one.
                 kernel_preference = wrapper.config.kernel_preference  # type: ignore[missing-attribute]
@@ -476,6 +517,9 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
                 scale_calculation_mode=ScaleCalculationMode.RCEIL,
                 bf16_bwd=True,
             )
+            # Kept so the wrapper can be re-applied if parallelism strips it
+            # (see _ensure_mxfp8_wrapped).
+            self._mxfp8_wrapper_op_config = op_config
             quantize_(
                 self,
                 config=op_config,

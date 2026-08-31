@@ -128,6 +128,9 @@ def _get_mxfp8_qat_fused_grouped_experts_cls() -> type:
                 scale_calculation_mode=ScaleCalculationMode.RCEIL,
                 bf16_bwd=True,
             )
+            # Kept so the wrapper can be re-applied if parallelism strips it
+            # (see _ensure_mxfp8_wrapped in components/quantization/mx.py).
+            self._mxfp8_wrapper_op_config = op_config
             quantize_(
                 self,
                 config=op_config,
