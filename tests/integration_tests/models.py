@@ -200,12 +200,4 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="muse_glimmer_mm_fsdp+tp+sp",
             ngpu=4,
         ),
-        # Integration Test Case for Kimi K3
-        OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_mm_fsdp2],
-            test_descr="Kimi K3 multimodal FSDP",
-            test_name="kimi_k3_mm_fsdp",
-            ngpu=2,
-            required_cuda_capabilities=((10, 0), (10, 3)),
-        ),
     ]

@@ -18,7 +18,6 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -70,9 +69,6 @@ def _qwen3_4b_dapo_math_config(
             validation=ValidationConfig(
                 num_samples=num_validation_samples,
             ),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=DapoMathRollouter.Config(
@@ -109,7 +105,10 @@ def _qwen3_4b_dapo_math_config(
                 warmup_steps=0,
                 min_lr_factor=1.0,
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
+                max_context_length=max_total_tokens,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_replicate_degree=1,
                 data_parallel_shard_degree=1,
