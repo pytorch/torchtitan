@@ -18,13 +18,13 @@ pytest.importorskip("verifiers")
 
 from torchtitan.experiments.rl.examples.dapo_math import DapoMathSample
 from torchtitan.experiments.rl.examples.verifiers import taskset
+from torchtitan.experiments.rl.examples.verifiers.components import VerifiersTaskDataset
 from torchtitan.experiments.rl.examples.verifiers.config_registry import (
     rl_dapo_qwen3_4b_verifiers_8k,
 )
 from torchtitan.experiments.rl.examples.verifiers.rollouter import (
     VerifiersMathRollouter,
 )
-from torchtitan.experiments.rl.rollout.verifiers import VerifiersTaskDataset
 
 
 def test_verifiers_task_scores_math_response() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from torchtitan.experiments.rl.rollout.verifiers import (
+from torchtitan.experiments.rl.examples.verifiers.components import (
     VerifiersEnvServer,
     VerifiersRewardFn,
     VerifiersRollouter,
