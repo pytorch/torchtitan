@@ -265,6 +265,16 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
         return ComputeLayout(
             shardings_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
+                MeshAxisName.TP.value: Shard(0),
+            },
+        )
+
+    if parallelism.tensor_parallel_degree > 1:
+        return ComputeLayout(
+            shardings_by_mesh_axis={
+                MeshAxisName.EFSDP.value: Shard(0),
+                MeshAxisName.EP.value: Shard(0),
+                MeshAxisName.TP.value: Shard(0),
             },
         )
 
@@ -295,6 +305,7 @@ def _dist_muon_optimizer(
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
+            MeshAxisName.TP.value: Owned(),
         },
     )
     per_query_head = ComputeLayout(
@@ -302,7 +313,11 @@ def _dist_muon_optimizer(
             MeshAxisName.DP_SHARD.value: BlockShard(
                 dim=0,
                 block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
-            )
+            ),
+            MeshAxisName.TP.value: BlockShard(
+                dim=0,
+                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+            ),
         },
     )
     per_key_value_head = ComputeLayout(
@@ -310,7 +325,11 @@ def _dist_muon_optimizer(
             MeshAxisName.DP_SHARD.value: BlockShard(
                 dim=0,
                 block_size=attention.qk_nope_head_dim + attention.v_head_dim,
-            )
+            ),
+            MeshAxisName.TP.value: BlockShard(
+                dim=0,
+                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+            ),
         },
     )
     per_expert = _per_expert_compute_layout(parallelism)
@@ -516,15 +535,6 @@ class _KimiTrainerConfig(Trainer.Config):
             self.optimizer,
             parallelism=self.parallelism,
         )
-        # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
-        if self.parallelism.tensor_parallel_degree > 1:
-            # Fail during config parsing, before TP/FSDP creates _StridedShard
-            # storage.
-            raise ValueError(
-                "Kimi DistMuon currently requires "
-                "tensor_parallel_degree=1: tensor parallelism can produce "
-                "unsupported _StridedShard parameter layouts."
-            )
         # No PP gate: DistMuon is PP-safe. The one precondition -- every stage
         # must own at least one transformer layer, or its Muon pattern claims
         # nothing and OptimizersContainer rejects the empty param group -- needs

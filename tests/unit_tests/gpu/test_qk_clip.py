@@ -16,8 +16,9 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.distributed.tensor.debug import CommDebugMode
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -285,3 +286,111 @@ class QKClipDistributedTest(DTensorTestBase):
         # One packed MAX all-reduce covers every layer and head; the 8 weights
         # this model clips must add nothing on top of it.
         self.assertEqual(total, 1, f"expected one collective, got {collectives}")
+
+
+@pytest.mark.multi_gpu
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class QKClipTensorParallelTest(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @property
+    def device_type(self) -> str:
+        return "cuda"
+
+    @with_comms
+    def test_dp_tp_head_scales_match_flex_shard_storage(self) -> None:
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        num_heads = 4
+        qk_nope_head_dim = 2
+        qk_rope_head_dim = 1
+        v_head_dim = 2
+        in_features = 2
+        storage_placements = (
+            _StridedShard(0, split_factor=mesh["tp"].size()),
+            Shard(0),
+        )
+
+        def weight_module(num_rows: int) -> nn.Module:
+            module = nn.Module()
+            module.register_parameter(
+                "weight",
+                nn.Parameter(
+                    distribute_tensor(
+                        torch.ones(num_rows, in_features, device=device),
+                        mesh,
+                        storage_placements,
+                    )
+                ),
+            )
+            return module
+
+        attention = Attention.__new__(Attention)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 1
+        attention.qk_nope_head_dim = qk_nope_head_dim
+        attention.qk_rope_head_dim = qk_rope_head_dim
+        attention.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        attention.v_head_dim = v_head_dim
+        attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
+        attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
+        attention.inner_attention = QKClipFlexAttention.Config().build()
+
+        coordinate = mesh.get_coordinate()
+        assert coordinate is not None
+        dp_rank, tp_rank = coordinate
+        maxima_by_coordinate = (
+            ((50.0, 400.0), (25.0, 800.0)),
+            ((200.0, 50.0), (500.0, 40.0)),
+        )
+        attention.inner_attention.max_attention_logits_N.append(
+            torch.tensor(maxima_by_coordinate[dp_rank][tp_rank], device=device)
+        )
+        model = nn.Module()
+        model.add_module("attention", attention)
+
+        with CommDebugMode() as comm_mode:
+            qk_clip([model], reduction_mesh=mesh["dp_shard"])
+
+        collectives = {
+            str(op): count for op, count in comm_mode.get_comm_counts().items() if count
+        }
+        self.assertEqual(
+            sum(collectives.values()),
+            1,
+            f"expected one collective, got {collectives}",
+        )
+
+        scales_N = torch.tensor((0.5, 0.25, 0.2, 0.125), device=device)
+        q_expected_NDI = torch.ones(
+            num_heads,
+            attention.qk_head_dim,
+            in_features,
+            device=device,
+        )
+        q_expected_NDI[:, :qk_nope_head_dim].mul_(scales_N.view(-1, 1, 1).pow(0.5))
+        q_expected_NDI[:, qk_nope_head_dim:].mul_(scales_N.view(-1, 1, 1))
+        q_weight = attention.wq_b.weight
+        assert isinstance(q_weight, DTensor)
+        torch.testing.assert_close(q_weight.full_tensor(), q_expected_NDI.flatten(0, 1))
+
+        kv_expected_NDI = torch.ones(
+            num_heads,
+            qk_nope_head_dim + v_head_dim,
+            in_features,
+            device=device,
+        )
+        kv_expected_NDI[:, :qk_nope_head_dim].mul_(scales_N.view(-1, 1, 1).pow(0.5))
+        kv_weight = attention.wkv_b.weight
+        assert isinstance(kv_weight, DTensor)
+        torch.testing.assert_close(
+            kv_weight.full_tensor(),
+            kv_expected_NDI.flatten(0, 1),
+        )
+        self.assertFalse(attention.inner_attention.max_attention_logits_N)
