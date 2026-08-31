@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 # Shape suffix legend:
-#   T = packed tokens, N = attention heads, H = head dimension, D = model dim
+#   T = packed tokens, H = attention heads, K = query/key head dimension,
+#   V = value head dimension, D = model dimension
 
 import unittest
 from unittest.mock import patch
@@ -63,11 +64,11 @@ class TestPackedVarlenAttention(unittest.TestCase):
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])
         metadata = create_varlen_metadata_for_document(positions_T)
 
-        def _identity_varlen(q_TNH, k_TNH, v_TNH, *args, **kwargs):
-            self.assertEqual(q_TNH.ndim, 3)
-            self.assertEqual(k_TNH.ndim, 3)
-            self.assertEqual(v_TNH.ndim, 3)
-            return q_TNH
+        def _identity_varlen(q_THK, k_THK, v_THV, *args, **kwargs):
+            self.assertEqual(q_THK.ndim, 3)
+            self.assertEqual(k_THK.ndim, 3)
+            self.assertEqual(v_THV.ndim, 3)
+            return q_THK
 
         with patch(
             "torchtitan.models.common.attention._varlen_attn",
@@ -77,7 +78,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
 
         self.assertEqual(out_TD.shape, x_TD.shape)
 
-    def test_tnh_sharding_uses_varlen_argument_names(self):
+    def test_thk_thv_sharding_uses_varlen_argument_names(self):
         from torchtitan.models.llama3 import llama3_configs
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
@@ -88,45 +89,45 @@ class TestPackedVarlenAttention(unittest.TestCase):
         assert sharding is not None
         self.assertEqual(
             set(sharding.in_src_shardings or {}),
-            {"q_TNH", "k_TNH", "v_TNH"},
+            {"q_THK", "k_THK", "v_THV"},
         )
-        q_layout = (sharding.in_src_shardings or {})["q_TNH"]
-        k_dst_layout = (sharding.in_dst_shardings or {})["k_TNH"]
+        q_layout = (sharding.in_src_shardings or {})["q_THK"]
+        k_dst_layout = (sharding.in_dst_shardings or {})["k_THK"]
         axis_types = _per_axis_types(q_layout)
         self.assertEqual(axis_types[MeshAxisName.DP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.CP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.TP], spmd.S(1))
         self.assertEqual(_per_axis_types(k_dst_layout)[MeshAxisName.CP], spmd.R)
 
-    def test_out_transform_receives_tn_lse(self):
+    def test_out_transform_receives_th_lse(self):
         num_tokens, num_heads, head_dim = 5, 2, 4
-        q_TNH = torch.randn(num_tokens, num_heads, head_dim)
+        q_THK = torch.randn(num_tokens, num_heads, head_dim)
         positions_T = torch.tensor([0, 1, 0, 1, 2])
         metadata = create_varlen_metadata_for_document(positions_T)
         inner_attention = VarlenAttention.Config().build()
 
         def _varlen_with_lse(q, k, v, *args, **kwargs):
-            lse_NT = torch.randn(num_heads, num_tokens)
-            return q, lse_NT
+            lse_HT = torch.randn(num_heads, num_tokens)
+            return q, lse_HT
 
-        def _check_shapes(out_TNH, lse_TN):
-            self.assertEqual(out_TNH.shape, q_TNH.shape)
-            self.assertEqual(lse_TN.shape, (num_tokens, num_heads))
-            return out_TNH
+        def _check_shapes(out_THV, lse_TH):
+            self.assertEqual(out_THV.shape, q_THK.shape)
+            self.assertEqual(lse_TH.shape, (num_tokens, num_heads))
+            return out_THV
 
         with patch(
             "torchtitan.models.common.attention._varlen_attn",
             side_effect=_varlen_with_lse,
         ):
-            out_TNH = inner_attention(
-                q_TNH,
-                q_TNH,
-                q_TNH,
+            out_THV = inner_attention(
+                q_THK,
+                q_THK,
+                q_THK,
                 attention_masks=metadata,
                 out_transform=_check_shapes,
             )
 
-        self.assertEqual(out_TNH.shape, q_TNH.shape)
+        self.assertEqual(out_THV.shape, q_THK.shape)
 
     def test_llama_decoder_preserves_td_shape(self):
         from torchtitan.models.llama3 import llama3_configs
@@ -138,8 +139,8 @@ class TestPackedVarlenAttention(unittest.TestCase):
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])
         metadata = model.get_attention_masks(positions_T)
 
-        def _identity_varlen(q_TNH, k_TNH, v_TNH, *args, **kwargs):
-            return q_TNH
+        def _identity_varlen(q_THK, k_THK, v_THV, *args, **kwargs):
+            return q_THK
 
         with patch(
             "torchtitan.models.common.attention._varlen_attn",
