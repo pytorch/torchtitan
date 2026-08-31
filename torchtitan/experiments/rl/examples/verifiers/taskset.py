@@ -4,7 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Verifiers taskset for the DAPO math datasets."""
+"""Register TorchTitan's DAPO-Math and AIME datasets with Verifiers.
+
+Verifiers 0.3.0 does not provide a v1 taskset for these datasets. This module
+also serves as an example of exposing a custom dataset as a Verifiers taskset.
+"""
 
 from collections.abc import Iterator
 from itertools import islice
