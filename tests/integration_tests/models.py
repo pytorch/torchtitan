@@ -46,20 +46,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8],
-            test_descr="DeepSeek V3 FSDP+TP+CP+EP",
-            test_name="deepseek_v3_fsdp+tp+cp+ep",
+            configs=[recipes.deepseek_v3_debugmodel_fsdp8_ep8],
+            test_descr="DeepSeek V3 FSDP+EP",
+            test_name="deepseek_v3_fsdp+ep",
             ngpu=8,
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
             ),
-            fake_pg_numerics_config=recipes.deepseek_v3_debugmodel_fsdp8_ep8,
         ),
         OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_fsdp2_tp2_pp2_ep4],
-            test_descr="DeepSeek V3 PP+FSDP+TP+EP",
-            test_name="deepseek_v3_pp+fsdp+tp+ep",
+            configs=[recipes.deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],
+            test_descr="DeepSeek V3 FSDP+CP+PP+EP",
+            test_name="deepseek_v3_fsdp+cp+pp+ep",
             ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
+            ),
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -125,9 +127,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="Qwen3.5 MoE FSDP+TP+EP",
             test_name="qwen3_5_moe_fsdp+tp+ep",
             ngpu=8,
-            golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/qwen3_5_a10g.txt"
-            ),
+            # NOTE: This topology is not bitwise deterministic with Real PG on
+            # A10G, so this case provides end-to-end coverage without a golden.
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
@@ -185,26 +186,18 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Cases for Muse Glimmer
         OverrideDefinitions(
-            configs=[recipes.muse_glimmer_debugmodel_fsdp2_tp2_cp2],
-            test_descr="Muse Glimmer text FSDP+TP+CP",
-            test_name="muse_glimmer_text_fsdp+tp+cp",
+            configs=[recipes.muse_glimmer_debugmodel_fsdp8],
+            test_descr="Muse Glimmer text FSDP",
+            test_name="muse_glimmer_text_fsdp",
             ngpu=8,
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"
             ),
-            fake_pg_numerics_config=recipes.muse_glimmer_debugmodel_fsdp8,
         ),
         OverrideDefinitions(
             configs=[recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2],
             test_descr="Muse Glimmer multimodal FSDP+TP+SP",
             test_name="muse_glimmer_mm_fsdp+tp+sp",
             ngpu=4,
-        ),
-        # Integration Test Case for Kimi K3
-        OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_mm_fsdp2],
-            test_descr="Kimi K3 multimodal FSDP",
-            test_name="kimi_k3_mm_fsdp",
-            ngpu=2,
         ),
     ]

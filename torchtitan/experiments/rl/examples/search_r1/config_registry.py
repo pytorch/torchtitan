@@ -33,7 +33,6 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -66,9 +65,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=SearchR1Rollouter.Config(
@@ -83,7 +79,10 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=4096,
+                max_context_length=4096,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
@@ -186,10 +185,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
-            batcher=Batcher.Config(
-                # TODO: TBD local_batch_size, seq_len
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
-            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=SearchR1Rollouter.Config(
@@ -203,6 +198,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
+            ),
+            # TODO: Tune the trainer token budget and maximum context length.
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=4096,
+                max_context_length=4096,
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=8,  # TODO: TBD

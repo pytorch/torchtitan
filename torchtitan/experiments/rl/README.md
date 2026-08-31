@@ -116,13 +116,18 @@ uv pip install -r torchtitan/experiments/rl/requirements.txt
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 ```
 
-2. Install Flash Attention 3 kernels:
+2. Install the Flash Attention kernels for your GPU architecture:
 ```bash
-# Flash Attention v3 (recommended for H100/H200 and newer GPUs)
+# Hopper (H100/H200, SM90): Flash Attention 3
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
+
+# Blackwell (GB200/GB300, SM100): Flash Attention 4
+# Newer FA4 betas require apache-tvm-ffi>=0.1.12, but vLLM pins 0.1.11.
+uv pip install "flash-attn-4[cu13]==4.0.0b19"
 ```
 
-**NOTE:** FA2 is bundled with PyTorch and will be used automatically on older GPUs (e.g. A100) that don't support FA3.
+TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
+bundled with PyTorch on older GPUs such as A100.
 
 3. Install batch-invariant ops if you need to run batch-invariant mode (Triton kernels for bitwise-reproducible training):
 ```bash
@@ -170,15 +175,18 @@ For background, see [train/inference mismatch in asynchronous RL](https://yichua
 
 ## Observability
 
-TitanRL exposes three complementary views of a run:
+TitanRL exposes four complementary views of a run:
 
 - **System timelines.** The structured logger emits per-rank JSONL events. Its Gantt generator turns trace spans into a cross-actor timeline for finding idle time, overlap, and bottlenecks. [Read the structured logger guide](../../observability/structured_logger/README.md).
 - **Training curves.** Typed metrics from the rollout, controller, trainer, and loss are reduced once per step and sent to the console. [Read the RL metrics guide](./observability/metrics/README.md).
+- **Inference engine health.** vLLM engine metrics can be written to JSONL or exported to an OTLP collector. [Read the vLLM engine metrics guide](./observability/metrics/README.md#vllm-engine-metrics).
 - **Rollout inspection.** The rollout logger (`RolloutSampleRecorder`) writes selected training and validation rollouts to `rollout_samples.jsonl`. [Inspect the rollout recorder](./rollout_recorder.py).
 
-Together these answer three different debugging questions: what the distributed system was doing, how the run was learning, and what the model actually produced.
+Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
 Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
+
+> **TODO:** Add [`Profiler.Config`](https://github.com/pytorch/torchtitan/blob/d208df86f4259711d4ae502fcb54ab28b15297e7/torchtitan/trainer.py#L86) support to `PolicyTrainer`, matching the core trainer's GPU profiler support.
 
 ## Monarch specifics
 

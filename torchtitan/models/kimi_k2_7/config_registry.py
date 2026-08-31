@@ -37,7 +37,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MultiModalProcessor,
 )
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
+from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
@@ -63,7 +63,7 @@ def _kimi_multimodal_dataloader(
         max_pixels=16_777_216,
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
-        resize_fn=resize_to_patch_budget,
+        resize_fn=resize_to_navit_patch_grid,
         max_patches=16_384,
         max_patches_per_side=512,
         video_dir="",

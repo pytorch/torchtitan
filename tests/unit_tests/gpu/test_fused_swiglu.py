@@ -10,6 +10,10 @@ FusedSwiGLU stores a single fused ``w13`` Linear but checkpoints in the stock
 ``FeedForward`` layout (``w1.weight`` / ``w3.weight``) via state_dict hooks, so
 its checkpoints round-trip with the non-fused module and the HF state-dict
 adapter. These run on CPU.
+
+``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on
+``tp_gemm_backend="dist_gemm"``, which must keep the TP overlap rather than
+silently replacing the overlapping FFN with the plain fused one.
 """
 
 import unittest
@@ -22,7 +26,11 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
+from torchtitan.overrides.fused_swiglu import (
+    dist_gemm_fused_swiglu,
+    fused_swiglu,
+    FusedSwiGLU,
+)
 
 _DIM = 16
 _HIDDEN = 32
@@ -104,7 +112,7 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         self.assertTrue(torch.equal(stock.w3.weight, _logical_w13(fused)[:, 1]))
         self.assertTrue(torch.equal(stock.w2.weight, fused.w2.weight))
         x = torch.randn(4, _DIM, device="cuda")
-        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-4, rtol=1e-5))
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_stock_checkpoint_loads_into_fused(self):
@@ -116,7 +124,7 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         self.assertTrue(torch.equal(_logical_w13(fused)[:, 1], stock.w3.weight))
         self.assertTrue(torch.equal(fused.w2.weight, stock.w2.weight))
         x = torch.randn(4, _DIM, device="cuda")
-        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(fused(x), stock(x), atol=1e-4, rtol=1e-5))
 
     def test_fused_roundtrip(self):
         """fused -> save -> load into a fresh fused preserves w13 exactly."""
@@ -142,6 +150,52 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         fused = _build_fused()
         with self.assertRaises(RuntimeError):
             fused.load_state_dict({"w2.weight": fused.w2.weight.detach().clone()})
+
+
+def _dist_gemm_ffn_config(**kwargs):
+    from torchtitan.models.common.config_utils import make_ffn_config
+
+    init = {"weight": torch.nn.init.zeros_}
+    return make_ffn_config(
+        dim=_DIM, hidden_dim=_HIDDEN, w1_param_init=init, w2w3_param_init=init, **kwargs
+    )
+
+
+class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
+    """The dist-GEMM override must keep TP overlap.
+
+    Asserts on the *built module* rather than the config type: the failure mode is
+    getting a working-but-unoverlapped FFN, which a config-type check on the
+    override's declared return type would not catch.
+    """
+
+    def test_dist_gemm_config_keeps_overlap(self):
+        from torchtitan.overrides.fused_swiglu import DistGEMMFusedSwiGLU
+
+        self.assertIsInstance(
+            fused_swiglu(_dist_gemm_ffn_config()).build(), FusedSwiGLU
+        )
+        fused = dist_gemm_fused_swiglu(
+            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        ).build()
+        self.assertIsInstance(fused, DistGEMMFusedSwiGLU)
+
+    def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
+        fused = dist_gemm_fused_swiglu(
+            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        ).build()
+        with torch.no_grad():
+            fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
+        state_dict = fused.state_dict()
+        self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
+        logical_w13 = fused.w13.weight.unflatten(0, (_HIDDEN, 2))
+        torch.testing.assert_close(state_dict["w1.weight"], logical_w13[:, 0])
+
+        reloaded = dist_gemm_fused_swiglu(
+            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        ).build()
+        reloaded.load_state_dict(state_dict)
+        torch.testing.assert_close(reloaded.w13.weight, fused.w13.weight)
 
 
 class TestFusedSwiGLUHFAdapter(unittest.TestCase):

@@ -242,7 +242,7 @@ def _precompile_aot_fx_trace(
 
     # TODO: Add CP support — call prepare_context_parallel_input here
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
-    # dimension, matching the trainer's post_dataloading_process.
+    # dimension, matching the trainer's preprocess_inputs path.
     if parallel_dims.cp_enabled:
         raise NotImplementedError(
             "CooR precompile does not yet support context parallelism. "

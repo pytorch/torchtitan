@@ -26,8 +26,8 @@ from . import model_registry
 
 
 def enable_fused_swiglu(config: Trainer.Config) -> None:
-    # fused_swiglu.py registers two overrides (dense FeedForward + MoE grouped
-    # experts); activate both by naming each factory.
+    # Activate the stock dense-FFN and MoE grouped-expert overrides. The separate
+    # dist-GEMM FFN override is not needed by these configs.
     for override in (
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
         "torchtitan.overrides.fused_swiglu.fused_grouped_experts",

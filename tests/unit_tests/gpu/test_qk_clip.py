@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
+import pytest
+
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -120,6 +122,7 @@ class QKClipTest(unittest.TestCase):
         )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class QKClipDistributedTest(DTensorTestBase):
     @property

@@ -148,14 +148,15 @@ def main():
         load_balancer_type=balancer,
     )
     from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+    from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
-    loc_input, _, extra_kwargs = annotate_input_spmd_types(
+    annotated = annotate_input_spmd_types(
         parallel_dims,
-        loc_input,
-        loc_input,
-        {"positions": loc_pos},
+        {"input": loc_input, "positions": loc_pos},
+        decoder_input_sharding(),
     )
-    loc_pos = extra_kwargs["positions"]
+    loc_input = annotated["input"]
+    loc_pos = annotated["positions"]
     _fm = tuple(full_mask_cp.shape) if full_mask_cp is not None else None
     _lm = tuple(loc_mask.shape) if loc_mask is not None else None
     print(

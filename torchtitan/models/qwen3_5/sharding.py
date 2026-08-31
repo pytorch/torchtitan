@@ -19,7 +19,7 @@ tensors via local_map.
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import VarlenMetadata
@@ -44,7 +44,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_invariant_linear_config,
     vision_scaled_bias_rowwise_config,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -62,43 +62,20 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def annotate_qwen35_input_spmd_types(
-    *,
-    attention_masks: "Qwen35AttentionMaskDict | None",
-    mrope_positions: torch.Tensor | None,
-    pixel_values: torch.Tensor | None,
-    pixel_values_videos: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-    grid_thw_videos: torch.Tensor | None,
-) -> None:
-    """Annotate Qwen3.5 structured inputs with their local SPMD types."""
-    token_type = (
-        {
-            MeshAxisName.DP: spmd.V,
-            MeshAxisName.CP: spmd.V,
-            MeshAxisName.TP: spmd.R,
-        },
-        spmd.PartitionSpec((MeshAxisName.DP, MeshAxisName.CP), None),
-    )
-    multimodal_type = {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.I}
+def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> None:
+    """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
 
-    if mrope_positions is not None:
-        spmd.assert_type(mrope_positions, *token_type)
-    if attention_masks is not None:
-        deltanet_metadata = attention_masks["deltanet"]
-        if isinstance(deltanet_metadata, VarlenMetadata):
-            spmd.assert_type(
-                deltanet_metadata.cu_seq_q,
-                {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
-            )
-    for tensor in (
-        pixel_values,
-        pixel_values_videos,
-        grid_thw,
-        grid_thw_videos,
-    ):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
+    ``cu_seq_q`` sits inside a ``VarlenMetadata`` inside the attention-mask
+    dict, so it is unreachable by name through ``input_sharding``; the caller
+    invokes this under the dense SPMD mesh.
+    """
+    deltanet_metadata = attention_masks.get("deltanet")
+    if not isinstance(deltanet_metadata, VarlenMetadata):
+        return
+    spmd.assert_type(
+        deltanet_metadata.cu_seq_q,
+        {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
+    )
 
 
 def _qk_norm_sharding() -> ShardingConfig:
@@ -113,7 +90,7 @@ def _qk_norm_sharding() -> ShardingConfig:
     )
 
 
-def _decoder_norm_sharding(activation_layout: SpmdLayout) -> ShardingConfig:
+def _decoder_norm_sharding(activation_layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": activation_layout},
@@ -180,7 +157,7 @@ def set_qwen35_sharding_config(
 def _set_qwen35_layer_sharding(
     layer_cfg: "Qwen35TransformerBlock.Config",
     *,
-    attention_input_layout: SpmdLayout,
+    attention_input_layout: SpmdType,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
@@ -270,13 +247,13 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": SpmdLayout({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdLayout({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=SpmdLayout({DP: spmd.V, TP: spmd.R}),
+        state_shardings={"pos_embed": SpmdType({DP: spmd.R, TP: spmd.I})},
+        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": SpmdLayout({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdLayout({DP: spmd.R, TP: spmd.I}),
+        state_shardings={"inv_freq": SpmdType({DP: spmd.R, TP: spmd.I})},
+        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
@@ -295,7 +272,7 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
 def _set_full_attention_sharding(
     attention_cfg: "Qwen35Attention.Config",
     *,
-    attention_input_layout: SpmdLayout,
+    attention_input_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
     """TP sharding for Qwen35Attention (output gating + partial RoPE)."""
@@ -324,7 +301,7 @@ def _set_full_attention_sharding(
 def _set_deltanet_sharding(
     deltanet_cfg: "GatedDeltaNet.Config",
     *,
-    attention_input_layout: SpmdLayout,
+    attention_input_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
     """Configure head-sharded TP for GatedDeltaNet.
@@ -358,7 +335,7 @@ def _set_deltanet_sharding(
     head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     replicated_placement = dense_param_placement(tp=spmd.R)
-    cu_seqlens_placement = SpmdLayout(
+    cu_seqlens_placement = SpmdType(
         {
             DP: spmd.V,
             CP: spmd.R,

@@ -26,7 +26,7 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .kda import KimiDeltaAttention, KimiKDAKernel, KimiRMSNormGated
+from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
@@ -170,7 +170,7 @@ def _kda_config(
     num_heads: int,
     head_dim: int,
     conv_kernel_size: int,
-) -> KimiDeltaAttention.Config:
+) -> KDA.Config:
     projection_dim = num_heads * head_dim
 
     def conv() -> Conv1d.Config:
@@ -183,8 +183,7 @@ def _kda_config(
             param_init=_CONV_INIT,
         )
 
-    return KimiDeltaAttention.Config(
-        dim=dim,
+    return KDA.Config(
         num_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
@@ -198,7 +197,10 @@ def _kda_config(
         forget_b=_linear(head_dim, projection_dim),
         beta=_linear(dim, num_heads),
         output_gate=_linear(dim, projection_dim),
-        kernel=KimiKDAKernel.Config(lower_bound=-5.0),
+        inner_kda=InnerKDA.Config(
+            head_dim=head_dim,
+            kernel=KDAKernel.Config(),
+        ),
         output_norm=KimiRMSNormGated.Config(
             dim=head_dim,
             eps=1e-5,
@@ -466,7 +468,7 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
         qk_nope_head_dim=64,
         qk_rope_head_dim=32,
         v_head_dim=64,
-        kda_head_dim=64,
+        kda_head_dim=128,
         conv_kernel_size=4,
         dense_hidden_dim=4096,
         latent_dim=512,

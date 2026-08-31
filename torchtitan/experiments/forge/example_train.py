@@ -187,15 +187,16 @@ class Trainer(ForgeEngine):
             pass
 
         if self.parallel_dims.cp_enabled:
-            inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs,
-                labels,
-                extra_kwargs,
+            cp_input_dict = prepare_context_parallel_input(
+                {"input": inputs, "labels": labels, **extra_kwargs},
+                None,
                 self.parallel_dims.get_mesh("cp"),
-                self.device,
                 self.config.parallelism.context_parallel_load_balancer,
                 self.config.parallelism.context_parallel_ptrr_mask_key,
             )
+            inputs = cp_input_dict.pop("input")
+            labels = cp_input_dict.pop("labels")
+            extra_kwargs = cp_input_dict
 
         return inputs, labels, extra_kwargs
 

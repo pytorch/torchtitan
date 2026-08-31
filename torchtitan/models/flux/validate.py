@@ -284,7 +284,7 @@ class FluxValidator(Validator):
                     (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
                     load_balancer_type=None,
-                    input_seq_dim=1,
+                    input_seq_dims=1,
                 )
 
             with self.validation_context():

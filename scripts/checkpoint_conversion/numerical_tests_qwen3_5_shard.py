@@ -115,8 +115,8 @@ def run_worker(args):
     dist.broadcast(tokens, src=0)
 
     # Text-only inputs: plain sequential positions. The flex backend requires a
-    # BlockMask, which the trainer normally builds in post_dataloading_process;
-    # build it here directly since we call the model outside the trainer.
+    # BlockMask, which the model normally builds in its preprocess_inputs; build
+    # it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
     attention_masks = cast(Qwen35Model, model).get_attention_masks(positions=positions)
 
