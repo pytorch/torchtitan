@@ -14,12 +14,11 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-import torch
-
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
@@ -29,6 +28,7 @@ _TEST_SUITES_FUNCTION = {
     "features": build_features_test_list,
     "models": build_model_tests_list,
     "h100": build_h100_tests_list,
+    "b200": build_b200_tests_list,
 }
 
 # Held while a test writes its captured output so concurrent tests do not
@@ -334,14 +334,10 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[OverrideDefinitions]
-) -> tuple[
-    list[OverrideDefinitions],
-    list[OverrideDefinitions],
-    list[OverrideDefinitions],
-]:
+) -> tuple[list[OverrideDefinitions], list[OverrideDefinitions]]:
     """Filter tests by name, scope, disabled state, architecture, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu, skipped_due_to_cuda_capability).
+    Returns (runnable, skipped_due_to_ngpu).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
@@ -349,13 +345,6 @@ def _filter_tests(
 
     runnable: list[OverrideDefinitions] = []
     skipped_ngpu: list[OverrideDefinitions] = []
-    skipped_cuda_capability: list[OverrideDefinitions] = []
-    cuda_capability = (
-        torch.cuda.get_device_capability()
-        if getattr(args, "gpu_arch_type", "cuda") == "cuda"
-        and torch.cuda.is_available()
-        else None
-    )
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -374,17 +363,11 @@ def _filter_tests(
             and test_flavor.skip_rocm_test
         ):
             continue
-        if (
-            test_flavor.required_cuda_capabilities
-            and cuda_capability not in test_flavor.required_cuda_capabilities
-        ):
-            skipped_cuda_capability.append(test_flavor)
-            continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu, skipped_cuda_capability
+    return runnable, skipped_ngpu
 
 
 def run_tests(
@@ -393,19 +376,12 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu, skipped_cuda_capability = _filter_tests(args, test_list)
+    runnable, skipped_ngpu = _filter_tests(args, test_list)
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
             f" because --ngpu arg is {args.ngpu}"
         )
-    for test_flavor in skipped_cuda_capability:
-        logger.info(
-            f"Skipping test {test_flavor.test_name} because its required CUDA "
-            "capability is unavailable; supported capabilities are "
-            f"{tuple(test_flavor.required_cuda_capabilities)}"
-        )
-
     failed_tests: list[tuple[str, str]] = []
     execution_mode = getattr(args, "execution_mode", "real_pg")
     export_numerics = getattr(args, "export_numerics", False)
@@ -507,7 +483,7 @@ def main():
     parser.add_argument(
         "--test_suite",
         default="features",
-        help="Comma-separated test suites to run: features, models, h100.",
+        help="Comma-separated test suites to run: features, models, h100, b200.",
     )
     parser.add_argument(
         "--execution_mode",
@@ -557,8 +533,10 @@ def main():
         test_suites = _parse_test_suites(args.test_suite)
     except ValueError as error:
         parser.error(str(error))
-    if args.execution_mode == "fake_pg" and "h100" in test_suites:
-        parser.error("The h100 suite only supports --execution_mode real_pg")
+    hardware_suites = {"h100", "b200"}.intersection(test_suites)
+    if args.execution_mode == "fake_pg" and hardware_suites:
+        suites = ", ".join(sorted(hardware_suites))
+        parser.error(f"The {suites} suite(s) only support --execution_mode real_pg")
     if args.execution_mode == "fake_pg" and args.test_scope == "real_pg_required":
         parser.error("real_pg_required test scope requires --execution_mode real_pg")
     if not os.path.exists(args.output_dir):
