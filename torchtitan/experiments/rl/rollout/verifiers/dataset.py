@@ -16,8 +16,8 @@ from typing import Any
 from torchtitan.config import Configurable
 
 
-def _load_taskset_id(taskset_id: str) -> str:
-    """Load a dotted local taskset module under a Verifiers-compatible alias."""
+def register_local_taskset_alias(taskset_id: str) -> str:
+    """Register a dotted local taskset under an ID Verifiers 0.3.0 can import."""
     if "." not in taskset_id or "/" in taskset_id:
         return taskset_id
 
@@ -62,7 +62,7 @@ class VerifiersTaskDataset(Configurable):
         # rest of TorchTitan RL does not require it.
         from verifiers.v1.utils.loaders import load_taskset, taskset_config_type
 
-        taskset_id = _load_taskset_id(config.taskset_id)
+        taskset_id = register_local_taskset_alias(config.taskset_id)
         taskset_config = taskset_config_type(taskset_id).model_validate(
             {"id": taskset_id, **config.taskset_args}
         )

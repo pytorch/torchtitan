@@ -40,7 +40,7 @@ class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetCon
     config: VerifiersMathTasksetConfig
 
     def load(self) -> list[VerifiersMathTask]:
-        dataset, num_tasks = _dataset(self.config.dataset)
+        dataset, num_tasks = _load_math_dataset(self.config.dataset)
         return [
             VerifiersMathTask(
                 VerifiersMathData(
@@ -54,7 +54,7 @@ class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetCon
         ]
 
 
-def _dataset(
+def _load_math_dataset(
     name: Literal["dapo_math", "aime2025"],
 ) -> tuple[Iterator[DapoMathSample], int]:
     if name == "dapo_math":

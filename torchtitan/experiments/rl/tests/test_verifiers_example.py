@@ -51,7 +51,7 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
         DapoMathSample(prompt="problem 2", ground_truth="113"),
         DapoMathSample(prompt="problem 3", ground_truth="7"),
     ]
-    monkeypatch.setattr(taskset, "_dataset", lambda name: (iter(samples), 3))
+    monkeypatch.setattr(taskset, "_load_math_dataset", lambda name: (iter(samples), 3))
     config = VerifiersTaskDataset.Config(
         taskset_id="torchtitan.experiments.rl.examples.verifiers.taskset",
         taskset_args={"dataset": "dapo_math"},

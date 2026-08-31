@@ -20,8 +20,8 @@ _SESSION_ID_HEADER = "X-Session-ID"
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationEvidence:
-    """TorchTitan metadata that is not represented in Verifiers traces."""
+class GenerationMetadata:
+    """Metadata for one successful model call not stored in its Verifiers trace."""
 
     min_policy_version: int
     max_policy_version: int
@@ -47,7 +47,7 @@ class GeneratorModelAdapter:
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
         self.turn_counts: dict[str, int] = {}
-        self.evidence: dict[str, list[GenerationEvidence]] = {}
+        self.generation_metadata: dict[str, list[GenerationMetadata]] = {}
 
     @property
     def port(self) -> int:
@@ -62,9 +62,9 @@ class GeneratorModelAdapter:
         if self.runner is not None:
             return
         app = web.Application()
-        app.router.add_get("/healthz", self._health)
-        app.router.add_get("/v1/models", self._models)
-        app.router.add_post("/inference/v1/generate", self._generate)
+        app.router.add_get("/healthz", self._handle_health_request)
+        app.router.add_get("/v1/models", self._handle_models_request)
+        app.router.add_post("/inference/v1/generate", self._handle_generate_request)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, self.host, self.requested_port)
@@ -88,17 +88,18 @@ class GeneratorModelAdapter:
         self.runner = None
         self.bound_port = None
         self.turn_counts.clear()
-        self.evidence.clear()
+        self.generation_metadata.clear()
 
-    def take_evidence(self, session_id: str) -> list[GenerationEvidence]:
+    def pop_generation_metadata(self, session_id: str) -> list[GenerationMetadata]:
+        """Remove and return generation metadata recorded for one rollout."""
         self.turn_counts.pop(session_id, None)
-        return self.evidence.pop(session_id, [])
+        return self.generation_metadata.pop(session_id, [])
 
-    async def _health(self, request: web.Request) -> web.Response:
+    async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
         return web.json_response({"status": "ok"})
 
-    async def _models(self, request: web.Request) -> web.Response:
+    async def _handle_models_request(self, request: web.Request) -> web.Response:
         del request
         return web.json_response(
             {
@@ -114,7 +115,7 @@ class GeneratorModelAdapter:
             }
         )
 
-    async def _generate(self, request: web.Request) -> web.Response:
+    async def _handle_generate_request(self, request: web.Request) -> web.Response:
         if self.generate_fn is None:
             return web.json_response(
                 {"error": "TorchTitan GenerateFn is not ready"}, status=503
@@ -130,7 +131,7 @@ class GeneratorModelAdapter:
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            sampling = _sampling_config(body.get("sampling_params"))
+            sampling = _parse_sampling_config(body.get("sampling_params"))
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
@@ -171,8 +172,8 @@ class GeneratorModelAdapter:
                 status=502,
             )
 
-        self.evidence.setdefault(session_id, []).append(
-            GenerationEvidence(
+        self.generation_metadata.setdefault(session_id, []).append(
+            GenerationMetadata(
                 min_policy_version=completion.min_policy_version,
                 max_policy_version=completion.max_policy_version,
                 metrics=list(completion.metrics),
@@ -217,7 +218,7 @@ def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
     return list(value)
 
 
-def _sampling_config(value: object):
+def _parse_sampling_config(value: object):
     """Convert Verifiers' vLLM sampling payload to TorchTitan config."""
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
 
