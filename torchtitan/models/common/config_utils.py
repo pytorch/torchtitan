@@ -363,7 +363,7 @@ def make_token_dispatcher_config(
     top_k: int,
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    hidden_dim: int | None = None,
+    hidden_dim: int,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> LocalTokenDispatcher.Config:
