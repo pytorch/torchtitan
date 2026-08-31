@@ -248,10 +248,9 @@ def _latent_moe_config(
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
             ),
-            # core's dispatcher factory: standard (PyTorch all-to-all), deepep,
-            # hybridep or minimal_async_ep, chosen per spec as deepseek_v3 does.
-            # It falls back to local dispatch when the ep mesh is None, so EP=1
-            # is unchanged.
+            # core's dispatcher factory: standard / deepep / hybridep /
+            # minimal_async_ep per spec, as deepseek_v3; falls back to local
+            # dispatch when the ep mesh is None.
             token_dispatcher=make_token_dispatcher_config(
                 num_experts=num_experts,
                 top_k=top_k,

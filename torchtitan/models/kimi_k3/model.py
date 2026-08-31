@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
-
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 
 from torchtitan.models.common import Linear
@@ -19,12 +18,12 @@ from torchtitan.models.common.attention import (
     FlexAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.kimi_k3.sharding import set_expert_parallel_sharding_config
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.kimi_k3.sharding import set_expert_parallel_sharding_config
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.module import Module
 

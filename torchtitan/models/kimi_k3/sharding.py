@@ -8,8 +8,7 @@
 
 Declarations only: functions here set ``ShardingConfig`` on sub-configs of an
 already-built config tree, and ``model.parallelize()`` applies them through the
-Module protocol. Nothing here touches a mesh or a device, which is what lets
-the expert-parallel declaration be unit-tested on CPU.
+Module protocol. Nothing here touches a mesh or a device.
 """
 
 from typing import TYPE_CHECKING
@@ -29,8 +28,7 @@ def set_expert_parallel_sharding_config(
 
     The routed experts shard on the expert axis; ``set_moe_sharding_config``
     declares that layout, and its input boundary lifts the plain incoming
-    activations itself -- no decoder-level declaration is needed (verified:
-    removing one changes nothing, to every printed digit).
+    activations itself, so no decoder-level declaration is needed.
     """
     for layer in config.layers:
         if layer.moe is not None:
