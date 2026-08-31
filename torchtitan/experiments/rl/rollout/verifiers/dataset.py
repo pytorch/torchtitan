@@ -43,13 +43,13 @@ class VerifiersTaskDataset(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         taskset_id: str
-        num_tasks: int
         taskset_args: dict[str, Any] = field(default_factory=dict)
+        num_tasks: int | None = None
         seed: int = 42
         shuffle: bool = True
 
         def __post_init__(self) -> None:
-            if self.num_tasks <= 0:
+            if self.num_tasks is not None and self.num_tasks <= 0:
                 raise ValueError("num_tasks must be positive")
 
     def __init__(self, config: Config) -> None:
@@ -61,8 +61,20 @@ class VerifiersTaskDataset(Configurable):
         taskset_config = taskset_config_type(taskset_id).model_validate(
             {"id": taskset_id, **config.taskset_args}
         )
-        tasks = list(load_taskset(taskset_config).head(config.num_tasks))
-        if len(tasks) != config.num_tasks:
+        taskset = load_taskset(taskset_config)
+        if config.num_tasks is None and taskset.INFINITE:
+            raise ValueError(
+                f"Verifiers taskset {config.taskset_id!r} is infinite; "
+                "num_tasks is required"
+            )
+        tasks = list(
+            taskset if config.num_tasks is None else taskset.head(config.num_tasks)
+        )
+        if not tasks:
+            raise ValueError(
+                f"Verifiers taskset {config.taskset_id!r} yielded no tasks"
+            )
+        if config.num_tasks is not None and len(tasks) != config.num_tasks:
             raise ValueError(
                 f"Verifiers taskset {config.taskset_id!r} yielded {len(tasks)} "
                 f"tasks, expected {config.num_tasks}"

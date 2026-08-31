@@ -162,6 +162,14 @@ class GeneratorModelAdapter:
                 {"error": "completion token IDs and logprobs have different lengths"},
                 status=500,
             )
+        if completion.finish_reason not in ("stop", "length"):
+            return web.json_response(
+                {
+                    "error": "generation finished without a usable completion: "
+                    f"{completion.finish_reason}"
+                },
+                status=502,
+            )
 
         self._evidence.setdefault(session_id, []).append(
             GenerationEvidence(
@@ -170,9 +178,6 @@ class GeneratorModelAdapter:
                 metrics=list(completion.metrics),
             )
         )
-        finish_reason = completion.finish_reason
-        if finish_reason not in ("stop", "length"):
-            finish_reason = "stop"
         return web.json_response(
             {
                 "request_id": completion.request_id,
@@ -193,7 +198,7 @@ class GeneratorModelAdapter:
                                 )
                             ]
                         },
-                        "finish_reason": finish_reason,
+                        "finish_reason": completion.finish_reason,
                     }
                 ],
                 "prompt_logprobs": None,

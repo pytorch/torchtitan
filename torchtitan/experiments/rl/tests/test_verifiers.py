@@ -135,3 +135,50 @@ def test_model_adapter_forwards_token_request() -> None:
         ] == [(7, 8)]
 
     asyncio.run(run_test())
+
+
+def test_model_adapter_rejects_aborted_generation() -> None:
+    async def run_test() -> None:
+        async def generate_fn(
+            prompt_token_ids,
+            *,
+            request_id,
+            routing_session_id=None,
+            sampling_config=None,
+        ):
+            return Completion(
+                min_policy_version=7,
+                max_policy_version=7,
+                request_id=request_id,
+                token_ids=[],
+                token_logprobs=[],
+                finish_reason="abort",
+            )
+
+        adapter = GeneratorModelAdapter(
+            host="127.0.0.1",
+            port=0,
+            model="test-model",
+            max_model_len=128,
+        )
+        adapter.set_generate_fn(generate_fn)
+        await adapter.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.post(
+                    f"http://127.0.0.1:{adapter.port}/inference/v1/generate",
+                    headers={"X-Session-ID": "group=1/rollout=2"},
+                    json={"token_ids": [10, 11], "sampling_params": {}},
+                )
+                assert response.status == 502
+                payload = await response.json()
+            evidence = adapter.take_evidence("group=1/rollout=2")
+        finally:
+            await adapter.close()
+
+        assert payload == {
+            "error": "generation finished without a usable completion: abort"
+        }
+        assert evidence == []
+
+    asyncio.run(run_test())

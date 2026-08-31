@@ -36,9 +36,7 @@ class VerifiersMathTasksetConfig(vf.TasksetConfig):
     dataset: Literal["dapo_math", "aime2025"] = "dapo_math"
 
 
-class VerifiersMathTaskset(
-    vf.Taskset[VerifiersMathTask, VerifiersMathTasksetConfig]
-):
+class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetConfig]):
     config: VerifiersMathTasksetConfig
 
     def load(self) -> list[VerifiersMathTask]:

@@ -30,7 +30,6 @@ class VerifiersMathRollouter(VerifiersRollouter):
             default_factory=lambda: VerifiersTaskDataset.Config(
                 taskset_id=_TASKSET_ID,
                 taskset_args={"dataset": "dapo_math"},
-                num_tasks=12643,
                 seed=42,
             )
         )
@@ -38,7 +37,6 @@ class VerifiersMathRollouter(VerifiersRollouter):
             default_factory=lambda: VerifiersTaskDataset.Config(
                 taskset_id=_TASKSET_ID,
                 taskset_args={"dataset": "aime2025"},
-                num_tasks=30,
                 seed=99,
                 shuffle=False,
             )

@@ -35,12 +35,14 @@ def test_verifiers_task_scores_math_response() -> None:
             ground_truth=r"336^\circ",
         )
     )
-    assert asyncio.run(
-        math_task.math_verify(SimpleNamespace(last_reply="Answer: $336$"))
-    ) == 1.0
-    assert asyncio.run(
-        math_task.math_verify(SimpleNamespace(last_reply="Answer: $335$"))
-    ) == 0.0
+    assert (
+        asyncio.run(math_task.math_verify(SimpleNamespace(last_reply="Answer: $336$")))
+        == 1.0
+    )
+    assert (
+        asyncio.run(math_task.math_verify(SimpleNamespace(last_reply="Answer: $335$")))
+        == 0.0
+    )
 
 
 def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
@@ -53,7 +55,6 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     config = VerifiersTaskDataset.Config(
         taskset_id="torchtitan.experiments.rl.examples.verifiers.taskset",
         taskset_args={"dataset": "dapo_math"},
-        num_tasks=3,
         seed=7,
     )
     first = config.build()
