@@ -96,10 +96,10 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.num_global_valid_tokens > 0
 
 
-def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
-    # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
-    # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
-    batcher = Batcher.Config().build(
+def test_microbatch_grid_avoids_all_padding_cells_when_possible() -> None:
+    # 5 real rows, 2 rows/rank, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
+    # Redistributing one row into the fourth cell keeps every cell trainable.
+    batcher = Batcher.Config(max_num_documents=4).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -115,6 +115,88 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     assert len(cells) == 4  # 2 microbatches x 2 ranks
     for cell in cells:
         assert cell.loss_mask.any()
+        assert cell.padding_mask.shape == cell.token_ids.shape
+        assert not cell.padding_mask[cell.loss_mask].any()
+
+
+def test_document_limit_applies_to_each_local_microbatch() -> None:
+    # Each row holds two documents, but a local microbatch is capped at three.
+    # The batcher must keep all five documents and split the rows 2 + 3.
+    batcher = Batcher.Config(max_num_documents=3).build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=4,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_trainable_group(0, num_samples=5)
+    )
+
+    assert batch is not None
+    assert group_is_trainable
+    assert len(batch.microbatches) == 2
+    num_documents = []
+    for (microbatch,) in batch.microbatches:
+        real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
+        num_documents.append(int(real_document_starts.sum().item()))
+    assert num_documents == [2, 3]
+    assert sum(num_documents) == 5
+
+
+def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
+    batcher = Batcher.Config(max_num_documents=1).build(
+        num_tokens_per_microbatch_per_dp_rank=4,
+        max_context_length=2,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_trainable_group(0, num_samples=2)
+    )
+
+    assert batch is not None
+    assert len(batch.microbatches) == 2
+    for (microbatch,) in batch.microbatches:
+        real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
+        assert int(real_document_starts.sum().item()) == 1
+
+
+def test_batcher_filters_training_samples_longer_than_context() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=4,
+        max_context_length=4,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    sample = _training_sample(group_id=0, rollout_id=0)
+    sample.token_ids = list(range(6))
+    sample.loss_mask = [False] * 6
+    sample.logprobs = [0.0] * 6
+    sample.advantage = [0.0] * 6
+
+    pending, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=TrainingSampleGroup(
+            group_id=0,
+            training_samples=[sample],
+            metrics=[],
+        )
+    )
+    assert pending is None
+    assert not group_is_trainable
+
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_trainable_group(1, num_samples=1)
+    )
+    assert batch is not None
+    dropped_metric = next(
+        metric
+        for metric in batch.metrics
+        if metric.key == "batcher/num_samples_dropped_oversized"
+    )
+    assert dropped_metric.value.value == 1
 
 
 def test_batcher_requires_whole_rows_per_microbatch() -> None:

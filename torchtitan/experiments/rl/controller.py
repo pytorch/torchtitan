@@ -608,6 +608,7 @@ class Controller(Configurable):
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
                 compile_config=config.compile,
+                max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
 

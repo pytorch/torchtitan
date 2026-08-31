@@ -456,7 +456,12 @@ class TestConfigManager(unittest.TestCase):
         )
 
         # Verify the merged type has both base and custom fields
-        merged = MergedTrainerConfig()
+        model_spec = (
+            ConfigManager()
+            .parse_args(["--module", "llama3", "--config", "llama3_debugmodel"])
+            .model_spec
+        )
+        merged = MergedTrainerConfig(model_spec=model_spec)
         assert hasattr(merged, "checkpoint")
         assert hasattr(merged.checkpoint, "convert_path")
         assert merged.checkpoint.convert_path == "/custom/path"
@@ -484,6 +489,18 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
+
+    def test_suppressed_model_spec_is_opaque_to_tyro(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "torchtitan_recipes.tests.transformers_modeling_backend",
+                "--config",
+                "transformers_backend_dense_cp_pp",
+            ]
+        )
+
+        assert config.model_spec.name == "transformers_modeling_backend"
 
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""

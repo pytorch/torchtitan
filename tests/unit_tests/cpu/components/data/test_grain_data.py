@@ -99,6 +99,11 @@ class RowToTokens(SampleProcessor):
         return TextSequence(
             input_ids=tokens[:-1],
             labels=tokens[1:],
+            positions=(
+                None
+                if "positions" not in sample
+                else np.asarray(sample["positions"], dtype=np.int64)
+            ),
         )
 
 
@@ -894,6 +899,140 @@ def test_packing_yields_rows_and_loader_batches(packing_type):
     assert labels.shape == (16,)
 
 
+@pytest.mark.parametrize(
+    "packing_type",
+    [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
+)
+def test_packing_document_cap_preserves_all_documents(packing_type):
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"tokens": [1, 10 + index, 2]} for index in range(6))
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_batch=12,
+        max_num_documents=4,
+    )
+
+    rows = list(
+        packing_type(dataset=documents).build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False,
+                repeat=False,
+            ),
+        )
+    )
+
+    assert len(rows) > 1
+    assert rows[0].padding_mask is not None
+    assert int(rows[0].padding_mask.sum()) == 4
+    assert rows[0].positions is not None
+    assert (
+        np.count_nonzero((rows[0].positions == 0) & ~rows[0].padding_mask)
+        == context.max_num_documents
+    )
+    real_input_ids = []
+    for row in rows:
+        assert row.positions is not None
+        assert row.padding_mask is not None
+        assert (
+            np.count_nonzero((row.positions == 0) & ~row.padding_mask)
+            <= context.max_num_documents
+        )
+        assert int(row.positions.max()) < context.max_context_length
+        real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
+    assert real_input_ids == [1, 10, 1, 11, 1, 12, 1, 13, 1, 14, 1, 15]
+
+
+def test_document_aware_concat_packing_restores_exactly():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"tokens": [1, 10 + index, 2]} for index in range(6))
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_batch=12,
+        max_num_documents=4,
+    )
+    config = ConcatThenSplitPackingConfig(dataset=documents)
+    policy = dataset_iteration_policy(shuffle=False, repeat=True)
+    iterator = iter(config.build(context=context, dataset_iteration_policy=policy))
+
+    next(iterator)
+    state = iterator.get_state()
+    expected = [next(iterator) for _ in range(4)]
+
+    restored = iter(config.build(context=context, dataset_iteration_policy=policy))
+    restored.set_state(state)
+    actual = [next(restored) for _ in range(4)]
+
+    for actual_row, expected_row in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(actual_row.input_ids, expected_row.input_ids)
+        np.testing.assert_array_equal(actual_row.labels, expected_row.labels)
+        np.testing.assert_array_equal(actual_row.positions, expected_row.positions)
+        np.testing.assert_array_equal(
+            actual_row.padding_mask, expected_row.padding_mask
+        )
+
+
+@pytest.mark.parametrize(
+    "packing_type",
+    [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
+)
+def test_packing_splits_positioned_long_documents(packing_type):
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {
+                    "tokens": list(range(15)),
+                    "positions": list(range(14)),
+                },
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_batch=8,
+        max_num_documents=2,
+    )
+
+    packing = packing_type(dataset=documents)
+    if isinstance(packing, FirstFitPackingConfig):
+        packing = replace(packing, num_packing_bins=1)
+
+    rows = list(
+        packing.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False,
+                repeat=False,
+            ),
+        )
+    )
+
+    assert len(rows) == 2
+    real_input_ids = []
+    for row in rows:
+        assert row.positions is not None
+        assert row.padding_mask is not None
+        assert (
+            np.count_nonzero((row.positions == 0) & ~row.padding_mask)
+            <= context.max_num_documents
+        )
+        assert int(row.positions.max()) < context.max_context_length
+        real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
+    assert real_input_ids == list(range(14))
+
+
 def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):
     captured = {}
 
@@ -1006,6 +1145,8 @@ def test_unpacked_text_collator_creates_range_positions():
 
     assert inputs["input"][:3].tolist() == [1, 2, 3]
     assert inputs["positions"][:3].tolist() == [0, 1, 2]
+    assert not inputs["padding_mask"][:3].any()
+    assert inputs["padding_mask"][3:].all()
     assert labels[:3].tolist() == [2, 3, 4]
     assert (labels[3:] == IGNORE_INDEX).all()
 
@@ -1165,7 +1306,7 @@ def test_chat_processor_rejects_non_single_turn_messages():
         )
 
 
-def test_first_fit_drops_rows_longer_than_sequence_length():
+def test_first_fit_chunks_rows_longer_than_sequence_length():
     recipe = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(
@@ -1175,17 +1316,22 @@ def test_first_fit_drops_rows_longer_than_sequence_length():
                 )
             ),
             processor=RowToTokens.Config(),
-        )
+        ),
+        num_packing_bins=1,
     )
 
-    sequence = next(
-        iter(
-            recipe.build(
-                context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
-            )
+    sequences = list(
+        recipe.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
     )
-    assert sequence.input_ids[0].item() == 1
+    real_input_ids = [
+        token
+        for sequence in sequences
+        for token in sequence.input_ids[sequence.labels != IGNORE_INDEX].tolist()
+    ]
+    assert real_input_ids == [*range(19), 1, 10, 11]
 
 
 class AddRandomOffset(SampleProcessor):
@@ -1745,7 +1891,7 @@ def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
             assert torch.equal(expected_batch[1], actual_batch[1])
 
 
-def test_first_fit_oversized_row_does_not_discard_buffered_row():
+def test_first_fit_oversized_row_preserves_chunks_and_buffered_rows():
     recipe = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(
@@ -1756,20 +1902,23 @@ def test_first_fit_oversized_row_does_not_discard_buffered_row():
                 )
             ),
             processor=RowToTokens.Config(),
+        ),
+        num_packing_bins=1,
+    )
+
+    sequences = list(
+        recipe.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
     )
 
-    sequence = next(
-        iter(
-            recipe.build(
-                context=CONTEXT,
-                dataset_iteration_policy=dataset_iteration_policy(),
-            )
-        )
-    )
-
-    assert sequence.input_ids.tolist() == [1, 2, 3, 4, 5, 10, 11] + [0] * 11
-    assert sequence.labels.tolist() == [2, 3, 4, 5, 6, 11, 12] + [IGNORE_INDEX] * 11
+    real_input_ids = [
+        token
+        for sequence in sequences
+        for token in sequence.input_ids[sequence.labels != IGNORE_INDEX].tolist()
+    ]
+    assert real_input_ids == [1, 2, 3, 4, 5, *range(20, 39), 10, 11]
 
 
 def test_loader_passes_read_options_to_map_conversion(monkeypatch):

@@ -591,7 +591,10 @@ def create_attention_mask(*args, **kwargs):
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
     *,
+    padding_mask: torch.Tensor | None = None,
     include_host_offsets: bool = False,
+    max_num_documents: int | None = None,
+    max_context_length: int | None = None,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -601,8 +604,18 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
+        padding_mask: Per-token boolean tensor that is true for padding. This
+            distinguishes padding position resets from real document starts so
+            their fixed metadata capacity can be reserved separately.
         include_host_offsets: Also materialize cumulative sequence offsets as
             host metadata for kernels that need it.
+        max_num_documents: Upper bound on non-padding document segments in the
+            local token batch. When set, the device offsets have a fixed shape
+            as required for CUDA graph capture. Padding segments are reserved
+            separately when ``padding_mask`` is provided.
+        max_context_length: Maximum length of one document segment. Required
+            with ``max_num_documents`` so the fixed-shape metadata can avoid a
+            device-to-host synchronization.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -610,42 +623,90 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
-    doc_starts = (positions == 0).nonzero(as_tuple=True)[0].to(torch.int32)
-    packed_cu_seqlens = torch.cat(
-        [
-            doc_starts,
-            torch.tensor([num_tokens], dtype=torch.int32, device=device),
-        ]
-    )
+    packed_cu_seqlens_host = None
+
+    real_doc_starts = positions == 0
+    padding_doc_starts = None
+    if padding_mask is None:
+        is_doc_start = real_doc_starts
+    else:
+        padding_mask = padding_mask.to(torch.bool)
+        real_doc_starts = real_doc_starts & ~padding_mask
+        padding_doc_starts = (positions == 0) & padding_mask
+        is_doc_start = real_doc_starts | padding_doc_starts
+
+    if max_num_documents is not None:
+        if max_context_length is None:
+            raise ValueError(
+                "max_context_length is required when max_num_documents is set"
+            )
+
+        max_num_padding_segments = (
+            (num_tokens + max_context_length - 1) // max_context_length
+            if padding_mask is not None
+            else 0
+        )
+        max_num_segments = max_num_documents + max_num_padding_segments
+        num_slots = max_num_segments + 1
+        slot = torch.cumsum(is_doc_start, 0) - 1
+        scatter_index = torch.where(
+            is_doc_start & (slot < max_num_segments),
+            slot,
+            torch.full_like(slot, num_slots),
+        )
+        packed_cu_seqlens = torch.full(
+            (num_slots + 1,), num_tokens, dtype=torch.int32, device=device
+        )
+        packed_cu_seqlens.scatter_(
+            0,
+            scatter_index,
+            torch.arange(num_tokens, dtype=torch.int32, device=device),
+        )
+        torch._assert_async(real_doc_starts.sum() <= max_num_documents)
+        if padding_doc_starts is not None:
+            torch._assert_async(padding_doc_starts.sum() <= max_num_padding_segments)
+        packed_cu_seqlens = packed_cu_seqlens[:num_slots]
+        max_seqlen = max_context_length
+
+        if include_host_offsets:
+            packed_cu_seqlens_host = tuple(
+                int(offset) for offset in packed_cu_seqlens.tolist()
+            )
+    else:
+        doc_starts = is_doc_start.nonzero(as_tuple=True)[0].to(torch.int32)
+        packed_cu_seqlens = torch.cat(
+            [
+                doc_starts,
+                torch.tensor([num_tokens], dtype=torch.int32, device=device),
+            ]
+        )
+        seq_lengths = torch.diff(packed_cu_seqlens)
+
+        if include_host_offsets:
+            packed_cu_seqlens_host = tuple(
+                int(offset) for offset in packed_cu_seqlens.tolist()
+            )
+            max_seqlen = max(
+                (
+                    end - start
+                    for start, end in zip(
+                        packed_cu_seqlens_host[:-1],
+                        packed_cu_seqlens_host[1:],
+                        strict=False,
+                    )
+                ),
+                default=0,
+            )
+        elif seq_lengths.numel() > 0:
+            # device to host sync but only done once per model forward
+            max_seqlen = int(seq_lengths.max().item())
+        else:
+            max_seqlen = 0
+
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
-    seq_lengths = torch.diff(packed_cu_seqlens)
-
-    max_seqlen: int
-    packed_cu_seqlens_host = None
-    if include_host_offsets:
-        packed_cu_seqlens_host = tuple(
-            int(offset) for offset in packed_cu_seqlens.tolist()
-        )
-        max_seqlen = max(
-            (
-                end - start
-                for start, end in zip(
-                    packed_cu_seqlens_host[:-1],
-                    packed_cu_seqlens_host[1:],
-                    strict=False,
-                )
-            ),
-            default=0,
-        )
-    elif seq_lengths.numel() > 0:
-        # device to host sync but only done once per model forward
-        max_seqlen = int(seq_lengths.max().item())
-    else:
-        max_seqlen = 0
-
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,

@@ -83,7 +83,8 @@ def llama3_debugmodel() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="varlen")
-    config.training.disable_cuda_graphs = True
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
     return config
 
 

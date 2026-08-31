@@ -32,6 +32,7 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=128 if attn_backend == "varlen" else None,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -80,6 +81,7 @@ def gpt_oss_20b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=64,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -113,6 +115,7 @@ def gpt_oss_120b() -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=64,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

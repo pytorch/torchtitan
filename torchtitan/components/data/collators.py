@@ -48,6 +48,7 @@ class TextCollator(Collator):
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         del config
         self._num_tokens_per_batch = context.num_tokens_per_batch
+        self._max_context_length = context.max_context_length
 
     def __call__(self, rows: Sequence[TextSequence]) -> TrainerBatch:
         num_tokens = sum(len(row.input_ids) for row in rows)
@@ -64,16 +65,32 @@ class TextCollator(Collator):
                 for row in rows
             ]
         )
+        padding_mask = torch.cat(
+            [
+                torch.zeros(len(row.input_ids), dtype=torch.bool)
+                if row.padding_mask is None
+                else torch.as_tensor(row.padding_mask, dtype=torch.bool)
+                for row in rows
+            ]
+        )
 
         pad_len = self._num_tokens_per_batch - num_tokens
         if pad_len:
             input_ids = torch.nn.functional.pad(input_ids, (0, pad_len))
             labels = torch.nn.functional.pad(labels, (0, pad_len), value=IGNORE_INDEX)
             positions = torch.cat(
-                [positions, torch.zeros(pad_len, dtype=positions.dtype)]
+                [
+                    positions,
+                    torch.arange(pad_len, dtype=positions.dtype)
+                    % self._max_context_length,
+                ]
+            )
+            padding_mask = torch.nn.functional.pad(
+                padding_mask, (0, pad_len), value=True
             )
 
         return {
             "input": input_ids,
             "positions": positions,
+            "padding_mask": padding_mask,
         }, labels

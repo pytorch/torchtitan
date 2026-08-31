@@ -14,6 +14,7 @@ import time
 import unittest
 import uuid
 from concurrent.futures import Future
+from dataclasses import fields
 from types import SimpleNamespace
 from unittest import mock
 
@@ -165,7 +166,10 @@ class TestCheckpointManager(unittest.TestCase):
             Trainer.Config.__annotations__["checkpoint"],
             BaseCheckpointManager.Config,
         )
-        checkpoint = Trainer.Config().checkpoint
+        checkpoint_field = next(
+            field for field in fields(Trainer.Config) if field.name == "checkpoint"
+        )
+        checkpoint = checkpoint_field.default_factory()
         self.assertIsInstance(checkpoint, CheckpointManager.Config)
         self.assertFalse(checkpoint.enable)
 

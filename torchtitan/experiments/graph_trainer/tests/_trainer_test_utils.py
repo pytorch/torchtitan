@@ -49,6 +49,7 @@ def build_minimal_trainer(
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
+    trainer.dataloader = SimpleNamespace(max_num_documents=None)
     trainer.ntokens_seen = 0
 
     if trainer_cls is GraphTrainer:
@@ -81,6 +82,7 @@ def build_minimal_trainer(
                 "selective": SelectiveAC.Config(),
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
+            dataloader=SimpleNamespace(max_num_documents=None),
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
@@ -91,6 +93,7 @@ def build_minimal_trainer(
         trainer._traced_step = None
     else:
         trainer.config = SimpleNamespace(
+            dataloader=SimpleNamespace(max_num_documents=None),
             parallelism=SimpleNamespace(spmd_backend="partial_dtensor"),
         )
 
