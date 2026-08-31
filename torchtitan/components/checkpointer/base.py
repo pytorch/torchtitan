@@ -195,9 +195,12 @@ class BaseCheckpointManager(Configurable, ABC):
     """
 
     enable: bool
-    save_future: Future | None
+    load_only: bool
+    interval: int
+    enable_first_step_checkpoint: bool
     folder: str
     keep_latest_k: int
+    save_future: Future | None
     purge_thread: threading.Thread | None
     purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
@@ -249,6 +252,23 @@ class BaseCheckpointManager(Configurable, ABC):
     @abstractmethod
     def _wait_for_saving(self) -> None:
         """Await ``save_future`` and clear it. Only called when it is set."""
+
+    # Policies shared by every manager. These depend only on config fields that
+    # BaseCheckpointManager.Config declares, not on how a backend reads or
+    # writes bytes, so they live here rather than once per backend.
+
+    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
+        """Whether ``curr_step`` is a checkpointing step."""
+        if not self.enable or self.load_only:
+            return False
+        if curr_step == 1 and self.enable_first_step_checkpoint:
+            return True
+        return last_step or curr_step % self.interval == 0
+
+    def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
+        """Standardized checkpoint path, e.g. ``checkpoints/step-100``."""
+        folder = folder or self.folder
+        return filesystem.join(folder, f"step-{step}")
 
     @abstractmethod
     def _load(self, step: int = -1) -> bool:
