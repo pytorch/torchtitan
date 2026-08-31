@@ -87,7 +87,8 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
         with pytest.raises(RuntimeError, match="validation failed"):
             validator.validate([model], step=1)
     else:
-        validator.validate([model], step=1)
+        loss = validator.validate([model], step=1)
+        assert loss == pytest.approx(1.0)
 
     assert loader.closed
 

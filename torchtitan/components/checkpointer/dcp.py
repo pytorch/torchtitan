@@ -409,6 +409,7 @@ class CheckpointManager(BaseCheckpointManager):
         2. The current step matches the configured saving interval.
         3. `last_step` is True, which forces a save regardless of the interval.
            This typically happens when the training reaches its final step.
+        4. The callback trigger asks for a checkpoint at the current step.
 
         Args:
             curr_step (int): The current training step.
@@ -434,6 +435,9 @@ class CheckpointManager(BaseCheckpointManager):
 
         if last_step:
             self._save_last_step(curr_step)
+            self._track_checkpoint_save(
+                curr_step, self._create_checkpoint_id(curr_step)
+            )
             logger.info(
                 f"Last step checkpoint completed in {time.monotonic() - begin:.2f}s"
             )
@@ -485,7 +489,7 @@ class CheckpointManager(BaseCheckpointManager):
                 enable_garbage_collection=True,
             )
 
-        self._purge_stale_checkpoints()
+        self._track_checkpoint_save(curr_step, checkpoint_id)
 
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
@@ -662,6 +666,11 @@ class CheckpointManager(BaseCheckpointManager):
         self.save_future.result()
         self.save_future = None
 
+    def _finish_checkpoint_save(self) -> None:
+        if self._save_pending_finish:
+            self._purge_stale_checkpoints()
+        super()._finish_checkpoint_save()
+
     def _find_load_step(self, folder: str = "") -> int:
         """Identify the highest available checkpoint step in the specified directory.
 
@@ -832,6 +841,9 @@ class CheckpointManager(BaseCheckpointManager):
         if curr_step % self.interval == 0:
             return True
 
+        if self._is_checkpoint_requested_by_callback_trigger(curr_step):
+            return True
+
         return False
 
     def _purge_stale_checkpoints(self):
@@ -848,6 +860,13 @@ class CheckpointManager(BaseCheckpointManager):
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
 
-            for _, path in to_delete:
+            for step, path in to_delete:
+                if self._is_retention_exempt(step):
+                    logger.info(
+                        "Checkpointer is preserving checkpoint %s outside "
+                        "keep_latest_k.",
+                        path,
+                    )
+                    continue
                 assert self.purge_thread is not None
                 self.purge_queue.put(path)

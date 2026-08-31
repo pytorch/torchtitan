@@ -11,7 +11,10 @@ import unittest
 from unittest import mock
 
 import pytest
+from torchtitan.components.async_eval import AsyncEval
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
+from torchtitan.trainer import Trainer
 
 
 class TestConfigManager(unittest.TestCase):
@@ -145,6 +148,16 @@ class TestConfigManager(unittest.TestCase):
         for max_context_length in (0, -1):
             with pytest.raises(ValueError, match="must be greater than 0"):
                 TrainingConfig(max_context_length=max_context_length)
+
+    def test_async_eval_requires_checkpoint_saving(self):
+        with pytest.raises(ValueError, match="checkpoint.enable=True"):
+            Trainer.Config(async_eval=AsyncEval.Config(enable=True))
+
+        with pytest.raises(ValueError, match="checkpoint.load_only=False"):
+            Trainer.Config(
+                checkpoint=CheckpointManager.Config(enable=True, load_only=True),
+                async_eval=AsyncEval.Config(enable=True),
+            )
 
     def test_num_pp_microbatches_does_not_constrain_non_pp_training(self):
         config_manager = ConfigManager()

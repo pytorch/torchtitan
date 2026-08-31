@@ -20,6 +20,7 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.async_eval import AsyncEval
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
@@ -108,6 +109,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
+        async_eval: AsyncEval.Config = field(default_factory=AsyncEval.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
@@ -123,6 +125,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
+
+            if self.async_eval.enable:
+                if not self.checkpoint.enable:
+                    raise ValueError("async_eval requires checkpoint.enable=True.")
+                if self.checkpoint.load_only:
+                    raise ValueError("async_eval requires checkpoint.load_only=False.")
 
             self._validate_cuda_graphs()
 
@@ -252,6 +260,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
+    async_eval: AsyncEval
     metrics_processor: MetricsProcessor
     checkpointer: BaseCheckpointManager
 
@@ -560,6 +569,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             max_context_length=config.training.max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
         )
+        self.async_eval = config.async_eval.build(
+            dump_folder=config.dump_folder,
+            metrics_config=config.metrics,
+        )
 
         # build checkpointer
         self.checkpointer = config.checkpoint.build(
@@ -575,6 +588,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             ),
             base_folder=config.dump_folder,
         )
+
+        if config.async_eval.enable:
+            self.checkpointer.register_post_checkpoint_callback(
+                self.async_eval.async_eval_launch_command,
+                callback_trigger=self.async_eval.request_async_eval_steps,
+                retention_exemption=self.async_eval.request_async_eval_steps,
+            )
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
@@ -982,6 +1002,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     ):
                         self.validator.validate(self.model_parts, self.step)
 
+                    # Eval launch happens from the checkpoint completion callback.
+                    # Poll every step so results and failures are reported promptly.
+                    self.async_eval.collect()
+
                     # signal the profiler that the next profiling step has started
                     profiler.step()
 
@@ -1019,5 +1043,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
+        if hasattr(self, "async_eval") and self.async_eval:
+            self.async_eval.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
