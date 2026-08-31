@@ -386,11 +386,17 @@ def model_registry(
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    get_config, default_len = llama3_configs[flavor]
+    get_config, max_context_len = llama3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
     config = get_config(
         attn_backend=attn_backend,
         tp_gemm_backend=tp_gemm_backend,
-        seq_len=seq_len or default_len,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -400,7 +406,7 @@ def model_registry(
         name="llama3",
         flavor=flavor,
         model=config,
-        max_context_length=seq_len or default_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,

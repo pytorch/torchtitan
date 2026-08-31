@@ -508,12 +508,18 @@ def model_registry(
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    get_config, default_len = kimi_k2_5_configs[flavor]
+    get_config, max_context_len = kimi_k2_5_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
     config = get_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        seq_len=seq_len or default_len,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -523,7 +529,7 @@ def model_registry(
         name="kimi_k2_5",
         flavor=flavor,
         model=config,
-        max_context_length=seq_len or default_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k2_5,
         pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=_register_optimizer_hooks,

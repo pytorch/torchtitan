@@ -541,7 +541,13 @@ def model_registry(
 ) -> ModelSpec:
     # The KDA / MLA layers build their own RoPE, so seq_len is not a builder
     # argument here -- it only reports the context length on the ModelSpec.
-    get_config, default_len = kimi_k3_configs[flavor]
+    get_config, max_context_len = kimi_k3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
     config = get_config(attn_backend=attn_backend)
     if converters is not None:
         validate_converter_order(converters)

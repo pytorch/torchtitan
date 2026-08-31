@@ -529,8 +529,14 @@ def model_registry(
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    get_config, default_len = muse_glimmer_configs[flavor]
-    config = get_config(attn_backend=attn_backend, seq_len=seq_len or default_len)
+    get_config, max_context_len = muse_glimmer_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(attn_backend=attn_backend, seq_len=context_len)
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
@@ -539,7 +545,7 @@ def model_registry(
         name="muse_glimmer",
         flavor=flavor,
         model=config,
-        max_context_length=seq_len or default_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_muse_glimmer,
         pipelining_fn=pipeline_muse_glimmer,
         post_optimizer_build_fn=None,

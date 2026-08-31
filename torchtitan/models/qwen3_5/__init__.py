@@ -1109,11 +1109,18 @@ def model_registry(
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    kwargs = dict(attn_backend=attn_backend)
-    if moe_comm_backend is not None:
-        kwargs["moe_comm_backend"] = moe_comm_backend
-    get_config, default_len = qwen3_5_configs[flavor]
-    config = get_config(**kwargs, seq_len=seq_len or default_len)
+    get_config, max_context_len = qwen3_5_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
+        attn_backend=attn_backend, 
+        seq_len=context_len,
+        **({"moe_comm_backend": moe_comm_backend} if moe_comm_backend is not None else {})
+    )
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:

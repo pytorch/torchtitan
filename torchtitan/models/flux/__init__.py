@@ -563,7 +563,13 @@ def model_registry(
 ) -> ModelSpec:
     # Flux has no RoPE cache to size, so seq_len only reports the context
     # length (latent patches + T5 encodings) on the ModelSpec.
-    get_config, default_len = flux_configs[flavor]
+    get_config, max_context_len = flux_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
     config = get_config()
     if converters is not None:
         validate_converter_order(converters)
@@ -573,7 +579,7 @@ def model_registry(
         name="flux",
         flavor=flavor,
         model=config,
-        max_context_length=seq_len or default_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         post_optimizer_build_fn=None,
