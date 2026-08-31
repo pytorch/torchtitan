@@ -36,7 +36,10 @@ from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_ke
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
-from torchtitan.experiments.graph_trainer.precompile import _FX_TRACE_ARTIFACT_KEY
+from torchtitan.experiments.graph_trainer.precompile import (
+    _FX_TRACE_ARTIFACT_KEY,
+    _register_coor_ops,
+)
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
@@ -86,6 +89,7 @@ def _common_setup(config):
     import torch.distributed.config as dist_config
 
     dist_config.compile_on_one_rank = True
+    _register_coor_ops()
 
     # Match the deterministic mode that the training loop will use.
     # The backward graph captures use_deterministic_algorithms() at
@@ -198,6 +202,7 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
+        get_spmd_precompile_meshes,
         precompile_fx_trace_save,
     )
     from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
@@ -212,17 +217,17 @@ def _precompile_aot_fx_trace(
 
     dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
     dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    # The trainer computes global_valid_tokens via dist_sum (an
-    # all-reduce + .item()), which returns a Python float. Use the
-    # same type here so make_fx bakes it as a graph constant — not a
-    # graph input — identical to the non-precompile runtime trace.
+    # Match Trainer.train_step, which keeps the global token count as an int64
+    # tensor on the training device.
     global_num_tokens = (
         num_tokens
         * parallel_dims.dp_shard
         * parallel_dims.dp_replicate
         * parallel_dims.cp
     )
-    dummy_global_valid_tokens = float(global_num_tokens)
+    dummy_global_valid_tokens = torch.tensor(
+        global_num_tokens, dtype=torch.int64, device=device
+    )
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
@@ -256,6 +261,13 @@ def _precompile_aot_fx_trace(
         if parallel_dims.tp_enabled
         else contextlib.nullcontext()
     )
+    spmd_context = dist_utils.get_spmd_context(
+        parallel_dims=parallel_dims,
+        spmd_typechecking=(
+            config.parallelism.spmd_backend == "spmd_types"
+            and config.debug.spmd_typechecking
+        ),
+    )
 
     maybe_register_blockmask_pytree_node()
 
@@ -282,10 +294,15 @@ def _precompile_aot_fx_trace(
         return args, kwargs
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
-    with loss_parallel_ctx:
+    with spmd_context(), loss_parallel_ctx:
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
+            precompile_meshes=(
+                get_spmd_precompile_meshes(parallel_dims)
+                if config.parallelism.spmd_backend == "spmd_types"
+                else None
+            ),
             prepare_inputs=prepare_trace_inputs,
             prepare_call_inputs=prepare_trace_call_inputs,
         )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
