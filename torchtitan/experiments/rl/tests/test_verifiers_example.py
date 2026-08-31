@@ -80,7 +80,11 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
     config = rl_dapo_qwen3_4b_verifiers_8k()
+    renderer_config = config.renderer.as_renderers_config()
 
     assert isinstance(config.rollouter, VerifiersMathRollouter.Config)
     assert config.generator.sampling.max_tokens == 8192
     assert config.dump_folder == "outputs/rl/qwen3_4b_verifiers_8k"
+    assert renderer_config is not None
+    assert renderer_config.name == "qwen3"
+    assert renderer_config.enable_thinking

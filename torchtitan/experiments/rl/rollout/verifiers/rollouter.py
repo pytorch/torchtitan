@@ -12,8 +12,6 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
-from renderers import config_from_name
-
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
@@ -34,6 +32,7 @@ if TYPE_CHECKING:
     from torchtitan.experiments.rl.renderer import RendererConfig
     from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
         GenerationEvidence,
+        GeneratorModelAdapter,
     )
 
 
@@ -60,27 +59,28 @@ class VerifiersRollouter(Rollouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):
+        # Unused because this class replaces the base rollout-worker execution path.
         worker: RolloutWorker.Config | None = None
+        # Configuration for the locally managed Verifiers environment server.
         env_server: VerifiersEnvServer.Config
+        # TorchTitan rubric that consumes rewards returned by Verifiers.
         rubric: Rubric.Config
+        # Converts sibling rollout rewards into training advantages.
         advantage: Configurable.Config = field(
             default_factory=AdvantageEstimator.Config
         )
 
+        # Interface on which the local HTTP model adapter listens.
         model_adapter_bind_host: str = "127.0.0.1"
+        # Adapter port; zero requests an ephemeral port from the operating system.
         model_adapter_bind_port: int = 0
+        # Base URL given to the Verifiers training client after port substitution.
         model_adapter_base_url: str = "http://127.0.0.1:{port}/v1"
-        model_name: str
-        renderer_model_name: str | None = None
-        renderer_name: str = "qwen3"
-        renderer_kwargs: dict[str, Any] = field(
-            default_factory=lambda: {
-                "enable_thinking": True,
-                "thinking_retention": "all",
-            }
-        )
+        # Maximum concurrent rollouts sharing one renderer instance.
         renderer_multiplex: int = 256
+        # Context limit advertised by the local model adapter.
         max_model_len: int
+        # Maximum time to wait for the Verifiers server to become healthy.
         connection_timeout_sec: float = 120.0
 
         def __post_init__(self) -> None:
@@ -103,21 +103,12 @@ class VerifiersRollouter(Rollouter):
                 raise ValueError("connection_timeout_sec must be positive")
 
     def __init__(self, config: Config) -> None:
-        from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
-            GeneratorModelAdapter,
-        )
-
         super().__init__(config)
         self._verifiers_config = config
         self._rubric: Rubric = config.rubric.build()
         self._advantage_estimator: AdvantageEstimator = config.advantage.build()
         self._env_server = config.env_server.build()
-        self._adapter = GeneratorModelAdapter(
-            host=config.model_adapter_bind_host,
-            port=config.model_adapter_bind_port,
-            model=config.model_name,
-            max_model_len=config.max_model_len,
-        )
+        self._adapter: GeneratorModelAdapter | None = None
         self._env_client: Any = None
         self._train_client_config: Any = None
 
@@ -128,44 +119,50 @@ class VerifiersRollouter(Rollouter):
         hf_assets_path: str,
     ) -> None:
         """Start the EnvServer and connect it to TorchTitan generation."""
-        del renderer_config
         if self._env_client is not None:
             return
 
         from verifiers.v1.configs.client import TrainClientConfig
         from verifiers.v1.serve.client import EnvClient
 
+        from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
+            GeneratorModelAdapter,
+        )
+
+        adapter = GeneratorModelAdapter(
+            host=self._verifiers_config.model_adapter_bind_host,
+            port=self._verifiers_config.model_adapter_bind_port,
+            model=hf_assets_path,
+            max_model_len=self._verifiers_config.max_model_len,
+        )
         server_address = await self._env_server.start()
         env_client = None
         try:
-            await self._adapter.start()
+            await adapter.start()
             env_client = EnvClient(server_address)
             await env_client.wait_for_server_startup(
                 timeout=self._verifiers_config.connection_timeout_sec
             )
-            renderer = config_from_name(self._verifiers_config.renderer_name)
-            if renderer is None:
-                raise ValueError("renderer_name must resolve to a concrete renderer")
-            renderer = type(renderer)(**self._verifiers_config.renderer_kwargs)
             train_client_config = TrainClientConfig(
                 base_url=self._verifiers_config.model_adapter_base_url.format(
-                    port=self._adapter.port
+                    port=adapter.port
                 ),
+                # Keep real provider credentials away from the unauthenticated local
+                # adapter; Verifiers uses "EMPTY" when this variable is unset.
                 api_key_var="TORCHTITAN_VERIFIERS_API_KEY",
-                renderer=renderer,
+                renderer=renderer_config.as_renderers_config(),
                 multiplex=self._verifiers_config.renderer_multiplex,
-                renderer_model_name=(
-                    self._verifiers_config.renderer_model_name or hf_assets_path
-                ),
+                renderer_model_name=hf_assets_path,
             )
         except BaseException:
             if env_client is not None:
                 await env_client.close()
             try:
-                await self._adapter.close()
+                await adapter.close()
             finally:
                 await self._env_server.close()
             raise
+        self._adapter = adapter
         self._env_client = env_client
         self._train_client_config = train_client_config
 
@@ -178,8 +175,10 @@ class VerifiersRollouter(Rollouter):
             self._env_client = None
             self._train_client_config = None
             try:
-                await self._adapter.close()
+                if self._adapter is not None:
+                    await self._adapter.close()
             finally:
+                self._adapter = None
                 await self._env_server.close()
 
     async def run_group_rollouts(
@@ -232,7 +231,11 @@ class VerifiersRollouter(Rollouter):
         """Send one task to Verifiers and convert its trace to a rollout."""
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
-        if self._env_client is None or self._train_client_config is None:
+        if (
+            self._adapter is None
+            or self._env_client is None
+            or self._train_client_config is None
+        ):
             raise RuntimeError("Verifiers rollouter is not initialized")
 
         from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
@@ -241,7 +244,7 @@ class VerifiersRollouter(Rollouter):
         episode = await self._env_client.run(
             task_data=sample.task_data,
             client=self._train_client_config,
-            model=self._verifiers_config.model_name,
+            model=self._adapter.model,
             sampling=VerifiersSamplingConfig(
                 temperature=sampling.temperature,
                 top_p=sampling.top_p,

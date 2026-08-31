@@ -42,10 +42,15 @@ class VerifiersTaskDataset(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        # Importable Verifiers taskset plugin ID or local dotted module path.
         taskset_id: str
+        # Keyword arguments used to construct the taskset's config.
         taskset_args: dict[str, Any] = field(default_factory=dict)
+        # Optional task cap; required when the taskset is infinite.
         num_tasks: int | None = None
+        # Seed used to produce a reproducible task order.
         seed: int = 42
+        # Whether to reshuffle the task order at initialization and each epoch.
         shuffle: bool = True
 
         def __post_init__(self) -> None:
