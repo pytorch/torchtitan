@@ -45,6 +45,7 @@ from torchtitan.experiments.graph_trainer.registry import (
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
@@ -113,6 +114,24 @@ class GraphTrainer(Trainer):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
         )
+
+        def __post_init__(self) -> None:
+            if self.debug.spmd_typechecking:
+                raise ValueError(
+                    "SPMD typechecking is not supported by GraphTrainer yet."
+                )
+
+            if (
+                self.parallelism.context_parallel_degree > 1
+                and self.model_spec is not None
+                and any(self.model_spec.model.traverse(FlexAttention.Config))
+            ):
+                raise ValueError(
+                    "Context parallelism with FlexAttention is not supported by "
+                    "GraphTrainer yet. Use a non-Flex attention backend."
+                )
+
+            Trainer.Config.__post_init__(self)
 
     def __init__(self, config):
         super().__init__(config)
@@ -256,7 +275,21 @@ class GraphTrainer(Trainer):
                     self._traced_step.gm, self._traced_step.example_inputs
                 )
         with self.train_context():
-            outputs = run_traced(self._traced_step, module=model)(
+            precompile_meshes = None
+            if (
+                self.config.compile.precompile_artifact_dir
+                and self.config.parallelism.spmd_backend == "spmd_types"
+            ):
+                from torchtitan.experiments.graph_trainer.precompile import (
+                    get_spmd_precompile_meshes,
+                )
+
+                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+            outputs = run_traced(
+                self._traced_step,
+                module=model,
+                precompile_meshes=precompile_meshes,
+            )(
                 inputs,
                 labels,
                 global_valid_tokens,
