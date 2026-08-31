@@ -16,7 +16,7 @@ from queue import Empty
 from typing import Any
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.rollout.verifiers.dataset import (
+from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
     register_local_taskset_alias,
 )
 

@@ -13,6 +13,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
 from torchtitan.config import Configurable
+from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
+    VerifiersTaskSample,
+)
+from torchtitan.experiments.rl.examples.verifiers.components.env_server import (
+    VerifiersEnvServer,
+)
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.experiments.rl.rollout.types import (
@@ -22,18 +28,16 @@ from torchtitan.experiments.rl.rollout.types import (
     RolloutStatus,
     RolloutTurn,
 )
-from torchtitan.experiments.rl.rollout.verifiers.dataset import VerifiersTaskSample
-from torchtitan.experiments.rl.rollout.verifiers.env_server import VerifiersEnvServer
 from torchtitan.experiments.rl.rubrics import RewardFn, Rubric
 from torchtitan.experiments.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
-    from torchtitan.experiments.rl.renderer import RendererConfig
-    from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
+    from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
         GenerationMetadata,
         GeneratorModelAdapter,
     )
+    from torchtitan.experiments.rl.renderer import RendererConfig
 
 
 VERIFIERS_REWARD_KEY = "verifiers_reward"
@@ -125,7 +129,7 @@ class VerifiersRollouter(Rollouter):
         from verifiers.v1.configs.client import TrainClientConfig
         from verifiers.v1.serve.client import EnvClient
 
-        from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
+        from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
             GeneratorModelAdapter,
         )
 
@@ -147,8 +151,8 @@ class VerifiersRollouter(Rollouter):
                 base_url=self._verifiers_config.model_adapter_base_url.format(
                     port=adapter.port
                 ),
-                # Keep real provider credentials away from the unauthenticated local
-                # adapter; Verifiers uses "EMPTY" when this variable is unset.
+                # No API key is needed. This intentionally unset variable makes
+                # Verifiers use "EMPTY" instead of forwarding PRIME_API_KEY.
                 api_key_var="TORCHTITAN_VERIFIERS_API_KEY",
                 renderer=renderer_config.as_renderers_config(),
                 multiplex=self._verifiers_config.renderer_multiplex,

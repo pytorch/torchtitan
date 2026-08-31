@@ -4,12 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.experiments.rl.rollout.verifiers.dataset import (
+from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
     VerifiersTaskDataset,
     VerifiersTaskSample,
 )
-from torchtitan.experiments.rl.rollout.verifiers.env_server import VerifiersEnvServer
-from torchtitan.experiments.rl.rollout.verifiers.rollouter import (
+from torchtitan.experiments.rl.examples.verifiers.components.env_server import (
+    VerifiersEnvServer,
+)
+from torchtitan.experiments.rl.examples.verifiers.components.rollouter import (
     VerifiersRewardFn,
     VerifiersRollouter,
 )

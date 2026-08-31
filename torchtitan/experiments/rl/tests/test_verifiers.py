@@ -13,11 +13,11 @@ from types import SimpleNamespace
 
 from aiohttp import ClientSession
 
-from torchtitan.experiments.rl.rollout.verifiers.model_adapter import (
+from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
     GenerationMetadata,
     GeneratorModelAdapter,
 )
-from torchtitan.experiments.rl.rollout.verifiers.rollouter import (
+from torchtitan.experiments.rl.examples.verifiers.components.rollouter import (
     _trainable_token_spans,
     VerifiersRollouter,
 )

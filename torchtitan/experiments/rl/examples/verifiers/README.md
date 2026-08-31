@@ -4,7 +4,8 @@ This example keeps the existing [DAPO Math](../dapo_math) recipe unchanged and r
 
 Verifiers runs a single-turn math task with its `null` harness. The runtime is a local subprocess; there is no Docker or remote sandbox and no tools are exposed. Do not use this configuration for untrusted code execution.
 
-Verifiers is optional and imported only by this example and the Verifiers rollout adapter. Other TitanRL recipes do not require it.
+Verifiers is optional, and all Verifiers integration code lives in this example.
+Other TitanRL recipes do not require it.
 
 ## Setup
 
