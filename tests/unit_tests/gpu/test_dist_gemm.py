@@ -318,7 +318,9 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         )
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "the fused silu_and_mul is CUDA-only")
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
 class TestFusedSwigluOverlapNumerics(DTensorTestBase):
     """The fused-``w13`` FFN with TP overlap must match the stock FFN under TP+SP.
 
