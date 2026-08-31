@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
+import contextvars
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import spmd_types as spmd
@@ -18,7 +20,105 @@ __all__ = [
     "ComplexRoPE",
     "CosSinRoPE",
     "RoPE",
+    "RoPECacheReader",
+    "register_rope_cache",
 ]
+
+
+_CURRENT_ROPE_CACHE_REGISTRY: contextvars.ContextVar[object | None] = (
+    contextvars.ContextVar("current_rope_cache_registry", default=None)
+)
+
+
+class RoPECacheReader:
+    """Read-only reference to a model-owned canonical RoPE cache.
+
+    The reader resolves the slot on every ``read()`` call instead of retaining
+    a tensor object.  Device/dtype transforms and DTensor distribution may
+    replace the registered buffer object during the model lifecycle.
+    """
+
+    __slots__ = ("_registry", "_slot_name")
+
+    def __init__(self, registry: "_RoPECacheRegistry", slot_name: str) -> None:
+        self._registry = registry
+        self._slot_name = slot_name
+
+    def read(self) -> torch.Tensor:
+        return self._registry._read(self._slot_name)
+
+
+@contextlib.contextmanager
+def _rope_cache_registry_context(registry: "_RoPECacheRegistry"):
+    token = _CURRENT_ROPE_CACHE_REGISTRY.set(registry)
+    try:
+        yield registry
+    finally:
+        _CURRENT_ROPE_CACHE_REGISTRY.reset(token)
+
+
+def _current_rope_cache_registry() -> "_RoPECacheRegistry | None":
+    registry = _CURRENT_ROPE_CACHE_REGISTRY.get()
+    return registry if isinstance(registry, _RoPECacheRegistry) else None
+
+
+def register_rope_cache(
+    cache_key: str,
+    cache_tensor: torch.Tensor,
+) -> RoPECacheReader:
+    """Register or read a canonical cache in the active model registry.
+
+    This is the only public registration operation.  The private registry
+    retains one buffer per key; equivalent later registrations return a reader
+    for the existing buffer and discard the temporary duplicate.
+    """
+
+    registry = _current_rope_cache_registry()
+    if registry is None:
+        raise RuntimeError(
+            "register_rope_cache() requires an active model cache registry. "
+            "Standalone RoPE construction should use its local-buffer fallback."
+        )
+    return registry._register(cache_key, cache_tensor)
+
+
+class _RoPECacheRegistry:
+    """Private cache table that registers canonical buffers on its owner."""
+
+    def __init__(self, owner: Module) -> None:
+        self._owner = owner
+        self._entries: dict[str, str] = {}
+        self._next_slot = 0
+
+    def _register(
+        self,
+        cache_key: str,
+        cache_tensor: torch.Tensor,
+    ) -> RoPECacheReader:
+        slot_name = self._entries.get(cache_key)
+        if slot_name is not None:
+            return RoPECacheReader(self, slot_name)
+
+        slot_name = f"_rope_cache_{self._next_slot}"
+        self._next_slot += 1
+        self._owner.register_buffer(slot_name, cache_tensor, persistent=False)
+        self._entries[cache_key] = slot_name
+        return RoPECacheReader(self, slot_name)
+
+    def _read(self, slot_name: str) -> torch.Tensor:
+        cache = self._owner._buffers.get(slot_name)
+        if cache is None:
+            raise RuntimeError(f"RoPE cache slot {slot_name!r} is not materialized")
+        return cache
+
+    def _materialize(
+        self,
+        reader: RoPECacheReader,
+        cache_tensor: torch.Tensor,
+    ) -> None:
+        if reader._registry is not self or reader._slot_name not in self._owner._buffers:
+            raise ValueError("RoPECacheReader does not belong to this registry")
+        self._owner.register_buffer(reader._slot_name, cache_tensor, persistent=False)
 
 
 # pyrefly: ignore [not-callable]
@@ -110,7 +210,51 @@ class RoPE(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        self.register_buffer("cache", self._precompute_cache(), persistent=False)
+        self._cache_reader: RoPECacheReader | None = None
+        cache = self._precompute_cache()
+        registry = _current_rope_cache_registry()
+        if registry is None:
+            self.register_buffer("cache", cache, persistent=False)
+        else:
+            self._cache_reader = register_rope_cache(self._cache_key(cache), cache)
+
+    @property
+    def cache(self) -> torch.Tensor:
+        """Return the current cache tensor for this RoPE instance.
+
+        Model-owned RoPE modules resolve a read-only reader into the private
+        registry's canonical buffer. Standalone RoPE modules retain the
+        historical direct ``cache`` buffer.
+        """
+        reader = self._cache_reader
+        if reader is not None:
+            return reader.read()
+        if "cache" not in self._buffers:
+            # ``Module.register_buffer`` uses ``hasattr`` to reject collisions;
+            # report the pre-registration state as a missing attribute.
+            raise AttributeError("cache")
+        return self._buffers["cache"]
+
+    def _cache_key(self, cache: torch.Tensor) -> str:
+        """Identify cache-equivalent RoPE modules without sharing the modules.
+
+        The cache is a derived, read-only buffer.  Config metadata used only by
+        parameter initialization metadata is not cache-producing and is
+        excluded. A concrete RoPE class is part of the key because subclasses
+        may use a different cache representation.
+        """
+
+        # RoPE configs contain scalar values and a small number of list fields.
+        # Their repr plus the candidate's physical metadata is sufficient for
+        # this construction-time cache table.
+        cache_config = replace(
+            self.config,
+            param_init=None,
+            sharding_config=None,
+        )
+        return repr(
+            (type(self), cache_config, tuple(cache.shape), cache.dtype, cache.device)
+        )
 
     def _precompute_cache(self) -> torch.Tensor:
         """Build the reusable cache for all positions up to ``max_context_length``.
@@ -173,7 +317,11 @@ class RoPE(Module):
             # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
         with torch.device(buffer_device):
-            self.cache = self._precompute_cache()
+            cache = self._precompute_cache()
+            if self._cache_reader is None:
+                self.register_buffer("cache", cache, persistent=False)
+            else:
+                self._cache_reader._registry._materialize(self._cache_reader, cache)
 
 
 class ComplexRoPE(RoPE):

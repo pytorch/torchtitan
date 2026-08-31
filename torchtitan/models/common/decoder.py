@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
+from torch.nn.attention.flex_attention import BlockMask, _mask_mod_signature, and_masks
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -19,13 +19,13 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    create_attention_mask,
-    create_varlen_metadata_for_document,
     FlexAttention,
-    get_causal_mask_mod,
-    get_efficient_causal_mask_mod_for_packed_document,
     ScaledDotProductAttention,
     VarlenAttention,
+    create_attention_mask,
+    create_varlen_metadata_for_document,
+    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -33,6 +33,10 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.rope import (
+    _rope_cache_registry_context,
+    _RoPECacheRegistry,
+)
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
@@ -254,11 +258,19 @@ class Decoder(BaseModel):
         super().__init__()
         self.config = config
 
+        registry = _RoPECacheRegistry(self)
+        # The registry is a private owner for canonical non-persistent buffers;
+        # the registry object itself is not part of the module tree.
+        self._rope_cache_registry = registry
+
         self.tok_embeddings = config.tok_embeddings.build()
 
-        self.layers = ModuleDict()
-        for i, layer_config in enumerate(config.layers):
-            self.layers[str(i)] = layer_config.build()
+        # Direct model construction and Config.build() both pass through this
+        # constructor, so the layer RoPE modules use the same local registry.
+        with _rope_cache_registry_context(registry):
+            self.layers = ModuleDict()
+            for i, layer_config in enumerate(config.layers):
+                self.layers[str(i)] = layer_config.build()
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
@@ -280,6 +292,10 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
+
+    def _rope_cache_context(self):
+        """Return a context that exposes this model's private cache registry."""
+        return _rope_cache_registry_context(self._rope_cache_registry)
 
     def forward(
         self,
