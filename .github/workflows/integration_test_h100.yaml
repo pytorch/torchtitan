@@ -1,11 +1,9 @@
 name: H100 Integration
 
 on:
-  pull_request:
-    types: [labeled, synchronize, reopened]
-    branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
+  push:
+    tags:
+      - ciflow/h100.8/*
 
 concurrency:
   group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -21,9 +19,7 @@ permissions:
 
 jobs:
   set-matrix:
-    if: >-
-      github.repository_owner == 'pytorch' &&
-      contains(github.event.pull_request.labels.*.name, 'ciflow/h100.8')
+    if: github.repository_owner == 'pytorch'
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-bx86iamx-176-1800-h100-8
