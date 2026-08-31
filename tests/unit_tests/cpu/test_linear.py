@@ -6,11 +6,16 @@
 
 import unittest
 from functools import partial
+from unittest import mock
 
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.components.fused_wgrad import (
+    enable_fused_wgrad_accumulation,
+    FusedWGradAccumLinear,
+)
+from torchtitan.models.common.linear import Linear, ScaledBiasRowwiseLinear
 from torchtitan.protocols.module import Module
 
 
@@ -25,6 +30,56 @@ class TestLinear(unittest.TestCase):
         self.assertIsInstance(linear, nn.Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
         self.assertIsNone(linear.bias)
+
+    def test_fused_wgrad_config_build(self):
+        config = FusedWGradAccumLinear.Config(
+            in_features=32,
+            out_features=16,
+        )
+        linear = config.build()
+        self.assertIsInstance(linear, FusedWGradAccumLinear)
+        self.assertEqual(linear.wgrad_accum_dtype, torch.float32)
+
+    def test_fused_wgrad_rejects_compile(self):
+        config = FusedWGradAccumLinear.Config(
+            in_features=4,
+            out_features=4,
+        )
+        linear = config.build().bfloat16()
+        input_BD = torch.randn(2, 4, dtype=torch.bfloat16)
+        with mock.patch("torch.compiler.is_compiling", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "does not support torch.compile"):
+                linear(input_BD)
+
+    def test_enable_fused_wgrad_accumulation(self):
+        config = Linear.Config(
+            in_features=32,
+            out_features=16,
+            bias=True,
+            param_init={"weight": nn.init.zeros_, "bias": nn.init.zeros_},
+        )
+        converted = enable_fused_wgrad_accumulation(
+            config,
+            reduce_dtype="bfloat16",
+            fqns=[],
+        )
+
+        self.assertIs(type(converted), FusedWGradAccumLinear.Config)
+        self.assertTrue(converted.bias)
+        self.assertEqual(converted.wgrad_accum_dtype, "bfloat16")
+        self.assertIs(converted.param_init, config.param_init)
+
+    def test_fused_wgrad_skips_specialized_linear(self):
+        config = ScaledBiasRowwiseLinear.Config(
+            in_features=4,
+            out_features=4,
+        )
+        converted = enable_fused_wgrad_accumulation(
+            config,
+            reduce_dtype="float32",
+            fqns=[],
+        )
+        self.assertIs(converted, config)
 
     def test_config_build_with_bias(self):
         """Linear.Config(bias=True).build() creates a linear with bias."""
