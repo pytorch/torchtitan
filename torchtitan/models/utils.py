@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from fractions import Fraction
 from typing import Any
 
@@ -478,10 +478,9 @@ def delta_rule_flops_per_token(
     return 6 * 3 * num_heads * key_head_dim * v_head_dim
 
 
-def get_vision_flops(
+def get_vision_flop_counter(
     model_config: Any,
-    input_dict: dict[str, torch.Tensor],
-) -> int:
+) -> Callable[[dict[str, torch.Tensor]], int]:
     def linear_weight_count(linear):
         rank = getattr(linear, "rank", 0)
         return linear.in_features * linear.out_features + rank * (
@@ -489,63 +488,34 @@ def get_vision_flops(
         )
 
     vision = model_config.vision_encoder
-    grids = [
-        row
-        for pixels_key, grid_key in (
-            ("pixel_values", "grid_thw"),
-            ("pixel_values_videos", "grid_thw_videos"),
-        )
-        if input_dict.get(pixels_key) is not None
-        for row in input_dict[grid_key].tolist()
-    ]
-    num_patches = sum(t * h * w for t, h, w in grids)
-
+    num_layers = vision.num_layers
     vision_types = {cls.__qualname__ for cls in type(vision).__mro__}
     if "Qwen35VisionEncoder.Config" in vision_types:
+        family = "qwen"
         patch_embed = vision.patch_embed_proj
         output_linears = (vision.merger.fc1, vision.merger.fc2)
-        num_attention_pairs = vision.num_layers * sum(
-            t * (h * w) ** 2 for t, h, w in grids
-        )
-        num_output_tokens = num_patches // vision.spatial_merge_size**2
+        merge_unit = vision.spatial_merge_size**2
     elif vision_types & {
         "KimiK25VisionEncoder.Config",
         "KimiK3VisionEncoder.Config",
     }:
+        family = "kimi"
         kernel_h, kernel_w = vision.merge_kernel_size
         projector = vision.projector
         patch_embed = vision.patch_embed_proj
         output_linears = (projector.linear_1, projector.linear_2)
-        num_attention_pairs = vision.num_layers * sum(
-            (t * h * w) ** 2 for t, h, w in grids
-        )
-        num_output_tokens = sum((h // kernel_h) * (w // kernel_w) for t, h, w in grids)
     elif "MuseGlimmerVisionEncoder.Config" in vision_types:
+        family = "muse"
         adapter = model_config.vision_adapter
         projection = model_config.vision_projection
-
-        num_global_pairs = sum((h * w) ** 2 for t, h, w in grids)
-        num_sparse_pairs = 0
-        for t, h, w in grids:
-            num_h_windows, h_remainder = divmod(h, vision.pos_emb_grid_h)
-            num_w_windows, w_remainder = divmod(w, vision.pos_emb_grid_w)
-            num_sparse_pairs += (
-                num_h_windows * vision.pos_emb_grid_h**2 + h_remainder**2
-            ) * (num_w_windows * vision.pos_emb_grid_w**2 + w_remainder**2)
-
-        num_layers = vision.num_layers
         factor = vision.sparse_attention_factor
         num_global_layers = (num_layers + factor - 1) // factor
+        num_sparse_layers = num_layers - num_global_layers
+        grid_h = vision.pos_emb_grid_h
+        grid_w = vision.pos_emb_grid_w
+        downsample_factor = vision.downsample_factor
         patch_embed = vision.conv1
         output_linears = (adapter.c_fc, adapter.c_proj, projection)
-        num_attention_pairs = (
-            num_global_layers * num_global_pairs
-            + (num_layers - num_global_layers) * num_sparse_pairs
-        )
-        num_output_tokens = sum(
-            (h // vision.downsample_factor) * (w // vision.downsample_factor)
-            for t, h, w in grids
-        )
     else:
         raise TypeError(f"Unsupported vision encoder: {type(vision).__qualname__}")
 
@@ -558,18 +528,55 @@ def get_vision_flops(
         block.mlp.fc1,
         block.mlp.fc2,
     )
-    return 6 * (
-        num_patches
-        * (
-            linear_weight_count(patch_embed)
-            + vision.num_layers
-            * sum(linear_weight_count(linear) for linear in block_linears)
-        )
-        + num_attention_pairs
-        * (block.attn.wq.out_features + block.attn.wv.out_features)
-        + num_output_tokens
-        * sum(linear_weight_count(linear) for linear in output_linears)
+    flops_per_patch = 6 * (
+        linear_weight_count(patch_embed)
+        + num_layers * sum(linear_weight_count(linear) for linear in block_linears)
     )
+    flops_per_attention_pair = 6 * (
+        block.attn.wq.out_features + block.attn.wv.out_features
+    )
+    flops_per_output_token = 6 * sum(
+        linear_weight_count(linear) for linear in output_linears
+    )
+
+    def count_vision_flops(input_dict: dict[str, torch.Tensor]) -> int:
+        num_patches = num_attention_pairs = num_output_tokens = 0
+        for pixels_key, grid_key in (
+            ("pixel_values", "grid_thw"),
+            ("pixel_values_videos", "grid_thw_videos"),
+        ):
+            if input_dict.get(pixels_key) is None:
+                continue
+            for t, h, w in input_dict[grid_key].tolist():
+                patches = t * h * w
+                num_patches += patches
+                if family == "qwen":
+                    num_attention_pairs += num_layers * t * (h * w) ** 2
+                elif family == "kimi":
+                    num_attention_pairs += num_layers * patches**2
+                    num_output_tokens += (h // kernel_h) * (w // kernel_w)
+                else:
+                    num_h_windows, h_remainder = divmod(h, grid_h)
+                    num_w_windows, w_remainder = divmod(w, grid_w)
+                    num_sparse_pairs = (
+                        num_h_windows * grid_h**2 + h_remainder**2
+                    ) * (num_w_windows * grid_w**2 + w_remainder**2)
+                    num_attention_pairs += (
+                        num_global_layers * (h * w) ** 2
+                        + num_sparse_layers * num_sparse_pairs
+                    )
+                    num_output_tokens += (h // downsample_factor) * (
+                        w // downsample_factor
+                    )
+        if family == "qwen":
+            num_output_tokens = num_patches // merge_unit
+        return (
+            num_patches * flops_per_patch
+            + num_attention_pairs * flops_per_attention_pair
+            + num_output_tokens * flops_per_output_token
+        )
+
+    return count_vision_flops
 
 
 def get_nparams_and_active_nparams(

@@ -54,7 +54,7 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
-from torchtitan.models.utils import get_vision_flops
+from torchtitan.models.utils import get_vision_flop_counter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -373,6 +373,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config_dict=config.to_dict(),
             has_quantization=has_quantization(model_config),
         )
+        self.vision_flop_counter = (
+            get_vision_flop_counter(model_config)
+            if getattr(model_config, "vision_encoder", None) is not None
+            else None
+        )
         color = self.metrics_processor.color
 
         # calculate model size and flops per token
@@ -659,10 +664,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             input_dict, labels = batch
             ntokens_batch = labels.numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
-            if getattr(self.model_config, "vision_encoder", None) is not None:
+            if self.vision_flop_counter is not None:
                 self.metrics_processor.has_vision = True
-                self.metrics_processor.vision_flops_since_last_log += get_vision_flops(
-                    self.model_config, input_dict
+                self.metrics_processor.vision_flops_since_last_log += (
+                    self.vision_flop_counter(input_dict)
                 )
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
