@@ -239,9 +239,7 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
 
-@unittest.skipUnless(
-    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
-)
+@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
 class TestFusedFeedForwardNumerics(DTensorTestBase):
     """The fused FFN must match the stock one under TP+SP.
 
@@ -318,9 +316,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         )
 
 
-@unittest.skipUnless(
-    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
-)
+@unittest.skipUnless(torch.cuda.is_available(), "the fused silu_and_mul is CUDA-only")
 class TestFusedSwigluOverlapNumerics(DTensorTestBase):
     """The fused-``w13`` FFN with TP overlap must match the stock FFN under TP+SP.
 

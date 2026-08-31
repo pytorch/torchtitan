@@ -114,7 +114,8 @@ def _build_llama3_layers(
 def _debugmodel(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 256
     n_heads = 16
@@ -150,7 +151,8 @@ def _debugmodel(
 def _1b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
@@ -196,7 +198,8 @@ def _1b(
 def _3b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
@@ -242,7 +245,8 @@ def _3b(
 def _8b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
@@ -285,7 +289,8 @@ def _8b(
 def _70b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
@@ -328,7 +333,8 @@ def _70b(
 def _405b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 16384
     n_heads = 128

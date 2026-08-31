@@ -220,7 +220,8 @@ def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    seq_len: int = 16384,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     dim = 256
     n_layers = 6
@@ -359,7 +360,8 @@ def _moonlight_16b_a3b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    seq_len: int = 8192,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
@@ -376,7 +378,8 @@ def _kimi_vl_a3b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
 
@@ -408,7 +411,8 @@ def _kimi_k2_5(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
-    seq_len: int = 262144,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
     ~32B-active DeepSeekV3-style text tower (384 routed experts, top-8) plus a

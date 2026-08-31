@@ -325,7 +325,8 @@ def _debugmodel(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
-    seq_len: int = 16384,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -396,7 +397,8 @@ def _16b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
-    seq_len: int = 16384,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -467,7 +469,8 @@ def _236b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
-    seq_len: int = 16384,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -542,7 +545,8 @@ def _671b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
-    seq_len: int = 16384,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61

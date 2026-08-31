@@ -276,7 +276,8 @@ class TestYaRNScaling(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import Attention
 
-        model_config = deepseekv3_configs["debugmodel"][0]("flex", "standard")
+        build_config, max_context_length = deepseekv3_configs["debugmodel"]
+        model_config = build_config("flex", "standard", seq_len=max_context_length)
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)
         attention_config.rope = dataclasses.replace(
@@ -329,7 +330,8 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        model = llama3_configs["debugmodel"][0]("flex").build()
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        model = build_config("flex", seq_len=max_context_length).build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
@@ -338,7 +340,8 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        cfg = llama3_configs["debugmodel"][0]("flex")
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        cfg = build_config("flex", seq_len=max_context_length)
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
         self.assertEqual(

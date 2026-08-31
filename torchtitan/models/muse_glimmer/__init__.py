@@ -426,7 +426,7 @@ def _muse_glimmer_config(
     )
 
 
-def _debugmodel(attn_backend: str, seq_len: int = 4096) -> MuseGlimmerModel.Config:
+def _debugmodel(attn_backend: str, *, seq_len: int) -> MuseGlimmerModel.Config:
     return _muse_glimmer_config(
         dim=256,
         n_layers=8,
@@ -445,7 +445,7 @@ def _muse_glimmer_30b(
     attn_backend: str,
     *,
     with_vision: bool = False,
-    seq_len: int = 16384,
+    seq_len: int,
 ) -> MuseGlimmerModel.Config:
     vision_adapter_dim = None
     vision_encoder = None
@@ -473,7 +473,7 @@ def _muse_glimmer_30b(
 
 
 def _muse_glimmer_debugmodel_mm(
-    attn_backend: str, seq_len: int = 4096
+    attn_backend: str, *, seq_len: int
 ) -> MuseGlimmerModel.Config:
     """Multimodal debug flavor: the debug text decoder that *owns* a scaled-down
     vision encoder + adapter and runs them inside ``forward``.

@@ -249,7 +249,8 @@ def _build_gptoss_layers(
 def _debugmodel(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
@@ -294,7 +295,8 @@ def _debugmodel(
 def _20b(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -339,7 +341,8 @@ def _20b(
 def _120b(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
-    seq_len: int = 131072,
+    *,
+    seq_len: int,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
