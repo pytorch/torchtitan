@@ -18,6 +18,8 @@ from .parallelize import parallelize_qwen3
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
 ) -> ModelSpec:
@@ -25,7 +27,15 @@ def model_registry(
     if moe_comm_backend is not None:
         kwargs["moe_comm_backend"] = moe_comm_backend
     get_config, max_context_len = qwen3_configs[flavor]
-    base = build_decoder_config_for_backend(get_config, attn_backend, **kwargs)
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    base = build_decoder_config_for_backend(
+        get_config, attn_backend, seq_len=context_len, **kwargs
+    )
     config = GraphTrainerQwen3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
@@ -33,7 +43,7 @@ def model_registry(
         name="graph_trainer/qwen3",
         flavor=flavor,
         model=config,
-        max_context_length=max_context_len,
+        max_context_length=context_len,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=None,

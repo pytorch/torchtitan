@@ -61,7 +61,11 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     """
     base = llama3_debugmodel()
     base.parallelism.context_parallel_load_balancer = "headtail"
-    base.model_spec = model_registry("debugmodel", attn_backend="sdpa")
+    base.model_spec = model_registry(
+        "debugmodel",
+        seq_len=base.training.max_context_length,
+        attn_backend="sdpa",
+    )
     config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
