@@ -815,7 +815,7 @@ def _qwen3_30b_a3b_varlen_pg(
     tp1: bool = False,
     deepep: bool = False,
     gen_gpus: int | None = None,
-    max_offpolicy_steps: int = 3,
+    target_offpolicy_steps: int = 3,
 ) -> Controller.Config:
     """``rl_grpo_qwen3_30b_a3b_varlen`` with an overridden rollout batch size (P, G)
     and, optionally, MXFP8 QAT on the MoE grouped experts only, TP=1, and/or the
@@ -854,7 +854,11 @@ def _qwen3_30b_a3b_varlen_pg(
     config = rl_grpo_qwen3_30b_a3b_varlen()
     config.async_loop.num_prompts_per_train_step = num_prompts_per_train_step
     config.async_loop.num_samples_per_prompt = num_samples_per_prompt
-    config.async_loop.max_offpolicy_steps = max_offpolicy_steps
+    config.async_loop.target_offpolicy_steps = target_offpolicy_steps
+    if target_offpolicy_steps == 0:
+        # Strict FIFO: with the default window_fraction the batcher may bypass an
+        # unfinished group at the queue head, so the run would not be on-policy.
+        config.async_loop.window_fraction = None
     if tp1:
         train_par = config.trainer.parallelism
         train_par.data_parallel_shard_degree = 4
@@ -896,7 +900,7 @@ def _qwen3_30b_a3b_varlen_pg(
         gen_dp_shards = max(config.generator.parallelism.data_parallel_degree, 1)
         max_num_seqs = min(
             math.ceil(
-                (max_offpolicy_steps + 1)
+                (target_offpolicy_steps + 1)
                 * num_prompts_per_train_step
                 * num_samples_per_prompt
                 / gen_dp_shards
@@ -1093,32 +1097,32 @@ def rl_grpo_qwen3_30b_a3b_varlen_p128g32_tp1_deepep_mxfp8_experts_gen2() -> Cont
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_sync() -> Controller.Config:
-    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    """Sync (on-policy, target_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1``; otherwise identical."""
-    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, max_offpolicy_steps=0)
+    return _qwen3_30b_a3b_varlen_pg(32, 32, tp1=True, target_offpolicy_steps=0)
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts_sync() -> Controller.Config:
-    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    """Sync (on-policy, target_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_mxfp8_experts``; otherwise identical."""
     return _qwen3_30b_a3b_varlen_pg(
-        32, 32, tp1=True, mxfp8_experts=True, max_offpolicy_steps=0
+        32, 32, tp1=True, mxfp8_experts=True, target_offpolicy_steps=0
     )
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_sync() -> Controller.Config:
-    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    """Sync (on-policy, target_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep``; otherwise identical."""
     return _qwen3_30b_a3b_varlen_pg(
-        32, 32, tp1=True, deepep=True, max_offpolicy_steps=0
+        32, 32, tp1=True, deepep=True, target_offpolicy_steps=0
     )
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts_sync() -> Controller.Config:
-    """Sync (on-policy, max_offpolicy_steps=0) variant of
+    """Sync (on-policy, target_offpolicy_steps=0) variant of
     ``rl_grpo_qwen3_30b_a3b_varlen_p32g32_tp1_deepep_mxfp8_experts``; otherwise identical."""
     return _qwen3_30b_a3b_varlen_pg(
-        32, 32, tp1=True, deepep=True, mxfp8_experts=True, max_offpolicy_steps=0
+        32, 32, tp1=True, deepep=True, mxfp8_experts=True, target_offpolicy_steps=0
     )
 
 
