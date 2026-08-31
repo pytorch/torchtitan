@@ -23,6 +23,12 @@ _RENDERER_BY_MODEL = {
     "qwen3_vl": "qwen3-vl",
     "gpt_oss": "gpt-oss",
     "deepseek_v3": "deepseek-v3",
+    # TODO: upstream the Muse Glimmer renderer to PrimeIntellect-ai/renderers, then
+    # delete its `register()` and point this at the library's name (hyphenated, like
+    # the entries above). It ships in torchtitan and self-registers only because the
+    # library has no Muse Glimmer renderer yet; every other model here resolves to one
+    # the library owns. See rl/models/muse_glimmer/renderer.py.
+    "muse_glimmer": "muse_glimmer",
     "default": "default",  # llama3
     "auto": "auto",  # ignores knobs, resolves from tokenizer,
 }
@@ -73,6 +79,21 @@ class RendererConfig(Configurable.Config):
 
         # `name=None` (or "auto") -> let `create_renderer` resolve from the tokenizer.
         renderer_name = _RENDERER_BY_MODEL.get(self.name, self.name)
+        if renderer_name == "muse_glimmer":
+            # TODO: temporary. Delete this block once the Muse Glimmer renderer is
+            # upstreamed to PrimeIntellect-ai/renderers -- the library registers its
+            # own renderers in _populate_registry(), so no torchtitan-side hook is
+            # needed for any other model here.
+            #
+            # Until then it has to live in build(), not in the config registry: the
+            # renderer is constructed inside a Monarch-spawned RolloutWorker, which
+            # only receives the serialized config and never imports the recipe module,
+            # so a register() call there never runs in that process.
+            from torchtitan.experiments.rl.models.muse_glimmer import (
+                renderer as _muse_glimmer_renderer,
+            )
+
+            _muse_glimmer_renderer.register()
         renderer_config = config_from_name(renderer_name) if renderer_name else None
         if renderer_config is None:
             return create_renderer(tokenizer, None)
