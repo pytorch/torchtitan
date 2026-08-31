@@ -19,9 +19,9 @@ from tests.integration_tests.run_tests import run_tests
 # partitioner issue is resolved.
 _JIT_DISABLED = True
 
-# TODO: Re-enable after regional_inductor can trace the CP load balancer's
-# index-rearrange constants; it currently raises a FunctionalTensor error.
-_FLEX_CP_INDUCTOR_DISABLED = True
+# GraphTrainer does not support context parallelism with FlexAttention yet.
+# SDPA configurations provide GraphTrainer CP coverage.
+_GRAPH_TRAINER_FLEX_CP_UNSUPPORTED = True
 
 
 def _build_llama3_tests() -> list[OverrideDefinitions]:
@@ -209,7 +209,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
-            disabled=_FLEX_CP_INDUCTOR_DISABLED,
+            disabled=_GRAPH_TRAINER_FLEX_CP_UNSUPPORTED,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
         OverrideDefinitions(
@@ -613,7 +613,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 FSDP+TP+CP",
             "aot_fx_trace_qwen3_fsdp_tp_cp",
             ngpu=8,
-            disabled=_FLEX_CP_INDUCTOR_DISABLED,
+            disabled=_GRAPH_TRAINER_FLEX_CP_UNSUPPORTED,
         ),
         OverrideDefinitions(
             [

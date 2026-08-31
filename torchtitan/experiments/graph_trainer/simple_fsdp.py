@@ -73,9 +73,7 @@ def _spmd_local_tensor_to_dtensor(
     tensor: torch.Tensor,
     param_name: str,
     non_dp_mesh: DeviceMesh | None,
-    param_non_dp_mesh_types: dict[
-        str, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
-    ],
+    param_non_dp_mesh_types: dict[str, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]],
 ) -> torch.Tensor:
     """Prepare an SPMD-annotated parameter for SimpleFSDP.
 
@@ -230,8 +228,7 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
-        | None = None,
+        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
