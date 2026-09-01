@@ -179,11 +179,16 @@ class GraphTrainer(Trainer):
             extra_kwargs,
         )
 
-    def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
+    def _load_precompiled_fx_trace(
+        self,
+        model: nn.Module,
+        runtime_args: tuple[Any, ...],
+    ) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""
         from torchtitan.experiments.graph_trainer.precompile import (
             _FX_TRACE_ARTIFACT_KEY,
             compute_config_fingerprint,
+            flatten_runtime_inputs,
             precompile_fx_trace_load,
         )
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
@@ -205,6 +210,7 @@ class GraphTrainer(Trainer):
         self._traced_step = precompile_fx_trace_load(
             storage,
             expected_fingerprint=config_fingerprint,
+            example_inputs=flatten_runtime_inputs(model, runtime_args, {}),
         )
 
     def _make_fx_forward_backward_step(
@@ -219,7 +225,10 @@ class GraphTrainer(Trainer):
         maybe_register_blockmask_pytree_node()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
-                self._load_precompiled_fx_trace(model)
+                self._load_precompiled_fx_trace(
+                    model,
+                    (inputs, labels, global_valid_tokens, extra_kwargs),
+                )
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
                 with self.train_context(), log_timer("minimal_fx_tracer"):
