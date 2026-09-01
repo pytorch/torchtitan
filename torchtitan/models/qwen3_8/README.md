@@ -45,9 +45,11 @@ checkpoint scales the existing MoE decoder and stores its language-model
 weights under `model.*` instead of the multimodal `model.language_model.*`
 prefix.
 
-The model registry exposes only Qwen3.8 variants. Hugging Face's retained
-`qwen3_5` architecture identifiers are an implementation detail rather than
-separate TorchTitan model configurations.
+This package's model registry exposes only Qwen3.8 variants. The sibling
+`torchtitan/models/qwen3_5/` package keeps the Qwen3.5 model registry and
+released training recipes while reusing the implementation in this directory.
+Hugging Face's retained `qwen3_5` architecture identifiers for Qwen3.8 are an
+implementation detail.
 
 The Hugging Face configs add `output_gate_type: "swish"`; this matches the
 existing SiLU/Swish gate in TorchTitan's Gated DeltaNet. Full-attention output
