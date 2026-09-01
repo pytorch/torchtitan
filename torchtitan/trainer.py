@@ -21,6 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
+from torchtitan.components.data.collators import get_batch_num_valid_tokens
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -834,26 +835,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         parallel_dims = self.parallel_dims
         # All groups form one optimizer step; each group feeds one fwd-bwd call.
         microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
-        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
+        local_valid_tokens = 0
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
                     input_dict, labels = next(data_iterator)
-                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                local_valid_tokens += get_batch_num_valid_tokens(
+                    input_dict,
+                    labels,
+                    ignore_index=IGNORE_INDEX,
+                )
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
-        sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
+        sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
+        local_valid_tokens_tensor = torch.tensor(
+            local_valid_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
         if parallel_dims.dp_enabled:
             dp_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum_tensor(
-                local_valid_tokens.to(self.device), dp_mesh
+                local_valid_tokens_tensor, dp_mesh
             )
         else:
-            global_valid_tokens = local_valid_tokens.to(self.device)
+            global_valid_tokens = local_valid_tokens_tensor
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None

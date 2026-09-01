@@ -4,7 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
+from torchtitan.components.data.collators import (
+    batch_with_valid_token_count,
+    BatchInputsWithMetadata,
+    Collator,
+    get_batch_num_valid_tokens,
+    TextCollator,
+    TrainerBatch,
+)
 from torchtitan.components.data.dataset import (
     DatasetConcatConfig,
     DatasetConfig,
@@ -29,6 +36,8 @@ from torchtitan.components.data.sources import (
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 
 __all__ = [
+    "batch_with_valid_token_count",
+    "BatchInputsWithMetadata",
     "Collator",
     "ConcatThenSplitPackingConfig",
     "DatasetBuildContext",
@@ -37,6 +46,7 @@ __all__ = [
     "DatasetIterationPolicy",
     "DatasetMixConfig",
     "FirstFitPackingConfig",
+    "get_batch_num_valid_tokens",
     "GrainDataLoader",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",

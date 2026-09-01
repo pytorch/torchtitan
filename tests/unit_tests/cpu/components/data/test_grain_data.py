@@ -17,7 +17,13 @@ import numpy as np
 import pytest
 import torch
 
-from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
+from torchtitan.components.data.collators import (
+    BatchInputsWithMetadata,
+    Collator,
+    get_batch_num_valid_tokens,
+    TextCollator,
+    TrainerBatch,
+)
 from torchtitan.components.data.dataset import (
     DatasetConcatConfig,
     DatasetMixConfig,
@@ -1022,6 +1028,68 @@ def test_unpacked_text_collator_pads_positions_within_context_window():
 
     assert len(inputs["positions"]) == CONTEXT.num_tokens_per_batch
     assert int(inputs["positions"].max()) < CONTEXT.max_context_length
+
+
+def test_text_collator_counts_unmasked_labels():
+    sequence = TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([2, 3, IGNORE_INDEX]),
+    )
+
+    inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
+
+    assert get_batch_num_valid_tokens(inputs, labels, ignore_index=IGNORE_INDEX) == 2
+    assert inputs["input"][:3].tolist() == [1, 2, 3]
+
+
+def test_collator_without_token_labels_leaves_count_unset():
+    rows = [
+        ({"input": torch.tensor([1, 2])}, torch.tensor([1.5, 2.5])),
+        ({"input": torch.tensor([3, 4])}, torch.tensor([3.5, 4.5])),
+    ]
+
+    inputs, _ = PairCollator.Config().build(context=CONTEXT)(rows)
+
+    assert not isinstance(inputs, BatchInputsWithMetadata)
+
+
+def test_batch_valid_token_count_falls_back_to_label_scan():
+    labels = torch.tensor([1, IGNORE_INDEX, 2])
+
+    num_valid_tokens = get_batch_num_valid_tokens(
+        {"input": torch.ones(3)},
+        labels,
+        ignore_index=IGNORE_INDEX,
+    )
+
+    assert num_valid_tokens == 2
+
+
+def test_loader_batches_carry_valid_token_count():
+    config = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(rows=({"tokens": [1, 10, 11, 2]},)),
+            processor=RowToTokens.Config(),
+        ),
+        collator=TextCollator.Config(),
+        repeat=True,
+    )
+    loader = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        max_context_length=CONTEXT.max_context_length,
+        num_tokens_per_batch=CONTEXT.num_tokens_per_batch,
+    )
+
+    input_dict, labels = next(iter(loader))
+
+    assert isinstance(input_dict, BatchInputsWithMetadata)
+    assert input_dict.num_valid_tokens == 3
+    assert get_batch_num_valid_tokens(
+        input_dict, labels, ignore_index=IGNORE_INDEX
+    ) == int((labels != IGNORE_INDEX).sum())
+    loader.close()
 
 
 def test_pack_then_pack_then_collate_preserves_aligned_pairs():
