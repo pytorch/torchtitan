@@ -60,6 +60,20 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
         self.assertIsInstance(loss, ChunkedLossWrapperWithParamGrads)
         self.assertEqual(loss.num_chunks, 4)
 
+    def test_rejects_lm_head_with_parameters_other_than_weight(self):
+        loss_fn = ChunkedLossWrapperWithParamGrads(
+            ChunkedLossWrapperWithParamGrads.Config(num_chunks=2)
+        )
+        loss_fn.set_lm_head(nn.Linear(8, 16, bias=True))
+        hidden_states = torch.randn(2, 4, 8, requires_grad=True)
+        labels = torch.randint(0, 16, (2, 4))
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "requires lm_head to have exactly one parameter named 'weight'",
+        ):
+            loss_fn(hidden_states, labels)
+
     def test_bitwise_equal_with_chunked_loss(self):
         for num_tokens, num_chunks in ((16, 4), (8, 4)):
             with self.subTest(num_tokens=num_tokens, num_chunks=num_chunks):
