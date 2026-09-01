@@ -104,7 +104,11 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
-          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+            export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          fi
+          export PYTORCH_ALLOC_CONF="expandable_segments:False"
         fi
 
         sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
@@ -171,7 +175,11 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.runner_config['index-url'] }}
 
         if [[ "${{ matrix.runner_config['gpu-arch-type'] }}" == "rocm" ]]; then
-          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+            export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          fi
+          export PYTORCH_ALLOC_CONF="expandable_segments:False"
         fi
 
         sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
