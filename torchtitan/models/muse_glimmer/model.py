@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 from typing import Any, cast
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,7 +16,7 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -36,8 +37,8 @@ from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     build_vision_bank_indices,
+    gather_vision_embeds,
     multimodal_context,
-    VisionScatter,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -281,11 +282,10 @@ class MuseGlimmerModel(Decoder):
         # pyrefly: ignore [bad-override]
         tok_embeddings: EmbeddingWithNorm.Config
         # Optional LLM-side multimodal injection. Preprocessing builds absolute
-        # packed-bank indices before CP; VisionScatter gathers the rows needed
-        # by each local token shard after projection and normalization.
+        # packed-bank indices before CP; forward gathers the corresponding vision
+        # rows into the TP-replicated token embeddings.
         vision_projection: Linear.Config | None = None
         perception_emb_norm: RMSNorm.Config | None = None
-        vision_scatter: VisionScatter.Config | None = None
         # Optional owned vision stack. When set, ``MuseGlimmerModel`` builds the encoder
         # + adapter as submodules and runs them inside ``forward`` (from padded
         # ``pixel_values`` + ``grid_thw``), mirroring qwen3_5's
@@ -360,9 +360,6 @@ class MuseGlimmerModel(Decoder):
             config.perception_emb_norm.build()
             if config.perception_emb_norm is not None
             else None
-        )
-        self.vision_scatter = (
-            config.vision_scatter.build() if config.vision_scatter is not None else None
         )
         # Owned vision stack (None unless a multimodal flavor configured it). When
         # present, ``forward`` runs encoder->adapter on packed pixel_values.
@@ -478,13 +475,16 @@ class MuseGlimmerModel(Decoder):
         assert vision_bank_indices_T is not None
         assert self.vision_projection is not None
         assert self.perception_emb_norm is not None
-        assert self.vision_scatter is not None
 
         vision_features_VD = self._get_vision_features(pixel_values, grid_thw)
         vision_bank_VD = self.perception_emb_norm(
             self.vision_projection(vision_features_VD)
         )
-        return self.vision_scatter(h_TD, vision_bank_VD, vision_bank_indices_T)
+        return gather_vision_embeds(
+            h_TD,
+            vision_bank_VD=vision_bank_VD,
+            vision_bank_indices_T=vision_bank_indices_T,
+        )
 
     def forward(
         self,
@@ -516,6 +516,20 @@ class MuseGlimmerModel(Decoder):
                 )
             else:
                 h_TD = tokens
+
+        # torch.where can erase the token PartitionSpec. Restore it before the
+        # layer-0 FSDP pre-forward hook runs ahead of input redistribution.
+        if (
+            self.tok_embeddings is not None
+            and self.vision_projection is not None
+            and get_spmd_backend() == "spmd_types"
+            and spmd.is_type_checking()
+        ):
+            spmd.assert_type(
+                h_TD,
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
+                spmd.PartitionSpec(("dp", "cp"), None),
+            )
 
         for layer in self.layers.values():
             h_TD = layer(h_TD, attention_masks, positions)

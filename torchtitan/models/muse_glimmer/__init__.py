@@ -19,7 +19,6 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenAttention
 from torchtitan.models.common.config_utils import get_attention_config, make_ffn_config
-from torchtitan.models.common.multimodal import VisionScatter
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
@@ -373,7 +372,6 @@ def _muse_glimmer_config(
     # apply a scaleless norm. Left as None for the text-only model.
     vision_projection = None
     perception_emb_norm = None
-    vision_scatter = None
     if vision_adapter_dim is not None:
         vision_projection = Linear.Config(
             in_features=vision_adapter_dim,
@@ -381,7 +379,6 @@ def _muse_glimmer_config(
             param_init=_LINEAR_INIT,
         )
         perception_emb_norm = _scaleless_norm(dim, _NORM_EPS)
-        vision_scatter = VisionScatter.Config()
 
     # When the model owns the vision stack, fill the encoder/adapter sharding
     # configs so ``model.parallelize`` applies their TP.
@@ -424,7 +421,6 @@ def _muse_glimmer_config(
         ),
         vision_projection=vision_projection,
         perception_emb_norm=perception_emb_norm,
-        vision_scatter=vision_scatter,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
     )

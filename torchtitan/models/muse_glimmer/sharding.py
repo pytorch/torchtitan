@@ -40,42 +40,6 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def _sequence_parallel_index_placement() -> SpmdType:
-    return SpmdType(
-        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
-        partition_spec=spmd.PartitionSpec((DP, CP, TP)),
-    )
-
-
-def _vision_scatter_config(*, enable_sp: bool) -> ShardingConfig:
-    vision_bank_src = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
-    vision_bank_dst = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
-    vision_bank_indices = token_id_placement()
-    if enable_sp:
-        hidden_src = dense_sequence_parallel_placement()
-        hidden_dst = hidden_src
-        local_vision_bank_indices = _sequence_parallel_index_placement()
-    else:
-        hidden_src = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-        hidden_dst = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        local_vision_bank_indices = vision_bank_indices
-
-    return ShardingConfig(
-        in_src_shardings={
-            "inputs_TD": hidden_src,
-            "vision_bank_VD": vision_bank_src,
-            "vision_bank_indices_T": vision_bank_indices,
-        },
-        in_dst_shardings={
-            "inputs_TD": hidden_dst,
-            "vision_bank_VD": vision_bank_dst,
-            "vision_bank_indices_T": local_vision_bank_indices,
-        },
-        out_src_shardings=hidden_dst,
-        out_dst_shardings=hidden_src,
-    )
-
-
 def set_muse_glimmer_sharding_config(
     config: "MuseGlimmerModel.Config",
     *,
@@ -83,10 +47,9 @@ def set_muse_glimmer_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Muse Glimmer sub-configs.
 
-    Text-only and multimodal models use the same token-sharded decoder path.
-    The multimodal path keeps its packed vision bank replicated across CP and
-    TP-invariant until ``VisionScatter`` gathers rows into each local token
-    shard. The scatter boundary performs the required TP ``I -> R`` transition.
+    Text-only models use the standard decoder layout. Multimodal models keep
+    token embeddings and the projected vision bank TP-replicated for fusion;
+    the first decoder layer restores the standard SP or invariant layout.
 
     All sub-configs are populated unconditionally -- ``Module.parallelize``
     filters disabled axes at runtime.
@@ -97,7 +60,7 @@ def set_muse_glimmer_sharding_config(
     for layer_cfg in config.layers:
         _set_muse_glimmer_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
-    # Configure the replicated vision bank and token-local scatter boundary.
+    # Configure the TP-replicated multimodal fusion path.
     if config.vision_encoder is not None:
         _set_multimodal_sharding(config, enable_sp=enable_sp)
 
@@ -136,18 +99,45 @@ def _set_multimodal_sharding(
     *,
     enable_sp: bool,
 ) -> None:
-    """Configure the vision bank and its token-sharded scatter boundary."""
+    """Keep multimodal fusion TP-replicated until the first decoder layer."""
+    fusion_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    decoder_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+    )
+    vision_replicated = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
+
+    emb_cfg = config.tok_embeddings
+    emb_cfg.embedding.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        in_src_shardings={"input": token_id_placement()},
+        in_dst_shardings={"input": token_id_placement()},
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+        out_dst_shardings=fusion_layout,
+        local_map=LocalMapConfig(in_grad_placements=None),
+    )
+    emb_cfg.norm.sharding_config = ShardingConfig(
+        in_src_shardings={"input": fusion_layout},
+        in_dst_shardings={"input": fusion_layout},
+        out_src_shardings=fusion_layout,
+        out_dst_shardings=fusion_layout,
+    )
+
     if config.vision_projection is not None:
         config.vision_projection.sharding_config = vision_invariant_linear_config(
             include_cp_axis=True
         )
     if config.perception_emb_norm is not None:
-        config.perception_emb_norm.sharding_config = invariant_norm_config(
-            include_cp_axis=True
-        )
-    if config.vision_scatter is not None:
-        config.vision_scatter.sharding_config = _vision_scatter_config(
-            enable_sp=enable_sp
+        vision_norm = invariant_norm_config(include_cp_axis=True)
+        vision_norm.out_dst_shardings = vision_replicated
+        config.perception_emb_norm.sharding_config = vision_norm
+
+    if config.layers:
+        config.layers[0].sharding_config = ShardingConfig(
+            in_src_shardings={"x": fusion_layout},
+            in_dst_shardings={"x": decoder_layout},
+            out_src_shardings=decoder_layout,
         )
 
 

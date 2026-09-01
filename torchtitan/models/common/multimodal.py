@@ -8,19 +8,17 @@
 
 ``get_vision_positions`` and ``scatter_vision_embeds`` support span-based
 fusion over a full token sequence. ``build_vision_bank_indices`` and
-``VisionScatter`` support the equivalent gather-based fusion after token
-sharding by carrying an absolute packed-bank row for every placeholder token.
+``gather_vision_embeds`` support gather-based fusion by carrying an absolute
+packed-bank row for every placeholder token.
 """
 
 import contextlib
-from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.protocols.module import Module
 
 
 def multimodal_context() -> contextlib.AbstractContextManager[None]:
@@ -109,29 +107,19 @@ def build_vision_bank_indices(
     return vision_bank_indices_T.masked_fill(~vision_mask_T, -1)
 
 
-class VisionScatter(Module):
-    """Sharding boundary for token-local packed-vision gathering."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: "VisionScatter.Config") -> None:
-        super().__init__()
-        del config
-
-    def forward(
-        self,
-        inputs_TD: torch.Tensor,
-        vision_bank_VD: torch.Tensor,
-        vision_bank_indices_T: torch.Tensor,
-    ) -> torch.Tensor:
-        if vision_bank_VD.shape[0] == 0:
-            return inputs_TD
-        vision_bank_VD = vision_bank_VD.to(inputs_TD.dtype)
-        is_vision_T1 = (vision_bank_indices_T >= 0).unsqueeze(-1)
-        gathered_TD = vision_bank_VD[vision_bank_indices_T.clamp(min=0)]
-        return torch.where(is_vision_T1, gathered_TD, inputs_TD)
+def gather_vision_embeds(
+    inputs_TD: torch.Tensor,
+    *,
+    vision_bank_VD: torch.Tensor,
+    vision_bank_indices_T: torch.Tensor,
+) -> torch.Tensor:
+    """Gather packed vision features into their placeholder token positions."""
+    if vision_bank_VD.shape[0] == 0:
+        return inputs_TD
+    vision_bank_VD = vision_bank_VD.to(inputs_TD.dtype)
+    is_vision_T1 = (vision_bank_indices_T >= 0).unsqueeze(-1)
+    gathered_TD = vision_bank_VD[vision_bank_indices_T.clamp(min=0)]
+    return torch.where(is_vision_T1, gathered_TD, inputs_TD)
 
 
 def scatter_vision_embeds(

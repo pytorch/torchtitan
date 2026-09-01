@@ -154,8 +154,8 @@ def pipeline_muse_glimmer(
 
     Muse Glimmer's owned vision stack runs inside ``MuseGlimmerModel.forward``
     on the embedding stage: the encoder and adapter build raw features, the
-    projection and norm build the packed bank, and the stateless scatter fuses
-    it into token embeddings. All present vision modules live on stage 0.
+    projection and norm build the packed bank, and the model fuses it into token
+    embeddings. All present vision modules live on stage 0.
     """
     import dataclasses
 
@@ -186,7 +186,7 @@ def pipeline_muse_glimmer(
         # vision encoder, bump
         # parallelism.pipeline_parallel_first_stage_less_layers to rebalance.
         # Prepend in data-flow order so the resulting stage-0 list reads
-        # encoder -> adapter -> projection -> emb_norm -> scatter -> embeddings.
+        # encoder -> adapter -> projection -> emb_norm -> embeddings.
         vision_fqns = [
             fqn
             for fqn in (
@@ -194,7 +194,6 @@ def pipeline_muse_glimmer(
                 "vision_adapter",
                 "vision_projection",
                 "perception_emb_norm",
-                "vision_scatter",
             )
             if getattr(model, fqn, None) is not None
         ]
