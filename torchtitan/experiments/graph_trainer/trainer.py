@@ -11,6 +11,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -222,7 +223,11 @@ class GraphTrainer(Trainer):
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
-                with self.train_context(), log_timer("minimal_fx_tracer"):
+                trace_context = dist_utils.get_spmd_context(
+                    parallel_dims=self.parallel_dims,
+                    spmd_typechecking=False,
+                )
+                with trace_context(), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
@@ -256,7 +261,21 @@ class GraphTrainer(Trainer):
                     self._traced_step.gm, self._traced_step.example_inputs
                 )
         with self.train_context():
-            outputs = run_traced(self._traced_step, module=model)(
+            precompile_meshes = None
+            if (
+                self.config.compile.precompile_artifact_dir
+                and self.config.parallelism.spmd_backend == "spmd_types"
+            ):
+                from torchtitan.experiments.graph_trainer.precompile import (
+                    get_spmd_precompile_meshes,
+                )
+
+                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+            outputs = run_traced(
+                self._traced_step,
+                module=model,
+                precompile_meshes=precompile_meshes,
+            )(
                 inputs,
                 labels,
                 global_valid_tokens,
