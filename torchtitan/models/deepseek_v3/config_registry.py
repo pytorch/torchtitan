@@ -6,6 +6,7 @@
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.fused_wgrad import enable_fused_wgrad_accumulation
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -105,6 +106,18 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
                 pad_multiple=128,
             ),
         ],
+    )
+    return config
+
+
+def deepseek_v3_debugmodel_fused_wgrad() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.training.mixed_precision_reduce = "float32"
+    assert config.model_spec is not None
+    config.model_spec.model = enable_fused_wgrad_accumulation(
+        config.model_spec.model,
+        reduce_dtype=config.training.mixed_precision_reduce,
+        fqns=["attention", "feed_forward", "shared_experts"],
     )
     return config
 
