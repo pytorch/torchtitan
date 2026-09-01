@@ -12,7 +12,11 @@ from typing import Any, cast, Literal
 
 import torch
 
-from torchtitan.components.data.collators import Collator, TrainerBatch
+from torchtitan.components.data.collators import (
+    batch_with_valid_token_count,
+    Collator,
+    TrainerBatch,
+)
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -342,4 +346,4 @@ class MultiModalCollator(Collator):
                 video_token_id=special_tokens["video_id"],
             )
 
-        return input_dict, labels
+        return batch_with_valid_token_count(input_dict, labels)
