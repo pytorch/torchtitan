@@ -304,8 +304,18 @@ class VerifiersRollouter(Rollouter):
     ) -> list[RolloutTurn]:
         """Flatten a Verifiers trace into TorchTitan's trainable rollout turns.
 
-        A trace may contain branches that share sampled nodes. Emit each sampled
-        node once and attach metadata from its matching model-generation call.
+        Verifiers stores messages in ``trace.nodes`` as an indexed graph. Each
+        node has per-message ``token_ids``, an aligned trainability ``mask``, a
+        ``sampled`` flag, and logprobs for the sampled positions. Each entry in
+        ``trace.branches`` is a root-to-leaf node path whose ``token_ids`` are
+        the concatenated node tokens and whose ``logprobs`` are aligned to that
+        full sequence. Each successful entry in ``trace.calls`` identifies its
+        generated assistant node by index.
+
+        A trace may contain branches that share sampled nodes. This conversion
+        emits one ``RolloutTurn`` per contiguous trainable token span, emits each
+        shared sampled node once, and attaches TorchTitan policy metadata from
+        the matching model-generation call.
         """
         successful_calls = [call for call in trace.calls if call.node is not None]
         if len(successful_calls) != len(generation_metadata):
