@@ -133,6 +133,7 @@ flattening, refill, reshard, the SimpleFSDP bridge -- comes from here.
 
 from __future__ import annotations
 
+import math
 from dataclasses import fields, is_dataclass
 from typing import Any
 
@@ -326,22 +327,67 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         return True
 
     def fsdp_pre_all_gather(self, mesh, outer_size, outer_stride, module, mp_policy):
-        """Return the high-precision communication tensor."""
+        """Return the high-precision communication tensor and the logical size.
+
+        All-gather needs every rank to contribute the same number of elements,
+        so an expert count that does not divide the mesh size leaves the last
+        rank short. FSDP's contract is that this returns the *padded* shard;
+        the logical size travels in the metadata so ``fsdp_post_all_gather``
+        can drop the padding before quantizing it as if it were weight.
+        """
         del outer_stride, module
-        if outer_size[0] % mesh.size() != 0:
-            raise ValueError(
-                "FSDP unsharded tensors require dimension 0 to be evenly divisible "
-                "by the FSDP shard mesh size"
+        shard_dim = self._sharded_dim(outer_size)
+        if shard_dim not in (None, 0):
+            raise NotImplementedError(
+                "FSDP unsharded tensors support sharding dimension 0 only, but "
+                f"this parameter of shape {tuple(outer_size)} is sharded on "
+                f"dimension {shard_dim}. TorchTitan selects Shard(1) for "
+                "grouped experts when the FSDP degree exceeds the expert "
+                "count, so either lower the degree or raise the expert count."
             )
         dtype = mp_policy.param_dtype or self._tensor.dtype
-        return (self._tensor.to(dtype),), None
+        source = self._tensor.to(dtype)
+        padded_rows = math.ceil(outer_size[0] / mesh.size())
+        if source.size(0) != padded_rows:
+            padded = source.new_zeros((padded_rows, *source.shape[1:]))
+            padded[: source.size(0)] = source
+            source = padded
+        return (source,), outer_size
+
+    def _sharded_dim(self, outer_size) -> int | None:
+        """Return the dimension FSDP sharded, or None when it did not shard.
+
+        FSDP does not pass the shard dimension, but the local shard differs
+        from the logical size exactly along it.
+        """
+        dims = [
+            dim
+            for dim, (local, logical) in enumerate(
+                zip(self._tensor.shape, outer_size, strict=True)
+            )
+            if local != logical
+        ]
+        if not dims:
+            return None
+        if len(dims) > 1:
+            raise RuntimeError(
+                f"FSDP sharded more than one dimension: local "
+                f"{tuple(self._tensor.shape)} against logical {tuple(outer_size)}"
+            )
+        return dims[0]
 
     def fsdp_post_all_gather(
         self, all_gather_outputs, metadata, param_dtype, *, out=None
     ):
         """Create or refill the unsharded tensor operands after all-gather."""
-        del metadata, param_dtype
+        del param_dtype
         (gathered_weight,) = all_gather_outputs
+        # ``metadata`` is the logical size returned by fsdp_pre_all_gather. An
+        # unevenly sharded parameter gathers padding rows past it, which must
+        # not reach the quantizer: they would occupy real scale tiles and, for
+        # a grouped weight, appear as extra experts.
+        if metadata is not None and gathered_weight.size(0) != metadata[0]:
+            gathered_weight = gathered_weight.narrow(0, 0, metadata[0])
 
         # On the first unshard, FSDP has no unsharded-tensor container or managed
         # tensors yet. Build both and return them to FSDP. With RAF=False, FSDP
