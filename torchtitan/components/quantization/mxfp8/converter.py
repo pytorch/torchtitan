@@ -5,8 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field, fields
-from importlib.util import find_spec
-from typing import Literal
 
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
@@ -15,14 +13,18 @@ from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from ..utils import swap_token_dispatcher
+from ._common import _MXFP8_SCALE_GROUP_ALIGNMENT, InputActivationFormatForBackward
 
 _mxfp8_linear_import_error: ImportError | None = None
 
 try:
+    from .grouped_experts import _mxfp8_experts_cache, get_mxfp8_grouped_experts_cls
     from .linear import MXFP8Linear
 
 except ImportError as import_error:
     MXFP8Linear = None
+    get_mxfp8_grouped_experts_cls = None
+    _mxfp8_experts_cache: dict[type, type] = {}
     _mxfp8_linear_import_error = import_error
 
 
@@ -140,79 +142,53 @@ class MXFP8LinearConverter(QuantizationConverter):
         return model_config
 
 
-_mxfp8_experts_cache: dict[type, type] = {}
-
-
-def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
-    """Get or create an MXFP8-quantized subclass of *parent_cls*.
-
-    Works for any experts module exposing the ``_grouped_mm`` seam (the common
-    ``GroupedExperts`` and ``GptOssGroupedExperts``). The returned class has a
-    proper ``_owner`` set by ``__init_subclass__``.
-
-    The subclass overrides ``_grouped_mm`` to call torchao's
-    ``_quantize_then_scaled_grouped_mm``.
-    """
-    if parent_cls in _mxfp8_experts_cache:
-        return _mxfp8_experts_cache[parent_cls]
-
-    parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
-
-    class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
-        @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls):  # type: ignore[misc]
-            recipe_name: str = "mxfp8_rceil"
-
-        def __init__(self, config: Config):
-            super().__init__(config)
-            from torchao.prototype.moe_training.config import (
-                MXFP8TrainingOpConfig,
-                MXFP8TrainingRecipe,
-            )
-
-            recipe = MXFP8TrainingRecipe(config.recipe_name)
-            self._mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
-
-        def _grouped_mm(self, *, A, B_t, offs):
-            from torchao.prototype.moe_training.utils import (
-                _quantize_then_scaled_grouped_mm,
-            )
-
-            return _quantize_then_scaled_grouped_mm(
-                A, B_t, config=self._mxfp8_op_config, offs=offs
-            )
-
-    MXFP8GroupedExperts.__name__ = f"MXFP8{parent_cls.__name__}"
-    MXFP8GroupedExperts.__qualname__ = f"MXFP8{parent_cls.__name__}"
-    _mxfp8_experts_cache[parent_cls] = MXFP8GroupedExperts
-    return MXFP8GroupedExperts
-
-
 class MXFP8GroupedExpertsConverter(QuantizationConverter):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
-        recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
-        """
-        Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
+        input_activation_format_for_backward: InputActivationFormatForBackward = "bf16"
+        """Format used to save routed-expert input activations for WGRAD.
 
-        - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode
-          when computing the e8m0 scale factors.
+        See ``MXFP8GroupedExperts.Config`` for the trade-off. BF16 is the
+        conservative default because the routed input feeds more than one
+        expert projection and stays alive regardless.
         """
-        pad_multiple: int = 32
+        pad_multiple: int = _MXFP8_SCALE_GROUP_ALIGNMENT
         """
         Pad per-expert token groups to this multiple for MXFP8 grouped GEMM alignment.
-        The CuTeDSL quantization kernel on sm_100 requires multiples of 128.
+
+        Two separate constraints apply, and the larger one wins. Columnwise
+        WGRAD quantization scales 32 rows together, so a scale block must not
+        span two experts. The blocked scale layout consumed by the grouped GEMM
+        additionally starts each group on a 128-row block boundary, so a group
+        whose size is not a multiple of 128 would misalign the scales against
+        the quantized data.
+
+        The default was 32 while this converter delegated to TorchAO, which
+        padded internally to whatever its kernels needed, so the value never
+        took effect -- the docstring already said 128 was required and both
+        in-tree configs passed it explicitly. Now that TorchTitan drives the
+        quantization, an unpadded group faults inside the scale rearrange
+        instead, so the default matches the requirement and __post_init__
+        rejects anything smaller.
         """
+
+        def __post_init__(self) -> None:
+            if self.pad_multiple % _MXFP8_SCALE_GROUP_ALIGNMENT:
+                raise ValueError(
+                    "MXFP8 grouped experts require pad_multiple to be a multiple "
+                    f"of {_MXFP8_SCALE_GROUP_ALIGNMENT}; got {self.pad_multiple}."
+                )
 
     def __init__(self, config: Config):
         self.config = config
 
-        if find_spec("torchao") is None:
+        if get_mxfp8_grouped_experts_cls is None:
             raise ImportError(
-                "torchao is not installed. Please install it to use MXFP8 MoE training."
-            )
+                "TorchAO with the MXFP8 32x32 swizzled cast kernels is required "
+                "for MXFP8 grouped experts. Install TorchAO from source."
+            ) from _mxfp8_linear_import_error
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
@@ -224,15 +200,18 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config):
+        assert get_mxfp8_grouped_experts_cls is not None
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
             swap_token_dispatcher(parent, self.config.pad_multiple)
             base_module_cls = type(config)._owner
-            quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
+            quantized_cls = get_mxfp8_grouped_experts_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
-                recipe_name=self.config.recipe_name,
+                input_activation_format_for_backward=(
+                    self.config.input_activation_format_for_backward
+                ),
             )
             if parent is None:
                 model_config = new_config
@@ -242,7 +221,8 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
                 setattr(parent, attr, new_config)
 
         logger.info(
-            f"Converted GroupedExperts to use dynamic {self.config.recipe_name} "
-            "quantization for grouped_mm ops"
+            "Converted GroupedExperts to MXFP8 grouped GEMMs with FSDP-managed "
+            "32x32 weight quantization and saved input activation format "
+            f"{self.config.input_activation_format_for_backward}"
         )
         return model_config

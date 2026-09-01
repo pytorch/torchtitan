@@ -13,7 +13,6 @@ Tensor shape suffixes:
 """
 
 from dataclasses import dataclass
-from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -30,23 +29,16 @@ from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
-from .tensor import (
-    _LinearShardedTensorWithMXFP8Compute,
+from ._common import (
+    _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD,
     _MXFP8_BLOCK_SIZE,
-    _quantize_mxfp8_weight,
+    _MXFP8_SCALING_MODE,
+    InputActivationFormatForBackward,
 )
+from .tensor import _LinearShardedTensorWithMXFP8Compute, _quantize_mxfp8_weight
 
 
 __all__ = ["InputActivationFormatForBackward", "MXFP8Linear"]
-
-# Activation and gradient quantization takes a scaling mode; the 32x32 weight
-# cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
-# their E8M0 scales the same way. This is TorchAO's current default too, but
-# relying on that would let a default change silently desync them.
-_MXFP8_SCALING_MODE = "rceil"
-
-InputActivationFormatForBackward = Literal["bf16", "mxfp8"]
-_INPUT_ACTIVATION_FORMATS_FOR_BACKWARD = ("bf16", "mxfp8")
 
 
 def _pad_rows(x_MK: torch.Tensor) -> tuple[torch.Tensor, int]:
