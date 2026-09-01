@@ -10,6 +10,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelDims
@@ -18,7 +19,7 @@ from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 
 
 class TestApplySimpleFSDPSingleRank(unittest.TestCase):
-    """Verify simple_fsdp's MixedPrecisionPolicy actually casts params at NGPU=1."""
+    """Verify GraphTrainer SimpleFSDP setup at NGPU=1."""
 
     def setUp(self):
         if not dist.is_initialized():
@@ -34,13 +35,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             dist.destroy_process_group()
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
-    def test_param_cast_to_bf16_at_ngpu_1(self):
-        """With ``mixed_precision_param=bfloat16``, the parametrized weight must
-        yield bf16 — and a forward must run in bf16 — even when fsdp /
-        dp_replicate / ep are all disabled. Without the unconditional
-        simple_fsdp wrap, parameters silently stay in fp32 on a single GPU and
-        any downstream bf16-only kernel (e.g. MXFP8) breaks.
-        """
+    def test_partial_dtensor_backend_is_rejected(self):
         set_spmd_backend("partial_dtensor")
         parallel_dims = ParallelDims(
             dp_replicate=1,
@@ -57,25 +52,12 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             mixed_precision_reduce="float32",
         )
 
-        model = nn.Linear(8, 8)
-        self.assertEqual(model.weight.dtype, torch.float32)
-
-        model = apply_simple_fsdp(model, parallel_dims=parallel_dims, training=training)
-
-        # Parametrization replaces ``weight`` access with a bf16 cast via
-        # ``redistribute(forward_dtype=...)``.
-        self.assertEqual(model.weight.dtype, torch.bfloat16)
-
-        # Underlying storage stays in fp32 (the cast is applied per forward),
-        # confirming this is true mixed precision rather than a one-shot
-        # downcast that would lose master-weight precision.
-        self.assertEqual(model._parameters["weight"].dtype, torch.float32)
-
-        # End-to-end: forward against the parametrized weight produces bf16
-        # activations.
-        x = torch.randn(2, 8, dtype=torch.bfloat16)
-        y = model(x)
-        self.assertEqual(y.dtype, torch.bfloat16)
+        with self.assertRaisesRegex(ValueError, "requires spmd_backend='spmd_types'"):
+            apply_simple_fsdp(
+                nn.Linear(8, 8),
+                parallel_dims=parallel_dims,
+                training=training,
+            )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_spmd_types_uses_dtensor_storage_and_local_compute(self):
@@ -101,10 +83,8 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             training=training,
         )
 
-        self.assertIsInstance(
-            model._parameters["weight"], torch.distributed.tensor.DTensor
-        )
-        self.assertNotIsInstance(model.weight, torch.distributed.tensor.DTensor)
+        self.assertIsInstance(model._parameters["weight"], DTensor)
+        self.assertNotIsInstance(model.weight, DTensor)
         self.assertEqual(model.weight.dtype, torch.bfloat16)
         self.assertEqual(
             model(torch.randn(2, 8, dtype=torch.bfloat16)).dtype, torch.bfloat16
