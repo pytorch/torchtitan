@@ -197,6 +197,8 @@ class CUDAGraphWrapper:
             are stable across calls (e.g. model weights/buffers).
         should_check_address: Whether to verify static input tensor addresses
             before each replay. This should only be enabled for debugging.
+        tensor_input_indices: Indices of inputs that should be copied before
+            replay. When omitted, these are inferred from ``example_inputs``.
     """
 
     def __init__(
@@ -205,6 +207,7 @@ class CUDAGraphWrapper:
         example_inputs: Sequence[Any],
         static_input_indices: tuple[int, ...] | None = None,
         should_check_address: bool = False,
+        tensor_input_indices: Sequence[int] | None = None,
     ):
         self._fn = fn
         self._num_inputs = len(example_inputs)
@@ -218,11 +221,16 @@ class CUDAGraphWrapper:
                 f"{sorted(invalid_static_indices)}"
             )
 
-        self._input_indices_to_copy = [
-            i
-            for i, inp in enumerate(example_inputs)
-            if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
-        ]
+        if tensor_input_indices is not None:
+            self._input_indices_to_copy = [
+                i for i in tensor_input_indices if i not in self._static_input_indices
+            ]
+        else:
+            self._input_indices_to_copy = [
+                i
+                for i, inp in enumerate(example_inputs)
+                if isinstance(inp, torch.Tensor) and i not in self._static_input_indices
+            ]
         self._tensor_metadata = {
             i: (inp.shape, inp.dtype, inp.device)
             for i, inp in enumerate(example_inputs)
