@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
+from torch.cuda._annotate_cuda_graph_trace import annotate_trace
 from torch.cuda._graph_annotations import get_kernel_annotations
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
@@ -196,17 +197,6 @@ def cudagraph_annotate_trace_post_processor(trace_path: str) -> None:
     """Post-process a profiler trace with captured CUDA graph annotations."""
     annotations = get_cudagraph_annotations()
     if not annotations:
-        return
-
-    try:
-        from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
-            annotate_trace,
-        )
-    except ImportError:
-        logger.warning(
-            "torch.cuda._annotate_cuda_graph_trace not available. "
-            "Upgrade PyTorch to enable trace CUDA graph kernel annotation."
-        )
         return
 
     open_trace = gzip.open if trace_path.endswith(".gz") else open
