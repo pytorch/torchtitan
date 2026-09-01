@@ -121,7 +121,9 @@ def _compute_learned_pos_embeds(
     packed_pos = torch.cat([pos[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_pos = spmd.mutate_type(
-            packed_pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+            packed_pos,
+            src={"dp": spmd.R, "tp": spmd.I},
+            dst={"dp": spmd.V, "tp": spmd.I},
         )
     return packed_pos
 
@@ -183,7 +185,9 @@ def _compute_2d_rope_cache(
     packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_angles = spmd.mutate_type(
-            packed_angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+            packed_angles,
+            src={"dp": spmd.R, "tp": spmd.I},
+            dst={"dp": spmd.V, "tp": spmd.I},
         )
     return torch.polar(torch.ones_like(packed_angles), packed_angles).unsqueeze(1)
 

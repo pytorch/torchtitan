@@ -118,7 +118,9 @@ def _compute_learned_pos_embeds(
     packed_pos_embeds = torch.cat([pos_embeds[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_pos_embeds = spmd.mutate_type(
-            packed_pos_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+            packed_pos_embeds,
+            src={"dp": spmd.R, "tp": spmd.I},
+            dst={"dp": spmd.V, "tp": spmd.I},
         )
     return packed_pos_embeds
 
@@ -212,7 +214,9 @@ def _compute_2d_rope_cache(
     packed_rope_embeds = torch.cat([rope_embeds[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_rope_embeds = spmd.mutate_type(
-            packed_rope_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+            packed_rope_embeds,
+            src={"dp": spmd.R, "tp": spmd.I},
+            dst={"dp": spmd.V, "tp": spmd.I},
         )
     packed_rope_embeds = torch.cat((packed_rope_embeds, packed_rope_embeds), dim=-1)
     rope_cache = torch.cat(
