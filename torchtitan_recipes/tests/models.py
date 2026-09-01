@@ -183,10 +183,10 @@ def qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2() -> Trainer.Config:
     return config
 
 
-def qwen38_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
-    from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel_moe
+def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
 
-    config = qwen38_debugmodel_moe()
+    config = qwen35_debugmodel_moe()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 2
@@ -197,10 +197,10 @@ def qwen38_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen38_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
-    from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel_moe
+def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
 
-    config = qwen38_debugmodel_moe()
+    config = qwen35_debugmodel_moe()
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
@@ -213,10 +213,10 @@ def qwen38_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen38_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
-    from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel_varlen_attn
+def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_varlen_attn
 
-    config = qwen38_debugmodel_varlen_attn()
+    config = qwen35_debugmodel_varlen_attn()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     # First-run FLA/TileLang kernel compile and autotune exceed the default

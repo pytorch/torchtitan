@@ -13,7 +13,7 @@ HuggingFace ``MuseGlimmerForConditionalGeneration`` safetensors layout
 format (``checkpoint.last_save_in_hf`` / ``checkpoint.initial_load_in_hf``) and
 so a HF<->titan parity check is possible. Both the text decoder and the vision
 stack (encoder/adapter/projection) are mapped, matching the VLM convention used
-by ``qwen3_8`` / ``kimi_k2_7``.
+by ``qwen3_5`` / ``kimi_k2_7``.
 
 This mapping was validated against the *actual* released checkpoint's
 ``model.safetensors.index.json``, its ``config.json``, and the
@@ -41,7 +41,7 @@ Vision stack (HF prefix ``model.vision_tower.`` / ``model.vision_adapter.`` /
 ``model.vision_projection``):
 * HF uses **split** ``q_proj/k_proj/v_proj`` with bias; torchtitan also stores
   split ``wq/wk/wv`` with bias -> straight 1:1 map (no fuse/split, unlike
-  qwen3_8 whose HF vision is fused).
+  qwen3_5 whose HF vision is fused).
 * Vision RoPE: HF applies 2D ``rotate_half`` (split-half) while torchtitan's
   vision attention uses the complex backend (adjacent-pair). As on the text
   side, q/k projection rows are (reverse-)permuted to reconcile the two.
@@ -65,6 +65,7 @@ from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
 from .model import MuseGlimmerModel
 
 # HF prefixes in the released MuseGlimmerForConditionalGeneration.

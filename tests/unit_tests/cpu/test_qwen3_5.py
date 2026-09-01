@@ -12,7 +12,7 @@ pytest.importorskip("fla")
 
 from torchtitan.models.qwen3_5 import model_registry, Qwen35Model, qwen3_5_configs
 from torchtitan.models.qwen3_5.config_registry import qwen35_0_8b, qwen35_27b
-from torchtitan.models.qwen3_8 import Qwen38Model
+from torchtitan.models.qwen3_8 import model_registry as qwen3_8_model_registry
 
 
 def test_qwen35_registry_keeps_released_flavors() -> None:
@@ -43,16 +43,16 @@ def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
     assert model_spec.flavor == flavor
 
 
-def test_qwen35_reuses_qwen38_model_implementation() -> None:
-    assert Qwen35Model is Qwen38Model
-
+def test_qwen35_is_the_shared_model_implementation() -> None:
     model_spec = model_registry("0.8B")
     config = cast(Qwen35Model.Config, model_spec.model)
+    qwen38_config = qwen3_8_model_registry("27B").model
 
     assert model_spec.name == "qwen3_5"
     assert model_spec.flavor == "0.8B"
     assert config.dim == 1024
     assert len(config.layers) == 24
+    assert isinstance(qwen38_config, Qwen35Model.Config)
 
 
 def test_qwen35_keeps_small_dense_and_moe_models() -> None:

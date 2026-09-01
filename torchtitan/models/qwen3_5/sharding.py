@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Sharding configs for the Qwen3.8 hybrid attention model.
+"""Sharding configs for the Qwen3.5 hybrid attention model.
 
 Sets ``ShardingConfig`` on all sub-configs so that ``model.parallelize()``
 applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
@@ -52,14 +52,14 @@ TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
     from torchtitan.models.common import SigmoidGatedFeedForward
-    from torchtitan.models.qwen3_8.gdn import GatedDeltaNet
-    from torchtitan.models.qwen3_8.model import (
+    from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
+    from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
         Qwen35AttentionMaskDict,
         Qwen35Model,
         Qwen35TransformerBlock,
     )
-    from torchtitan.models.qwen3_8.vision_encoder import Qwen35VisionEncoder
+    from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
 def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> None:
@@ -112,13 +112,13 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 }
 
 
-def set_qwen38_sharding_config(
+def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Qwen3.8 sub-configs."""
+    """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     layer_input_layout = (
         dense_sequence_parallel_placement()
@@ -148,7 +148,7 @@ def set_qwen38_sharding_config(
             in_dst_shardings={"x_TD": layer_input_layout},
             out_src_shardings=layer_input_layout,
         )
-        _set_qwen38_layer_sharding(
+        _set_qwen35_layer_sharding(
             layer_cfg,
             attention_input_layout=layer_input_layout,
             enable_sp=enable_sp,
@@ -156,7 +156,7 @@ def set_qwen38_sharding_config(
         )
 
 
-def _set_qwen38_layer_sharding(
+def _set_qwen35_layer_sharding(
     layer_cfg: "Qwen35TransformerBlock.Config",
     *,
     attention_input_layout: SpmdType,
@@ -213,7 +213,7 @@ def _set_shared_expert_gate_sharding(
     *,
     enable_sp: bool,
 ) -> None:
-    """Shard Qwen3.8's shared-expert sigmoid gate.
+    """Shard Qwen3.5's shared-expert sigmoid gate.
 
     The common MoE sharding handles the shared FFN (w1/w2/w3) and the
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
@@ -221,7 +221,7 @@ def _set_shared_expert_gate_sharding(
     is sliced into the sequence-sharded layout produced by the shared FFN. With
     SP disabled, it remains Replicate and scales the shared FFN's Partial output.
     ``getattr`` keeps this a no-op when the MoE has no shared expert (``None``);
-    Qwen3.8's shared expert always carries the gate.
+    Qwen3.5's shared expert always carries the gate.
     """
     gate = getattr(shared_experts, "gate", None)
     if gate is None:

@@ -6,7 +6,7 @@
 
 """Muse Glimmer vision encoder built on torchtitan's shared component library.
 
-Structurally follows ``torchtitan/models/qwen3_8/vision_encoder.py`` (nested
+Structurally follows ``torchtitan/models/qwen3_5/vision_encoder.py`` (nested
 ``Config`` dataclasses, ``ModuleDict`` layer stack, shared
 ``Linear``/``LayerNorm``/``FlexAttention``), with Muse Glimmer-specific internals:
 
@@ -23,7 +23,7 @@ Structurally follows ``torchtitan/models/qwen3_8/vision_encoder.py`` (nested
 
 The transformer block stack is named ``layers`` so the shared
 ``apply_ac``/pipeline tooling (which expects a ``layers`` submodule, like
-``torchtitan/models/qwen3_8``) works unchanged.
+``torchtitan/models/qwen3_5``) works unchanged.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ def reorder_patch_vector(
     layout to Muse Glimmer's ``(pt, c, ph, pw)`` ``conv1_linear`` layout.
 
     Why this exists: the shared multimodal collator (``vision_to_patches``,
-    reused by qwen3_8/kimi_k2_7) emits patch vectors channel-first as
+    reused by qwen3_5/kimi_k2_7) emits patch vectors channel-first as
     ``(c, pt, ph, pw)``. Muse Glimmer's ``conv1_linear`` was defined with the
     temporal axis first, ``(pt, c, ph, pw)`` -- matching the pretrained
     ``conv1`` weight layout -- so we swap the c/pt axes here

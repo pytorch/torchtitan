@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Parallelization utilities for Qwen3.8.
+Parallelization utilities for Qwen3.5.
 
 This module applies PT-D parallelisms and various training techniques
-(activation checkpointing, compile, FSDP) to Qwen3.8 models. Hugging Face
+(activation checkpointing, compile, FSDP) to Qwen3.5 models. Hugging Face
 retains the Qwen3.5 architecture identifiers for these checkpoints.
 """
 
@@ -31,7 +31,7 @@ from torchtitan.distributed.fsdp import (
 )
 
 
-def parallelize_qwen3_8(
+def parallelize_qwen3_5(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
@@ -44,7 +44,7 @@ def parallelize_qwen3_8(
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
-    parallelism to a Qwen3.8 model.
+    parallelism to a Qwen3.5 model.
 
     ``skip_dp=True`` applies TP/AC/compile but no FSDP/DP -- used by the vLLM
     generator, which replicates params across vLLM DP groups (not TorchTitan FSDP).
@@ -58,7 +58,7 @@ def parallelize_qwen3_8(
 
     if parallel_dims.cp_enabled:
         raise NotImplementedError(
-            "Context Parallel is not yet supported for Qwen3.8. "
+            "Context Parallel is not yet supported for Qwen3.5. "
             "GatedDeltaNet (75% of layers) requires full-sequence allgather, "
             "and multimodal CP needs vision scatter before CP sharding."
         )

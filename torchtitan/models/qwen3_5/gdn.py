@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Gated DeltaNet modules for the Qwen3.8 implementation."""
+"""Gated DeltaNet modules for the Qwen3.5 implementation."""
 
 from dataclasses import dataclass
 from typing import Literal
@@ -51,11 +51,11 @@ def _causal_conv1d_varlen(
     """FLA depthwise causal conv with per-document resets (CUDA-only).
 
     A pure-torch per-document reference lives in
-    ``tests/unit_tests/gpu/test_qwen3_8_deltanet.py``.
+    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
     """
     if cu_seqlens_cpu is None:
         raise ValueError(
-            "Qwen3.8 FLA varlen conv requires a CPU cu_seqlens tensor. "
+            "Qwen3.5 FLA varlen conv requires a CPU cu_seqlens tensor. "
             "Build VarlenMetadata with include_host_offsets=True."
         )
 
@@ -238,7 +238,7 @@ class GatedDeltaKernel(Module):
     DTensor-to-local conversion -- same pattern as FlexAttention. Handles Q/K
     head expansion for grouped linear attention internally so that
     repeat_interleave runs on local tensors under TP. A pure-torch reference
-    implementation lives in ``tests/unit_tests/gpu/test_qwen3_8_deltanet.py``;
+    implementation lives in ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``;
     it is far too slow for training use.
     """
 
@@ -294,7 +294,7 @@ class GatedDeltaKernel(Module):
         if self.backend == "fla_chunked":
             if cu_seqlens is not None and cu_seqlens_cpu is None:
                 raise ValueError(
-                    "Qwen3.8 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
+                    "Qwen3.5 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
                 )
             result = _fla_chunk_gated_delta_rule(
                 xq_BTNK,
@@ -496,7 +496,7 @@ class GatedDeltaNet(Module):
             cu_seqlens_host = attention_masks.cu_seq_q_host
             if cu_seqlens_host is None:
                 raise ValueError(
-                    "Qwen3.8 GatedDeltaNet varlen requires CPU cu_seqlens "
+                    "Qwen3.5 GatedDeltaNet varlen requires CPU cu_seqlens "
                     "metadata. Build VarlenMetadata with include_host_offsets=True."
                 )
         else:

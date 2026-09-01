@@ -46,7 +46,7 @@ from torchtitan.models.utils import (
 from torchtitan.protocols.module import Module
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
-from .sharding import annotate_deltanet_cu_seqlens, set_qwen38_sharding_config
+from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -78,7 +78,7 @@ class OffsetRMSNorm(Module):
 
 
 class Qwen35Attention(BaseAttention):
-    """Full attention with output gating and partial RoPE for Qwen3.8.
+    """Full attention with output gating and partial RoPE for Qwen3.5.
 
     Differences from GQAttention:
     - wq is 2x wider: produces both query and sigmoid gate
@@ -176,7 +176,7 @@ class Qwen35Attention(BaseAttention):
 
 
 class Qwen35TransformerBlock(Module):
-    """Hybrid transformer block for Qwen3.8.
+    """Hybrid transformer block for Qwen3.5.
 
     Each layer uses either full attention (Qwen35Attention) or linear
     attention (GatedDeltaNet), determined by which config is provided.
@@ -239,7 +239,7 @@ class Qwen35TransformerBlock(Module):
 
 
 class Qwen35Model(Decoder):
-    """Qwen3.8 model with hybrid attention and optional vision.
+    """Qwen3.5 model with hybrid attention and optional vision.
 
     Implements a hybrid decoder (GatedDeltaNet linear attention + full
     attention with output gating and partial RoPE) and optionally combines it
@@ -316,7 +316,7 @@ class Qwen35Model(Decoder):
                             f"n_value_heads ({n_value_heads})."
                         )
 
-            set_qwen38_sharding_config(
+            set_qwen35_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
@@ -410,7 +410,7 @@ class Qwen35Model(Decoder):
                 ),
             )
         assert rope_positions is not None, (
-            "Qwen3.8 needs RoPE positions: the batch must provide "
+            "Qwen3.5 needs RoPE positions: the batch must provide "
             "'positions' or 'mrope_positions'."
         )
         batch["positions"] = rope_positions

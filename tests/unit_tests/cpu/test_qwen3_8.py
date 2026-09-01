@@ -12,14 +12,10 @@ import torch
 
 pytest.importorskip("fla")
 
-from torchtitan.models.qwen3_8 import (
-    model_registry,
-    Qwen38Model,
-    Qwen38StateDictAdapter,
-    qwen3_8_configs,
-)
+from torchtitan.models.qwen3_5 import Qwen35Model, Qwen35StateDictAdapter
+from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
+from torchtitan.models.qwen3_8 import model_registry, qwen3_8_configs
 from torchtitan.models.qwen3_8.config_registry import qwen38_27b, qwen38_2_4t_a95b
-from torchtitan.models.qwen3_8.sharding import set_qwen38_sharding_config
 
 
 def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
@@ -44,7 +40,7 @@ def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
 
 def test_qwen38_27b_reuses_qwen35_multimodal_architecture() -> None:
     model_spec = model_registry("27B")
-    config = cast(Qwen38Model.Config, model_spec.model)
+    config = cast(Qwen35Model.Config, model_spec.model)
 
     assert model_spec.name == "qwen3_8"
     assert config.dim == 5120
@@ -96,7 +92,7 @@ def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
         moe_comm_backend="standard",
     )
 
-    set_qwen38_sharding_config(config, enable_sp=True, enable_ep=True)
+    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=True)
 
     assert config.tok_embeddings.sharding_config is not None
     assert config.layers[0].sharding_config is not None
@@ -122,7 +118,7 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
         attn_backend="flex",
         moe_comm_backend="standard",
     )
-    adapter = Qwen38StateDictAdapter(config, hf_assets_path=None)
+    adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
     lm_head = torch.randn(2, 3)
 
@@ -144,7 +140,7 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
 
 def test_multimodal_checkpoint_adapter_keeps_language_model_prefix() -> None:
     config = qwen3_8_configs["27B"](attn_backend="flex")
-    adapter = Qwen38StateDictAdapter(config, hf_assets_path=None)
+    adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
     lm_head = torch.randn(2, 3)
 
@@ -165,7 +161,7 @@ def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
         attn_backend="flex",
         moe_comm_backend="standard",
     )
-    adapter = Qwen38StateDictAdapter(config, hf_assets_path=None)
+    adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     delta_net = config.layers[0].delta_net
     assert delta_net is not None
     key_dim = delta_net.in_proj_q.out_features

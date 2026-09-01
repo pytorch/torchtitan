@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-State dict adapter for Qwen3.8 checkpoints.
+State dict adapter for Qwen3.5-compatible checkpoints.
 
-Converts Qwen3.8 Hugging Face checkpoints to and from torchtitan format. The
-Hugging Face implementation retains Qwen3.5 architecture identifiers.
+Converts Qwen3.5 and Qwen3.8 Hugging Face checkpoints to and from torchtitan
+format. Both versions use the Qwen3.5 architecture identifiers.
 Multimodal checkpoints nest the decoder under
 ``model.language_model``; text-only checkpoints use ``model`` directly.
 
@@ -123,7 +123,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
         )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert a torchtitan state dict to Hugging Face Qwen3.8 format."""
+        """Convert a torchtitan state dict to Hugging Face format."""
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
@@ -263,7 +263,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert a Hugging Face Qwen3.8 state dict to torchtitan."""
+        """Convert a Hugging Face state dict to torchtitan."""
         tt_state_dict = {}
 
         # HF ties lm_head with embed_tokens -- copy if missing

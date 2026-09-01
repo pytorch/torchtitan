@@ -6,7 +6,7 @@
 
 """vLLM paged-cache adapter for TorchTitan's Gated DeltaNet.
 
-The enclosing Qwen3.8 module owns all parameters. This adapter runs the same FLA
+The enclosing Qwen3.5 module owns all parameters. This adapter runs the same FLA
 convolution and recurrence kernels as training while reading and updating vLLM's
 paged convolution and SSM states.
 
@@ -43,6 +43,7 @@ from torchtitan.protocols.module import Module
 # The recurrence mutates paged state and must run eager at a breakable cudagraph
 # split point. This decorator is inert when breakable capture is disabled.
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -58,7 +59,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 class VLLMInnerGatedDeltaNet(Module, MambaBase):
     """Paged-cache inner GDN implementation.
 
-    The enclosing ``qwen3_8.gdn.GatedDeltaNet`` owns all parameters. This
+    The enclosing ``qwen3_5.gdn.GatedDeltaNet`` owns all parameters. This
     module owns only vLLM cache plumbing and the FLA kernels.
 
     The enclosing module and vLLM cache are both head-sharded under tensor

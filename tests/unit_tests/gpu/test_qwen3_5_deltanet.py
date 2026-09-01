@@ -167,18 +167,18 @@ class ReferenceGatedDeltaKernel(nn.Module):
         ).squeeze(0)
 
 
-class TestQwen38DeltaNetVarlen(unittest.TestCase):
+class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def test_flex_masks_ignore_padding_position_resets(self):
         try:
             from torchtitan.models.common.decoder import Decoder
-            from torchtitan.models.qwen3_8 import qwen3_8_configs
+            from torchtitan.models.qwen3_5 import qwen3_5_configs
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
-                f"Qwen3.8 optional dependency unavailable: {exc.name}"
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
             ) from exc
 
         with torch.device("meta"):
-            model = qwen3_8_configs["debugmodel"]("flex").build()
+            model = qwen3_5_configs["debugmodel"]("flex").build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
 
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
@@ -189,14 +189,14 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
             from torchtitan.models.common.decoder import Decoder
-            from torchtitan.models.qwen3_8 import qwen3_8_configs
+            from torchtitan.models.qwen3_5 import qwen3_5_configs
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
-                f"Qwen3.8 optional dependency unavailable: {exc.name}"
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
             ) from exc
 
         with torch.device("meta"):
-            model = qwen3_8_configs["debugmodel"]("flex").build()
+            model = qwen3_5_configs["debugmodel"]("flex").build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
 
@@ -232,7 +232,7 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
     ):
         try:
             from torchtitan.models.common import Conv1d, Linear
-            from torchtitan.models.qwen3_8.gdn import (
+            from torchtitan.models.qwen3_5.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
                 InnerGatedDeltaNet,
@@ -240,7 +240,7 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
             )
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
-                f"Qwen3.8 optional dependency unavailable: {exc.name}"
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
             ) from exc
 
         key_dim = num_key_heads * key_head_dim
@@ -389,7 +389,7 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
 
         for masks in (None, attention_masks):
             with mock.patch(
-                "torchtitan.models.qwen3_8.gdn._causal_conv1d_varlen",
+                "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
                 _reference_causal_conv1d_varlen,
             ):
                 actual = model(x_TD, masks)
@@ -404,7 +404,7 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
         forwards below take the non-varlen conv path, which runs on CPU.
         """
         with mock.patch(
-            "torchtitan.models.qwen3_8.gdn._causal_conv1d_varlen",
+            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
             _reference_causal_conv1d_varlen,
         ):
             actual = model(x, masks)
@@ -435,21 +435,21 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
         )
 
     def test_get_attention_masks_pairs_flex_mask_with_deltanet_offsets(self):
-        """Qwen38Model.get_attention_masks must return the per-consumer mask
+        """Qwen35Model.get_attention_masks must return the per-consumer mask
         dict: under flex, a BlockMask ("quadratic_attention") paired with the
         document offsets ("deltanet"); under varlen, one VarlenMetadata shared
         by both keys. Each transformer block picks its entry by attn_mask_key.
         """
         from torch.nn.attention.flex_attention import BlockMask
 
-        # torchtitan.models.qwen3_8 imports the FLA (flash-linear-attention)
+        # torchtitan.models.qwen3_5 imports the FLA (flash-linear-attention)
         # kernels at module scope. FLA is a triton/CUDA-only optional
         # dependency, so skip instead of erroring on environments without it.
         try:
-            from torchtitan.models.qwen3_8 import model_registry
+            from torchtitan.models.qwen3_5 import model_registry
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
-                f"Qwen3.8 optional dependency unavailable: {exc.name}"
+                f"Qwen3.5 optional dependency unavailable: {exc.name}"
             ) from exc
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -625,7 +625,7 @@ class TestQwen38DeltaNetVarlen(unittest.TestCase):
             )
 
         with mock.patch(
-            "torchtitan.models.qwen3_8.gdn._causal_conv1d_varlen",
+            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
             side_effect=record_cu_seqlens,
         ):
             model(x_TD, attention_masks)
