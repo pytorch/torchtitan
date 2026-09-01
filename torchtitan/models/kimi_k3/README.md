@@ -8,7 +8,7 @@ Attention (MLA) decoder with LatentMoE and a MoonViT-V2 vision encoder.
 Install the additional dependencies:
 
 ```bash
-pip install av einops pillow torchvision flash-linear-attention
+pip install av einops pillow torchvision
 ```
 
 ## Architecture

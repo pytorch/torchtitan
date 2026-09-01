@@ -12,7 +12,7 @@ applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
 Full-attention layers: TP on wq/wk/wv/wo with local_map for inner attention;
 each layer's MRoPE ``cache`` buffer is sharded Replicate.
 GatedDeltaNet layers: head-sharded TP on projections (ColwiseParallel) and
-out_proj (RowwiseParallel); the FLA kernel and depthwise Conv1d run on local
+out_proj (RowwiseParallel); the GDN kernel and depthwise Conv1d run on local
 tensors via local_map.
 """
 
@@ -360,7 +360,7 @@ def _set_deltanet_sharding(
     )
 
     # The inner GDN is the DTensor-to-local boundary for the head-parallel
-    # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
+    # convolution and recurrence. use_packed_sequence is keyword-only metadata
     # and intentionally remains outside local_map's positional placements.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_src_shardings={

@@ -18,6 +18,8 @@ These go through the public ``preprocess_inputs`` seam and call
 resolution lives in ``forward`` or in ``preprocess_inputs``.
 """
 
+import subprocess
+import sys
 import unittest
 
 import torch
@@ -25,9 +27,6 @@ from torch import nn
 
 
 def _build_config_modules():
-    # torchtitan.models.qwen3_5 imports the FLA (flash-linear-attention)
-    # kernels at module scope. FLA is a triton/CUDA-only optional dependency,
-    # so skip instead of erroring on environments without it.
     try:
         from torchtitan.config import ParallelismConfig
         from torchtitan.distributed.parallel_dims import ParallelDims
@@ -43,8 +42,8 @@ class _RecordingLayer(nn.Module):
     """Layer stub that records the positions it is handed and passes x through.
 
     The mrope/positions resolution is independent of the layer internals, so
-    stubbing the layers keeps these tests on CPU without the FLA kernels while
-    still exercising the real ``preprocess_inputs`` and ``forward`` glue.
+    stubbing the layers keeps these tests on CPU while still exercising the real
+    ``preprocess_inputs`` and ``forward`` glue.
     """
 
     def __init__(self, sink: dict):
@@ -57,6 +56,19 @@ class _RecordingLayer(nn.Module):
 
 
 class TestQwen35MRoPEPositions(unittest.TestCase):
+    def test_model_import_does_not_require_fla(self):
+        script = (
+            "import builtins\n"
+            "original_import = builtins.__import__\n"
+            "def without_fla(name, globals=None, locals=None, fromlist=(), level=0):\n"
+            "    if level == 0 and (name == 'fla' or name.startswith('fla.')):\n"
+            "        raise ModuleNotFoundError('blocked fla import')\n"
+            "    return original_import(name, globals, locals, fromlist, level)\n"
+            "builtins.__import__ = without_fla\n"
+            "import torchtitan.models.qwen3_5\n"
+        )
+        subprocess.run([sys.executable, "-c", script], check=True)
+
     def _build_stub_model(self):
         model_registry, ParallelDims, ParallelismConfig = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
