@@ -86,6 +86,14 @@ class PolicyTrainer(Actor, Configurable):
         Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
+        transfer_mxfp8_experts: bool = False
+        """Quantize MoE expert weights to MXFP8 before publishing them.
+
+        For a generator whose experts are stored as MXFP8 (see
+        ``torchtitan.overrides.mxfp8_inference_grouped_experts``), which then
+        holds no high-precision copy and quantizes nothing. Halves the bytes on
+        the wire. Must match the generator's experts module: the published names
+        and shapes are its parameters."""
 
     def __init__(
         self,
@@ -519,6 +527,14 @@ class PolicyTrainer(Actor, Configurable):
                 )
                 for name, tensor in state_dict.items()
             }
+
+        # TODO: express as a post hook instead?
+        if self.config.transfer_mxfp8_experts:
+            from torchtitan.components.quantization.mxfp8_utils import (
+                quantize_expert_state_dict_to_mxfp8,
+            )
+
+            state_dict = quantize_expert_state_dict_to_mxfp8(state_dict)
 
         await ts.put_state_dict(
             state_dict,

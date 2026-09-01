@@ -606,11 +606,11 @@ def _apply_deepep_cudagraph_generator(
     max_num_batched_tokens: int,
     mxfp8_experts: bool = False,
 ) -> None:
-    # Gate+up fusion for the routed experts. The stock override only accepts a
-    # bf16 GroupedExperts.Config, so the mxfp8 path needs its own; they claim the
-    # same config node, so pick exactly one (listing both is a claim conflict).
+    # Gate+up fusion for the routed experts. The mxfp8 path uses the experts
+    # module that stores MXFP8 directly, already fused; both claim the same
+    # config node, so pick exactly one (listing both is a claim conflict).
     fused_experts_override = (
-        "torchtitan.overrides.mxfp8_fused_grouped_experts.mxfp8_fused_grouped_experts"
+        "torchtitan.overrides.mxfp8_inference_grouped_experts.mxfp8_inference_grouped_experts"
         if mxfp8_experts
         else "torchtitan.overrides.fused_swiglu.fused_grouped_experts"
     )
@@ -914,6 +914,20 @@ def _qwen3_30b_a3b_varlen_pg(
             max_num_batched_tokens=max_num_seqs + 2048,
             mxfp8_experts=mxfp8_experts,
         )
+    if mxfp8_experts:
+        # The trainer keeps its QAT recipe -- real mxfp8 forward, bf16 backward --
+        # and additionally publishes the expert weights already quantized, so the
+        # generator stores MXFP8 and holds no high-precision copy.
+        config.trainer.transfer_mxfp8_experts = True
+        if not deepep:
+            # DeepEP configs already got this from the generator override list
+            # above; the rest need it on its own.
+            config.generator.override = OverrideConfig(
+                imports=[
+                    "torchtitan.overrides.mxfp8_inference_grouped_experts."
+                    "mxfp8_inference_grouped_experts"
+                ]
+            )
     return config
 
 

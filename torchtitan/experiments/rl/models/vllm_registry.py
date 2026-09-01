@@ -257,7 +257,6 @@ def register_to_vllm(
     compile_config: CompileConfig,
     checkpoint_config: CheckpointManager.Config,
     override: OverrideConfig,
-    mxfp8_cache_weights: bool = False,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -294,11 +293,6 @@ def register_to_vllm(
         override: Config overrides applied to the generator's model spec after
             ``update_from_config`` and before build (empty ``OverrideConfig`` for
             no overrides).
-        mxfp8_cache_weights: When True, the wrapper pre-populates the mxfp8
-            inference weight cache once at init (before vLLM's CUDA-graph capture)
-            so the captured forward uses the cached mxfp8 grouped-experts path;
-            otherwise the graph captures the dynamic path (bf16 experts under
-            inference_mode). Must match the generator's ``mxfp8_cache_weights``.
     """
     from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
@@ -325,7 +319,6 @@ def register_to_vllm(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 override=override,
-                mxfp8_cache_weights=mxfp8_cache_weights,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
