@@ -16,8 +16,8 @@ If --output-folder is specified, all outputs are organized in that
 folder with detailed analysis and statistical summaries.
 
 The --assert-equal flag can be used for CI testing to verify that
-losses are identical between runs. If losses differ, the script will
-exit with a non-zero status code.
+selected metrics are identical between runs. If metrics differ, the
+script will exit with a non-zero status code.
 
 Example usages:
 1. Compare losses between two different git commits with default config:
@@ -67,12 +67,14 @@ Example usages:
 """
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
 import sys
 import unittest
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 # =============================================================================
@@ -685,16 +687,130 @@ def export_metrics_to_file(
     log_print(f"Results saved to: {export_path}")
 
 
+MetricComparator = Callable[[float, float], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class SeriesComparison:
+    """Paired statistics for two step-indexed scalar series.
+
+    Difference values are always ``test - baseline`` and are computed only for
+    steps present in both series. ``matched_count`` and
+    ``first_divergent_step`` use the supplied comparator, while
+    ``exact_match_count`` always uses Python's exact equality.
+    """
+
+    baseline_step_count: int
+    test_step_count: int
+    paired_step_count: int
+    matched_count: int
+    exact_match_count: int
+    first_divergent_step: int | None
+    mean_absolute_error: float | None
+    root_mean_square_error: float | None
+    max_absolute_diff: float | None
+    max_absolute_diff_step: int | None
+    final_step: int | None
+    final_diff: float | None
+    differences: tuple[tuple[int, float], ...]
+
+
+def _values_match(
+    baseline_value: float,
+    test_value: float,
+    comparator: MetricComparator | None,
+) -> bool:
+    """Compare two scalar values using the optional shared comparator."""
+    if comparator is None:
+        return baseline_value == test_value
+    return comparator(baseline_value, test_value)
+
+
+def compare_series(
+    baseline: Mapping[int, float],
+    test: Mapping[int, float],
+    *,
+    comparator: MetricComparator | None = None,
+) -> SeriesComparison:
+    """Compare two step-indexed scalar series and return paired statistics.
+
+    The statistics are calculated over the intersection of the two step sets.
+    ``comparator`` is intentionally injectable so assertion and reporting
+    callers can share the same exact or tolerant comparison policy.
+    """
+    paired_steps = tuple(sorted(set(baseline) & set(test)))
+    differences = tuple((step, test[step] - baseline[step]) for step in paired_steps)
+
+    matched_count = sum(
+        _values_match(baseline[step], test[step], comparator) for step in paired_steps
+    )
+    exact_match_count = sum(baseline[step] == test[step] for step in paired_steps)
+    first_divergent_step = next(
+        (
+            step
+            for step in paired_steps
+            if not _values_match(baseline[step], test[step], comparator)
+        ),
+        None,
+    )
+
+    if differences:
+        abs_diffs = [abs(diff) for _, diff in differences]
+        mean_absolute_error = math.fsum(abs_diffs) / len(abs_diffs)
+        root_mean_square_error = math.sqrt(
+            math.fsum(diff * diff for _, diff in differences) / len(differences)
+        )
+        max_absolute_diff, max_absolute_diff_step = max(
+            ((abs(diff), step) for step, diff in differences),
+            key=lambda item: (item[0], -item[1]),
+        )
+        final_step, final_diff = differences[-1]
+    else:
+        mean_absolute_error = None
+        root_mean_square_error = None
+        max_absolute_diff = None
+        max_absolute_diff_step = None
+        final_step = None
+        final_diff = None
+
+    return SeriesComparison(
+        baseline_step_count=len(baseline),
+        test_step_count=len(test),
+        paired_step_count=len(paired_steps),
+        matched_count=matched_count,
+        exact_match_count=exact_match_count,
+        first_divergent_step=first_divergent_step,
+        mean_absolute_error=mean_absolute_error,
+        root_mean_square_error=root_mean_square_error,
+        max_absolute_diff=max_absolute_diff,
+        max_absolute_diff_step=max_absolute_diff_step,
+        final_step=final_step,
+        final_diff=final_diff,
+        differences=differences,
+    )
+
+
+def _format_stat(value: float | None) -> str:
+    """Format an optional scalar statistic for the comparison report."""
+    return "N/A" if value is None else f"{value:.6e}"
+
+
 def generate_step_comparison(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float],
     stats_file: str | None,
+    metric_name: str = "loss",
 ) -> None:
-    """Generate step-by-step comparison."""
+    """Generate a step-by-step comparison for one metric."""
+    metric_label = metric_name.replace("_", " ").title()
     log_and_save("", stats_file)
-    log_and_save(f"{LOG_PREFIX} Step-by-step loss comparison:", stats_file)
     log_and_save(
-        f"{LOG_PREFIX} Step    Baseline Loss    Test Loss   Difference",
+        f"{LOG_PREFIX} Step-by-step {metric_name.replace('_', ' ')} comparison:",
+        stats_file,
+    )
+    log_and_save(
+        f"{LOG_PREFIX} Step    Baseline {metric_label}    "
+        f"Test {metric_label}   Difference",
         stats_file,
     )
     log_and_save(
@@ -704,13 +820,13 @@ def generate_step_comparison(
 
     # Generate comparison for common steps
     for step in sorted(set(baseline_losses.keys()) & set(test_losses.keys())):
-        baseline_loss = baseline_losses[step]
-        test_loss = test_losses[step]
-        diff = test_loss - baseline_loss
+        baseline_value = baseline_losses[step]
+        test_value = test_losses[step]
+        diff = test_value - baseline_value
 
         formatted_line = (
-            f"{LOG_PREFIX} {step:<6}  {baseline_loss:<13}    "
-            f"{test_loss:<14}   {diff:.6f}"
+            f"{LOG_PREFIX} {step:<6}  {baseline_value:<13}    "
+            f"{test_value:<14}   {diff:.6f}"
         )
         log_and_save(formatted_line, stats_file)
 
@@ -719,10 +835,66 @@ def generate_summary_statistics(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float],
     stats_file: str | None,
+    metric_name: str = "loss",
+    comparator: MetricComparator | None = None,
 ) -> None:
-    """Generate summary statistics."""
+    """Generate paired and per-series summary statistics for one metric."""
+    comparison = compare_series(baseline_losses, test_losses, comparator=comparator)
     log_and_save(f"{LOG_PREFIX}", stats_file)
     log_and_save(f"{LOG_PREFIX} Summary statistics:", stats_file)
+    log_and_save(f"{LOG_PREFIX} metric: {metric_name}", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} steps: {comparison.baseline_step_count}/"
+        f"{comparison.test_step_count}",
+        stats_file,
+    )
+    log_and_save(
+        f"{LOG_PREFIX} paired_steps: {comparison.paired_step_count}",
+        stats_file,
+    )
+    log_and_save(
+        f"{LOG_PREFIX} exact_match: {comparison.exact_match_count}/"
+        f"{comparison.paired_step_count}",
+        stats_file,
+    )
+    if comparison.matched_count != comparison.exact_match_count:
+        log_and_save(
+            f"{LOG_PREFIX} matched: {comparison.matched_count}/"
+            f"{comparison.paired_step_count}",
+            stats_file,
+        )
+    first_divergent_step = (
+        comparison.first_divergent_step
+        if comparison.first_divergent_step is not None
+        else "N/A"
+    )
+    log_and_save(
+        f"{LOG_PREFIX} first_divergent_step: {first_divergent_step}",
+        stats_file,
+    )
+    log_and_save(
+        f"{LOG_PREFIX} mae: {_format_stat(comparison.mean_absolute_error)}",
+        stats_file,
+    )
+    log_and_save(
+        f"{LOG_PREFIX} rmse: {_format_stat(comparison.root_mean_square_error)}",
+        stats_file,
+    )
+    if comparison.max_absolute_diff_step is None:
+        max_diff = "N/A"
+    else:
+        max_diff = (
+            f"{_format_stat(comparison.max_absolute_diff)} "
+            f"at step {comparison.max_absolute_diff_step}"
+        )
+    log_and_save(f"{LOG_PREFIX} max_abs_diff: {max_diff}", stats_file)
+    if comparison.final_step is None:
+        final_diff = "N/A"
+    else:
+        final_diff = (
+            f"{_format_stat(comparison.final_diff)} " f"(step {comparison.final_step})"
+        )
+    log_and_save(f"{LOG_PREFIX} final_diff: {final_diff}", stats_file)
 
     # Calculate average losses
     def calculate_average(losses: dict[int, float]) -> float | None:
@@ -737,8 +909,11 @@ def generate_summary_statistics(
     baseline_avg_str = f"{baseline_avg}" if baseline_avg is not None else "N/A"
     test_avg_str = f"{test_avg}" if test_avg is not None else "N/A"
 
-    log_and_save(f"{LOG_PREFIX} Average baseline loss:  {baseline_avg_str}", stats_file)
-    log_and_save(f"{LOG_PREFIX} Average test loss: {test_avg_str}", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} Average baseline {metric_name}:  {baseline_avg_str}",
+        stats_file,
+    )
+    log_and_save(f"{LOG_PREFIX} Average test {metric_name}: {test_avg_str}", stats_file)
 
     # Calculate overall difference if both averages are available
     if baseline_avg is not None and test_avg is not None:
@@ -750,19 +925,24 @@ def perform_loss_analysis(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float],
     stats_file: str | None,
+    metric_name: str = "loss",
+    comparator: MetricComparator | None = None,
 ) -> None:
-    """Perform loss comparison analysis."""
+    """Perform comparison analysis for one metric."""
     # Initialize stats file and add header
     log_and_save(f"{LOG_PREFIX} ==========================================", stats_file)
-    log_and_save(f"{LOG_PREFIX} LOSS COMPARISON ANALYSIS", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} {metric_name.replace('_', ' ').upper()} " "COMPARISON ANALYSIS",
+        stats_file,
+    )
     log_and_save(f"{LOG_PREFIX} ==========================================", stats_file)
 
-    # Check if losses were extracted successfully
-    name_losses = [("baseline", baseline_losses), ("test", test_losses)]
-    for name, losses in name_losses:
-        if not losses:
+    # Check if values were extracted successfully
+    name_values = [("baseline", baseline_losses), ("test", test_losses)]
+    for name, values in name_values:
+        if not values:
             log_and_save(
-                f"{LOG_PREFIX} Warning: No loss data for {name}.",
+                f"{LOG_PREFIX} Warning: No {metric_name} data for {name}.",
                 stats_file,
             )
             log_and_save(
@@ -773,16 +953,29 @@ def perform_loss_analysis(
             return
 
     # Generate comparison outputs
-    generate_step_comparison(baseline_losses, test_losses, stats_file)
-    generate_summary_statistics(baseline_losses, test_losses, stats_file)
+    generate_step_comparison(
+        baseline_losses, test_losses, stats_file, metric_name=metric_name
+    )
+    generate_summary_statistics(
+        baseline_losses,
+        test_losses,
+        stats_file,
+        metric_name=metric_name,
+        comparator=comparator,
+    )
 
 
 def assert_metrics_equal(
     baseline_metrics: dict[str, dict[int, float]],
     test_metrics: dict[str, dict[int, float]] | None = None,
     import_result: str | None = None,
+    comparator: MetricComparator | None = None,
 ) -> None:
-    """Assert every metric matches, against the test run and/or a golden file."""
+    """Assert every metric matches, against the test run and/or a golden file.
+
+    ``comparator`` allows tolerance-aware callers to share the same comparison
+    policy with :func:`compare_series`.
+    """
     imported_metrics = read_metrics_from_file(import_result) if import_result else None
     if test_metrics is None and imported_metrics is None:
         log_print("Error: baseline-only mode requires --import-result")
@@ -803,6 +996,7 @@ def assert_metrics_equal(
             None if test_metrics is None else test_metrics[name],
             None if imported_metrics is None else imported_metrics[name],
             metric_name=name,
+            comparator=comparator,
         )
 
 
@@ -811,6 +1005,7 @@ def assert_losses_equal(
     test_losses: dict[int, float] | None = None,
     imported_losses: dict[int, float] | None = None,
     metric_name: str = "loss",
+    comparator: MetricComparator | None = None,
 ) -> None:
     """Assert one metric is equal between baseline and test using unittest.
 
@@ -820,6 +1015,7 @@ def assert_losses_equal(
             compares baseline against imported values (baseline-only mode).
         imported_losses: Values read from a golden result file.
         metric_name: Metric these values belong to, used in messages.
+        comparator: Optional value comparator shared with ``compare_series``.
     """
     log_print(f"Asserting {metric_name} values are equal...")
     log_print(f"Baseline: {len(baseline_losses)} steps")
@@ -844,6 +1040,26 @@ def assert_losses_equal(
 
     # Create a test case
     class LossEqualityTest(unittest.TestCase):
+        def assert_value_matches(
+            self,
+            baseline_value: float,
+            other_value: float,
+            other_name: str,
+            step: int,
+        ) -> None:
+            message = (
+                f"{metric_name} mismatch at step {step}: "
+                f"baseline={repr(baseline_value)}, "
+                f"{other_name}={repr(other_value)}"
+            )
+            if comparator is None:
+                self.assertEqual(baseline_value, other_value, message)
+            else:
+                self.assertTrue(
+                    _values_match(baseline_value, other_value, comparator),
+                    message,
+                )
+
         def test_losses_equal(self):
             baseline_steps = set(baseline_losses.keys())
 
@@ -873,23 +1089,21 @@ def assert_losses_equal(
 
                 # Compare baseline vs test (if test exists)
                 if test_losses is not None:
-                    test_loss = test_losses[step]
-                    self.assertEqual(
+                    self.assert_value_matches(
                         baseline_loss,
-                        test_loss,
-                        f"{metric_name} mismatch at step {step}: "
-                        f"baseline={repr(baseline_loss)}, test={repr(test_loss)}",
+                        test_losses[step],
+                        "test",
+                        step,
                     )
 
                 # Compare baseline vs imported (if provided)
                 if imported_losses:
                     imported_loss = imported_losses[step]
-                    self.assertEqual(
+                    self.assert_value_matches(
                         baseline_loss,
                         imported_loss,
-                        f"{metric_name} mismatch at step {step}: "
-                        f"baseline={repr(baseline_loss)}, "
-                        f"imported={repr(imported_loss)}",
+                        "imported",
+                        step,
                     )
 
     # Run the test
@@ -1328,9 +1542,13 @@ def main() -> None:
 
         # Analysis and reporting (skip in baseline-only mode as there's no test to compare)
         if not baseline_only_mode and test_metrics is not None:
-            perform_loss_analysis(
-                baseline_metrics["loss"], test_metrics["loss"], stats_file
-            )
+            for metric_name in metric_names:
+                perform_loss_analysis(
+                    baseline_metrics[metric_name],
+                    test_metrics[metric_name],
+                    stats_file,
+                    metric_name=metric_name,
+                )
         print_completion_summary(
             args.output_folder, enable_seed_checkpoint, baseline_only_mode
         )
