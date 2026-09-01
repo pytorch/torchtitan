@@ -11,6 +11,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -45,7 +46,6 @@ from torchtitan.experiments.graph_trainer.registry import (
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
@@ -114,24 +114,6 @@ class GraphTrainer(Trainer):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
         )
-
-        def __post_init__(self) -> None:
-            if self.debug.spmd_typechecking:
-                raise ValueError(
-                    "SPMD typechecking is not supported by GraphTrainer yet."
-                )
-
-            if (
-                self.parallelism.context_parallel_degree > 1
-                and self.model_spec is not None
-                and any(self.model_spec.model.traverse(FlexAttention.Config))
-            ):
-                raise ValueError(
-                    "Context parallelism with FlexAttention is not supported by "
-                    "GraphTrainer yet. Use a non-Flex attention backend."
-                )
-
-            Trainer.Config.__post_init__(self)
 
     def __init__(self, config):
         super().__init__(config)
@@ -241,7 +223,11 @@ class GraphTrainer(Trainer):
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
-                with self.train_context(), log_timer("minimal_fx_tracer"):
+                trace_context = dist_utils.get_spmd_context(
+                    parallel_dims=self.parallel_dims,
+                    spmd_typechecking=False,
+                )
+                with trace_context(), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,

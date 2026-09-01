@@ -10,6 +10,10 @@ import os
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
 
+from torchtitan.experiments.graph_trainer.llama3 import (
+    config_registry as llama3_recipes,
+)
+
 # TODO: Move these tests to config recipes, matching the main trainer integration
 # tests, then remove the legacy shell-fragment overrides.
 
@@ -19,14 +23,21 @@ from tests.integration_tests.run_tests import run_tests
 # partitioner issue is resolved.
 _JIT_DISABLED = True
 
-# GraphTrainer does not support context parallelism with FlexAttention yet.
-# SDPA configurations provide GraphTrainer CP coverage.
-_GRAPH_TRAINER_FLEX_CP_UNSUPPORTED = True
+# TODO: Re-enable after regional_inductor can trace the CP load balancer's
+# index-rearrange constants; it currently raises a FunctionalTensor error.
+_FLEX_CP_INDUCTOR_DISABLED = True
 
 
 def _build_llama3_tests() -> list[OverrideDefinitions]:
     """Llama3-based integration tests (run on default A10 machines)."""
     return [
+        OverrideDefinitions(
+            configs=[llama3_recipes.graph_trainer_llama3_debugmodel_sdc_replay],
+            test_descr="GraphTrainer SDC replay",
+            test_name="sdc_replay",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
         # === JIT mode tests ===
         OverrideDefinitions(
             [
@@ -209,7 +220,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
             skip_rocm_test=True,
-            disabled=_GRAPH_TRAINER_FLEX_CP_UNSUPPORTED,
+            disabled=_FLEX_CP_INDUCTOR_DISABLED,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
         OverrideDefinitions(
@@ -613,7 +624,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace qwen3 FSDP+TP+CP",
             "aot_fx_trace_qwen3_fsdp_tp_cp",
             ngpu=8,
-            disabled=_GRAPH_TRAINER_FLEX_CP_UNSUPPORTED,
+            disabled=_FLEX_CP_INDUCTOR_DISABLED,
         ),
         OverrideDefinitions(
             [

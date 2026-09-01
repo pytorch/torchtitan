@@ -261,12 +261,9 @@ def _precompile_aot_fx_trace(
         if parallel_dims.tp_enabled
         else contextlib.nullcontext()
     )
-    spmd_context = dist_utils.get_spmd_context(
+    trace_context = dist_utils.get_spmd_context(
         parallel_dims=parallel_dims,
-        spmd_typechecking=(
-            config.parallelism.spmd_backend == "spmd_types"
-            and config.debug.spmd_typechecking
-        ),
+        spmd_typechecking=False,
     )
 
     maybe_register_blockmask_pytree_node()
@@ -294,7 +291,7 @@ def _precompile_aot_fx_trace(
         return args, kwargs
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
-    with spmd_context(), loss_parallel_ctx:
+    with trace_context(), loss_parallel_ctx:
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,

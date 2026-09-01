@@ -69,21 +69,19 @@ For other types: I is no-op, S(i) is sharded at rest, P is banned in titan for n
 """
 
 
-def _spmd_local_tensor_to_dtensor(
+def _prepare_spmd_parameter_for_fsdp(
     tensor: torch.Tensor,
     param_name: str,
     non_dp_mesh: DeviceMesh | None,
-    param_non_dp_mesh_types: dict[str, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]],
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]]:
     """Prepare an SPMD-annotated parameter for SimpleFSDP.
 
     For the spmd_types backend, record the parameter's model-parallel axis types
     for ReplicateComputation and restore its DTensor wrapper on ``non_dp_mesh``.
     """
     non_dp_mesh_types = {}
-    param_non_dp_mesh_types[param_name] = non_dp_mesh_types
     if non_dp_mesh is None:
-        return tensor
+        return tensor, non_dp_mesh_types
 
     if not spmd.has_local_type(tensor):
         raise ValueError(
@@ -104,7 +102,10 @@ def _spmd_local_tensor_to_dtensor(
         )
         for axis_name in non_dp_mesh.mesh_dim_names
     )
-    return DTensor.from_local(tensor, non_dp_mesh, placements, run_check=False)
+    return (
+        DTensor.from_local(tensor, non_dp_mesh, placements, run_check=False),
+        non_dp_mesh_types,
+    )
 
 
 def _distribute_dtensor(
@@ -228,7 +229,8 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType] | None = None,
+        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
+        | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -368,12 +370,12 @@ def data_parallel(
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
                 if get_spmd_backend() == "spmd_types":
-                    p = _spmd_local_tensor_to_dtensor(
+                    p, non_dp_mesh_types = _prepare_spmd_parameter_for_fsdp(
                         p,
                         p_name,
                         non_dp_mesh,
-                        param_non_dp_mesh_types,
                     )
+                    param_non_dp_mesh_types[p_name] = non_dp_mesh_types
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
