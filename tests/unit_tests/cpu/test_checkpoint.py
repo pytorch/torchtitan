@@ -135,6 +135,23 @@ class DummyTrainerConfig:
 
 
 class TestCheckpointManager(unittest.TestCase):
+    def test_close_waits_for_async_work_before_releasing_resources(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager.enable = True
+        manager.staging_future = mock.sentinel.staging_future
+        manager.save_future = mock.sentinel.save_future
+
+        calls = []
+        manager._maybe_wait_for_staging = mock.Mock(
+            side_effect=lambda: calls.append("staging")
+        )
+        manager._wait_for_saving = mock.Mock(side_effect=lambda: calls.append("saving"))
+        manager._close = mock.Mock(side_effect=lambda: calls.append("close"))
+
+        manager.close()
+
+        self.assertEqual(calls, ["staging", "saving", "close"])
+
     def test_checkpointer_package_import_path(self):
         from torchtitan.components.checkpointer import (
             AsyncMode as PackageAsyncMode,
