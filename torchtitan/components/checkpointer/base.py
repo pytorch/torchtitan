@@ -198,6 +198,9 @@ class BaseCheckpointManager(Configurable, ABC):
     """
 
     enable: bool
+    load_only: bool
+    interval: int
+    enable_first_step_checkpoint: bool
     staging_future: Future | None
     save_future: Future | None
     folder: str
@@ -227,7 +230,7 @@ class BaseCheckpointManager(Configurable, ABC):
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
-        if not self.enable or getattr(self, "staging_future", None) is None:
+        if not self.enable:
             return
         self._maybe_wait_for_staging()
 
@@ -238,9 +241,11 @@ class BaseCheckpointManager(Configurable, ABC):
         # raised before assigning ``enable``.
         if not getattr(self, "enable", False):
             return
-        self.maybe_wait_for_staging()
-        self.maybe_wait_for_saving()
-        self._close()
+        try:
+            self.maybe_wait_for_staging()
+            self.maybe_wait_for_saving()
+        finally:
+            self._close()
 
     def maybe_wait_for_saving(self) -> None:
         """Block until the last asynchronous save completes.
@@ -255,6 +260,23 @@ class BaseCheckpointManager(Configurable, ABC):
     @abstractmethod
     def _wait_for_saving(self) -> None:
         """Await ``save_future`` and clear it. Only called when it is set."""
+
+    # Policies shared by every manager. These depend only on config fields that
+    # BaseCheckpointManager.Config declares, not on how a backend reads or
+    # writes bytes, so they live here rather than once per backend.
+
+    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
+        """Whether ``curr_step`` is a checkpointing step."""
+        if not self.enable or self.load_only:
+            return False
+        if curr_step == 1 and self.enable_first_step_checkpoint:
+            return True
+        return last_step or curr_step % self.interval == 0
+
+    def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
+        """Standardized checkpoint path, e.g. ``checkpoints/step-100``."""
+        folder = folder or self.folder
+        return filesystem.join(folder, f"step-{step}")
 
     @abstractmethod
     def _load(self, step: int = -1) -> bool:
