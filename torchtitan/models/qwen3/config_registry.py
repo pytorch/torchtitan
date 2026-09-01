@@ -34,7 +34,7 @@ from . import model_registry
 from .model import Qwen3Model
 
 
-def qwen3_debugmodel(seq_len: int = 2048) -> Trainer.Config:
+def qwen3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -57,8 +57,8 @@ def qwen3_debugmodel(seq_len: int = 2048) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -69,7 +69,7 @@ def qwen3_debugmodel(seq_len: int = 2048) -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_nvfp4(seq_len: int = 2048) -> Trainer.Config:
+def qwen3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
@@ -89,7 +89,9 @@ def qwen3_debugmodel_nvfp4(seq_len: int = 2048) -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_first_85_pct_layers_nvfp4(seq_len: int = 2048) -> Trainer.Config:
+def qwen3_debugmodel_first_85_pct_layers_nvfp4(
+    seq_len: int | None = None,
+) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
@@ -116,7 +118,7 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(seq_len: int = 2048) -> Trainer.C
     return config
 
 
-def qwen3_debugmodel_moe_param_groups(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_debugmodel_moe_param_groups(seq_len: int | None = None) -> Trainer.Config:
     config = qwen3_moe_debug(seq_len=seq_len)
     config.optimizer = OptimizersContainer.Config(
         param_groups=[
@@ -150,7 +152,7 @@ def qwen3_debugmodel_moe_param_groups(seq_len: int = 4096) -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_flex_flash(seq_len: int = 2048) -> Trainer.Config:
+def qwen3_debugmodel_flex_flash(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend="flex_flash"
     )
@@ -175,8 +177,8 @@ def qwen3_debugmodel_flex_flash(seq_len: int = 2048) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -187,7 +189,7 @@ def qwen3_debugmodel_flex_flash(seq_len: int = 2048) -> Trainer.Config:
     )
 
 
-def qwen3_0_6b(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("0.6B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -204,8 +206,8 @@ def qwen3_0_6b(seq_len: int = 4096) -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -217,7 +219,7 @@ def qwen3_0_6b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def qwen3_1_7b(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("1.7B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -233,8 +235,8 @@ def qwen3_1_7b(seq_len: int = 4096) -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=100,
         ),
         checkpoint=CheckpointManager.Config(
@@ -246,7 +248,7 @@ def qwen3_1_7b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int = 2048) -> Trainer.Config:
+def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Config:
     config = sft_qwen3_8b_math(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
@@ -272,7 +274,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int = 2048) -> Trainer.Config:
     return config
 
 
-def qwen3_14b(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("14B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -288,8 +290,8 @@ def qwen3_14b(seq_len: int = 4096) -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -307,7 +309,7 @@ def qwen3_14b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def qwen3_30b_a3b(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("30B-A3B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -323,8 +325,8 @@ def qwen3_30b_a3b(seq_len: int = 4096) -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=2 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -342,7 +344,7 @@ def qwen3_30b_a3b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def qwen3_32b(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("32B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -358,8 +360,8 @@ def qwen3_32b(seq_len: int = 4096) -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=2 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -377,7 +379,7 @@ def qwen3_32b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_non_fused_qkv(seq_len: int = 2048) -> Trainer.Config:
+def qwen3_debugmodel_non_fused_qkv(seq_len: int | None = None) -> Trainer.Config:
     # Reverse test: exercise the separate wq/wk/wv path now that fused QKV is
     # the debugmodel default.
     config = qwen3_debugmodel(seq_len=seq_len)
@@ -385,7 +387,7 @@ def qwen3_debugmodel_non_fused_qkv(seq_len: int = 2048) -> Trainer.Config:
     return config
 
 
-def qwen3_moe_debug(seq_len: int = 4096) -> Trainer.Config:
+def qwen3_moe_debug(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -403,8 +405,8 @@ def qwen3_moe_debug(seq_len: int = 4096) -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -419,7 +421,7 @@ def qwen3_moe_debug(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def qwen3_moe_deepep(seq_len: int = 512) -> Trainer.Config:
+def qwen3_moe_deepep(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3 debug MoE pretraining with the DeepEP v2 backend (compact training path), EP=4.
 
     The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
@@ -453,8 +455,8 @@ def qwen3_moe_deepep(seq_len: int = 512) -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=2 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -466,7 +468,7 @@ def qwen3_moe_deepep(seq_len: int = 512) -> Trainer.Config:
     )
 
 
-def sft_qwen3_8b_math(seq_len: int = 2048) -> Trainer.Config:
+def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3-8B SFT on GSM8K math dataset."""
 
     def process_sample(sample):
@@ -498,8 +500,8 @@ def sft_qwen3_8b_math(seq_len: int = 2048) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(

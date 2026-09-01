@@ -107,7 +107,7 @@ def _muse_glimmer_mm_dataloader(
     )
 
 
-def muse_glimmer_debugmodel(seq_len: int = 2048) -> Trainer.Config:
+def muse_glimmer_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len, attn_backend="flex")
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
@@ -133,8 +133,8 @@ def muse_glimmer_debugmodel(seq_len: int = 2048) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(spmd_backend="spmd_types"),
@@ -146,7 +146,7 @@ def muse_glimmer_debugmodel(seq_len: int = 2048) -> Trainer.Config:
     )
 
 
-def muse_glimmer_debugmodel_mm(seq_len: int = 512) -> Trainer.Config:
+def muse_glimmer_debugmodel_mm(seq_len: int | None = None) -> Trainer.Config:
     """Multimodal debug training config.
 
     Trains the ``debugmodel_mm`` flavor (debug text decoder that owns a
@@ -182,8 +182,8 @@ def muse_glimmer_debugmodel_mm(seq_len: int = 512) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * mm_model_spec.max_context_length,
+            max_context_length=mm_model_spec.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -196,7 +196,7 @@ def muse_glimmer_debugmodel_mm(seq_len: int = 512) -> Trainer.Config:
     )
 
 
-def muse_glimmer_30b(seq_len: int = 8192) -> Trainer.Config:
+def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("30B", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
@@ -215,8 +215,8 @@ def muse_glimmer_30b(seq_len: int = 8192) -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -234,7 +234,7 @@ def muse_glimmer_30b(seq_len: int = 8192) -> Trainer.Config:
     )
 
 
-def muse_glimmer_30b_mm(seq_len: int = 8192) -> Trainer.Config:
+def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("30B_mm", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
@@ -252,8 +252,8 @@ def muse_glimmer_30b_mm(seq_len: int = 8192) -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),

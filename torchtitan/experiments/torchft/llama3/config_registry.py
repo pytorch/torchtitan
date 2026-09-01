@@ -22,7 +22,9 @@ from torchtitan.tools.profiler import Profiler
 from . import model_registry
 
 
-def llama3_torchft_debugmodel(seq_len: int = 2048) -> FaultTolerantTrainer.Config:
+def llama3_torchft_debugmodel(
+    seq_len: int | None = None,
+) -> FaultTolerantTrainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
@@ -47,8 +49,8 @@ def llama3_torchft_debugmodel(seq_len: int = 2048) -> FaultTolerantTrainer.Confi
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(

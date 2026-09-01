@@ -20,7 +20,7 @@ from . import model_registry
 
 
 def _gpt_oss_debugmodel(
-    seq_len: int = 2048, attn_backend: str = "varlen"
+    seq_len: int | None = None, attn_backend: str = "varlen"
 ) -> Trainer.Config:
     model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend=attn_backend
@@ -45,8 +45,8 @@ def _gpt_oss_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -64,15 +64,15 @@ def _gpt_oss_debugmodel(
     )
 
 
-def gpt_oss_debugmodel(seq_len: int = 2048) -> Trainer.Config:
+def gpt_oss_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     return _gpt_oss_debugmodel(seq_len=seq_len)
 
 
-def gpt_oss_debugmodel_flex(seq_len: int = 2048) -> Trainer.Config:
+def gpt_oss_debugmodel_flex(seq_len: int | None = None) -> Trainer.Config:
     return _gpt_oss_debugmodel(seq_len=seq_len, attn_backend="flex")
 
 
-def gpt_oss_20b(seq_len: int = 8192) -> Trainer.Config:
+def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("20b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -93,8 +93,8 @@ def gpt_oss_20b(seq_len: int = 8192) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
@@ -105,7 +105,7 @@ def gpt_oss_20b(seq_len: int = 8192) -> Trainer.Config:
     )
 
 
-def gpt_oss_120b(seq_len: int = 8192) -> Trainer.Config:
+def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("120b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -126,8 +126,8 @@ def gpt_oss_120b(seq_len: int = 8192) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(

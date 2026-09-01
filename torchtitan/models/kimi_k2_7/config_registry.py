@@ -85,7 +85,7 @@ def _kimi_multimodal_dataloader(
     )
 
 
-def kimi_k2_5_debugmodel(seq_len: int = 512) -> Trainer.Config:
+def kimi_k2_5_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     parallelism = ParallelismConfig(spmd_backend="spmd_types")
     return _KimiTrainerConfig(
@@ -111,8 +111,8 @@ def kimi_k2_5_debugmodel(seq_len: int = 512) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -125,7 +125,7 @@ def kimi_k2_5_debugmodel(seq_len: int = 512) -> Trainer.Config:
     )
 
 
-def moonlight_16b_a3b(seq_len: int = 4096) -> Trainer.Config:
+def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
     model_spec = model_registry(
         "moonlight-16B-A3B", seq_len=seq_len, attn_backend="flex"
@@ -157,8 +157,8 @@ def moonlight_16b_a3b(seq_len: int = 4096) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -168,7 +168,7 @@ def moonlight_16b_a3b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def kimi_vl_a3b(seq_len: int = 4096) -> Trainer.Config:
+def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
     model_spec = model_registry("Kimi-VL-A3B", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
@@ -203,8 +203,8 @@ def kimi_vl_a3b(seq_len: int = 4096) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -214,7 +214,7 @@ def kimi_vl_a3b(seq_len: int = 4096) -> Trainer.Config:
     )
 
 
-def kimi_k2_5(seq_len: int = 4096) -> Trainer.Config:
+def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
     compile_config = CompileConfig(enable=True, components=["loss"])
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
@@ -247,8 +247,8 @@ def kimi_k2_5(seq_len: int = 4096) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * seq_len,
-            max_context_length=seq_len,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
