@@ -31,10 +31,9 @@ from torchtitan.distributed.linear import (
 )
 
 
-# DTensorTestBase falls back to a CPU/gloo mesh when CUDA is unavailable, so
-# without this guard the CPU CI job runs these for real and dies in the
-# dispatcher: the symm_mem ops have no CPU kernel.
-@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
 class TestDistLinearPrimitives(DTensorTestBase):
     """Forward and backward parity against an unsharded reference."""
 
