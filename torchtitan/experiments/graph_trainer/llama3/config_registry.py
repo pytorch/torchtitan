@@ -24,6 +24,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel,
     llama3_debugmodel_dist_gemm,
 )
+from torchtitan.observability.sdc_replayer import SDCReplayer
 
 from . import model_registry
 
@@ -31,6 +32,16 @@ from . import model_registry
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.disable_cuda_graphs = True
+    config.training.steps = 2
+    config.sdc_replayer = SDCReplayer.Config()
     return config
 
 

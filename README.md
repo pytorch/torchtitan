@@ -80,6 +80,7 @@ We look forward to your contributions!
 14. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage
 15. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 16. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
+    - [Deterministic SDC replay](torchtitan/observability/silent_data_corruption.md)
 17. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
 18. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
 19. [Helper scripts](scripts/) to
