@@ -229,8 +229,7 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]
-        | None = None,
+        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
