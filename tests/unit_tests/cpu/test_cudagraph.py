@@ -4,12 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from contextlib import nullcontext
 from typing import cast
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from torchtitan.distributed.cudagraph import CUDAGraphWrapper, _manager
+from torchtitan.distributed.cudagraph import (
+    CUDAGraphWrapper,
+    _manager,
+    get_cudagraph_annotations,
+)
 
 
 def test_tensor_input_indices_control_replay_copies() -> None:
@@ -41,3 +46,38 @@ def test_tensor_input_indices_control_replay_copies() -> None:
     assert excluded_input.item() == 2
     assert copied_input.item() == 6
     cast(MagicMock, graph.replay).assert_called_once_with()
+
+
+def test_cudagraph_wrapper_collects_annotations() -> None:
+    graph = cast(torch.cuda.CUDAGraph, MagicMock())
+    annotations = {42: [{"module_fqn": "layers.0"}]}
+    graph_pool = object()
+    stream = MagicMock()
+
+    with (
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+        patch.object(_manager, "_graph_pool", graph_pool),
+        patch.object(_manager, "_stream", stream),
+        patch.object(_manager, "all_annotations", {}),
+        patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.cuda.graph", return_value=nullcontext()) as cuda_graph,
+        patch(
+            "torch.cuda._graph_annotations.get_kernel_annotations",
+            return_value=annotations,
+        ),
+    ):
+        wrapper = CUDAGraphWrapper(lambda x: x, (torch.tensor(1),))
+        wrapper._warmup_remaining = 0
+
+        output = wrapper(torch.tensor(2))
+
+        assert output.item() == 2
+        assert get_cudagraph_annotations() == annotations
+        cuda_graph.assert_called_once_with(
+            graph,
+            pool=graph_pool,
+            stream=stream,
+            enable_annotations=True,
+            capture_error_mode="thread_local",
+        )
