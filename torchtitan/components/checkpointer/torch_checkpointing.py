@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import queue
 import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -33,6 +35,7 @@ from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.distributed_metadata import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
+from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage, StorageConfig
@@ -41,6 +44,9 @@ from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.structured_logger.structured_logging import (
+    _get_structured_logger_init_args,
+)
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
@@ -59,6 +65,9 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+
+# Logger the backend emits its checkpoint events and metrics on.
+_BACKEND_LOGGER_NAME = "torch_checkpointing"
 
 
 def _step_dir_pattern(temp_dir_prefix: str) -> re.Pattern[str]:
@@ -99,6 +108,51 @@ class _BackendCheckpointStorage:
 
     def remove(self, path: str) -> None:
         self._storage.rmdir(Path(path))
+
+
+def _init_subprocess_logging(
+    structured_logger_init_args: tuple[str, str, int],
+    init_fn: Callable[..., None] | None,
+    init_args: tuple[Any, ...],
+) -> None:
+    """Re-establish structured logging inside the async save subprocess.
+
+    The subprocess does not inherit the parent's logging handlers, so its
+    checkpoint records would otherwise be lost.
+    """
+    if init_fn is not None:
+        init_fn(*init_args)
+
+    source, output_dir, rank = structured_logger_init_args
+    sl.init_structured_logger(source=source, output_dir=output_dir, rank=rank)
+
+    backend_logger = logging.getLogger(_BACKEND_LOGGER_NAME)
+    if backend_logger.level == logging.NOTSET and not backend_logger.isEnabledFor(
+        logging.INFO
+    ):
+        backend_logger.setLevel(logging.INFO)
+
+
+def _with_structured_logging(
+    config: BackendCheckpointManager.Config,
+) -> BackendCheckpointManager.Config:
+    """Forward the backend's own log records into TorchTitan's structured log.
+
+    No-op when structured logging is not active, or when saves are synchronous.
+    Any existing ``subprocess_init_fn`` is chained rather than replaced.
+    """
+    init_args = _get_structured_logger_init_args()
+    if init_args is None or not isinstance(config.save, AsyncCheckpointSaverConfig):
+        return config
+    return replace(
+        config,
+        subprocess_init_fn=_init_subprocess_logging,
+        subprocess_init_args=(
+            init_args,
+            config.subprocess_init_fn,
+            config.subprocess_init_args,
+        ),
+    )
 
 
 def _item_specs() -> dict[str, ItemSpec]:
@@ -254,6 +308,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # so saves and loads use it too, not just our own path probes.
         if storage_config is not None:
             manager_config = replace(manager_config, storage_config=storage_config)
+        manager_config = _with_structured_logging(manager_config)
         self._manager_config = manager_config
         self._step_dir_pattern = _step_dir_pattern(
             manager_config.save.writer_config.temp_dir_prefix
@@ -308,6 +363,10 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             return False
 
         sl.add_step_tag("checkpoint_save")
+        # The backend stamps its own events from this context and carries it
+        # into the async save subprocess, so without it every forwarded backend
+        # metric reports step=None.
+        checkpoint_logging_context.update(step=curr_step)
         self.maybe_wait_for_saving()
         # Purge before issuing this step's save, while the folder holds only
         # settled state: the previous save has been awaited and the next has not
