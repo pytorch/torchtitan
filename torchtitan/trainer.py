@@ -850,20 +850,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
-        # Keep the global token count on device so loss normalization does not
-        # introduce a CPU synchronization in the training path.
-        local_valid_tokens_tensor = torch.tensor(
+        # Keep the loss normalization count on device so it does not introduce
+        # a CPU synchronization in the training path. Only the last PP stage
+        # computes the loss, so earlier stages keep their local scalar rather
+        # than reducing one they never use; it still has to be a device tensor
+        # to preserve the fwd/bwd CUDA graph input signature.
+        global_valid_tokens = torch.tensor(
             local_valid_tokens,
             dtype=torch.int64,
             device=self.device,
         )
-        if parallel_dims.dp_enabled:
+        should_reduce_valid_tokens = parallel_dims.dp_enabled and (
+            not parallel_dims.pp_enabled or self.pp_has_last_stage
+        )
+        if should_reduce_valid_tokens:
             dp_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum_tensor(
-                local_valid_tokens_tensor, dp_mesh
+                global_valid_tokens, dp_mesh
             )
-        else:
-            global_valid_tokens = local_valid_tokens_tensor
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None

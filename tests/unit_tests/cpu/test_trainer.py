@@ -16,6 +16,80 @@ from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
 
+@pytest.mark.parametrize(
+    ("pp_enabled", "pp_has_last_stage", "should_reduce"),
+    [
+        (False, False, True),
+        (True, False, False),
+        (True, True, True),
+    ],
+)
+def test_train_step_reduces_valid_tokens_only_on_loss_stage(
+    pp_enabled: bool,
+    pp_has_last_stage: bool,
+    should_reduce: bool,
+) -> None:
+    batch_mesh = object()
+    get_mesh = MagicMock(return_value=batch_mesh)
+    forward_backward_step = MagicMock(return_value=torch.tensor(0.0))
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(disable_cuda_graphs=False, max_norm=1.0),
+            ),
+            optimizers=MagicMock(),
+            lr_schedulers=SimpleNamespace(get_metrics=lambda: {}, step=MagicMock()),
+            parallel_dims=SimpleNamespace(
+                dp_enabled=True,
+                pp_enabled=pp_enabled,
+                dp_cp_enabled=False,
+                ep_enabled=False,
+                get_mesh=get_mesh,
+                get_optional_mesh=lambda name: None,
+            ),
+            gradient_accumulation_steps=1,
+            num_pp_microbatches=1,
+            pp_has_last_stage=pp_has_last_stage,
+            device=torch.device("cpu"),
+            forward_backward_step=forward_backward_step,
+            sdc_replayer=None,
+            model_parts=[],
+            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
+            metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
+            step=2,
+            ntokens_seen=0,
+        ),
+    )
+
+    with (
+        patch(
+            "torchtitan.trainer.dist_utils.dist_sum_tensor",
+            side_effect=lambda tokens, mesh: tokens * 2,
+        ) as reduce_tokens,
+        patch(
+            "torchtitan.trainer.dist_utils.clip_grad_norm_",
+            return_value=torch.tensor(0.0),
+        ),
+    ):
+        Trainer.train_step(
+            trainer,
+            iter([({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))]),
+        )
+
+    if should_reduce:
+        reduce_tokens.assert_called_once()
+        reduced_tokens, reduced_mesh = reduce_tokens.call_args.args
+        torch.testing.assert_close(reduced_tokens, torch.tensor(1))
+        assert reduced_mesh is batch_mesh
+    else:
+        reduce_tokens.assert_not_called()
+        get_mesh.assert_not_called()
+
+    passed_tokens = forward_backward_step.call_args.kwargs["global_valid_tokens"]
+    torch.testing.assert_close(passed_tokens, torch.tensor(2 if should_reduce else 1))
+
+
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     trainer = cast(
         Trainer,
