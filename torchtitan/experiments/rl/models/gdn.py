@@ -16,9 +16,7 @@ Batch-invariant execution has two additional requirements:
   cache stays in model dtype because it only stores trailing input columns.
 * Batch-invariant recurrence uses the same Attention Gym scan as the trainer.
 
-Decode, recurrent execution, and chunked prefill all update the paged SSM state
-pool directly. Convolution prefill still materializes its much smaller ``W - 1``
-history until Attention Gym exposes a paged varlen convolution operation.
+Decode and prefill update the paged convolution and SSM state pools directly.
 """
 
 from dataclasses import dataclass
@@ -26,9 +24,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from attn_gym.linear import (
-    causal_conv1d,
     causal_conv1d_decode,
     l2norm,
+    paged_causal_conv1d,
     paged_chunk_gdn,
     recurrent_gdn,
     recurrent_gdn_decode,
@@ -277,11 +275,9 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         num_sequences = num_decodes + num_prefills
 
         # Convolution is split by request type and writes one contiguous
-        # conv_output for the single recurrence below. Decode is FULL-captured in
-        # a CUDA graph, so it must use the single-token update kernel: the varlen
-        # causal_conv1d prepares chunk indices with host syncs, which capture
-        # forbids. Prefill (eager at the graph break) uses the varlen kernel.
-        # vLLM orders tokens decode-first, then prefill.
+        # conv_output for the single recurrence below. Decode uses the specialized
+        # single-token state update, while prefill uses the packed multi-token
+        # operation. vLLM orders tokens decode-first, then prefill.
         conv_output = mixed_qkv.new_empty(num_actual_tokens, mixed_qkv.shape[1])
 
         decode_slots = state_indices[:num_decodes]
@@ -310,42 +306,18 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 # 0-based for the prefill slice.
                 prefill_cu_seqlens = gdn_metadata.non_spec_query_start_loc
             else:
-                # Mixed batch: prefill_query_start_loc holds absolute offsets that
-                # start at num_decode_tokens, because decode tokens occupy the front
-                # of the batch. Subtract the first offset (which equals
-                # num_decode_tokens) to rebase the prefill slice's cu_seqlens to 0.
+                # Mixed-batch prefill metadata is already rebased to the prefill slice.
                 assert gdn_metadata.prefill_query_start_loc is not None
-                prefill_cu_seqlens = (
-                    gdn_metadata.prefill_query_start_loc
-                    - gdn_metadata.prefill_query_start_loc[0]
-                )
-            num_prefill_sequences = int(prefill_cu_seqlens.numel()) - 1
-            # This implementation runs eager at the graph break, so checking
-            # whether any prefix state must be restored does not enter a captured graph.
-            has_continuations = prefill_has_initial_state is not None and bool(
-                prefill_has_initial_state.any()
-            )
-            conv_initial_state = mixed_qkv.new_zeros(
-                num_prefill_sequences,
-                self.conv_kernel_size - 1,
-                mixed_qkv.shape[1],
-            )
-            # Fresh prefills keep zero state; prefix-cache continuations restore
-            # only the sequence slots identified by vLLM metadata.
-            if has_continuations:
-                resumed_slots = prefill_slots[prefill_has_initial_state]
-                conv_initial_state[prefill_has_initial_state] = conv_state[
-                    resumed_slots
-                ]
-            prefill_conv_output, conv_final_state = causal_conv1d(
+                prefill_cu_seqlens = gdn_metadata.prefill_query_start_loc
+            prefill_conv_output = paged_causal_conv1d(
                 mixed_qkv[prefill_start:num_actual_tokens].unsqueeze(0),
                 conv_weight,
+                conv_state,
+                prefill_slots,
                 activation="silu",
                 cu_seqlens=prefill_cu_seqlens,
-                initial_state=conv_initial_state,
-                return_final_state=True,
+                has_initial_state=prefill_has_initial_state,
             )
-            conv_state[prefill_slots] = conv_final_state.to(conv_state.dtype)
             conv_output[prefill_start:num_actual_tokens] = prefill_conv_output.squeeze(
                 0
             )
