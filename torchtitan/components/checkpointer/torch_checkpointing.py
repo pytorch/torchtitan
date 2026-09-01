@@ -22,6 +22,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
+from torch_checkpointing.checkpoint_layout import LayoutInfo, SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
 )
@@ -34,6 +35,7 @@ from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.distributed_metadata import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
+from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
 from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
@@ -64,6 +66,10 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+
+# Index the HF consolidation writes at the root of a final export; the
+# backend names it after the checkpoint item it consolidated.
+_HF_INDEX_FILE_NAME = f"{MODEL}.safetensors.index.json"
 
 # Logger the backend emits its checkpoint events and metrics on.
 _BACKEND_LOGGER_NAME = "torch_checkpointing"
@@ -223,12 +229,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        def __post_init__(self) -> None:
-            BaseCheckpointManager.Config.__post_init__(self)
-            if self.last_save_in_hf:
-                raise ValueError(
-                    "TorchCheckpointingManager does not support last_save_in_hf yet."
-                )
+        pass
 
     def __init__(
         self,
@@ -378,9 +379,15 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         return True
 
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
+        # Either shape this manager publishes. A resumable checkpoint has the
+        # backend's metadata at its root. A final HF export does not: its
+        # backend metadata sits in the nested "sharded" directory the shards
+        # were written to, and the root holds the consolidated HF files. Probing
+        # only for the former would classify a finished export as abandoned and
+        # let the next run's retention delete it.
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
-        )
+        ) or self._storage.isfile(filesystem.join(checkpoint_id, _HF_INDEX_FILE_NAME))
 
     def _maybe_wait_for_staging(self) -> None:
         # Acquiring the backend lock is what blocks until staging for the last
@@ -444,11 +451,55 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         # The final save must land before the process exits, so retire the async
         # manager and write synchronously through a fresh one.
+        checkpoint_id = self._create_checkpoint_id(curr_step)
         self._manager.close()
-        manager = _with_sync_save(self._manager_config).build()
+        manager_config = _with_sync_save(self._manager_config)
+        input_checkpoint_id = checkpoint_id
+        if self.last_save_in_hf:
+            assert self.sd_adapter is not None
+            states = {MODEL: self.sd_adapter.to_hf(states[MODEL])}
+            # Ranks write safetensors shards into a nested directory; the
+            # pre-finalize callback consolidates them up into checkpoint_id, so
+            # the published checkpoint is HF-layout rather than sharded.
+            input_checkpoint_id = filesystem.join(checkpoint_id, "sharded")
+            item_specs = dict(manager_config.items)
+            model_spec = item_specs.get(
+                MODEL,
+                ItemSpec(requires_copy=True, required=False),
+            )
+            item_specs[MODEL] = replace(
+                model_spec,
+                layout=LayoutInfo(
+                    f"{MODEL}_{{rank}}.safetensors",
+                    SafetensorsSerialization(),
+                ),
+            )
+            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
+            hf_storage_config = (
+                manager_config.storage_config
+                or LocalFileSystemStorageConfig(use_direct_io=False)
+            )
+            manager_config = replace(
+                manager_config,
+                items=item_specs,
+                # The backend hands the callback the directory the shards were
+                # actually written to -- its staging directory when a write
+                # barrier is configured, the final path otherwise -- so
+                # consolidate from that path as given, deriving nothing from it.
+                pre_finalize_callback=lambda staged, _event_logger: (
+                    consolidate_hf_safetensors_checkpoint(
+                        staged,
+                        output_dir=checkpoint_id,
+                        item_key=MODEL,
+                        fqn_to_index_mapping=fqn_to_index_mapping,
+                        storage_config=hf_storage_config,
+                    )
+                ),
+            )
+        manager = manager_config.build()
         try:
             manager.save(
-                self._create_checkpoint_id(curr_step),
+                input_checkpoint_id,
                 _stateful_to_state_dict(states),
             )
         finally:
