@@ -71,6 +71,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config import derive, override
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.protocols.module import ModuleDict
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -816,8 +817,8 @@ class FusedMLAAttention(Attention):
     class Config(Attention.Config):
         pass
 
-    def __init__(self, config: Config):
-        super().__init__(config)
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
+        super().__init__(config, rope_modules=rope_modules)
         if not isinstance(self.rope, ComplexRoPE):
             raise TypeError(
                 "FusedMLAAttention currently requires ComplexRoPE, got "

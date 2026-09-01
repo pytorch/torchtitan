@@ -28,15 +28,27 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import (
-    _rope_cache_registry_context,
-    _RoPECacheRegistry,
-)
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
 __all__ = ["Decoder", "TransformerBlock"]
+
+
+def _rope_config(layer_config):
+    attention_config = getattr(layer_config, "attention", None)
+    return getattr(attention_config, "rope", None)
+
+
+def _register_rope_modules(layer_configs, rope_modules: ModuleDict) -> None:
+    """Build one canonical RoPE module for each layer configuration key."""
+    for layer_config in layer_configs:
+        rope_config = _rope_config(layer_config)
+        if rope_config is None:
+            continue
+        key = rope_config.rope_key()
+        if key not in rope_modules:
+            rope_modules[key] = rope_config.build()
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -252,20 +264,19 @@ class Decoder(BaseModel):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-
-        registry = _RoPECacheRegistry(self)
-        # The registry is a private owner for canonical non-persistent buffers;
-        # the registry object itself is not part of the module tree.
-        self._rope_cache_registry = registry
-
         self.tok_embeddings = config.tok_embeddings.build()
 
-        # Direct model construction and Config.build() both pass through this
-        # constructor, so the layer RoPE modules use the same local registry.
-        with _rope_cache_registry_context(registry):
-            self.layers = ModuleDict()
-            for i, layer_config in enumerate(config.layers):
-                self.layers[str(i)] = layer_config.build()
+        self.rope_modules = ModuleDict()
+        _register_rope_modules(config.layers, self.rope_modules)
+
+        self.layers = ModuleDict()
+        for i, layer_config in enumerate(config.layers):
+            rope_config = _rope_config(layer_config)
+            if rope_config is None:
+                layer = layer_config.build()
+            else:
+                layer = layer_config.build(rope_modules=self.rope_modules)
+            self.layers[str(i)] = layer
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
@@ -287,10 +298,6 @@ class Decoder(BaseModel):
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
         super().init_states(buffer_device=buffer_device)
-
-    def _rope_cache_context(self):
-        """Return a context that exposes this model's private cache registry."""
-        return _rope_cache_registry_context(self._rope_cache_registry)
 
     def forward(
         self,

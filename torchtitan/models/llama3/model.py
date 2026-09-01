@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.protocols.module import ModuleDict
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -31,9 +32,9 @@ class Llama3TransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         pass
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
         assert config.feed_forward is not None
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()

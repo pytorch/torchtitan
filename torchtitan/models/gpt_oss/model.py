@@ -22,13 +22,14 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
+    _resolve_rope,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 
 def apply_attention_sink_rescale(
@@ -45,6 +46,8 @@ class Attention(BaseAttention):
     Multi-head attention (MLA) module with sink attention.
     """
 
+    rope: RoPE
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int = 64
@@ -60,7 +63,7 @@ class Attention(BaseAttention):
         """Per-layer causal sliding-window size"""
         rope: RoPE.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         self.head_dim = config.head_dim
         self.n_heads = config.n_heads
@@ -81,7 +84,8 @@ class Attention(BaseAttention):
         self.wo = config.wo.build()
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         self.inner_attention = config.inner_attention.build()
-        self.rope = config.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
 
     def forward(
         self,
@@ -137,7 +141,7 @@ class GptOssTransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         pass
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         assert isinstance(config.attention, Attention.Config)
         self.attn_mask_key = (
@@ -145,7 +149,7 @@ class GptOssTransformerBlock(TransformerBlock):
             if config.attention.sliding_window_size is not None
             else "basic_mask"
         )
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 

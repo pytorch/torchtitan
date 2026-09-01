@@ -34,7 +34,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
@@ -93,8 +93,8 @@ class Attention(GQAttention):
             # field name without renaming the flex-path usages).
             return self.window_size
 
-    def __init__(self, config: Config):
-        super().__init__(config)
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
+        super().__init__(config, rope_modules=rope_modules)
         self.use_rope: bool = config.use_rope
         self.scale_query_by: float = config.scale_query_by
         self.window_size: int | None = config.window_size
@@ -158,9 +158,9 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         post_attention_norm: RMSNorm.Config
         post_ffn_norm: RMSNorm.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
         assert config.feed_forward is not None
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()

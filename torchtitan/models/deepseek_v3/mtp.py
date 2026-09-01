@@ -23,10 +23,14 @@ from torchtitan.components.loss import (
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.models.common.attention import AttentionMasksType
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import (
+    Decoder,
+    TransformerBlock,
+    _register_rope_modules,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.protocols.module import ModuleList
+from torchtitan.protocols.module import ModuleDict, ModuleList
 
 
 def roll_mtp_sequence(
@@ -120,9 +124,9 @@ class MTPTransformerBlock(TransformerBlock):
         eh_proj: Linear.Config
         mtp_norm: RMSNorm.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.enorm = config.enorm.build()
@@ -211,15 +215,17 @@ class MTPDecoder(Decoder):
             self.mtp_layers = None
             return
 
+        _register_rope_modules(config.mtp_layers, self.rope_modules)
         self.mtp_layers = ModuleList()
-        with self._rope_cache_context():
-            for layer_config in config.mtp_layers:
-                if not isinstance(layer_config, MTPTransformerBlock.Config):
-                    raise ValueError(
-                        "MTPDecoder requires Config.mtp_layers to contain "
-                        "MTPTransformerBlock.Config instances."
-                    )
-                self.mtp_layers.append(layer_config.build())
+        for layer_config in config.mtp_layers:
+            if not isinstance(layer_config, MTPTransformerBlock.Config):
+                raise ValueError(
+                    "MTPDecoder requires Config.mtp_layers to contain "
+                    "MTPTransformerBlock.Config instances."
+                )
+            self.mtp_layers.append(
+                layer_config.build(rope_modules=self.rope_modules)
+            )
 
     def forward(
         self,

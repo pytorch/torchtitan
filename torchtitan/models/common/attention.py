@@ -13,7 +13,7 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple, cast
 
 import spmd_types as spmd
 import torch
@@ -43,7 +43,7 @@ from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.utils import round_up
 
 
@@ -667,6 +667,10 @@ class BaseAttention(Module):
             assert self.n_heads > 0, "n_heads must be > 0"
 
 
+def _resolve_rope(rope_config: RoPE.Config, rope_modules: ModuleDict) -> RoPE:
+    return cast(RoPE, rope_modules[rope_config.rope_key()])
+
+
 class BaseQKVLinear(Module):
     """Base class for Q/K/V projection strategies.
 
@@ -892,6 +896,8 @@ class GQAttention(BaseAttention):
     :class:`FusedQKVLinear` for a single fused projection.
     """
 
+    rope: RoPE
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -919,7 +925,7 @@ class GQAttention(BaseAttention):
                     f"n_kv_heads ({n_kv_heads})"
                 )
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         self.n_heads = config.n_heads
         self.n_kv_heads = (
@@ -931,7 +937,8 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
