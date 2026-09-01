@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import queue
+import re
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -29,6 +31,8 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+
+_STEP_DIR_PATTERN = re.compile(r"step-(0|[1-9]\d*)")
 
 
 def purge_thread(
@@ -198,6 +202,8 @@ class BaseCheckpointManager(Configurable, ABC):
     save_future: Future | None
     folder: str
     keep_latest_k: int
+    purge_thread: threading.Thread | None
+    purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
 
     # A disabled manager returns early from ``__init__`` without setting up any
@@ -266,15 +272,6 @@ class BaseCheckpointManager(Configurable, ABC):
     def _close(self) -> None:
         """Implement ``close``. Only called when checkpointing is enabled."""
 
-    @abstractmethod
-    def _parse_step(self, checkpoint_name: str) -> int | None:
-        """Return the step encoded in a complete checkpoint's name.
-
-        Callers must verify that the checkpoint's completion metadata has been
-        written before invoking this method. ``None`` means that the checkpoint
-        name does not belong to this manager's naming scheme.
-        """
-
     def _should_purge(self) -> bool:
         """Whether this rank should purge stale checkpoints."""
         return (
@@ -282,6 +279,67 @@ class BaseCheckpointManager(Configurable, ABC):
             and dist.get_rank() == 0
             and self._storage.isdir(self.folder)
         )
+
+    def _parse_step(self, dirname: str) -> int | None:
+        """Parse a canonical ``step-N`` checkpoint directory name."""
+        match = _STEP_DIR_PATTERN.fullmatch(dirname)
+        return None if match is None else int(match.group(1))
+
+    @abstractmethod
+    def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
+        """Whether ``checkpoint_dir`` holds a checkpoint this manager can load.
+
+        A directory whose save was interrupted exists but has no metadata, so
+        resuming from it would fail; this is what keeps it out of
+        ``_find_load_step``.
+        """
+
+    def _find_load_step(self, folder: str = "") -> int:
+        """The highest step in ``folder`` that can actually be loaded.
+
+        Args:
+            folder: Directory to scan. Defaults to ``self.folder``.
+
+        Returns:
+            The step number, or -1 when the folder holds no loadable checkpoint.
+
+        Note:
+            This is not remote friendly: it issues one listdir plus a metadata
+            probe per step folder, each a network round trip on remote (fsspec)
+            storage instead of a single batched listing. Acceptable for now
+            since it only runs once at load time.
+        """
+        folder = folder or self.folder
+        if not self._storage.isdir(folder):
+            return -1
+
+        valid_steps = []
+        for dirname in self._storage.listdir(folder):
+            step = self._parse_step(dirname)
+            if step is None:
+                continue
+            if self._is_valid_checkpoint(filesystem.join(folder, dirname)):
+                valid_steps.append(step)
+        return max(valid_steps) if valid_steps else -1
+
+    def _purge_stale_checkpoints(self) -> None:
+        """Delete the checkpoints beyond the ``keep_latest_k`` most recent."""
+        if not self._should_purge():
+            return
+
+        discovered: list[tuple[int, str]] = []
+        for filename in self._storage.listdir(self.folder):
+            step = self._parse_step(filename)
+            if step is None:
+                continue
+            checkpoint_id = filesystem.join(self.folder, filename)
+            if self._is_valid_checkpoint(checkpoint_id):
+                discovered.append((step, checkpoint_id))
+
+        discovered.sort()
+        for _, path in discovered[: -self.keep_latest_k]:
+            assert self.purge_thread is not None
+            self.purge_queue.put(path)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
