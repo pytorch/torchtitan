@@ -55,6 +55,7 @@ from torchtitan.models.common.token_dispatcher import (
     MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -109,6 +110,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+        # NOTE: sdc_replayer is suppressed from tyro CLI parsing; enable it
+        # programmatically in a config/recipe by assigning a config
+        # (config.sdc_replayer = SDCReplayer.Config()). None disables replay.
+        sdc_replayer: Annotated[SDCReplayer.Config | None, tyro.conf.Suppress] = None
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
 
@@ -117,6 +122,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "Batch-invariant mode is not supported in pre-training."
                 )
+
+            self._validate_sdc_replay()
 
             num_pp_microbatches = self.parallelism.num_pp_microbatches
             if num_pp_microbatches <= 0:
@@ -195,6 +202,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
 
+        def _validate_sdc_replay(self) -> None:
+            if self.sdc_replayer is None:
+                return
+            if not self.debug.deterministic:
+                raise ValueError("SDC replay requires debug.deterministic=True.")
+            if self.debug.deterministic_warn_only:
+                raise ValueError(
+                    "SDC replay requires debug.deterministic_warn_only=False."
+                )
+            if (
+                not self.training.disable_cuda_graphs
+                and self.sdc_replayer.num_replays > 1
+            ):
+                # TODO: Support additional replays after CUDA graph capture has
+                # established stable gradient and buffer identities, or make
+                # replay state restoration aware of graph-owned storage.
+                raise ValueError(
+                    "SDC replay supports at most one replay when CUDA graphs "
+                    "are enabled: set sdc_replayer.num_replays=1 or "
+                    "training.disable_cuda_graphs=True."
+                )
+
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
@@ -264,6 +293,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     num_pp_microbatches: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
+    sdc_replayer: SDCReplayer | None
 
     # additional training states
     step: int
@@ -346,7 +376,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # loss, dataloader, …) are built later in __init__.
         if config.override.imports:
             apply_overrides(config.override, config)
-        config._validate_cuda_graphs()
+        # Overrides may change any config field; re-run the full validation.
+        # __post_init__ only raises (no mutation), so re-running is safe.
+        config.__post_init__()
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")
 
@@ -547,6 +579,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+
+        # SDC replay state is process-local and not checkpointed; its check
+        # schedule restarts after every checkpoint load (see load_state_dict).
+        self.sdc_replayer = None
+        if config.sdc_replayer is not None:
+            self.sdc_replayer = config.sdc_replayer.build(
+                modules=self.model_parts,
+                device=self.device,
+                # ntokens_seen is the only trainer scalar the replayed
+                # forward/backward mutates; self.step is incremented outside
+                # the replay boundary and needs no capture.
+                scalar_state={
+                    "ntokens_seen": ScalarStateAccessor(
+                        get=lambda: self.ntokens_seen,
+                        set=lambda value: setattr(self, "ntokens_seen", value),
+                    )
+                },
+            )
 
         # build tokenizer
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
@@ -809,7 +859,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         accumulated_loss: torch.Tensor | None = None
         # int32 is supported by NCCL reductions, unlike bool.
         loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
-        for microbatches in microbatch_groups:
+        for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
             input_dict_mbs = []
             label_mbs = []
             for input_dict, labels in microbatches:
@@ -827,11 +877,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 fwd_bwd_input_dict = input_dict_mbs[0]
                 fwd_bwd_labels = label_mbs[0]
 
-            loss = self.forward_backward_step(
-                input_dict=fwd_bwd_input_dict,
-                labels=fwd_bwd_labels,
-                global_valid_tokens=global_valid_tokens,
-            )
+            def fwd_bwd() -> torch.Tensor:
+                return self.forward_backward_step(
+                    input_dict=fwd_bwd_input_dict,
+                    labels=fwd_bwd_labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
+
+            if self.sdc_replayer is not None and fwd_bwd_index == 0:
+                # Only the step's first gradient-accumulation group is
+                # replay-checked; under PP one group is a complete pipeline
+                # schedule. Later groups exercise the same compute and
+                # communication paths, so checking them too would only add
+                # overhead.
+                loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
+            else:
+                loss = fwd_bwd()
             detached_loss = loss.detach()
             local_loss = (
                 detached_loss.to_local()
@@ -895,7 +956,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert accumulated_loss is not None
 
         with sl.log_trace_span("collect_dist_metrics"):
-
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
             if parallel_dims.dp_cp_enabled:
@@ -1011,6 +1071,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
+        if self.sdc_replayer is not None:
+            self.sdc_replayer.reset_schedule()
 
     def close(self) -> None:
         if hasattr(self, "dataloader") and self.dataloader:

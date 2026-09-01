@@ -662,6 +662,17 @@ class CheckpointManager(BaseCheckpointManager):
         self.save_future.result()
         self.save_future = None
 
+    def _parse_step(self, checkpoint_name: str) -> int | None:
+        match = re.fullmatch(r"step-(0|[1-9]\d*)", checkpoint_name)
+        return int(match.group(1)) if match else None
+
+    def _has_complete_metadata(self, checkpoint_id: str) -> bool:
+        return self._storage.isfile(filesystem.join(checkpoint_id, ".metadata")) or (
+            self._storage.isfile(
+                filesystem.join(checkpoint_id, "model.safetensors.index.json")
+            )
+        )
+
     def _find_load_step(self, folder: str = "") -> int:
         """Identify the highest available checkpoint step in the specified directory.
 
@@ -688,23 +699,15 @@ class CheckpointManager(BaseCheckpointManager):
         if not self._storage.isdir(folder):
             return -1
 
-        pattern = r"step-(\d+)"
         valid_steps = []
 
         for filename in self._storage.listdir(folder):
-            match = re.search(pattern, filename)
-            if not match:
-                continue
-
-            # A checkpoint is valid only if it contains core metadata
             checkpoint_path = filesystem.join(folder, filename)
-            is_dcp = self._storage.isfile(filesystem.join(checkpoint_path, ".metadata"))
-            is_hf = self._storage.isfile(
-                filesystem.join(checkpoint_path, "model.safetensors.index.json")
-            )
-
-            if is_dcp or is_hf:
-                valid_steps.append(int(match.group(1)))
+            if (
+                self._has_complete_metadata(checkpoint_path)
+                and (step := self._parse_step(filename)) is not None
+            ):
+                valid_steps.append(step)
 
         return max(valid_steps) if valid_steps else -1
 
@@ -840,10 +843,12 @@ class CheckpointManager(BaseCheckpointManager):
         if self._should_purge():
             discovered_checkpoints = []
             for filename in self._storage.listdir(self.folder):
-                match = re.search(r"step-(\d+)", filename)
-                if match:
-                    path = filesystem.join(self.folder, filename)
-                    discovered_checkpoints.append((int(match.group(1)), path))
+                path = filesystem.join(self.folder, filename)
+                if (
+                    self._has_complete_metadata(path)
+                    and (step := self._parse_step(filename)) is not None
+                ):
+                    discovered_checkpoints.append((step, path))
 
             discovered_checkpoints.sort()
             to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
