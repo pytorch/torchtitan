@@ -113,6 +113,9 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
         }
         if model_config.vision_encoder is None:
+            # The vision encoder determines the Hugging Face wrapper layout:
+            # multimodal checkpoints use model.language_model.*, while
+            # text-only checkpoints use model.*.
             self.from_hf_map = {
                 hf_key.replace("model.language_model.", "model.", 1): tt_key
                 for hf_key, tt_key in self.from_hf_map.items()
