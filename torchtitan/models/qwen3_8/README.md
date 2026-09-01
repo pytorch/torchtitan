@@ -44,21 +44,3 @@ Qwen3.5 configurations remain available separately:
 ```bash
 MODULE=qwen3_5 CONFIG=qwen35_0_8b ./run_train.sh
 ```
-
-## Numerical parity
-
-Qwen3.8-27B was validated against Hugging Face Transformers 5.15 on an H100
-using the released checkpoint and three deterministic image-text samples:
-
-- FP16: average KL divergence `1.64e-6`, cosine similarity about `0.99997`,
-  and 100% top-1/top-5 match.
-- BF16: average KL divergence `1.93e-4` with 100% top-1/top-5 match.
-- Reconstructed image inputs matched with maximum difference `1.19e-7`.
-
-A text-only FP16 run produced KL divergence `4.36e-7` with 100% top-1/top-5
-match.
-
-## References
-
-- [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)
-- [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B)
