@@ -8,8 +8,7 @@
 Parallelization utilities for Qwen3.5.
 
 This module applies PT-D parallelisms and various training techniques
-(activation checkpointing, compile, FSDP) to Qwen3.5 models. Hugging Face
-retains the Qwen3.5 architecture identifiers for these checkpoints.
+(activation checkpointing, compile, FSDP) to the Qwen3.5 model.
 """
 
 import torch.nn as nn
@@ -20,6 +19,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
+
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
@@ -44,7 +44,7 @@ def parallelize_qwen3_5(
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
-    parallelism to a Qwen3.5 model.
+    parallelism to the Qwen3.5 model.
 
     ``skip_dp=True`` applies TP/AC/compile but no FSDP/DP -- used by the vLLM
     generator, which replicates params across vLLM DP groups (not TorchTitan FSDP).

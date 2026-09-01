@@ -54,10 +54,8 @@ from .state_dict_adapter import Qwen35StateDictAdapter
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
 __all__ = [
-    "model_registry",
     "parallelize_qwen3_5",
     "Qwen35Model",
-    "Qwen35StateDictAdapter",
     "qwen3_5_configs",
     "QWEN3_5_SPECIAL_TOKENS",
 ]

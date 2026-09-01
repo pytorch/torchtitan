@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Vision encoder for multimodal Qwen3.5 checkpoints.
+"""Qwen3.5 vision encoder.
 
 Shape suffixes:
 - T = packed patch tokens
@@ -313,7 +313,7 @@ class Qwen35VisionEncoder(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        """Configuration for the Qwen3.5 Vision Encoder (ViT)."""
+        """Configuration for Qwen3.5 Vision Encoder (ViT)."""
 
         dim: int = 1280
         num_layers: int = 32

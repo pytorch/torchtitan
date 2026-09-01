@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Sharding configs for the Qwen3.5 hybrid attention model.
+"""Sharding configs for Qwen3.5 hybrid attention model.
 
 Sets ``ShardingConfig`` on all sub-configs so that ``model.parallelize()``
 applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
@@ -137,7 +137,7 @@ def set_qwen35_sharding_config(
             local_map=LocalMapConfig(in_grad_placements=None),
         )
         _set_vision_encoder_sharding(config.vision_encoder)
-        # The first layer restores the decoder layout after vision scatter.
+        # The first layer restores the decoder layout after replicated vision scatter.
         first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     for layer_idx, layer_cfg in enumerate(config.layers):
         input_layout = (

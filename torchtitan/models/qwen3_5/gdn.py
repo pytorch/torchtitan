@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Gated DeltaNet modules for the Qwen3.5 implementation."""
+"""Gated DeltaNet modules for Qwen3.5."""
 
 from dataclasses import dataclass
 from typing import Literal

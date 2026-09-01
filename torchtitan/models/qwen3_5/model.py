@@ -44,6 +44,7 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
+
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
 from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
@@ -239,11 +240,11 @@ class Qwen35TransformerBlock(Module):
 
 
 class Qwen35Model(Decoder):
-    """Qwen3.5 model with hybrid attention and optional vision.
+    """Qwen3.5: Multimodal model with hybrid attention.
 
-    Implements a hybrid decoder (GatedDeltaNet linear attention + full
-    attention with output gating and partial RoPE) and optionally combines it
-    with a Vision Transformer encoder for multimodal understanding.
+    Combines a hybrid decoder (GatedDeltaNet linear attention + full
+    attention with output gating and partial RoPE) with a Vision
+    Transformer encoder for multimodal understanding.
 
     Key architectural features:
     - Hybrid attention: 75% GatedDeltaNet (linear) + 25% full attention

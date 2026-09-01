@@ -5,12 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-State dict adapter for Qwen3.5-compatible checkpoints.
+State dict adapter for Qwen3.5.
 
-Converts Qwen3.5 and Qwen3.8 Hugging Face checkpoints to and from torchtitan
-format. Both versions use the Qwen3.5 architecture identifiers.
-Multimodal checkpoints nest the decoder under
-``model.language_model``; text-only checkpoints use ``model`` directly.
+Converts between HuggingFace Qwen3.5 checkpoint format and torchtitan format.
 
 MoE expert weights require two transformations:
 - **Transpose**: HF and TT use transposed layouts for grouped 3D expert weights.
@@ -33,6 +30,7 @@ from typing import Any
 import torch
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
 from .model import Qwen35Model
 
 
@@ -45,85 +43,84 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             if model_config.vision_encoder is not None
             else "model"
         )
-        model_prefix = self.hf_language_model_prefix
 
         self.from_hf_map = {
             # ===== Language Model =====
-            f"{model_prefix}.embed_tokens.weight": "tok_embeddings.weight",
+            "model.language_model.embed_tokens.weight": "tok_embeddings.weight",
             # Full attention layers (self_attn.*)
-            f"{model_prefix}.layers.{{}}.self_attn.q_proj.weight": "layers.{}.attn.wq.weight",
-            f"{model_prefix}.layers.{{}}.self_attn.k_proj.weight": "layers.{}.attn.wk.weight",
-            f"{model_prefix}.layers.{{}}.self_attn.v_proj.weight": "layers.{}.attn.wv.weight",
-            f"{model_prefix}.layers.{{}}.self_attn.o_proj.weight": "layers.{}.attn.wo.weight",
-            f"{model_prefix}.layers.{{}}.self_attn.q_norm.weight": "layers.{}.attn.q_norm.weight",
-            f"{model_prefix}.layers.{{}}.self_attn.k_norm.weight": "layers.{}.attn.k_norm.weight",
-            f"{model_prefix}.layers.{{}}.self_attn.rotary_emb.inv_freq": None,
+            "model.language_model.layers.{}.self_attn.q_proj.weight": "layers.{}.attn.wq.weight",
+            "model.language_model.layers.{}.self_attn.k_proj.weight": "layers.{}.attn.wk.weight",
+            "model.language_model.layers.{}.self_attn.v_proj.weight": "layers.{}.attn.wv.weight",
+            "model.language_model.layers.{}.self_attn.o_proj.weight": "layers.{}.attn.wo.weight",
+            "model.language_model.layers.{}.self_attn.q_norm.weight": "layers.{}.attn.q_norm.weight",
+            "model.language_model.layers.{}.self_attn.k_norm.weight": "layers.{}.attn.k_norm.weight",
+            "model.language_model.layers.{}.self_attn.rotary_emb.inv_freq": None,
             # GatedDeltaNet layers (linear_attn.*)
-            # QKV and Conv1d: HF fused -> TT separate (handled in to_hf/from_hf)
-            f"{model_prefix}.layers.{{}}.linear_attn.in_proj_qkv.weight": None,
-            f"{model_prefix}.layers.{{}}.linear_attn.conv1d.weight": None,
-            f"{model_prefix}.layers.{{}}.linear_attn.in_proj_z.weight": "layers.{}.attn.in_proj_z.weight",
-            f"{model_prefix}.layers.{{}}.linear_attn.in_proj_a.weight": "layers.{}.attn.in_proj_a.weight",
-            f"{model_prefix}.layers.{{}}.linear_attn.in_proj_b.weight": "layers.{}.attn.in_proj_b.weight",
-            f"{model_prefix}.layers.{{}}.linear_attn.A_log": "layers.{}.attn.A_log",
-            f"{model_prefix}.layers.{{}}.linear_attn.dt_bias": "layers.{}.attn.dt_bias",
-            f"{model_prefix}.layers.{{}}.linear_attn.norm.weight": "layers.{}.attn.norm.weight",
-            f"{model_prefix}.layers.{{}}.linear_attn.out_proj.weight": "layers.{}.attn.out_proj.weight",
+            # QKV and Conv1d: HF fused → TT separate (handled in to_hf/from_hf)
+            "model.language_model.layers.{}.linear_attn.in_proj_qkv.weight": None,
+            "model.language_model.layers.{}.linear_attn.conv1d.weight": None,
+            "model.language_model.layers.{}.linear_attn.in_proj_z.weight": "layers.{}.attn.in_proj_z.weight",
+            "model.language_model.layers.{}.linear_attn.in_proj_a.weight": "layers.{}.attn.in_proj_a.weight",
+            "model.language_model.layers.{}.linear_attn.in_proj_b.weight": "layers.{}.attn.in_proj_b.weight",
+            "model.language_model.layers.{}.linear_attn.A_log": "layers.{}.attn.A_log",
+            "model.language_model.layers.{}.linear_attn.dt_bias": "layers.{}.attn.dt_bias",
+            "model.language_model.layers.{}.linear_attn.norm.weight": "layers.{}.attn.norm.weight",
+            "model.language_model.layers.{}.linear_attn.out_proj.weight": "layers.{}.attn.out_proj.weight",
             # Non-MoE MLP
-            f"{model_prefix}.layers.{{}}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            f"{model_prefix}.layers.{{}}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            f"{model_prefix}.layers.{{}}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
+            "model.language_model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+            "model.language_model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
+            "model.language_model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # Layer norms
-            f"{model_prefix}.layers.{{}}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            f"{model_prefix}.layers.{{}}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
+            "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
+            "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE (grouped 3D format, handled specially in to_hf/from_hf)
-            f"{model_prefix}.layers.{{}}.mlp.experts.down_proj": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
-            f"{model_prefix}.layers.{{}}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
+            "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             # MoE shared expert
-            f"{model_prefix}.layers.{{}}.mlp.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
-            f"{model_prefix}.layers.{{}}.mlp.shared_expert.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
-            f"{model_prefix}.layers.{{}}.mlp.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
-            f"{model_prefix}.layers.{{}}.mlp.shared_expert_gate.weight": "layers.{}.moe.shared_experts.gate.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
+            "model.language_model.layers.{}.mlp.shared_expert.down_proj.weight": "layers.{}.moe.shared_experts.w2.weight",
+            "model.language_model.layers.{}.mlp.shared_expert_gate.weight": "layers.{}.moe.shared_experts.gate.weight",
             # Final norm and output
-            f"{model_prefix}.norm.weight": "norm.weight",
+            "model.language_model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
+            # ===== Vision Encoder =====
+            # Patch embedding (Conv3d in HF, Linear in TT — weight reshape needed)
+            "model.visual.patch_embed.proj.weight": "vision_encoder.patch_embed.weight",
+            "model.visual.patch_embed.proj.bias": "vision_encoder.patch_embed.bias",
+            # Position embeddings
+            "model.visual.pos_embed.weight": "vision_encoder.pos_embed",
+            # Vision transformer blocks (HF: blocks, TT: layers)
+            "model.visual.blocks.{}.norm1.weight": "vision_encoder.layers.{}.norm1.weight",
+            "model.visual.blocks.{}.norm1.bias": "vision_encoder.layers.{}.norm1.bias",
+            "model.visual.blocks.{}.norm2.weight": "vision_encoder.layers.{}.norm2.weight",
+            "model.visual.blocks.{}.norm2.bias": "vision_encoder.layers.{}.norm2.bias",
+            # Vision QKV: HF fused → TT separate (handled in to_hf/from_hf)
+            "model.visual.blocks.{}.attn.qkv.weight": None,
+            "model.visual.blocks.{}.attn.qkv.bias": None,
+            "model.visual.blocks.{}.attn.proj.weight": "vision_encoder.layers.{}.attn.proj.weight",
+            "model.visual.blocks.{}.attn.proj.bias": "vision_encoder.layers.{}.attn.proj.bias",
+            "model.visual.blocks.{}.mlp.linear_fc1.weight": "vision_encoder.layers.{}.mlp.linear_fc1.weight",
+            "model.visual.blocks.{}.mlp.linear_fc1.bias": "vision_encoder.layers.{}.mlp.linear_fc1.bias",
+            "model.visual.blocks.{}.mlp.linear_fc2.weight": "vision_encoder.layers.{}.mlp.linear_fc2.weight",
+            "model.visual.blocks.{}.mlp.linear_fc2.bias": "vision_encoder.layers.{}.mlp.linear_fc2.bias",
+            # Merger
+            "model.visual.merger.norm.weight": "vision_encoder.merger.norm.weight",
+            "model.visual.merger.norm.bias": "vision_encoder.merger.norm.bias",
+            "model.visual.merger.linear_fc1.weight": "vision_encoder.merger.linear_fc1.weight",
+            "model.visual.merger.linear_fc1.bias": "vision_encoder.merger.linear_fc1.bias",
+            "model.visual.merger.linear_fc2.weight": "vision_encoder.merger.linear_fc2.weight",
+            "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
         }
-        self.from_hf_map.update(
-            {
-                # ===== Vision Encoder =====
-                # Patch embedding (Conv3d in HF, Linear in TT -- reshape weight)
-                "model.visual.patch_embed.proj.weight": "vision_encoder.patch_embed.weight",
-                "model.visual.patch_embed.proj.bias": "vision_encoder.patch_embed.bias",
-                # Position embeddings
-                "model.visual.pos_embed.weight": "vision_encoder.pos_embed",
-                # Vision transformer blocks (HF: blocks, TT: layers)
-                "model.visual.blocks.{}.norm1.weight": "vision_encoder.layers.{}.norm1.weight",
-                "model.visual.blocks.{}.norm1.bias": "vision_encoder.layers.{}.norm1.bias",
-                "model.visual.blocks.{}.norm2.weight": "vision_encoder.layers.{}.norm2.weight",
-                "model.visual.blocks.{}.norm2.bias": "vision_encoder.layers.{}.norm2.bias",
-                # Vision QKV: HF fused -> TT separate (handled in to_hf/from_hf)
-                "model.visual.blocks.{}.attn.qkv.weight": None,
-                "model.visual.blocks.{}.attn.qkv.bias": None,
-                "model.visual.blocks.{}.attn.proj.weight": "vision_encoder.layers.{}.attn.proj.weight",
-                "model.visual.blocks.{}.attn.proj.bias": "vision_encoder.layers.{}.attn.proj.bias",
-                "model.visual.blocks.{}.mlp.linear_fc1.weight": "vision_encoder.layers.{}.mlp.linear_fc1.weight",
-                "model.visual.blocks.{}.mlp.linear_fc1.bias": "vision_encoder.layers.{}.mlp.linear_fc1.bias",
-                "model.visual.blocks.{}.mlp.linear_fc2.weight": "vision_encoder.layers.{}.mlp.linear_fc2.weight",
-                "model.visual.blocks.{}.mlp.linear_fc2.bias": "vision_encoder.layers.{}.mlp.linear_fc2.bias",
-                # Merger
-                "model.visual.merger.norm.weight": "vision_encoder.merger.norm.weight",
-                "model.visual.merger.norm.bias": "vision_encoder.merger.norm.bias",
-                "model.visual.merger.linear_fc1.weight": "vision_encoder.merger.linear_fc1.weight",
-                "model.visual.merger.linear_fc1.bias": "vision_encoder.merger.linear_fc1.bias",
-                "model.visual.merger.linear_fc2.weight": "vision_encoder.merger.linear_fc2.weight",
-                "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
+        if model_config.vision_encoder is None:
+            self.from_hf_map = {
+                hf_key.replace("model.language_model.", "model.", 1): tt_key
+                for hf_key, tt_key in self.from_hf_map.items()
+                if not hf_key.startswith("model.visual.")
             }
-            if model_config.vision_encoder is not None
-            else {}
-        )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert a torchtitan state dict to Hugging Face format."""
+        """Convert torchtitan state dict to HuggingFace Qwen3.5 format."""
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
@@ -211,7 +208,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                         self.fqn_to_index_mapping.pop("lm_head.weight", None)
                     continue
                 hf_value = value
-                # Linear weight (out, C*T*H*W) -> Conv3d weight (out, C, T, H, W)
+                # Linear weight (out, C*T*H*W) → Conv3d weight (out, C, T, H, W)
                 if tt_key == "vision_encoder.patch_embed.weight":
                     # pyrefly: ignore [missing-attribute]
                     encoder = self.model_config.vision_encoder
@@ -224,7 +221,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     )
                 hf_state_dict[to_hf_map[tt_key]] = hf_value
 
-        # Fuse MoE w1 (gate) + w3 (up) -> gate_up_proj
+        # Fuse MoE w1 (gate) + w3 (up) → gate_up_proj
         for layer_num in moe_w1_by_layer:
             w1 = moe_w1_by_layer[layer_num].transpose(-2, -1)
             w3 = moe_w3_by_layer[layer_num].transpose(-2, -1)
@@ -232,7 +229,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 f"{self.hf_language_model_prefix}.layers.{layer_num}.mlp.experts.gate_up_proj"
             ] = torch.cat([w1, w3], dim=-1)
 
-        # Fuse vision wq/wk/wv -> qkv
+        # Fuse vision wq/wk/wv → qkv
         for layer_num, parts in vision_qkv_by_layer.items():
             for suffix in ("weight", "bias"):
                 q = parts.get(f"wq.{suffix}")
@@ -243,7 +240,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                         f"model.visual.blocks.{layer_num}.attn.qkv.{suffix}"
                     ] = torch.cat([q, k, v], dim=0)
 
-        # Fuse deltanet in_proj_q/k/v -> in_proj_qkv, conv_q/k/v -> conv1d
+        # Fuse deltanet in_proj_q/k/v → in_proj_qkv, conv_q/k/v → conv1d
         for layer_num, parts in deltanet_qkv_by_layer.items():
             q = parts.get("in_proj_q.weight")
             k = parts.get("in_proj_k.weight")
@@ -263,10 +260,10 @@ class Qwen35StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert a Hugging Face state dict to torchtitan."""
+        """Convert HuggingFace Qwen3.5 state dict to torchtitan format."""
         tt_state_dict = {}
 
-        # HF ties lm_head with embed_tokens -- copy if missing
+        # HF ties lm_head with embed_tokens — copy if missing
         if "lm_head.weight" not in hf_state_dict:
             embed_key = f"{self.hf_language_model_prefix}.embed_tokens.weight"
             if embed_key not in hf_state_dict:
@@ -281,7 +278,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 # pyrefly: ignore [missing-attribute]
                 idx = re.search(r"\d+", hf_key).group(0)
 
-                # MoE gate_up_proj -> split into w1 + w3 and transpose
+                # MoE gate_up_proj → split into w1 + w3 and transpose
                 if (
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.gate_up_proj"
@@ -295,7 +292,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     ] = w3_hf.transpose(-2, -1)
                     continue
 
-                # MoE down_proj -> transpose
+                # MoE down_proj → transpose
                 if (
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.down_proj"
@@ -305,7 +302,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     ] = value.transpose(-2, -1)
                     continue
 
-                # GatedDeltaNet fused in_proj_qkv -> split into q/k/v
+                # GatedDeltaNet fused in_proj_qkv → split into q/k/v
                 if (
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.linear_attn.in_proj_qkv.weight"
@@ -320,7 +317,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     tt_state_dict[f"layers.{idx}.attn.in_proj_v.weight"] = v
                     continue
 
-                # GatedDeltaNet fused conv1d -> split into conv_q/k/v
+                # GatedDeltaNet fused conv1d → split into conv_q/k/v
                 if (
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.linear_attn.conv1d.weight"
@@ -335,7 +332,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     tt_state_dict[f"layers.{idx}.attn.conv_v.weight"] = cv
                     continue
 
-                # Vision fused QKV -> split into wq/wk/wv
+                # Vision fused QKV → split into wq/wk/wv
                 if hf_abstract_key in (
                     "model.visual.blocks.{}.attn.qkv.weight",
                     "model.visual.blocks.{}.attn.qkv.bias",
@@ -361,7 +358,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 if tt_key is None:
                     continue
                 tt_value = value
-                # Conv3d weight (out, C, T, H, W) -> Linear weight (out, C*T*H*W)
+                # Conv3d weight (out, C, T, H, W) → Linear weight (out, C*T*H*W)
                 if hf_key == "model.visual.patch_embed.proj.weight":
                     tt_value = value.reshape(value.shape[0], -1)
                 tt_state_dict[tt_key] = tt_value
