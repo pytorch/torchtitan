@@ -29,13 +29,15 @@ from . import model_registry
 
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel(seq_len=2048), model_registry
+    )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
-    base = deepseek_v3_debugmodel()
+    base = deepseek_v3_debugmodel(seq_len=2048)
     # Quantize dense and moe gemms to mxfp8
     base.model_spec = deepseek_v3_model_registry(
         "debugmodel",
@@ -56,7 +58,9 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel(seq_len=2048), model_registry
+    )
     config.compile = GraphTrainerCompileConfig(enable=True)
     config.model_spec = model_registry(
         "debugmodel",
@@ -69,7 +73,7 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        deepseek_v3_debugmodel_minimal_async_ep(),
+        deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048),
         model_registry,
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
@@ -89,14 +93,14 @@ def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_16b(), model_registry)
+    config = to_graph_trainer_config(deepseek_v3_16b(seq_len=4096), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
 
 def graph_trainer_deepseek_v3_16b_minimal_async_ep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        deepseek_v3_16b_minimal_async_ep(),
+        deepseek_v3_16b_minimal_async_ep(seq_len=4096),
         model_registry,
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
@@ -115,6 +119,6 @@ def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_671b(), model_registry)
+    config = to_graph_trainer_config(deepseek_v3_671b(seq_len=4096), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config

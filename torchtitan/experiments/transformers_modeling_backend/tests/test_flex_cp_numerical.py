@@ -67,9 +67,9 @@ def main():
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
-        transformers_modeling_backend_debugmodel_moe()
+        transformers_modeling_backend_debugmodel_moe(seq_len=2048)
         if args.moe
-        else transformers_modeling_backend_debugmodel()
+        else transformers_modeling_backend_debugmodel(seq_len=2048)
     )
     cfg.hf_model = args.hf_model
     cfg.training.max_context_length = args.seq_len
