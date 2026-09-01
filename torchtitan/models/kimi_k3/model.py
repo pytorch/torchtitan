@@ -274,8 +274,9 @@ class KimiK3Model(Decoder):
             # and KDA recurrent states at document boundaries.
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
-            if config.parallelism.expert_parallel_degree > 1:
-                set_expert_parallel_sharding_config(self)
+            set_expert_parallel_sharding_config(
+                self, enable_ep=config.parallelism.expert_parallel_degree > 1
+            )
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(

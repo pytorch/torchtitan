@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 def set_expert_parallel_sharding_config(
-    config: "KimiK3Model.Config", *, enable_sp: bool = False
+    config: "KimiK3Model.Config", *, enable_ep: bool, enable_sp: bool = False
 ) -> None:
     """Declare the sharding expert parallel acts on.
 
@@ -34,7 +34,7 @@ def set_expert_parallel_sharding_config(
         if layer.moe is not None:
             set_moe_sharding_config(
                 layer.moe,
-                enable_ep=True,
+                enable_ep=enable_ep,
                 # TODO: flip to True from the caller once the
                 # tensor-parallel PR lands; with EP alone the internals run
                 # without sequence parallel.
