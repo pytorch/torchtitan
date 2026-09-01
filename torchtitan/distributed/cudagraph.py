@@ -17,10 +17,10 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
+from torch.cuda._graph_annotations import get_kernel_annotations
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
-from torchtitan.config.function import Function
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -126,7 +126,7 @@ class CUDAGraphInputSpec:
 
 
 class _CUDAGraphManager:
-    """Singleton that owns a shared graph pool and stream."""
+    """Singleton that owns a shared graph pool, stream, and annotations."""
 
     def __init__(self) -> None:
         self._initialized = False
@@ -135,7 +135,6 @@ class _CUDAGraphManager:
         self._stream: torch.cuda.Stream | None = None
         self._dummy_graph: torch.cuda.CUDAGraph | None = None
         self.all_annotations: dict[int, list[Any]] = {}
-        self.enable_annotations = False
 
     @property
     def graph_pool(self) -> Any:
@@ -196,25 +195,21 @@ def get_cudagraph_annotations() -> dict[int, list[Any]]:
     return _manager.all_annotations
 
 
-def enable_cudagraph_annotations() -> None:
-    """Enable kernel annotation capture on subsequent CUDA graph recordings."""
-    _manager.enable_annotations = True
+def collect_cudagraph_annotations() -> None:
+    """Accumulate kernel annotations from the most recent CUDA graph capture."""
+    _manager.all_annotations.update(get_kernel_annotations())
 
 
-def cudagraph_annotate_trace_post_processor() -> Function.Config:
-    """Build a profiler hook that adds CUDA graph annotations to traces."""
-    return Function.Config(
-        fn=_cudagraph_annotate_trace_file  # pyrefly: ignore [bad-argument-type]
-    )
-
-
-def _cudagraph_annotate_trace_file(trace_path: str) -> None:
+def cudagraph_annotate_trace_post_processor(trace_path: str) -> None:
+    """Post-process a profiler trace with captured CUDA graph annotations."""
     annotations = get_cudagraph_annotations()
     if not annotations:
         return
 
     try:
-        from torch.cuda._annotate_cuda_graph_trace import annotate_trace
+        from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
+            annotate_trace,
+        )
     except ImportError:
         logger.warning(
             "torch.cuda._annotate_cuda_graph_trace not available. "
@@ -364,14 +359,11 @@ class CUDAGraphWrapper:
                 self._graph,
                 pool=_manager.graph_pool,
                 stream=_manager.stream,
-                enable_annotations=_manager.enable_annotations,
+                enable_annotations=True,
                 capture_error_mode="thread_local",
             ):
                 self._output = self._fn(*args)
-            if _manager.enable_annotations:
-                from torch.cuda._graph_annotations import get_kernel_annotations
-
-                _manager.all_annotations.update(get_kernel_annotations())
+            collect_cudagraph_annotations()
             logger.info("Recorded CUDA graph")
 
         if self._should_check_address:

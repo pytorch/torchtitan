@@ -261,7 +261,7 @@ def test_cuda_graph_trace_post_processor_adds_annotations() -> None:
         with gzip.open(trace_path, "wt") as trace_file:
             json.dump(trace, trace_file)
 
-        cudagraph_annotate_trace_post_processor().build()(trace_path)
+        cudagraph_annotate_trace_post_processor(trace_path)
 
         with gzip.open(trace_path, "rt") as trace_file:
             annotated = json.load(trace_file)
