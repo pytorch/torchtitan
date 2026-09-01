@@ -32,10 +32,13 @@ def test_trainable_token_spans() -> None:
 
 
 def test_verifiers_trace_preserves_generation_metadata() -> None:
+    from verifiers.v1.types import AssistantMessage
+
     node = SimpleNamespace(
         token_ids=[10, 11, 12, 13],
         mask=[False, False, True, True],
         sampled=True,
+        message=AssistantMessage(content="Answer: $42$"),
     )
     trace = SimpleNamespace(
         calls=[SimpleNamespace(node=0)],
@@ -65,6 +68,10 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     assert turns[0].prompt_token_ids == [10, 11]
     assert turns[0].completion_token_ids == [12, 13]
     assert turns[0].completion_logprobs == [-0.2, -0.3]
+    assert turns[0].completion_message == {
+        "role": "assistant",
+        "content": "Answer: $42$",
+    }
     assert turns[0].min_policy_version == 3
     assert turns[0].max_policy_version == 4
 
