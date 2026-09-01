@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from torchtitan.distributed.cudagraph import (
-    CUDAGraphWrapper,
     _manager,
+    CUDAGraphWrapper,
     get_cudagraph_annotations,
 )
 
@@ -63,7 +63,7 @@ def test_cudagraph_wrapper_collects_annotations() -> None:
         patch("torch.cuda.CUDAGraph", return_value=graph),
         patch("torch.cuda.graph", return_value=nullcontext()) as cuda_graph,
         patch(
-            "torch.cuda._graph_annotations.get_kernel_annotations",
+            "torchtitan.distributed.cudagraph.get_kernel_annotations",
             return_value=annotations,
         ),
     ):

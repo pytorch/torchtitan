@@ -4,10 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Lightweight CUDA graph wrapper for eager-mode training steps.
-
-Adapted from ``torchtitan/experiments/graph_trainer/cudagraph.py``.
-"""
+"""Lightweight CUDA graph wrapper for training steps."""
 
 import gzip
 import json
@@ -195,11 +192,6 @@ def get_cudagraph_annotations() -> dict[int, list[Any]]:
     return _manager.all_annotations
 
 
-def collect_cudagraph_annotations() -> None:
-    """Accumulate kernel annotations from the most recent CUDA graph capture."""
-    _manager.all_annotations.update(get_kernel_annotations())
-
-
 def cudagraph_annotate_trace_post_processor(trace_path: str) -> None:
     """Post-process a profiler trace with captured CUDA graph annotations."""
     annotations = get_cudagraph_annotations()
@@ -247,7 +239,7 @@ class CUDAGraphWrapper:
         self,
         fn: Callable,
         example_inputs: Sequence[Any],
-        static_input_indices: tuple[int, ...] | None = None,
+        static_input_indices: Sequence[int] | None = None,
         should_check_address: bool = False,
         tensor_input_indices: Sequence[int] | None = None,
     ):
@@ -363,7 +355,7 @@ class CUDAGraphWrapper:
                 capture_error_mode="thread_local",
             ):
                 self._output = self._fn(*args)
-            collect_cudagraph_annotations()
+            _manager.all_annotations.update(get_kernel_annotations())
             logger.info("Recorded CUDA graph")
 
         if self._should_check_address:

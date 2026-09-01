@@ -20,13 +20,13 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.distributed.cudagraph import (
     cudagraph_annotate_trace_post_processor,
+    cudagraph_teardown,
     get_cudagraph_annotations,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
