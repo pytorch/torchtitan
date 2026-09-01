@@ -34,8 +34,7 @@ from .kda import KDA
 from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
-# Shape suffixes:
-# T = packed tokens, D = model dimension, H = heads,
+# Shape suffixes: T = packed tokens, D = model dimension, H = heads,
 # K = key head dimension, V = value head dimension,
 # N = attention-residual entries.
 
@@ -270,6 +269,31 @@ class KimiK3Model(Decoder):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        # DEP (report sec 5.2.3): the vision tower gets a pipeline stage of its
+        # own ahead of the text stages, so its compute leaves the critical path
+        # of the stage that owns the embedding. Opt-in: it changes the stage
+        # count, which the schedule and the checkpoint layout both see.
+        vit_dep: bool = False
+        # How many stages the tower is split across. 1 is the tower on its own
+        # stage; more than 1 needs the split to address vision_encoder.layers,
+        # which _split_module cannot reach, and raises rather than silently
+        # falling back to 1.
+        vit_dep_stages: int = 1
+        # How many micro-batches ahead the tower's encode is issued. 0 keeps
+        # the encode inline, which is the measured-nothing default.
+        vit_prefetch: int = 0
+        # Run the planned encodes in the schedule's idle intervals on the main
+        # stream instead of ahead of time on a side stream. The two are
+        # alternatives, not layers: this takes over placement when it is on.
+        vit_bubble: bool = False
+        # Ship only the blocks a receiver does not already hold on each
+        # pipeline hop, instead of the whole stack. On by default: under
+        # pipeline parallelism this is the transport, and the naive one is
+        # the fallback, not the other way round. It changes the order the
+        # block gradients are summed, so it is not bitwise against that
+        # fallback. Engages only on Interleaved1F1B with an even split;
+        # anything else warns and passes through.
+        attn_res_cache: bool = True
 
         def update_from_config(self, *, config, **kwargs) -> None:
             dataset = config.dataloader.dataset
@@ -316,6 +340,94 @@ class KimiK3Model(Decoder):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def encode_images(self, pixel_values, grid_thw):
+        """Public entry the DEP prefetcher calls.
+
+        The run-ahead issues the encode for a later micro-batch on the vision
+        stream, so it needs a name it can call on whichever module owns the
+        tower. The forward delegates here too, so the two cannot drift.
+        """
+        pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
+        return self.vision_encoder(pixel_values, grid_thw=grid_thw)
+
+    def _vision_stream(self):
+        """A dedicated CUDA stream for the tower, created once per module.
+
+        Groundwork for DEP's concurrent design (report 5.2.3): the overlap
+        needs the encode for micro-batch m+k issued during micro-batch m's text
+        compute, and what has to be right first is cross-stream tensor lifetime
+        and the interaction with FSDP2's tower all-gather.
+
+        Same THREAD, separate stream. Not a worker thread: the adapter keys its
+        per-microbatch cache in a ``threading.local``, and its forward reads a
+        missing key as "this call is PP's shape inference" and diverts WITHOUT
+        raising. A worker thread would therefore take the shape-inference path
+        and return wrong shapes with no error.
+        """
+        if not torch.cuda.is_available():
+            return None
+        # Only when no autograd graph is being recorded: with prefetch, several
+        # micro-batches' backwards accumulate into the tower parameters from two
+        # streams with nothing ordering them. Both callers join immediately, so
+        # grad-on loses nothing; the deferred design (report 5.2.3) orders first.
+        if torch.is_grad_enabled():
+            return None
+        s = getattr(self, "_vision_side_stream", None)
+        if s is None:
+            s = torch.cuda.Stream()
+            self._vision_side_stream = s
+        return s
+
+    def _issue_on_vision_stream(self, fn, *tensors):
+        """Issue ``fn`` on the vision stream and return ``(out, event)`` WITHOUT waiting.
+
+        The run-ahead needs the encode for micro-batch m+k in flight WHILE m's
+        text compute runs, so it issues here and joins later, in
+        :meth:`_join_vision_stream`.
+
+        The input-side edges are required: the side stream waits for the current
+        one because ``fn``'s inputs were produced there, and each input is
+        ``record_stream``'d so the caching allocator cannot hand its memory to
+        another allocation while the side stream still reads it.
+        """
+        side = self._vision_stream()
+        if side is None:
+            return fn(), None
+        cur = torch.cuda.current_stream()
+        side.wait_stream(cur)
+        for t in tensors:
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                t.record_stream(side)
+        # Bracket the encode ON THE SIDE STREAM so its own GPU time is
+        # measurable; the issue-to-join span is dominated by text compute and
+        # reads the same whether or not the encode ran concurrently.
+        started = torch.cuda.Event(enable_timing=True)
+        finished = torch.cuda.Event(enable_timing=True)
+        with torch.cuda.stream(side):
+            started.record(side)
+            out = fn()
+            finished.record(side)
+        done = finished
+        self._last_encode_span = (started, finished)
+        return out, done
+
+    def _join_vision_stream(self, out, done) -> None:
+        """Make the current stream wait for an issued encode, and hand the outputs over.
+
+        Both halves are needed: without the wait the consumer reads memory the side
+        stream is still writing, and without ``record_stream`` on the outputs the
+        allocator may reuse buffers the side stream produced while the current stream
+        still holds them.
+        """
+        if done is None:
+            return
+        cur = torch.cuda.current_stream()
+        cur.wait_event(done)
+        outs = out if isinstance(out, (list, tuple)) else [out]
+        for t in outs:
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                t.record_stream(cur)
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -339,7 +451,7 @@ class KimiK3Model(Decoder):
             raise ValueError("special_tokens are required for multimodal inputs.")
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        vision_embeds = self.encode_images(pixel_values, grid_thw)
         # MoonViT collapses time and merges spatially, so the text-side token
         # count per item is (h/kh)*(w/kw), independent of t.
         kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
@@ -360,6 +472,7 @@ class KimiK3Model(Decoder):
     def forward(  # pyrefly: ignore [bad-override]
         self,
         tokens: torch.Tensor,
+        block_residual_TND: torch.Tensor | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
@@ -371,6 +484,11 @@ class KimiK3Model(Decoder):
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
+        # Under pipeline parallel a middle stage receives its predecessor's
+        # two outputs, the hidden states and the accumulated block residual;
+        # see the return below for why the residual has to travel.
+        block_residual_in = block_residual_TND
+
         if self.tok_embeddings is not None:
             h_TD = self._prepare_multimodal_embeds(
                 tokens,
@@ -382,7 +500,11 @@ class KimiK3Model(Decoder):
             h_TD = tokens
 
         num_tokens, D = h_TD.shape
-        block_residual_TND = h_TD.new_zeros(num_tokens, 0, D)
+        block_residual_TND = (
+            block_residual_in
+            if block_residual_in is not None
+            else h_TD.new_zeros(num_tokens, 0, D)
+        )
         for layer in self.layers.values():
             h_TD, block_residual_TND = layer(
                 h_TD,
@@ -391,6 +513,12 @@ class KimiK3Model(Decoder):
                 positions,
             )
 
+        # The final aggregation belongs to the head-owning stage; other stages
+        # have these None, like norm and lm_head. The accumulated block residual
+        # must travel on: a block residual is defined over the whole stack, and
+        # a stage that dropped it would train against a different model.
+        if self.output_res_proj is None:
+            return h_TD, block_residual_TND
         h_TD = _apply_attention_residual(
             h_TD,
             block_residual_TND,

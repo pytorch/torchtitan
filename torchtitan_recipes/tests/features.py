@@ -518,3 +518,36 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config.checkpoint.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config
+
+def kimi_k3_debugmodel_pp2() -> Trainer.Config:
+    """Kimi K3 text decoder split over two pipeline stages.
+
+    The block attention residual is defined over the whole stack, so it travels
+    between stages as a second stage payload alongside the hidden states.
+    """
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    return config
+
+
+def kimi_k3_debugmodel_pp8_vp4() -> Trainer.Config:
+    """Eight stages, four virtual stages per rank, on the interleaved schedule.
+
+    The 32-layer flavor is what makes this expressible: one layer per stage over
+    32 stages, so the block residual crosses every boundary the schedule has.
+    """
+    from torchtitan.models.kimi_k3.config_registry import (
+        kimi_k3_debugmodel_32l,
+    )
+
+    config = kimi_k3_debugmodel_32l()
+    config.parallelism.pipeline_parallel_degree = 8
+    config.parallelism.pipeline_parallel_layers_per_stage = 1
+    config.parallelism.pipeline_parallel_first_stage_less_layers = 0
+    config.parallelism.pipeline_parallel_last_stage_less_layers = 0
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 8
+    return config
