@@ -58,10 +58,6 @@ using the released checkpoint and three deterministic image-text samples:
 A text-only FP16 run produced KL divergence `4.36e-7` with 100% top-1/top-5
 match.
 
-Test script:
-
-- `scripts/checkpoint_conversion/numerical_tests_qwen3_8.py`
-
 ## References
 
 - [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)
