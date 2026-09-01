@@ -385,6 +385,58 @@ def test_quantized_grouped_experts():
     assert hasattr(float8_cls.Config, "swiglu_limit")
 
 
+@pytest.mark.parametrize(
+    "module, recipe, experts_cls_name",
+    [
+        ("qwen3", "qwen3_moe_debug_mxfp8", "MXFP8GroupedExperts"),
+        ("gpt_oss", "gpt_oss_debugmodel_mxfp8", "MXFP8GptOssGroupedExperts"),
+    ],
+)
+def test_mxfp8_moe_configs_convert_experts_and_spare_router(
+    monkeypatch, module, recipe, experts_cls_name
+):
+    """The MoE MXFP8 recipes quantize experts and attention, nothing else.
+
+    Runs on CPU: the converters' SM100 gate is bypassed because the config-tree
+    transform under test does not depend on hardware.
+    """
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+
+    config = ConfigManager().parse_args(["--module", module, "--config", recipe])
+    model_config = config.model_spec.model
+    assert has_quantization(model_config)
+
+    quantized, stock = [], []
+    for fqn, linear_config, _parent, _attr in model_config.traverse(Linear.Config):
+        target = quantized if isinstance(linear_config, MXFP8Linear.Config) else stock
+        target.append(fqn.split(".", 2)[-1])
+
+    # Attention projections are quantized; the router gate stays BF16 because
+    # its output drives routing, and lm_head because it is large and sensitive.
+    assert set(quantized) == {"attention.qkv_linear.wqkv", "attention.wo"}
+    assert set(stock) == {"moe.router.gate", "lm_head"}
+
+    # Only the fused QKV saves a quantized input: nothing else consumes its
+    # activation, whereas attention already retains wo's input.
+    for _fqn, linear_config, _parent, _attr in model_config.traverse(Linear.Config):
+        if not isinstance(linear_config, MXFP8Linear.Config):
+            continue
+        expected = "mxfp8" if _fqn.endswith("qkv_linear.wqkv") else "bf16"
+        assert linear_config.input_activation_format_for_backward == expected
+
+    # Experts subclass the model's own variant, so gpt_oss keeps its biases
+    # and SwiGLU clamp while only the grouped GEMM seam is replaced.
+    experts = [c for _fqn, c, _p, _a in model_config.traverse(GroupedExperts.Config)]
+    assert experts
+    for experts_config in experts:
+        assert type(experts_config)._owner.__name__ == experts_cls_name
+
+
 def test_mxfp8_grouped_experts_config_validation():
     """The grouped-expert config rejects unusable padding and activation formats."""
     experts_cls = get_mxfp8_grouped_experts_cls(GroupedExperts)

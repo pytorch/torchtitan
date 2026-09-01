@@ -22,7 +22,11 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.components.quantization import NVFP4LinearConverter
+from torchtitan.components.quantization import (
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
+    NVFP4LinearConverter,
+)
 from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -412,6 +416,53 @@ def qwen3_moe_debug() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def qwen3_mxfp8_linear_converter_config(
+    *, model_compile_enabled: bool
+) -> MXFP8LinearConverter.Config:
+    """Build the dense MXFP8 policy for the MoE debug model.
+
+    ``fqns`` is an include-list, so the router gate and lm_head stay in BF16;
+    the gate is tiny and its output drives routing, and the vocab projection
+    is both large and numerically sensitive.
+
+    The fused QKV projection has a single-consumer input that nothing else
+    saves for backward, so its columnwise MXFP8 representation replaces BF16
+    storage. The output projection keeps the conservative BF16 format because
+    flash attention already retains its input.
+    """
+    return MXFP8LinearConverter.Config(
+        model_compile_enabled=model_compile_enabled,
+        fqns=["attention"],
+        linears_saving_inputs_for_backward_in_mxfp8=["attention.qkv_linear.wqkv"],
+    )
+
+
+def qwen3_moe_debug_mxfp8() -> Trainer.Config:
+    """MoE debug model with MXFP8 expert grouped GEMMs and dense linears."""
+    config = qwen3_moe_debug()
+    # The grouped converter swaps in a padding-capable token dispatcher, and
+    # TorchAOTokenDispatcher needs a CPU sync, which CUDA graphs reject. Run
+    # eager so this config works at any expert-parallel degree; the
+    # CUDA-graph path for MXFP8 experts needs HybridEP with a
+    # non_blocking_capacity_factor.
+    config.training.disable_cuda_graphs = True
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel_moe",
+        converters=[
+            qwen3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+            ),
+        ],
+    )
+    return config
 
 
 def qwen3_moe_deepep() -> Trainer.Config:
