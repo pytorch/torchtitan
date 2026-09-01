@@ -214,6 +214,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             "TorchCheckpointingManager does not implement maybe_wait_for_staging() yet."
         )
 
+    def _parse_step(self, checkpoint_name: str) -> int | None:
+        raise NotImplementedError(
+            "TorchCheckpointingManager does not implement checkpoint discovery yet."
+        )
+
     def _close(self) -> None:
         # hasattr: __del__ -> close() can reach here on a partially constructed
         # object if __init__ raised after setting enable but before building the
