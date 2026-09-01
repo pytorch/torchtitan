@@ -1227,7 +1227,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
         self.manager = CheckpointManager.__new__(CheckpointManager)
-        self.manager.keep_latest_k = 1
+        self.manager.keep_latest_k = 2
         self.manager.folder = self.root
         self.manager._storage = _FilesystemCheckpointStorage()
         self.manager.purge_thread = mock.sentinel.purge_thread
@@ -1249,11 +1249,12 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self._write_checkpoint("step-0200")
         self._write_checkpoint("step-300", complete=False)
 
-        self.manager._purge_stale_checkpoints()
+        self.manager._purge_stale_checkpoints(is_save_in_flight=False)
 
         self.manager.purge_queue.put.assert_called_once_with(
             os.path.join(self.root, "step-1")
         )
+        self.assertFalse(os.path.exists(os.path.join(self.root, "step-300")))
 
 
 class TestSharedDiscoveryAndRetention(unittest.TestCase):
@@ -1294,11 +1295,53 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
 
         self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
 
-    def test_parse_step_accepts_only_canonical_names(self):
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_incomplete_directory_cannot_evict_a_valid_checkpoint(self, _rank):
+        # An interrupted save leaves a step-N directory with no metadata. If it
+        # occupied a slot it would push a checkpoint we can actually resume from
+        # out of the retained set.
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2", "step-3"])
+        manager._storage.isfile.side_effect = lambda path: "step-3" not in path
+
+        manager._purge_stale_checkpoints(is_save_in_flight=False)
+
+        # k-1 valid ones stay (step-2), the incomplete step-3 is deleted rather
+        # than counted, and step-1 falls out normally.
+        self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
+        manager._storage.remove.assert_called_once_with("/checkpoint/step-3")
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_in_flight_checkpoint_is_not_treated_as_abandoned(self, _rank):
+        # This manager purges after dispatching its save, so the newest
+        # directory is legitimately incomplete and must not be deleted.
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2", "step-3"])
+        manager._storage.isfile.side_effect = lambda path: "step-3" not in path
+
+        manager._purge_stale_checkpoints(is_save_in_flight=True)
+
+        self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
+        manager._storage.remove.assert_not_called()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_abandoned_directories_are_deleted_synchronously(self, _rank):
+        # Queuing these would let the delete land after a retry at the same step
+        # recreated the directory it names.
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2"])
+        manager._storage.isfile.return_value = False
+
+        manager._purge_stale_checkpoints(is_save_in_flight=False)
+
+        self.assertEqual(set(), self._purged(manager))
+        self.assertEqual(
+            [mock.call("/checkpoint/step-1"), mock.call("/checkpoint/step-2")],
+            manager._storage.remove.call_args_list,
+        )
+
+    def test_parse_step_accepts_only_canonical_published_names(self):
         manager = CheckpointManager.__new__(CheckpointManager)
 
-        self.assertEqual(0, manager._parse_step("step-0"))
-        self.assertEqual(7, manager._parse_step("step-7"))
+        self.assertEqual((0, False), manager._parse_step("step-0"))
+        self.assertEqual((7, False), manager._parse_step("step-7"))
         for name in ("logs", "foo-step-9", "step-9.partial", "step-09"):
             with self.subTest(name=name):
                 self.assertIsNone(manager._parse_step(name))

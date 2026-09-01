@@ -662,9 +662,9 @@ class CheckpointManager(BaseCheckpointManager):
         self.save_future.result()
         self.save_future = None
 
-    def _parse_step(self, checkpoint_name: str) -> int | None:
-        match = re.fullmatch(r"step-(0|[1-9]\d*)", checkpoint_name)
-        return int(match.group(1)) if match else None
+    def _parse_step(self, filename: str) -> tuple[int, bool] | None:
+        match = re.fullmatch(r"step-(0|[1-9]\d*)", filename)
+        return None if match is None else (int(match.group(1)), False)
 
     def _is_valid_checkpoint(self, checkpoint_id: str) -> bool:
         return self._storage.isfile(filesystem.join(checkpoint_id, ".metadata")) or (
