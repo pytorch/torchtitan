@@ -666,50 +666,12 @@ class CheckpointManager(BaseCheckpointManager):
         match = re.fullmatch(r"step-(0|[1-9]\d*)", checkpoint_name)
         return int(match.group(1)) if match else None
 
-    def _has_complete_metadata(self, checkpoint_id: str) -> bool:
+    def _is_valid_checkpoint(self, checkpoint_id: str) -> bool:
         return self._storage.isfile(filesystem.join(checkpoint_id, ".metadata")) or (
             self._storage.isfile(
                 filesystem.join(checkpoint_id, "model.safetensors.index.json")
             )
         )
-
-    def _find_load_step(self, folder: str = "") -> int:
-        """Identify the highest available checkpoint step in the specified directory.
-
-        This method scans the target folder for subdirectories matching the
-        'step-N' pattern. A folder is only considered a valid checkpoint if
-        it contains either a DCP metadata file or a HuggingFace safetensors
-        index.
-
-        Args:
-            folder (str, optional): The directory to scan. Defaults to `self.folder`.
-
-        Returns:
-            int: The maximum step number found among valid checkpoints,
-                or -1 if no valid checkpoints are detected.
-
-        Note:
-            This function is not remote friendly: it issues one listdir plus
-            up to two isfile probes per step folder, each a network round trip
-            on remote (fsspec) storage instead of a single batched listing.
-            Acceptable for now since it only runs once at load time.
-        """
-
-        folder = folder or self.folder
-        if not self._storage.isdir(folder):
-            return -1
-
-        valid_steps = []
-
-        for filename in self._storage.listdir(folder):
-            checkpoint_path = filesystem.join(folder, filename)
-            if (
-                self._has_complete_metadata(checkpoint_path)
-                and (step := self._parse_step(filename)) is not None
-            ):
-                valid_steps.append(step)
-
-        return max(valid_steps) if valid_steps else -1
 
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
         """Generate the standardized filesystem path for a checkpoint
@@ -836,23 +798,3 @@ class CheckpointManager(BaseCheckpointManager):
             return True
 
         return False
-
-    def _purge_stale_checkpoints(self):
-        """Remove older checkpoint directories from storage to maintain
-        only the most recent 'k' copies."""
-        if self._should_purge():
-            discovered_checkpoints = []
-            for filename in self._storage.listdir(self.folder):
-                path = filesystem.join(self.folder, filename)
-                if (
-                    self._has_complete_metadata(path)
-                    and (step := self._parse_step(filename)) is not None
-                ):
-                    discovered_checkpoints.append((step, path))
-
-            discovered_checkpoints.sort()
-            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
-
-            for _, path in to_delete:
-                assert self.purge_thread is not None
-                self.purge_queue.put(path)
