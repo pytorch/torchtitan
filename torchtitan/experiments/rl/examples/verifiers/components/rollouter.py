@@ -244,6 +244,8 @@ class VerifiersRollouter(Rollouter):
 
         from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 
+        # Route the adapter's HTTP generation requests through TorchTitan's
+        # controller-provided generator router.
         self._adapter.set_generate_fn(generate_fn)
         episode = await self._env_client.run(
             task_data=sample.task_data,
@@ -300,6 +302,11 @@ class VerifiersRollouter(Rollouter):
         group_id: int,
         rollout_id: int,
     ) -> list[RolloutTurn]:
+        """Flatten a Verifiers trace into TorchTitan's trainable rollout turns.
+
+        A trace may contain branches that share sampled nodes. Emit each sampled
+        node once and attach metadata from its matching model-generation call.
+        """
         successful_calls = [call for call in trace.calls if call.node is not None]
         if len(successful_calls) != len(generation_metadata):
             raise ValueError(
