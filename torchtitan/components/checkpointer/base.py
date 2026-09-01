@@ -322,24 +322,53 @@ class BaseCheckpointManager(Configurable, ABC):
                 valid_steps.append(step)
         return max(valid_steps) if valid_steps else -1
 
-    def _purge_stale_checkpoints(self) -> None:
-        """Delete the checkpoints beyond the ``keep_latest_k`` most recent."""
-        if not self._should_purge():
-            return
+    def _purge_stale_checkpoints(
+        self,
+        *,
+        saving_step: int,
+        staging_dir_prefix: str | None = None,
+    ) -> None:
+        """Delete abandoned entries and reserve one retained slot for this save."""
+        if self._should_purge():
+            saving_dirnames = {f"step-{saving_step}"}
+            if staging_dir_prefix:
+                saving_dirnames.add(f"{staging_dir_prefix}step-{saving_step}")
 
-        discovered: list[tuple[int, str]] = []
-        for filename in self._storage.listdir(self.folder):
-            step = self._parse_step(filename)
-            if step is None:
-                continue
-            checkpoint_id = filesystem.join(self.folder, filename)
-            if self._is_valid_checkpoint(checkpoint_id):
-                discovered.append((step, checkpoint_id))
+            staging_pattern = (
+                re.compile(rf"{re.escape(staging_dir_prefix)}step-(0|[1-9]\d*)")
+                if staging_dir_prefix
+                else None
+            )
+            checkpoints: list[tuple[int, str]] = []
+            abandoned: list[str] = []
 
-        discovered.sort()
-        for _, path in discovered[: -self.keep_latest_k]:
-            assert self.purge_thread is not None
-            self.purge_queue.put(path)
+            for dirname in self._storage.listdir(self.folder):
+                if dirname in saving_dirnames:
+                    continue
+
+                checkpoint_dir = filesystem.join(self.folder, dirname)
+                if staging_pattern and staging_pattern.fullmatch(dirname):
+                    abandoned.append(checkpoint_dir)
+                    continue
+
+                step = self._parse_step(dirname)
+                if step is None:
+                    continue
+                if self._is_valid_checkpoint(checkpoint_dir):
+                    checkpoints.append((step, checkpoint_dir))
+                else:
+                    abandoned.append(checkpoint_dir)
+
+            checkpoints.sort()
+            num_to_keep = self.keep_latest_k - 1
+            num_to_purge = max(0, len(checkpoints) - num_to_keep)
+            for _, checkpoint_dir in checkpoints[:num_to_purge]:
+                assert self.purge_thread is not None
+                self.purge_queue.put(checkpoint_dir)
+
+            for checkpoint_dir in abandoned:
+                assert self.purge_thread is not None
+                self.purge_queue.put(checkpoint_dir)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

@@ -424,6 +424,7 @@ class CheckpointManager(BaseCheckpointManager):
         sl.add_step_tag("checkpoint_save")
 
         self.maybe_wait_for_saving()
+        self._purge_stale_checkpoints(saving_step=curr_step)
 
         begin = time.monotonic()
         checkpoint_phase = (
@@ -483,8 +484,6 @@ class CheckpointManager(BaseCheckpointManager):
                 async_mode=AsyncMode.DISABLED,
                 enable_garbage_collection=True,
             )
-
-        self._purge_stale_checkpoints()
 
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
