@@ -27,8 +27,8 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_gemm import (
-    AllGatherFusedFeedForward,
     AllGatherFusedQKVLinear,
+    DistGEMMFeedForward,
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -292,9 +292,7 @@ def make_ffn_config(
     folding them in: one all-gather feeds w1 and w3, and w2 reduce-scatters. A bias
     on w1/w3 is rejected by the config. See make_gqa_config.
     """
-    ffn_cls = (
-        AllGatherFusedFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
-    )
+    ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
         w1=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w1_param_init

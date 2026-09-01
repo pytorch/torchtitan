@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
 
     from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
+    from torchtitan.experiments.rl.renderer import RendererConfig
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class Rollouter(Configurable):
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
             generate_fn=generate_fn, sample=sample,
             group_id=group_index,  # assigned by the data input loop (a monotonic int)
-            group_size=N, sampling=sampling, renderer=renderer)
+            group_size=N, sampling=sampling)
 
     `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
     adds the message <-> token plumbing.
@@ -131,8 +132,13 @@ class Rollouter(Configurable):
         """Get one validation sample (the env input) from the validation dataset."""
         return next(self._validation_dataset)
 
-    async def setup_async(self) -> None:
-        """Spawn the owned worker proc mesh and actor pool."""
+    async def setup_async(
+        self,
+        *,
+        renderer_config: RendererConfig,
+        hf_assets_path: str,
+    ) -> None:
+        """Spawn and initialize the owned worker proc mesh and actor pool."""
         # Import lazily to avoid a circular dependency through Rollouter.Config.
         from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
 
@@ -147,6 +153,10 @@ class Rollouter(Configurable):
             RolloutWorkerActor,
             worker_config=self._config.worker,
             num_threads=self._config.num_threads_per_worker,
+        )
+        await self._worker_actors.setup_async.call(
+            renderer_config=renderer_config,
+            hf_assets_path=hf_assets_path,
         )
 
     async def close(self) -> None:
@@ -170,7 +180,6 @@ class Rollouter(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
-        renderer: Renderer,
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
@@ -184,7 +193,6 @@ class Rollouter(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
-            renderer: Renderer shared by the group's envs.
 
         Returns:
             One scored `RolloutGroup`.
@@ -200,7 +208,6 @@ class Rollouter(Configurable):
             group_id=group_id,
             group_size=group_size,
             sampling=sampling,
-            renderer=renderer,
         )
 
 
@@ -229,22 +236,28 @@ class RolloutWorker(Configurable):
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
+        self._renderer: Renderer
 
-    # TODO: revisit the Renderer being injected into `make_env_group` once we
-    # know whether Rollouter should own a Renderer (per-rollouter chat templates).
+    async def setup_async(
+        self,
+        *,
+        renderer_config: RendererConfig,
+        hf_assets_path: str,
+    ) -> None:
+        """Build runtime dependencies after the worker actor is spawned."""
+        self._renderer = renderer_config.build(tokenizer_path=hf_assets_path)
+
     def make_env_group(
         self,
         *,
         sample: object,
         group_size: int,
-        renderer: Renderer,
     ) -> list[TokenEnv]:
         """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
             sample: the dataset sample (the env input) from `Rollouter.get_training_sample` / `Rollouter.get_validation_sample`.
             group_size: number of sibling envs for this prompt group.
-            renderer: Renderer shared by the rollout controller.
 
         Returns:
             `TokenEnv` * `group_size` instances, each ready for one rollout.
@@ -252,7 +265,7 @@ class RolloutWorker(Configurable):
         return [
             self._token_env_config.build(
                 message_env=self._message_env_config.build(env_input=sample),
-                renderer=renderer,
+                renderer=self._renderer,
             )
             for _ in range(group_size)
         ]
@@ -285,7 +298,6 @@ class RolloutWorker(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
-        renderer: Renderer,
     ) -> RolloutGroup:
         """Roll out and score one prompt group.
 
@@ -301,7 +313,6 @@ class RolloutWorker(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
-            renderer: Renderer shared by the group's envs.
 
         Returns:
             One scored `RolloutGroup`.
@@ -310,7 +321,6 @@ class RolloutWorker(Configurable):
         envs = self.make_env_group(
             sample=sample,
             group_size=group_size,
-            renderer=renderer,
         )
 
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and

@@ -40,8 +40,8 @@ from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
-    AllGatherFusedFeedForward,
     AllGatherFusedQKVLinear,
+    DistGEMMFeedForward,
     RowParallelLinear,
 )
 
@@ -150,7 +150,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         kw = {"in_features": DIM, "out_features": 4 * DIM}
         with self.assertRaisesRegex(ValueError, "does not support a bias"):
-            AllGatherFusedFeedForward.Config(
+            DistGEMMFeedForward.Config(
                 w1=Linear.Config(**kw, bias=True),
                 w2=Linear.Config(in_features=4 * DIM, out_features=DIM),
                 w3=Linear.Config(**kw),
@@ -239,7 +239,9 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
 class TestFusedFeedForwardNumerics(DTensorTestBase):
     """The fused FFN must match the stock one under TP+SP.
 
@@ -311,6 +313,86 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
                 out_shard = fused(x_shard)
 
         # fused returns this rank's sequence shard of the full-sequence result
+        torch.testing.assert_close(
+            out_shard, ref.chunk(R, 0)[self.rank], atol=2e-3, rtol=2e-3
+        )
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
+class TestFusedSwigluOverlapNumerics(DTensorTestBase):
+    """The fused-``w13`` FFN with TP overlap must match the stock FFN under TP+SP.
+
+    Same argument as TestFusedFeedForwardNumerics: the weights are sharded per
+    rank, so a silent fallback to an unfused path could not consume them. Lives
+    here rather than in test_fused_swiglu.py, which is CPU-only by design.
+    """
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_matches_stock_feed_forward(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.models.common.config_utils import make_ffn_config
+        from torchtitan.overrides.fused_swiglu import (
+            dist_gemm_fused_swiglu,
+            DistGEMMFusedSwiGLU,
+        )
+
+        R = self.world_size
+        dev = self.device_type
+        dim, hidden, num_tokens = 64, 128, 16 * R
+        init = {"weight": torch.nn.init.zeros_}
+
+        def make(**kwargs):
+            return make_ffn_config(
+                dim=dim,
+                hidden_dim=hidden,
+                w1_param_init=init,
+                w2w3_param_init=init,
+                **kwargs,
+            )
+
+        torch.manual_seed(0)
+        stock = make().build().to(dev)
+        fused = (
+            dist_gemm_fused_swiglu(make(tp_gemm_backend="dist_gemm")).build().to(dev)
+        )
+        self.assertIsInstance(fused, DistGEMMFusedSwiGLU)
+
+        with torch.no_grad():
+            for w in (stock.w1.weight, stock.w2.weight, stock.w3.weight):
+                torch.manual_seed(hash(tuple(w.shape)) % 2**31)
+                w.copy_(torch.randn_like(w) * 0.1)
+
+        x = torch.randn(num_tokens, dim, device=dev)
+        ref = stock(x)
+
+        # w13.weight is (2 * hidden/R, dim), with this rank's interleaved
+        # colwise slice of both halves.
+        with torch.no_grad():
+            fused.w13.weight = torch.nn.Parameter(
+                torch.stack(
+                    [
+                        stock.w1.weight.chunk(R, 0)[self.rank],
+                        stock.w3.weight.chunk(R, 0)[self.rank],
+                    ],
+                    dim=1,
+                )
+                .flatten(0, 1)
+                .contiguous()
+            )
+            fused.w2.weight = torch.nn.Parameter(
+                stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
+            )
+
+        mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
+        with use_spmd_backend("spmd_types"), set_current_spmd_mesh(mesh):
+            out_shard = fused(x.chunk(R, 0)[self.rank].contiguous())
+
         torch.testing.assert_close(
             out_shard, ref.chunk(R, 0)[self.rank], atol=2e-3, rtol=2e-3
         )

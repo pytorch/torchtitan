@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
@@ -17,13 +19,17 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.experiments.transformers_modeling_backend.configs import (
-    TransformersBackendConfig,
-)
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.tools.profiler import Profiler
+from torchtitan.trainer import Trainer
 from . import model_registry
 from .tokenizer import HFBackendTokenizer
+
+
+@dataclass(kw_only=True, slots=True)
+class TransformersBackendConfig(Trainer.Config):
+    hf_model: str = ""
+    """HuggingFace model ID (e.g., 'Qwen/Qwen2.5-7B')"""
 
 
 def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
@@ -53,7 +59,6 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -89,7 +94,6 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -123,7 +127,6 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=10),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=500,
@@ -159,7 +162,6 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,
@@ -214,7 +216,6 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             enable=True,
@@ -276,7 +277,6 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
-            spmd_backend="partial_dtensor",
         ),
         checkpoint=CheckpointManager.Config(
             interval=10,

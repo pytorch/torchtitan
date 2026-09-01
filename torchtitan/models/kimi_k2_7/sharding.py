@@ -21,7 +21,7 @@ TP/EP/SP uniformly via the Module protocol.
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
-import torch
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
@@ -38,7 +38,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_scaled_bias_rowwise_config,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
@@ -47,28 +47,6 @@ if TYPE_CHECKING:
     from torchtitan.models.kimi_k2_7.model import KimiK25Model
 
 _REPLICATE_ACT = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-
-
-def annotate_multimodal_input_spmd_types(
-    *,
-    pixel_values: torch.Tensor | None,
-    grid_thw: torch.Tensor | None,
-    pixel_values_videos: torch.Tensor | None,
-    grid_thw_videos: torch.Tensor | None,
-) -> None:
-    """Annotate Kimi K2.5 multimodal inputs with their local SPMD types."""
-    multimodal_type = {
-        MeshAxisName.DP: spmd.V,
-        MeshAxisName.TP: spmd.I,
-    }
-    for tensor in (
-        pixel_values,
-        grid_thw,
-        pixel_values_videos,
-        grid_thw_videos,
-    ):
-        if tensor is not None:
-            spmd.assert_type(tensor, multimodal_type)
 
 
 def set_kimi_k2_5_sharding_config(
@@ -126,16 +104,16 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     # The encoder's own ``pos_embed`` table is invariant across TP ranks.
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={
-            "pos_embed": SpmdLayout({DP: spmd.R, TP: spmd.I}),
+            "pos_embed": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
-        out_src_shardings=SpmdLayout({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=SpmdLayout({DP: spmd.V, TP: spmd.R}),
+        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
         state_shardings={
-            "inv_freq": SpmdLayout({DP: spmd.R, TP: spmd.I}),
+            "inv_freq": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
-        out_src_shardings=SpmdLayout({DP: spmd.R, TP: spmd.I}),
+        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()

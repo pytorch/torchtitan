@@ -14,6 +14,7 @@ from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_lo
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
@@ -65,10 +66,11 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
 
 
 def test_parse_multiple_integration_test_suites() -> None:
-    assert _parse_test_suites("features,models,h100") == (
+    assert _parse_test_suites("features,models,h100,b200") == (
         "features",
         "models",
         "h100",
+        "b200",
     )
 
 
@@ -76,6 +78,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_h100_tests_list()} == {
         "2d_asynctp_compile",
         "deepseek_v3_fsdp+cp+tp+minimal_async_ep",
+        "deepseek_v3_fsdp+cp+tp+minimal_async_ep+sdc_replay",
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
         "float8",
@@ -86,6 +89,13 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     }
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
+
+
+def test_b200_tests_are_registered_in_separate_suite() -> None:
+    assert {test.test_name for test in build_b200_tests_list()} == {"kimi_k3_mm_fsdp"}
+    assert "kimi_k3_mm_fsdp" not in {
+        test.test_name for test in build_model_tests_list()
+    }
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
@@ -103,17 +113,21 @@ def test_specialized_moe_backends_have_ep_coverage() -> None:
         assert config.parallelism.expert_parallel_degree > 1
 
 
-def test_models_do_not_reserve_canonical_real_pg_cases() -> None:
+def test_models_select_fake_and_real_pg_cases() -> None:
     model_tests = build_model_tests_list()
     fake_pg_model_tests = {
         test.test_name for test in model_tests if not test.use_real_pg
     }
+    real_pg_model_tests = {test.test_name for test in model_tests if test.use_real_pg}
 
     assert {
+        "deepseek_v3_fsdp+ep",
         "qwen3_moe_fsdp+tp+cp+ep_param_groups",
         "kimi_k2_5_muon_fsdp+ep",
+        "muse_glimmer_text_fsdp",
         "muse_glimmer_mm_fsdp+tp+sp",
     } <= fake_pg_model_tests
+    assert {"deepseek_v3_fsdp+cp+pp+ep"} <= real_pg_model_tests
 
 
 def test_flux_fake_pg_filters_real_collective_cases() -> None:

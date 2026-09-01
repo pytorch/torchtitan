@@ -15,17 +15,19 @@ from typing import Any
 import spmd_types as spmd
 import torch
 import torch.nn as nn
-from spmd_types.runtime import get_local_type, get_partition_spec, has_local_type
+from spmd_types import SpmdType
 from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import ParallelDims, SpmdLayout
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
+    _per_axis_types,
     current_spmd_mesh,
     set_current_spmd_mesh,
+    spmd_axes,
     spmd_distribute_tensor,
     spmd_redistribute_per_axis,
     spmd_validate_redistributions,
@@ -137,25 +139,19 @@ class Module(nn.Module, Configurable):
             return
 
         saved = {
-            fqn: SpmdLayout(
-                # pyrefly: ignore [bad-argument-type]
-                axis_types=get_local_type(buf),
-                partition_spec=get_partition_spec(buf),
+            fqn: SpmdType(
+                dict(spmd.get_local_type(buf)),
+                spmd.get_partition_spec(buf),
             )
             for fqn, buf in self.named_buffers()
-            if has_local_type(buf)
+            if spmd.has_local_type(buf)
         }
         try:
             yield
         finally:
             for fqn, buf in self.named_buffers():
-                if fqn in saved and not has_local_type(buf):
-                    layout = saved[fqn]
-                    spmd.assert_type(
-                        buf,
-                        layout.axis_types,
-                        partition_spec=layout.partition_spec,
-                    )
+                if fqn in saved and not spmd.has_local_type(buf):
+                    spmd.assert_type(buf, saved[fqn])
 
     def _init_self_parameters(self) -> None:
         """Initialize this module's own direct parameters.
@@ -298,14 +294,15 @@ class Module(nn.Module, Configurable):
         parallel_dims: ParallelDims,
         name: str,
         tensor: torch.Tensor,
-        layout: SpmdLayout,
+        layout: SpmdType,
         *,
         is_param: bool,
     ) -> None:
         # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
         # using all axes, and defer size-1 axis filtering to spmd_types internals.
         mesh = parallel_dims.get_optional_mesh(
-            [axis.value for axis in layout.axes()], include_singleton_axes=True
+            [axis.value for axis in spmd_axes(layout)],
+            include_singleton_axes=True,
         )
         assert mesh is not None
         assert mesh.mesh_dim_names is not None, "DeviceMesh must have named axes"
@@ -322,13 +319,48 @@ class Module(nn.Module, Configurable):
             self.register_buffer(name, tensor, persistent=persistent)
             registered = self._buffers[name]
 
-        # assert_type resolves SpmdLayout's string mesh axis names to concrete
+        # assert_type resolves SpmdType's string mesh axis names to concrete
         # runtime mesh-axis objects, so a mesh context is required here.
         with set_current_spmd_mesh(mesh):
-            spmd.assert_type(
-                registered,
-                layout.axis_types,
-                layout.partition_spec,
+            spmd.assert_type(registered, layout)
+
+    def _validate_even_model_parallel_param_sharding(
+        self,
+        name: str,
+        param: nn.Parameter,
+        layout: SpmdType,
+        parallel_dims: ParallelDims,
+    ) -> None:
+        """Reject parameter layouts that produce uneven TP or EP local shards."""
+        axis_types = _per_axis_types(layout)
+        axis_sizes = {
+            MeshAxisName.TP: parallel_dims.tp,
+            MeshAxisName.EP: parallel_dims.ep,
+        }
+        for axis_name, axis_size in axis_sizes.items():
+            axis_type = axis_types.get(axis_name)
+            if axis_size == 1 or not isinstance(axis_type, spmd.Shard):
+                continue
+
+            tensor_dim = axis_type.dim
+            if tensor_dim < 0:
+                tensor_dim += param.ndim
+            if tensor_dim < 0 or tensor_dim >= param.ndim:
+                raise ValueError(
+                    f"{type(self).__name__}.{name} has invalid tensor dimension "
+                    f"{axis_type.dim} in its {axis_name.value.upper()} sharding "
+                    f"for parameter shape {tuple(param.shape)}."
+                )
+            if param.shape[tensor_dim] % axis_size == 0:
+                continue
+
+            raise ValueError(
+                "spmd_types does not support uneven model-parallel parameter "
+                f"sharding: {type(self).__name__}.{name} with shape "
+                f"{tuple(param.shape)} "
+                f"cannot be evenly sharded on tensor dimension {tensor_dim} "
+                f"across model-parallel mesh axis {axis_name.value} with size "
+                f"{axis_size}."
             )
 
     def _distribute_states(self, parallel_dims: ParallelDims) -> None:
@@ -350,6 +382,12 @@ class Module(nn.Module, Configurable):
                     "in sharding_config.state_shardings."
                 )
             if parallel_dims.spmd_backend == "spmd_types":
+                self._validate_even_model_parallel_param_sharding(
+                    name,
+                    param,
+                    spmd_layout,
+                    parallel_dims,
+                )
                 self._spmd_distribute_state(
                     parallel_dims,
                     name,
@@ -358,7 +396,7 @@ class Module(nn.Module, Configurable):
                     is_param=True,
                 )
                 continue
-            axes = spmd_layout.axes()
+            axes = spmd_axes(spmd_layout)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -401,7 +439,7 @@ class Module(nn.Module, Configurable):
                     is_param=False,
                 )
                 continue
-            axes = spmd_layout.axes()
+            axes = spmd_axes(spmd_layout)
             mesh = parallel_dims.resolve_mesh(axes)
             if mesh is None:
                 continue
@@ -446,7 +484,7 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}: local_map is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[SpmdLayout] = [in_dst[name] for name in pos_args]
+        in_named: list[SpmdType] = [in_dst[name] for name in pos_args]
 
         if parallel_dims.spmd_backend == "spmd_types":
             return self._spmd_apply_local_map(fn, in_named, out_src)
@@ -456,8 +494,8 @@ class Module(nn.Module, Configurable):
         self,
         fn: Callable,
         parallel_dims: ParallelDims,
-        in_named: list[SpmdLayout],
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        in_named: list[SpmdType],
+        out_src: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
         """Apply DTensor local_map for a local-tensor compute region."""
         sharding_config = self._sharding_config
@@ -466,7 +504,7 @@ class Module(nn.Module, Configurable):
         assert lm is not None
 
         if isinstance(out_src, tuple):
-            out_named: list[SpmdLayout] = [p for p in out_src if p is not None]
+            out_named: list[SpmdType] = [p for p in out_src if p is not None]
         else:
             out_named = [out_src]
         # in_grad_placements may contain None for non-tensor args; filter
@@ -501,19 +539,19 @@ class Module(nn.Module, Configurable):
     def _spmd_apply_local_map(
         self,
         fn: Callable,
-        in_named: list[SpmdLayout],
-        out_src: SpmdLayout | tuple[SpmdLayout | None, ...],
+        in_named: list[SpmdType],
+        out_src: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         in_types = tuple(
-            (layout.axis_types, layout.partition_spec) for layout in in_named
+            (layout.local_type, layout.partition_spec) for layout in in_named
         )
         out_types = tree_map(
-            lambda layout: (layout.axis_types, layout.partition_spec),
+            lambda layout: (layout.local_type, layout.partition_spec),
             out_src,
-            is_leaf=lambda x: isinstance(x, SpmdLayout),
+            is_leaf=lambda x: isinstance(x, SpmdType),
         )
-        return spmd.local_map(
+        return spmd.no_typecheck(
             in_types=in_types,
             out_types=out_types,
         )(fn)
@@ -527,7 +565,7 @@ class Module(nn.Module, Configurable):
         """Redistribute inputs to desired placements.
 
         Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
-        resolve a mesh from that input's SpmdLayouts, then:
+        resolve a mesh from that input's SpmdTypes, then:
         1. If plain tensor and ``in_src_shardings`` declared, wrap as
            DTensor via ``DTensor.from_local`` on that mesh.
         2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
@@ -569,11 +607,7 @@ class Module(nn.Module, Configurable):
                 # before redistributing so typechecking catches placement mismatch.
                 # Gate assertion so compile doesn't error.
                 if spmd.is_type_checking():
-                    spmd.assert_type(
-                        value,
-                        src_spmd_layout.axis_types,
-                        src_spmd_layout.partition_spec,
-                    )
+                    spmd.assert_type(value, src_spmd_layout)
 
                 if dst_spmd_layout is None:
                     new_kwargs[name] = value
@@ -581,10 +615,8 @@ class Module(nn.Module, Configurable):
                 value = spmd_redistribute_per_axis(
                     value,
                     current_spmd_mesh(),
-                    # pyrefly: ignore [bad-argument-type]
-                    src_spmd_layout.per_axis_spmd_types(),
-                    # pyrefly: ignore [bad-argument-type]
-                    dst_spmd_layout.per_axis_spmd_types(),
+                    src_spmd_layout,
+                    dst_spmd_layout,
                 )
                 new_kwargs[name] = value
                 continue
@@ -659,21 +691,15 @@ class Module(nn.Module, Configurable):
             # before redistributing so typechecking catches placement mismatch.
             # Gate assertion so compile doesn't error.
             if spmd.is_type_checking():
-                spmd.assert_type(
-                    outputs,
-                    out_src.axis_types,
-                    out_src.partition_spec,
-                )
+                spmd.assert_type(outputs, out_src)
 
             if out_dst is None:
                 return outputs
             return spmd_redistribute_per_axis(
                 outputs,
                 current_spmd_mesh(),
-                # pyrefly: ignore [bad-argument-type]
-                out_src.per_axis_spmd_types(),
-                # pyrefly: ignore [bad-argument-type]
-                out_dst.per_axis_spmd_types(),
+                out_src,
+                out_dst,
             )
 
         if isinstance(out_src, tuple):
