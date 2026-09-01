@@ -317,6 +317,8 @@ class VerifiersRollouter(Rollouter):
         shared sampled node once, and attaches TorchTitan policy metadata from
         the matching model-generation call.
         """
+        from verifiers.v1.dialects.chat import message_to_wire
+
         successful_calls = [call for call in trace.calls if call.node is not None]
         if len(successful_calls) != len(generation_metadata):
             raise ValueError(
@@ -369,6 +371,7 @@ class VerifiersRollouter(Rollouter):
                             ),
                             min_policy_version=call_metadata.min_policy_version,
                             max_policy_version=call_metadata.max_policy_version,
+                            completion_message=message_to_wire(node.message),
                             metrics=list(call_metadata.metrics),
                         )
                     )
