@@ -6,32 +6,45 @@
 
 from __future__ import annotations
 
+import copy
 import os
+import queue
 import re
-from dataclasses import dataclass
+import threading
+from concurrent.futures import Future
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
 )
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
-from torch_checkpointing.config import AsyncCheckpointSaverConfig
+from torch_checkpointing.config import (
+    AsyncCheckpointSaverConfig,
+    SyncCheckpointSaverConfig,
+)
 from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.distributed_metadata import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
-from torch_checkpointing.storage.base_storage import Storage
+from torch_checkpointing.storage.base_storage import Storage, StorageConfig
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
+from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import GarbageCollection
 
 from .base import (
     BaseCheckpointManager,
@@ -40,6 +53,7 @@ from .base import (
     MODEL,
     ModelWrapper,
     OPTIMIZER,
+    purge_thread,
 )
 
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
@@ -125,12 +139,48 @@ def _default_backend_config() -> BackendCheckpointManager.Config:
     )
 
 
+def _with_sync_save(
+    config: BackendCheckpointManager.Config,
+    *,
+    use_barrier: bool = True,
+) -> BackendCheckpointManager.Config:
+    """Return ``config`` with its async saver swapped for a synchronous one.
+
+    Used for the final save, which must complete before the process exits, and
+    for load-only runs, where no save is expected and the barrier would block
+    against ranks that never save.
+    """
+    writer_config = copy.deepcopy(config.save.writer_config)
+    if not use_barrier:
+        writer_config = replace(writer_config, barrier_config=None)
+    return replace(
+        config,
+        save=SyncCheckpointSaverConfig(
+            writer_config=writer_config,
+            wait_timeout_secs=config.save.wait_timeout_secs,
+        ),
+    )
+
+
 class TorchCheckpointingManager(BaseCheckpointManager):
-    """TorchTitan checkpoint manager backed by ``torch_checkpointing``."""
+    """TorchTitan checkpoint manager backed by ``torch_checkpointing``.
+
+    Args:
+        storage_config: Backend storage for reading and writing checkpoints.
+            Defaults to the local filesystem. An init parameter rather than a
+            ``Config`` field because ``Configurable.Config`` is Tyro-parsed and
+            a backend storage object is not a command-line surface; callers that
+            need remote storage pass it programmatically.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        pass
+        def __post_init__(self) -> None:
+            BaseCheckpointManager.Config.__post_init__(self)
+            if self.last_save_in_hf:
+                raise ValueError(
+                    "TorchCheckpointingManager does not support last_save_in_hf yet."
+                )
 
     def __init__(
         self,
@@ -143,11 +193,13 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
+        storage_config: StorageConfig | None = None,
     ) -> None:
         self.enable = config.enable
         if not self.enable:
             return
-        self.save_future = None
+        self.save_future: Future[Any] | None = None
+        self.purge_thread: threading.Thread | None = None
 
         self.folder = filesystem.join(base_folder, config.folder)
         # Checked here, not just in the storage adapter: a save runs no path
@@ -185,41 +237,93 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.last_save_in_hf = config.last_save_in_hf
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.keep_latest_k = config.keep_latest_k
+
+        manager_config = _default_backend_config()
+        if self.load_only:
+            manager_config = _with_sync_save(manager_config, use_barrier=False)
+        elif (
+            dist.is_initialized()
+            and dist.get_world_size() > 1
+            and manager_config.save.writer_config.barrier_config is None
+        ):
+            raise ValueError(
+                "TorchCheckpointingManager requires a checkpoint barrier for "
+                "multi-rank saves."
+            )
+        # An explicit storage_config wins, and is pushed into the backend config
+        # so saves and loads use it too, not just our own path probes.
+        if storage_config is not None:
+            manager_config = replace(manager_config, storage_config=storage_config)
+        self._manager_config = manager_config
+        self._step_dir_pattern = _step_dir_pattern(
+            manager_config.save.writer_config.temp_dir_prefix
+        )
+        storage_config = (
+            self._manager_config.storage_config or LocalFileSystemStorageConfig()
+        )
+        self._storage = _BackendCheckpointStorage(storage_config.create_storage())
+        self._prewarmed = False
+
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
                 "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
             )
 
-        manager_config = _default_backend_config()
-        self._step_dir_pattern = _step_dir_pattern(
-            manager_config.save.writer_config.temp_dir_prefix
+        self._manager = self._manager_config.build()
+
+        if self.keep_latest_k > 0:
+            self.purge_queue: queue.Queue[str | None] = queue.Queue()
+            self.purge_thread = threading.Thread(
+                target=purge_thread,
+                args=(self.purge_queue, self._storage.remove),
+                daemon=True,
+            )
+            self.purge_thread.start()
+
+        logger.info(
+            "Checkpointing active. Checkpoints will be loaded from and saved "
+            f"to {self.folder}"
         )
-        storage_config = manager_config.storage_config or LocalFileSystemStorageConfig()
-        self._storage = _BackendCheckpointStorage(storage_config.create_storage())
-        self._manager = manager_config.build()
 
     def __del__(self) -> None:
         self.close()
 
-    # Save and load routing land in later changes; this one only plumbs config.
-    # The methods are stubbed rather than omitted because BaseCheckpointManager
-    # declares them abstract, so a partial implementation cannot be instantiated.
-
+    # Load routing lands in a later change.
     def _load(self, step: int = -1) -> bool:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement load() yet."
         )
 
+    @sl.log_trace_span("checkpoint_save")
+    @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement save() yet."
-        )
+        should_save = self._should_save(curr_step, last_step)
+        # Prewarm on a step we are not saving, so the first real save does not
+        # pay for pinned-buffer allocation.
+        if not should_save and self._should_prewarm():
+            self._manager.prewarm_staging(_stateful_to_state_dict(self.states))
+            self._prewarmed = True
+        if not should_save:
+            return False
 
-    def _wait_for_saving(self) -> None:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement saving yet."
-        )
+        sl.add_step_tag("checkpoint_save")
+        self.maybe_wait_for_saving()
+        # Purge before issuing this step's save, while the folder holds only
+        # settled state: the previous save has been awaited and the next has not
+        # started, so nothing here can be mistaken for an in-flight checkpoint.
+        self._purge_stale_checkpoints(is_save_in_flight=False)
+
+        if last_step:
+            self._save_last_step(curr_step)
+        else:
+            self.save_future = self._manager.save(
+                self._create_checkpoint_id(curr_step),
+                _stateful_to_state_dict(self.states),
+            )
+            self._prewarmed = True
+
+        return True
 
     def _parse_step(self, filename: str) -> tuple[int, bool] | None:
         match = self._step_dir_pattern.fullmatch(filename)
@@ -233,13 +337,77 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         )
 
     def _maybe_wait_for_staging(self) -> None:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement maybe_wait_for_staging() yet."
-        )
+        # Acquiring the backend lock is what blocks until staging for the last
+        # save has drained; there is no separate staging future to await. Safe
+        # after _save_last_step has closed the manager: the lock is a no-op once
+        # nothing is staging.
+        if not hasattr(self, "_manager"):
+            return
+        with self._manager.lock():
+            pass
+
+    def _wait_for_saving(self) -> None:
+        # Narrowing for the type checker: maybe_wait_for_saving only dispatches
+        # here when save_future is set. Cleared before awaiting so a failed save
+        # is not retried on close().
+        save_future = self.save_future
+        assert save_future is not None
+        self.save_future = None
+        save_future.result(timeout=self._manager_config.save.wait_timeout_secs)
 
     def _close(self) -> None:
-        # hasattr: __del__ -> close() can reach here on a partially constructed
-        # object if __init__ raised after setting enable but before building the
-        # backend manager.
-        if hasattr(self, "_manager"):
-            self._manager.close()
+        try:
+            self.maybe_wait_for_saving()
+        finally:
+            try:
+                if self.purge_thread is not None and self.purge_thread.is_alive():
+                    self.purge_queue.put(None)
+                    self.purge_thread.join()
+            finally:
+                # hasattr: __del__ -> close() can reach here on a partially
+                # constructed object if __init__ raised after setting enable but
+                # before building the backend manager. No guard against closing
+                # twice is needed -- _save_last_step may already have closed it,
+                # and the backend's close() returns immediately when it has.
+                if hasattr(self, "_manager"):
+                    self._manager.close()
+
+    def _save_last_step(self, curr_step: int) -> None:
+        if self.last_save_model_only:
+            model_state = self.states[MODEL].state_dict()
+            # Matches the DCP manager (#4166): convert per tensor rather than
+            # gating on export_dtype != float32, which skipped the conversion
+            # entirely for BF16 training exporting to FP32, and cast integer and
+            # boolean buffers when it did run.
+            model_state = {
+                key: value.to(self.export_dtype)
+                if isinstance(value, torch.Tensor)
+                and value.is_floating_point()
+                and value.dtype != self.export_dtype
+                else value
+                for key, value in model_state.items()
+            }
+            states: dict[str, Any] = {MODEL: model_state}
+            logger.info(
+                f"Saving a model only checkpoint in {self.export_dtype} "
+                f"at last step, step {curr_step}."
+            )
+        else:
+            states = self.states
+            logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
+
+        # The final save must land before the process exits, so retire the async
+        # manager and write synchronously through a fresh one.
+        self._manager.close()
+        manager = _with_sync_save(self._manager_config).build()
+        try:
+            manager.save(
+                self._create_checkpoint_id(curr_step),
+                _stateful_to_state_dict(states),
+            )
+        finally:
+            manager.close()
+        GarbageCollection.collect("GC collection invoked by checkpointer.")
+
+    def _should_prewarm(self) -> bool:
+        return self.enable and not self._prewarmed and not self.load_only
