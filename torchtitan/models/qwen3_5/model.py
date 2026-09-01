@@ -29,6 +29,7 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     VarlenAttention,
     VarlenMetadata,
+    _resolve_rope,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -43,7 +44,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
@@ -98,6 +99,8 @@ class Qwen35Attention(BaseAttention):
     gated ``wq`` doesn't fit a fused QKV projection that TP-shards by head.
     """
 
+    rope: MRoPE
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -113,7 +116,7 @@ class Qwen35Attention(BaseAttention):
         k_norm: OffsetRMSNorm.Config
         inner_attention: Module.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads
@@ -126,7 +129,8 @@ class Qwen35Attention(BaseAttention):
         self.wv = config.wv.build()
         self.wo = config.wo.build()
 
-        self.rope = config.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
 
         self.q_norm = config.q_norm.build()
         self.k_norm = config.k_norm.build()
@@ -199,13 +203,15 @@ class Qwen35TransformerBlock(Module):
         attention_norm: OffsetRMSNorm.Config
         ffn_norm: OffsetRMSNorm.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         self.full_attn = config.attention is not None
         self.attn_mask_key = "quadratic_attention" if self.full_attn else "deltanet"
 
         if self.full_attn:
-            self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
+            self.attn = config.attention.build(  # pyrefly: ignore [missing-attribute]
+                rope_modules=rope_modules
+            )
         else:
             assert config.delta_net is not None
             self.attn = config.delta_net.build()

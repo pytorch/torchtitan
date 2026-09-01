@@ -488,7 +488,11 @@ def _split_module(
     model = copy.deepcopy(whole_model)
     # Create a set of modules to keep for faster lookup
     modules_to_keep = set(module_names)
+    if "rope_modules" in model._modules:
+        modules_to_keep.add("rope_modules")
     for module_name, module_value in model.named_children():
+        if module_name in modules_to_keep:
+            continue
         # Handle layer-like structures (e.g., "layers.0", "layers.1")
         if isinstance(
             module_value, (nn.ModuleDict, nn.ModuleList, ModuleDict, ModuleList)

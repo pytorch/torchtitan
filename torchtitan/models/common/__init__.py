@@ -40,8 +40,6 @@ from .rope import (
     ComplexRoPE,
     CosSinRoPE,
     RoPE,
-    RoPECacheReader,
-    register_rope_cache,
 )
 
 __all__ = [
@@ -73,9 +71,7 @@ __all__ = [
     "QKVLinear",
     "RMSNorm",
     "RoPE",
-    "RoPECacheReader",
-    "register_rope_cache",
-    "RouterGateLinear",
+"RouterGateLinear",
     "ScaledBiasRowwiseLinear",
     "ScaledDotProductAttention",
     "SiLU",
