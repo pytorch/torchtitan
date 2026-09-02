@@ -22,6 +22,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
+    validate_fp8_graph_config,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -116,6 +117,7 @@ class GraphTrainer(Trainer):
 
     def __init__(self, config):
         super().__init__(config)
+        validate_fp8_graph_config(self.config.compile)
 
         validate_memory_policy_config(self.config.compile)
 

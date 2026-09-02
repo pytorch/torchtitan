@@ -162,11 +162,33 @@ _MODULE_FQN = "module_fqn"
 # Tuple of unique parameter FQNs naming one gradient value. Consumers must
 # treat it as a set: tied parameters can associate multiple FQNs with one node.
 PARAMETER_GRADIENT_FQNS_META = "parameter_gradient_fqns"
+_QUANTIZATION_KIND = "quantization_kind"
+_QUANTIZATION_EMULATE = "quantization_emulate"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def get_quantization_kind(module: nn.Module) -> str | None:
+    """Return the quantization category used by GraphTrainer annotations."""
+    from torchtitan.components.quantization.float8 import (
+        _float8_experts_cache,
+        Float8Linear,
+    )
+    from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+
+    if Float8Linear is not None and isinstance(module, Float8Linear):
+        return "float8_linear"
+    if MXFP8Linear is not None and isinstance(module, MXFP8Linear):
+        return "mxfp8_linear"
+
+    if any(isinstance(module, cls) for cls in _float8_experts_cache.values()):
+        return "float8_grouped_experts"
+    if any(isinstance(module, cls) for cls in _mxfp8_experts_cache.values()):
+        return "mxfp8_grouped_experts"
+    return None
 
 
 def compute_parameter_gradients(
@@ -257,14 +279,21 @@ def annotate_module_fqns(model: nn.Module) -> None:
     """Annotate all modules' forward with their fully-qualified names.
 
     Every named submodule (excluding the root) gets its forward method wrapped
-    with ``annotate_fn`` so that FX nodes carry ``module_fqn`` in
-    ``node.meta["custom"]``.
+    with ``annotate_fn`` so that FX nodes carry ``module_fqn`` and, for
+    quantized modules, ``quantization_kind`` in ``node.meta["custom"]``.
 
     Call once after model construction, before tracing/compilation.
     """
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
-            submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+            metadata = {_MODULE_FQN: fqn}
+            quantization_kind = get_quantization_kind(submodule)
+            if quantization_kind is not None:
+                metadata[_QUANTIZATION_KIND] = quantization_kind
+                metadata[_QUANTIZATION_EMULATE] = bool(
+                    getattr(submodule, "_quantization_emulate", False)
+                )
+            submodule.forward = annotate_fn(metadata)(submodule.forward)
 
 
 def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
