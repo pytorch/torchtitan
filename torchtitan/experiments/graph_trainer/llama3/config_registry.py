@@ -8,7 +8,6 @@ from functools import partial
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -23,6 +22,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_8b,
     llama3_debugmodel,
     llama3_debugmodel_dist_gemm,
+    llama3_mxfp8_linear_converter_config,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer
 
@@ -57,6 +57,19 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
         llama3_debugmodel_dist_gemm(),
         partial(model_registry, tp_gemm_backend="dist_gemm"),
     )
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
+    base = llama3_debugmodel()
+    base.model_spec = llama3_model_registry(
+        "debugmodel",
+        converters=[
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
+        ],
+    )
+    config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -123,7 +136,9 @@ def graph_trainer_llama3_8b_mxfp8() -> GraphTrainer.Config:
     # MXFP8 converter's compile requirement is satisfied.
     base.model_spec = llama3_model_registry(
         "8B",
-        converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)],
+        converters=[
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
+        ],
     )
     config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)

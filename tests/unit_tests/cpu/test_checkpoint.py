@@ -23,6 +23,7 @@ import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
+
 from torchtitan.components.checkpointer.base import (
     BaseCheckpointManager,
     CheckpointStorage,
@@ -35,6 +36,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
+from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 class FakeOptimizersContainer:
@@ -1404,6 +1406,31 @@ class TestModelWrapper(unittest.TestCase):
         self.assertEqual(sd2["a"].untyped_storage().data_ptr(), ptr_a)
         # ... and the in-place refresh picked up the updated parameter.
         self.assertTrue(torch.all(sd2["a"] == 1.0))
+
+    def test_fsdp_unsharded_tensor_checkpoint(self):
+        class FSDPWeight(_ShardedFSDPTensor):
+            pass
+
+        class WrappedBuffer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("w", FSDPWeight(torch.zeros(4)))
+
+        model = WrappedBuffer()
+        wrapper = ModelWrapper(model)
+        state_dict = wrapper.state_dict()
+        cached_weight = state_dict["w"]
+
+        with torch.no_grad():
+            model.w._tensor.fill_(2.0)
+
+        refreshed = wrapper.state_dict()
+        self.assertIs(refreshed, state_dict)
+        self.assertIs(refreshed["w"], cached_weight)
+        self.assertTrue(torch.all(refreshed["w"]._tensor == 2.0))
+
+        wrapper.load_state_dict({"w": torch.full((4,), 3.0)})
+        self.assertTrue(torch.all(model.w._tensor == 3.0))
 
 
 if __name__ == "__main__":
