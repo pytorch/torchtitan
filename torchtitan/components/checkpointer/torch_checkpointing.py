@@ -10,7 +10,8 @@ import logging
 import os
 import queue
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
+from torch.distributed.checkpoint.stateful import Stateful
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch_checkpointing.checkpoint_layout import LayoutInfo, SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
@@ -145,6 +147,36 @@ def _item_specs() -> dict[str, ItemSpec]:
             required=False,
         ),
     }
+
+
+def _restore_state_dict(
+    states: Mapping[str, Any],
+    state_dict: Mapping[str, Any],
+) -> None:
+    """Write loaded values back into the live state objects.
+
+    The backend returns a plain dict, so ``Stateful`` entries need an explicit
+    ``load_state_dict``; plain dicts are updated in place so callers holding a
+    reference observe the loaded values.
+    """
+    missing = object()
+    model_state_dict = state_dict.get(MODEL, state_dict)
+
+    for key, target in states.items():
+        value = model_state_dict if key == MODEL else state_dict.get(key, missing)
+        if value is missing:
+            continue
+        if isinstance(target, Stateful):
+            target.load_state_dict(value)
+        elif isinstance(target, dict) and isinstance(value, Mapping):
+            if target is not value:
+                target.clear()
+                target.update(value)
+        elif target is not value:
+            raise TypeError(
+                f"Cannot restore non-Stateful checkpoint state {key!r} of type "
+                f"{type(target).__name__}"
+            )
 
 
 def _writer_config(*, use_barrier: bool) -> CheckpointWriterConfig:
@@ -322,11 +354,69 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         if hasattr(self, "_manager"):
             self.close()
 
-    # Load routing lands in a later change.
+    @sl.log_trace_span("checkpoint_load")
+    @torch.no_grad()
     def _load(self, step: int = -1) -> bool:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement load() yet."
+        has_checkpoint_folder = self._storage.isdir(self.folder)
+        load_step = -1
+        if has_checkpoint_folder:
+            load_step = self._find_load_step() if step == -1 else step
+        if step != -1 and not has_checkpoint_folder:
+            raise FileNotFoundError(
+                f"--checkpoint.load_step={step} not found because "
+                f"checkpoint.folder {self.folder} does not exist"
+            )
+
+        if load_step == -1:
+            if self.initial_load_in_hf:
+                raise ValueError(
+                    "TorchCheckpointingManager does not yet support loading "
+                    "Hugging Face checkpoints."
+                )
+            if not self.initial_load_path:
+                logger.info("No checkpoint was provided, this is a fresh start.")
+                return False
+            checkpoint_id = self.initial_load_path
+            model_only = self.initial_load_model_only
+            if not self._storage.isdir(checkpoint_id):
+                raise ValueError(
+                    f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
+                )
+        else:
+            step = load_step
+            # Step 0 is a seed checkpoint, which holds model state only.
+            model_only = step == 0
+            checkpoint_id = self._create_checkpoint_id(step)
+            if not self._storage.isdir(checkpoint_id):
+                raise FileNotFoundError(
+                    f"--checkpoint.load_step={step} not found at {checkpoint_id}"
+                )
+
+        if not self._is_valid_checkpoint(checkpoint_id):
+            raise ValueError(
+                f"Checkpoint {checkpoint_id!r} is not a native "
+                "torch_checkpointing checkpoint."
+            )
+        logger.info("Loading the checkpoint from %s.", checkpoint_id)
+        begin = time.monotonic()
+        states = self._states_to_load(model_only)
+        # strict: the backend defaults to skipping anything the checkpoint does
+        # not carry, which would silently leave parameters at their initialized
+        # values and resume from a model that is not the one that was saved.
+        # exclude_from_loading is applied by _states_to_load, so anything still
+        # in `states` here is genuinely required.
+        loaded = self._manager.load(
+            checkpoint_id,
+            into=_stateful_to_state_dict(states),
+            strict=True,
         )
+        _restore_state_dict(states, loaded)
+        GarbageCollection.collect("GC collection for checkpoint loading.")
+        logger.info(
+            "Finished loading the checkpoint in %.2f seconds.",
+            time.monotonic() - begin,
+        )
+        return True
 
     @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
@@ -492,3 +582,16 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     def _should_prewarm(self) -> bool:
         return self.enable and not self._prewarmed and not self.load_only
+
+    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
+        if model_only:
+            return {MODEL: self.states[MODEL]}
+
+        for exclude_key in self.exclude_from_loading:
+            if exclude_key not in self.states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
+        return {
+            key: value
+            for key, value in self.states.items()
+            if key not in self.exclude_from_loading
+        }
