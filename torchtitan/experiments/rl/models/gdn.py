@@ -429,13 +429,13 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         query_TC: torch.Tensor,
         key_TC: torch.Tensor,
         value_TC: torch.Tensor,
-        a_TN: torch.Tensor,
-        b_TN: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
         conv_k_weight_C1W: torch.Tensor,
         conv_v_weight_C1W: torch.Tensor,
-        A_log_N: torch.Tensor,
-        dt_bias_N: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
         key_head_dim: int,
@@ -456,17 +456,17 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
 
         num_tokens = mixed_qkv_TC.shape[0]
         # Padded rows must remain defined across vLLM graph replays.
-        output_TNV = mixed_qkv_TC.new_zeros(
+        output_THV = mixed_qkv_TC.new_zeros(
             num_tokens, self.local_num_v_heads, self.head_v_dim
         )
         self._forward(
             mixed_qkv_TC,
-            a_TN,
-            b_TN,
+            a_TH,
+            b_TH,
             conv_weight_CW,
             None,
-            A_log_N,
-            dt_bias_N,
-            output_TNV,
+            A_log_H,
+            dt_bias_H,
+            output_THV,
         )
-        return output_TNV
+        return output_THV
