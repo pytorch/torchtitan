@@ -719,6 +719,48 @@ class TestCheckpointManager(unittest.TestCase):
         new_future = manager.save_future
         new_future.result.assert_not_called()
 
+    @mock.patch("torchtitan.components.checkpointer.dcp.dist.new_group")
+    def test_purge_runs_before_this_step_save_is_issued(self, _mock_new_group):
+        trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
+        checkpoint_config = trainer_config.checkpoint
+        checkpoint_config.async_mode = "async"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=checkpoint_config,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        save_future: Future[None] = Future()
+        calls = []
+
+        with (
+            mock.patch.object(
+                manager,
+                "_purge_stale_checkpoints",
+                side_effect=lambda *, saving_step: calls.append(("purge", saving_step)),
+            ),
+            mock.patch.object(
+                manager,
+                "dcp_save",
+                side_effect=lambda *args, **kwargs: (
+                    calls.append("save"),
+                    save_future,
+                )[1],
+            ),
+            mock.patch(
+                "torchtitan.components.checkpointer.dcp.GarbageCollection.collect"
+            ),
+        ):
+            self.assertTrue(manager.save(curr_step=10))
+
+        self.assertEqual([("purge", 10), "save"], calls)
+        save_future.set_result(None)
+        manager.close()
+
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
     def test_enable_first_step_checkpoint(self, mock_save, mock_rank):
@@ -1227,7 +1269,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
         self.manager = CheckpointManager.__new__(CheckpointManager)
-        self.manager.keep_latest_k = 1
+        self.manager.keep_latest_k = 2
         self.manager.folder = self.root
         self.manager._storage = _FilesystemCheckpointStorage()
         self.manager.purge_thread = mock.sentinel.purge_thread
@@ -1241,7 +1283,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
                 pass
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    def test_only_queues_complete_canonical_checkpoints(self, _rank):
+    def test_only_queues_stale_canonical_directories(self, _rank):
         self._write_checkpoint("step-1")
         self._write_checkpoint("step-2")
         self._write_checkpoint("step-100.backup")
@@ -1249,11 +1291,16 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self._write_checkpoint("step-0200")
         self._write_checkpoint("step-300", complete=False)
 
-        self.manager._purge_stale_checkpoints()
+        self.manager._purge_stale_checkpoints(saving_step=400)
 
-        self.manager.purge_queue.put.assert_called_once_with(
-            os.path.join(self.root, "step-1")
+        self.assertEqual(
+            [
+                mock.call(os.path.join(self.root, "step-1")),
+                mock.call(os.path.join(self.root, "step-300")),
+            ],
+            self.manager.purge_queue.put.call_args_list,
         )
+        self.assertTrue(os.path.exists(os.path.join(self.root, "step-300")))
 
 
 class TestSharedDiscoveryAndRetention(unittest.TestCase):
@@ -1285,16 +1332,48 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
                 self.assertIn(name, vars(BaseCheckpointManager))
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
-    def test_purge_keeps_k_because_dcp_purges_after_saving(self, _rank):
-        # This manager purges once its checkpoint is already on disk, so it
-        # reserves nothing and keeps the full k.
+    def test_purge_reserves_a_slot_for_the_upcoming_save(self, _rank):
         manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2", "step-3"])
 
-        manager._purge_stale_checkpoints()
+        manager._purge_stale_checkpoints(saving_step=4)
 
-        self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
+        self.assertEqual(
+            {"/checkpoint/step-1", "/checkpoint/step-2"},
+            self._purged(manager),
+        )
 
-    def test_parse_step_accepts_only_canonical_names(self):
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_incomplete_directory_cannot_evict_a_valid_checkpoint(self, _rank):
+        # An interrupted save leaves a step-N directory with no metadata. If it
+        # occupied a slot it would push a checkpoint we can actually resume from
+        # out of the retained set.
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2", "step-3"])
+        manager._storage.isfile.side_effect = lambda path: "step-3" not in path
+
+        manager._purge_stale_checkpoints(saving_step=4)
+
+        # k-1 valid ones stay (step-2), the incomplete step-3 is purged rather
+        # than counted, and step-1 falls out normally.
+        self.assertEqual(
+            {"/checkpoint/step-1", "/checkpoint/step-3"},
+            self._purged(manager),
+        )
+        manager._storage.remove.assert_not_called()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_abandoned_directories_are_queued_for_purge(self, _rank):
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2"])
+        manager._storage.isfile.return_value = False
+
+        manager._purge_stale_checkpoints(saving_step=3)
+
+        self.assertEqual(
+            {"/checkpoint/step-1", "/checkpoint/step-2"},
+            self._purged(manager),
+        )
+        manager._storage.remove.assert_not_called()
+
+    def test_parse_step_accepts_only_canonical_published_names(self):
         manager = CheckpointManager.__new__(CheckpointManager)
 
         self.assertEqual(0, manager._parse_step("step-0"))
@@ -1302,6 +1381,16 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
         for name in ("logs", "foo-step-9", "step-9.partial", "step-09"):
             with self.subTest(name=name):
                 self.assertIsNone(manager._parse_step(name))
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_purge_preserves_the_checkpoint_currently_being_saved(self, _rank):
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2"])
+        manager._storage.isfile.return_value = False
+
+        manager._purge_stale_checkpoints(saving_step=2)
+
+        self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
+        manager._storage.remove.assert_not_called()
 
     def test_valid_checkpoint_accepts_dcp_or_hf_markers(self):
         manager = CheckpointManager.__new__(CheckpointManager)
