@@ -11,8 +11,8 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
