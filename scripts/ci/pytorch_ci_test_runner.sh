@@ -44,8 +44,14 @@ case "$COMMAND" in
         # and which is unavailable on its A10G (sm86) runners anyway. Excluded
         # here rather than disabled in models.py so torchtitan's own CI, whose
         # image ships flash-linear-attention, keeps running it.
+        # --test_scope=real_pg_required: this entrypoint runs with
+        # --execution_mode real_pg (the default), so without it the flavors
+        # intended for the fake-PG job also run here and are compared against
+        # real_pg goldens they do not reproduce. Mirrors what torchtitan's own
+        # integration_test.yaml passes for pull requests.
         python -m tests.integration_tests.run_tests \
             --test_suite models \
+            --test_scope real_pg_required \
             --exclude "qwen3_5_moe_fsdp+tp+ep+pp,qwen3_5_fsdp+tp+varlen_attn+per_op_sac" \
             --ngpu "$NGPU" \
             "$OUTPUT_DIR"
