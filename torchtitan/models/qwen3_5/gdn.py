@@ -292,16 +292,16 @@ class InnerGatedDeltaNet(Module):
         *,
         key_head_dim: int,
         value_head_dim: int,
-        use_packed_sequence: bool = False,
     ) -> torch.Tensor:
         """Run separate Q/K/V convolutions and recurrence on local heads."""
         num_tokens = query_TC.shape[0]
+        use_varlen_kernels = cu_seqlens.numel() > 2 or is_in_batch_invariant_mode()
 
         def causal_conv(
             x_TC: torch.Tensor,
             weight_C1W: torch.Tensor,
         ) -> torch.Tensor:
-            if use_packed_sequence:
+            if use_varlen_kernels:
                 return _causal_conv1d_varlen(
                     x_TC,
                     weight_C1W,
@@ -342,7 +342,7 @@ class InnerGatedDeltaNet(Module):
             xv_THV,
             g_TH,
             beta_TH,
-            cu_seqlens=cu_seqlens if use_packed_sequence else None,
+            cu_seqlens=cu_seqlens if use_varlen_kernels else None,
         )
 
 
@@ -409,9 +409,6 @@ class GatedDeltaNet(Module):
         attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
-        use_packed_sequence = (
-            attention_masks is not None or is_in_batch_invariant_mode()
-        )
         if attention_masks is not None:
             cu_seqlens = attention_masks.cu_seq_q
         else:
@@ -444,7 +441,6 @@ class GatedDeltaNet(Module):
             cu_seqlens,
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
-            use_packed_sequence=use_packed_sequence,
         )
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)

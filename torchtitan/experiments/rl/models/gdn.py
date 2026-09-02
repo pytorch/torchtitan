@@ -80,6 +80,8 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         self.num_speculative_tokens = (
             speculative_config.num_speculative_tokens if speculative_config else 0
         )
+        # vLLM speculative decoding retains one state per draft position and
+        # commits the accepted state; Attention Gym currently mutates one slot.
         if self.num_speculative_tokens != 0:
             raise ValueError("Attention Gym GDN does not support speculative decoding.")
 
@@ -110,6 +112,13 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 "the paged convolution history has contiguous channels."
             )
 
+        # Attention Gym's paged kernels mutate the SSM state pool directly and
+        # require FP32 state in both regular and batch-invariant execution.
+        if self.cache_config.mamba_ssm_cache_dtype not in {"auto", "float32"}:
+            raise ValueError(
+                "Attention Gym GDN requires mamba_ssm_cache_dtype='float32', "
+                f"got {self.cache_config.mamba_ssm_cache_dtype!r}."
+            )
         self.cache_config.mamba_ssm_cache_dtype = "float32"
 
         # vLLM populates this via the KV-cache allocator: (conv_state, ssm_state).
@@ -176,56 +185,6 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         )
         return query, key, value
 
-    def _run_recurrence(
-        self,
-        conv_output: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        negative_exp_A: torch.Tensor,
-        dt_bias: torch.Tensor,
-        ssm_state: torch.Tensor,
-        slot_indices: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        has_initial_state: torch.Tensor | None,
-        batch_invariant: bool,
-    ) -> torch.Tensor:
-        """Run the selected recurrence and update the paged SSM slots."""
-        query, key, value = self._split_qkv(conv_output)
-        decay = (negative_exp_A * F.softplus(a.float() + dt_bias)).unsqueeze(0)
-        update_gate = torch.sigmoid(b).unsqueeze(0)
-        query = l2norm(query, cu_seqlens=cu_seqlens)
-        key = l2norm(key, cu_seqlens=cu_seqlens)
-
-        if batch_invariant:
-            output, _ = recurrent_gdn(
-                query,
-                key,
-                value,
-                decay,
-                update_gate,
-                ssm_state,
-                cu_seqlens=cu_seqlens,
-                scale=self.head_k_dim**-0.5,
-                state_indices=slot_indices,
-                has_initial_state=has_initial_state,
-                # Triton autotuning breaks batch invariance.
-                autotune=False,
-            )
-            return output
-
-        return paged_chunk_gdn(
-            query,
-            key,
-            value,
-            decay,
-            update_gate,
-            ssm_state,
-            slot_indices,
-            cu_seqlens=cu_seqlens,
-            has_initial_state=has_initial_state,
-            scale=self.head_k_dim**-0.5,
-        )
-
     # The decorator makes this an eager graph-split point during breakable capture.
     # The caller-owned output has a stable address across graph replays.
     @eager_break_during_capture
@@ -267,7 +226,6 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         ssm_state = self.kv_cache[1]
         conv_state = self.kv_cache[0]
         assert conv_bias is None
-        negative_exp_A = -torch.exp(A_log.float())
         dt_bias = dt_bias.float()
         num_decodes = gdn_metadata.num_decodes
         num_prefills = gdn_metadata.num_prefills
@@ -297,7 +255,9 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             assert gdn_metadata.prefill_state_indices is not None
             prefill_slots = gdn_metadata.prefill_state_indices
             prefill_has_initial_state = gdn_metadata.prefill_has_initial_state
-            assert prefill_has_initial_state is not None
+            assert (
+                prefill_has_initial_state is not None
+            ), "prefill_has_initial_state is required when num_prefills > 0"
             prefill_start = num_decode_tokens if num_decodes > 0 else 0
             # cu_seqlens must be 0-based within the prefill slice that the conv
             # kernel receives (mixed_qkv[prefill_start:]).
@@ -337,11 +297,12 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             has_initial_state = torch.ones(
                 num_sequences, dtype=torch.bool, device=mixed_qkv.device
             )
-            if prefill_has_initial_state is not None:
-                has_initial_state[num_decodes:] = prefill_has_initial_state
+            has_initial_state[num_decodes:] = prefill_has_initial_state
 
         batch_invariant = is_in_batch_invariant_mode()
         if num_prefills == 0 and not batch_invariant:
+            # Pure decode fuses QKV splitting, gate activation, normalization,
+            # and the recurrent update into one kernel.
             recurrent_gdn_decode(
                 conv_output[:num_decode_tokens],
                 a[:num_decode_tokens].unsqueeze(0),
@@ -355,18 +316,42 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             )
             return
 
-        recurrent_output = self._run_recurrence(
-            conv_output,
-            a,
-            b,
-            negative_exp_A,
-            dt_bias,
-            ssm_state,
-            all_slots,
-            cu_seqlens,
-            has_initial_state,
-            batch_invariant=batch_invariant,
+        query, key, value = self._split_qkv(conv_output)
+        decay = (-torch.exp(A_log.float()) * F.softplus(a.float() + dt_bias)).unsqueeze(
+            0
         )
+        update_gate = torch.sigmoid(b).unsqueeze(0)
+        query = l2norm(query, cu_seqlens=cu_seqlens)
+        key = l2norm(key, cu_seqlens=cu_seqlens)
+
+        if batch_invariant:
+            recurrent_output, _ = recurrent_gdn(
+                query,
+                key,
+                value,
+                decay,
+                update_gate,
+                ssm_state,
+                cu_seqlens=cu_seqlens,
+                scale=self.head_k_dim**-0.5,
+                state_indices=all_slots,
+                has_initial_state=has_initial_state,
+                # Triton autotuning breaks batch invariance.
+                autotune=False,
+            )
+        else:
+            recurrent_output = paged_chunk_gdn(
+                query,
+                key,
+                value,
+                decay,
+                update_gate,
+                ssm_state,
+                all_slots,
+                cu_seqlens=cu_seqlens,
+                has_initial_state=has_initial_state,
+                scale=self.head_k_dim**-0.5,
+            )
         output[:num_actual_tokens] = recurrent_output[0, :num_actual_tokens].to(
             output.dtype
         )
@@ -387,7 +372,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         *,
         key_head_dim: int,
         value_head_dim: int,
-        use_packed_sequence: bool = False,
+        use_varlen_kernels: bool = False,
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors."""
         assert key_head_dim == self.head_k_dim

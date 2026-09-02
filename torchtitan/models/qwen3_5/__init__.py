@@ -507,6 +507,7 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             hidden_dim=512,
             n_key_heads=2,
             n_value_heads=4,
+            # Attention Gym fused chunk GDN requires K=V=128 on SM80+.
             key_head_dim=128,
             value_head_dim=128,
         ),

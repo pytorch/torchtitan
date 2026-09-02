@@ -360,8 +360,7 @@ def _set_deltanet_sharding(
     )
 
     # The inner GDN is the DTensor-to-local boundary for the head-parallel
-    # convolution and recurrence. use_packed_sequence is keyword-only metadata
-    # and intentionally remains outside local_map's positional placements.
+    # convolution and recurrence.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_src_shardings={
             "query_TC": projected_placement,

@@ -177,7 +177,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            model = qwen3_5_configs["debugmodel"]("flex").build()
+            build_config, max_context_length = qwen3_5_configs["debugmodel"]
+            model = build_config("flex", seq_len=max_context_length).build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
 
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
@@ -195,7 +196,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            model = qwen3_5_configs["debugmodel"]("flex").build()
+            build_config, max_context_length = qwen3_5_configs["debugmodel"]
+            model = build_config("flex", seq_len=max_context_length).build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
 
@@ -211,7 +213,6 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             attention_masks["deltanet"].cu_seq_q,
             torch.tensor([0, 2, 5], dtype=torch.int32),
         )
-        self.assertEqual(attention_masks["deltanet"].cu_seq_q_host, (0, 2, 5))
 
     def _make_deltanet(
         self,
@@ -366,10 +367,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             [0, 1, 0, 1, 2, 0, 1, 2, 0, 1],
             dtype=torch.int32,
         )
-        attention_masks = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=True,
-        )
+        attention_masks = create_varlen_metadata_for_document(positions)
 
         for masks in (None, attention_masks):
             with mock.patch(
@@ -410,10 +408,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             dtype=torch.int32,
         )
 
-        attention_masks = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=False,
-        )
+        attention_masks = create_varlen_metadata_for_document(positions)
         self._assert_packed_run_matches_per_document(
             model, x_TD, positions, attention_masks
         )
@@ -447,7 +442,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self.assertIsInstance(masks["quadratic_attention"], BlockMask)
         self.assertIsInstance(masks["deltanet"], VarlenMetadata)
         # Three packed documents have lengths 3, 2, and 5.
-        self.assertEqual(masks["deltanet"].cu_seq_q_host, (0, 3, 5, 10))
+        torch.testing.assert_close(
+            masks["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
+        )
 
         # Each block picks the entry matching its layer type.
         mask_keys = {layer.attn_mask_key for layer in flex_model.layers.values()}
@@ -463,7 +461,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self.assertIsInstance(varlen_masks, dict)
         self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
         self.assertIsInstance(varlen_masks["deltanet"], VarlenMetadata)
-        self.assertEqual(varlen_masks["deltanet"].cu_seq_q_host, (0, 3, 5, 10))
+        torch.testing.assert_close(
+            varlen_masks["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
+        )
 
         deltanet_only_config = model_registry("debugmodel").model
         deltanet_only_config.layers = [
@@ -479,9 +480,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
         self.assertIsNone(deltanet_only_masks["quadratic_attention"])
         self.assertIsInstance(deltanet_only_masks["deltanet"], VarlenMetadata)
-        self.assertEqual(
-            deltanet_only_masks["deltanet"].cu_seq_q_host,
-            (0, 3, 5, 10),
+        torch.testing.assert_close(
+            deltanet_only_masks["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
     def _assert_fused_varlen_matches_per_document(
@@ -547,10 +548,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             requires_grad=True,
         )
 
-        attention_masks = create_varlen_metadata_for_document(
-            positions,
-            include_host_offsets=True,
-        )
+        attention_masks = create_varlen_metadata_for_document(positions)
         actual = model(x_TD, attention_masks)
 
         # Reference: run each document on its own and stitch the outputs back.

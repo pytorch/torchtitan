@@ -94,8 +94,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         # No mrope: layers see the plain 1D positions.
         self.assertTrue(torch.equal(sink["positions"], positions))
         # Masks come from the 1D positions.
-        self.assertEqual(
-            batch["attention_masks"]["deltanet"].cu_seq_q_host, (0, 3, 5, 10)
+        torch.testing.assert_close(
+            batch["attention_masks"]["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
     def test_multimodal_batch_routes_mrope_to_layers(self):
@@ -122,8 +123,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertEqual(sink["positions"].shape[-1], 3)
         self.assertTrue(torch.equal(sink["positions"], mrope_positions))
         # Masks are still built from the 1D positions, not the mrope positions.
-        self.assertEqual(
-            batch["attention_masks"]["deltanet"].cu_seq_q_host, (0, 3, 5, 10)
+        torch.testing.assert_close(
+            batch["attention_masks"]["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
 

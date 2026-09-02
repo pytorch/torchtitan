@@ -96,6 +96,7 @@ class KDAKernel(Module):
             A_log_H.float(),
             dt_bias_HK.float(),
             lower_bound=self.lower_bound,
+            impl="fused",
         )
         output_1THV, _ = chunk_kda(
             l2norm(q_1THK),
