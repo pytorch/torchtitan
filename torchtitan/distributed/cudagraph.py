@@ -6,16 +6,13 @@
 
 """Lightweight CUDA graph wrapper for training steps."""
 
-import gzip
-import json
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
-from torch.cuda._annotate_cuda_graph_trace import annotate_trace
-from torch.cuda._graph_annotations import get_kernel_annotations
+from torch.cuda.graph_annotations import get_kernel_annotations
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
@@ -191,23 +188,6 @@ def cudagraph_teardown() -> None:
 def get_cudagraph_annotations() -> dict[int, list[Any]]:
     """Return all kernel annotations accumulated across CUDA graph captures."""
     return _manager.all_annotations
-
-
-def cudagraph_annotate_trace_post_processor(trace_path: str) -> None:
-    """Post-process a profiler trace with captured CUDA graph annotations."""
-    annotations = get_cudagraph_annotations()
-    if not annotations:
-        return
-
-    open_trace = gzip.open if trace_path.endswith(".gz") else open
-    with open_trace(trace_path, "rt") as trace_file:
-        trace = json.load(trace_file)
-
-    count = annotate_trace(trace, annotations)
-    if count > 0:
-        with open_trace(trace_path, "wt") as trace_file:
-            json.dump(trace, trace_file)
-        logger.info(f"Annotated {count} CUDA graph kernel events in profiler trace")
 
 
 class CUDAGraphWrapper:
