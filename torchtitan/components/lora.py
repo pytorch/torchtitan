@@ -193,8 +193,6 @@ class LoRAConverter(ModelConfigConverter):
 
     def _make_lora_config(self, cfg: Module.Config) -> Module.Config:
         """Create an adapter config for a supported projection."""
-        if not isinstance(cfg, Linear.Config):
-            raise TypeError(f"Unsupported LoRA config type: {type(cfg).__name__}")
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
         return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
