@@ -22,21 +22,6 @@ __all__ = [
 ]
 
 
-def _format_rope_key_value(value: object) -> str:
-    """Format config values into safe, readable ``ModuleDict`` key fragments."""
-    if value is None:
-        text = "none"
-    elif isinstance(value, bool):
-        text = "true" if value else "false"
-    elif isinstance(value, float):
-        text = format(value, ".17g")
-    elif isinstance(value, (list, tuple)):
-        text = "-".join(_format_rope_key_value(item) for item in value)
-    else:
-        text = str(value)
-    return re.sub(r"[^A-Za-z0-9_-]", "p", text)
-
-
 # pyrefly: ignore [not-callable]
 @spmd.no_typecheck()
 def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None:
@@ -127,6 +112,20 @@ class RoPE(Module):
 
         def rope_key(self) -> str:
             """Return the stable, descriptive key for this RoPE implementation."""
+
+            def format_value(value: object) -> str:
+                if value is None:
+                    text = "none"
+                elif isinstance(value, bool):
+                    text = "true" if value else "false"
+                elif isinstance(value, float):
+                    text = format(value, ".17g")
+                elif isinstance(value, (list, tuple)):
+                    text = "-".join(format_value(item) for item in value)
+                else:
+                    text = str(value)
+                return re.sub(r"[^A-Za-z0-9_-]", "p", text)
+
             owner = self._owner
             owner_name = owner.__name__ if owner is not None else type(self).__name__
             parts = [owner_name]
@@ -179,7 +178,7 @@ class RoPE(Module):
                     }
                 ):
                     continue
-                value = _format_rope_key_value(getattr(self, config_field.name))
+                value = format_value(getattr(self, config_field.name))
                 name = key_names.get(config_field.name, config_field.name)
                 separator = "" if config_field.name in common_fields - {"scaling"} else "_"
                 parts.append(f"{name}{separator}{value}")

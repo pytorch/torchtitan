@@ -23,11 +23,7 @@ from torchtitan.components.loss import (
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.models.common.attention import AttentionMasksType
-from torchtitan.models.common.decoder import (
-    Decoder,
-    TransformerBlock,
-    _register_rope_modules,
-)
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -215,14 +211,18 @@ class MTPDecoder(Decoder):
             self.mtp_layers = None
             return
 
-        _register_rope_modules(config.mtp_layers, self.rope_modules)
-        self.mtp_layers = ModuleList()
         for layer_config in config.mtp_layers:
             if not isinstance(layer_config, MTPTransformerBlock.Config):
                 raise ValueError(
                     "MTPDecoder requires Config.mtp_layers to contain "
                     "MTPTransformerBlock.Config instances."
                 )
+            rope_config = getattr(layer_config.attention, "rope")
+            key = rope_config.rope_key()
+            if key not in self.rope_modules:
+                self.rope_modules[key] = rope_config.build()
+        self.mtp_layers = ModuleList()
+        for layer_config in config.mtp_layers:
             self.mtp_layers.append(
                 layer_config.build(rope_modules=self.rope_modules)
             )

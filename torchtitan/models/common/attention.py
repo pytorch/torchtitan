@@ -14,7 +14,7 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, cast
+from typing import Any, ClassVar, NamedTuple
 
 import spmd_types as spmd
 import torch
@@ -644,10 +644,6 @@ class BaseAttention(Module):
             assert self.n_heads > 0, "n_heads must be > 0"
 
 
-def _resolve_rope(rope_config: RoPE.Config, rope_modules: ModuleDict) -> RoPE:
-    return cast(RoPE, rope_modules[rope_config.rope_key()])
-
-
 class BaseQKVLinear(Module):
     """Base class for Q/K/V projection strategies.
 
@@ -915,7 +911,7 @@ class GQAttention(BaseAttention):
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
         # Keep the canonical module registered only under Decoder.rope_modules.
-        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()

@@ -29,7 +29,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     VarlenAttention,
     VarlenMetadata,
-    _resolve_rope,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -130,7 +129,7 @@ class Qwen35Attention(BaseAttention):
         self.wo = config.wo.build()
 
         # Keep the canonical module registered only under Decoder.rope_modules.
-        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
         self.q_norm = config.q_norm.build()
         self.k_norm = config.k_norm.build()

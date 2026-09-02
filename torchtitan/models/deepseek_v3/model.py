@@ -16,7 +16,6 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexAttention,
-    _resolve_rope,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -96,7 +95,7 @@ class Attention(BaseAttention):
 
         self.inner_attention = config.inner_attention.build()
         # Keep the canonical module registered only under Decoder.rope_modules.
-        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
     def forward(
         self,
