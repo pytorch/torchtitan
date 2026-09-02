@@ -42,6 +42,13 @@ from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
 
+class _HFContiguousMoE(MoE):
+    """Adapt non-contiguous HF hidden states to the Titan MoE input contract."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().forward(hidden_states.contiguous())
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 — config preparation (called from HFTransformerModel.__init__)
 # ---------------------------------------------------------------------------
@@ -130,6 +137,9 @@ def build_and_swap_native_moe(
 
         with torch.device("meta"):
             native_moe = moe_config.build()
+        # Context parallelism can produce non-contiguous HF hidden states,
+        # while this release's Titan MoE implementation flattens them with view.
+        native_moe.__class__ = _HFContiguousMoE
 
         # Materialize meta params to real tensors, then initialize values.
         # This mirrors the trainer's flow: to_empty → init_states.
