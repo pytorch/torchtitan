@@ -50,6 +50,12 @@ from .rope import MRoPE
 from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
+# Shape suffixes:
+# T = packed tokens, D = model dimension, C = projection channels,
+# H = attention heads,
+# K = query/key head dimension, V = value head dimension,
+# R = rotary dimension, P = non-rotary dimension.
+
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 
@@ -138,41 +144,41 @@ class Qwen35Attention(BaseAttention):
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_TN2H = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
-        xq_TNH, gate_TNH = xq_gate_TN2H.chunk(2, dim=-1)
-        xk_TNH = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_TNH = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
+        xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
+        xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
 
         # QK norm (before RoPE)
-        xq_TNH = self.q_norm(xq_TNH)
-        xk_TNH = self.k_norm(xk_TNH)
+        xq_THK = self.q_norm(xq_THK)
+        xk_THK = self.k_norm(xk_THK)
 
         # Partial RoPE: only first rotary_dim elements get positional encoding
         assert self.rotary_dim <= self.head_dim
-        xq_TNR, xq_TNP = (
-            xq_TNH[..., : self.rotary_dim],
-            xq_TNH[..., self.rotary_dim :],
+        xq_THR, xq_THP = (
+            xq_THK[..., : self.rotary_dim],
+            xq_THK[..., self.rotary_dim :],
         )
-        xk_TNR, xk_TNP = (
-            xk_TNH[..., : self.rotary_dim],
-            xk_TNH[..., self.rotary_dim :],
+        xk_THR, xk_THP = (
+            xk_THK[..., : self.rotary_dim],
+            xk_THK[..., self.rotary_dim :],
         )
-        xq_TNR, xk_TNR = self.rope(xq_TNR, xk_TNR, positions)
-        xq_TNH = torch.cat([xq_TNR, xq_TNP], dim=-1)
-        xk_TNH = torch.cat([xk_TNR, xk_TNP], dim=-1)
+        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
+        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
+        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
 
-        out_TNH = self.inner_attention(
-            xq_TNH,
-            xk_TNH,
-            xv_TNH,
+        out_THV = self.inner_attention(
+            xq_THK,
+            xk_THK,
+            xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
 
         # Output gating
-        out_TNH = out_TNH * torch.sigmoid(gate_TNH)
-        out_TD = out_TNH.view(num_tokens, -1)
+        out_THV = out_THV * torch.sigmoid(gate_THV)
+        out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
 
 

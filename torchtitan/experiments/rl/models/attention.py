@@ -334,9 +334,9 @@ class VLLMAttentionWrapper(Module):
 
     def forward(
         self,
-        q_TNH: torch.Tensor,
-        k_TNH: torch.Tensor,
-        v_TNH: torch.Tensor,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
         *,
         attention_masks: AttentionMasksType | None = None,
         **kwargs,
@@ -344,9 +344,9 @@ class VLLMAttentionWrapper(Module):
         """Run vLLM paged attention on local (non-DTensor) tensors.
 
         Args:
-            q_TNH: ``(num_tokens, num_heads, head_dim)``
-            k_TNH: ``(num_tokens, num_kv_heads, head_dim)``
-            v_TNH: ``(num_tokens, num_kv_heads, head_dim)``
+            q_THK: ``(num_tokens, num_heads, query/key_head_dim)``
+            k_THK: ``(num_tokens, num_kv_heads, query/key_head_dim)``
+            v_THV: ``(num_tokens, num_kv_heads, value_head_dim)``
 
         Returns:
             ``(num_tokens, num_heads, head_dim)``.
@@ -357,11 +357,11 @@ class VLLMAttentionWrapper(Module):
                 "manages causal masking and the KV-cache internally."
             )
 
-        out_TD = self.vllm_attn(q_TNH, k_TNH, v_TNH)
+        out_TD = self.vllm_attn(q_THK, k_THK, v_THV)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
         # shape under torch.compile.  Narrow to trim this padding.
-        num_tokens, _, head_dim = q_TNH.shape
+        num_tokens, _, head_dim = q_THK.shape
         out_TD = out_TD.narrow(0, 0, num_tokens)
         return out_TD.view(num_tokens, -1, head_dim)
