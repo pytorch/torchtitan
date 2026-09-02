@@ -55,6 +55,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ),
         ),
         OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_remat_fsdp8_ep8],
+            test_descr="DeepSeek V3 FSDP+EP+remat",
+            test_name="deepseek_v3_fsdp+ep+remat",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_remat_fsdp2_pp2_ep2],
+            test_descr="DeepSeek V3 FSDP+PP+EP+remat",
+            test_name="deepseek_v3_fsdp+pp+ep+remat",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],
             test_descr="DeepSeek V3 FSDP+CP+PP+EP",
             test_name="deepseek_v3_fsdp+cp+pp+ep",

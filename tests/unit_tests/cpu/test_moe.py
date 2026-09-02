@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -44,10 +45,7 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
-    def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
-        num_experts = 2
-        dim = 4
-        top_k = 1
+    def _build_moe(self, *, num_experts: int, dim: int, top_k: int):
         moe = make_moe_config(
             num_experts=num_experts,
             router=make_router_config(
@@ -67,6 +65,13 @@ class TestMoE(unittest.TestCase):
         ).build()
         moe.router = _FixedRouter(num_experts, top_k)
         moe.routed_experts = _PassthroughRoutedExperts()
+        return moe
+
+    def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
+        num_experts = 2
+        dim = 4
+        top_k = 1
+        moe = self._build_moe(num_experts=num_experts, dim=dim, top_k=top_k)
 
         x_TD = torch.randn(6, dim)
         moe.train()
@@ -84,6 +89,20 @@ class TestMoE(unittest.TestCase):
         torch.testing.assert_close(
             moe.tokens_per_expert_E,
             training_counts,
+        )
+
+    def test_remat_recompute_does_not_accumulate_tokens_per_expert(self):
+        moe = self._build_moe(num_experts=2, dim=4, top_k=1)
+        moe.train()
+
+        with patch(
+            "torchtitan.models.common.moe.is_remat_recomputing", return_value=True
+        ):
+            moe(torch.randn(6, 4))
+
+        torch.testing.assert_close(
+            moe.tokens_per_expert_E,
+            torch.zeros_like(moe.tokens_per_expert_E),
         )
 
 
