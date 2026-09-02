@@ -35,11 +35,11 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
-    # Blackwell (SM 10.0) and newer use FA4; Hopper (SM 9.0) uses FA3.
+    # Blackwell (SM 10.0) and Hopper (SM 9.0) use FA4.
     if has_cuda_capability(10, 0):
         return "FA4"
     if has_cuda_capability(9, 0):
-        return "FA3"
+        return "FA4"
     return None
 
 
