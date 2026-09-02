@@ -185,7 +185,7 @@ class TestConfigManager(unittest.TestCase):
         assert config.parallelism.pipeline_parallel_degree == 1
         assert config.parallelism.num_pp_microbatches == 3
 
-    def test_cuda_graphs_reject_pipeline_parallelism(self):
+    def test_cuda_graphs_require_directed_pipeline_process_groups(self):
         config_manager = ConfigManager()
         with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
             with pytest.raises((ValueError, SystemExit)) as exc_info:
@@ -205,7 +205,24 @@ class TestConfigManager(unittest.TestCase):
             error = stderr.getvalue()
         else:
             error = str(exc_info.value)
-        assert "do not support pipeline parallelism" in error
+        assert "require directed P2P process groups" in error
+
+    def test_cuda_graphs_allow_pipeline_parallelism_with_directed_groups(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.disable_cuda_graphs",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+            ]
+        )
+        config.training.disable_cuda_graphs = False
+        config.parallelism.pipeline_parallel_per_direction_p2p = True
+
+        config._validate_cuda_graphs()
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(

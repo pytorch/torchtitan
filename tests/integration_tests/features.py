@@ -152,6 +152,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             use_real_pg=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_pp4_interleaved_1f1b_cudagraph],
+            test_descr="PP looped 1F1B CUDA graph test",
+            test_name="pp_looped_1f1b_cudagraph",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
         # TODO: Disabled with the FlexAttention default (SDPA is no longer a
         # language-model backend). Zero-bubble / multi schedules split backward
         # and call torch's stage_backward_input, which runs

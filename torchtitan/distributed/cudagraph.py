@@ -9,7 +9,7 @@
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, cast, ParamSpec, TypeVar
 
 import torch
 from torch.cuda.graph_annotations import get_kernel_annotations
@@ -390,6 +390,7 @@ def wrap_with_cuda_graph(
 
     # Every wrapper is registered to the manager in this module and persists
     # until cudagraph_teardown is called.
+    untyped_fn = cast(Callable[..., _R], fn)
     graph_wrapper: CUDAGraphWrapper | None = None
     input_spec: CUDAGraphInputSpec | None = None
 
@@ -402,7 +403,7 @@ def wrap_with_cuda_graph(
             def flat_fn(*flat_inputs: Any) -> _R:
                 assert input_spec is not None
                 step_args, step_kwargs = input_spec.unflatten(flat_inputs)
-                return fn(*step_args, **step_kwargs)
+                return untyped_fn(*step_args, **step_kwargs)
 
             flat_inputs = input_spec.flatten((args, kwargs))
             graph_wrapper = CUDAGraphWrapper(
