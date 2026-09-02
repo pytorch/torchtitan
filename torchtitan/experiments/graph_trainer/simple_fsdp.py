@@ -338,7 +338,9 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
-    # non_dp_mesh: model-parallel (TP/EP) mesh so SimpleFSDP constructs DTensor params on full-mesh
+    # Model-parallel (TP/EP) mesh used to construct DTensor parameters on the
+    # full mesh.
+    # TODO: Unify this with device_mesh as a global data- and model-parallel mesh.
     non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]

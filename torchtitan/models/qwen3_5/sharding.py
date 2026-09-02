@@ -330,7 +330,7 @@ def _set_deltanet_sharding(
     deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=enable_sp)
 
     # The projections are 2D [T, C], while the norm and recurrence output are
-    # 3D [T, N, H]. Both shard the feature/head axis on TP.
+    # 3D [T, H, V]. Both shard the feature/head axis on TP.
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
@@ -365,26 +365,26 @@ def _set_deltanet_sharding(
             "query_TC": projected_placement,
             "key_TC": projected_placement,
             "value_TC": projected_placement,
-            "a_TN": projected_placement,
-            "b_TN": projected_placement,
+            "a_TH": projected_placement,
+            "b_TH": projected_placement,
             "conv_q_weight_C1W": parameter_placement,
             "conv_k_weight_C1W": parameter_placement,
             "conv_v_weight_C1W": parameter_placement,
-            "A_log_N": parameter_placement,
-            "dt_bias_N": parameter_placement,
+            "A_log_H": parameter_placement,
+            "dt_bias_H": parameter_placement,
             "cu_seqlens": cu_seqlens_placement,
         },
         in_dst_shardings={
             "query_TC": projected_placement,
             "key_TC": projected_placement,
             "value_TC": projected_placement,
-            "a_TN": projected_placement,
-            "b_TN": projected_placement,
+            "a_TH": projected_placement,
+            "b_TH": projected_placement,
             "conv_q_weight_C1W": parameter_placement,
             "conv_k_weight_C1W": parameter_placement,
             "conv_v_weight_C1W": parameter_placement,
-            "A_log_N": parameter_placement,
-            "dt_bias_N": parameter_placement,
+            "A_log_H": parameter_placement,
+            "dt_bias_H": parameter_placement,
             "cu_seqlens": cu_seqlens_placement,
         },
         out_src_shardings=head_placement,

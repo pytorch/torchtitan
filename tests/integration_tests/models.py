@@ -200,4 +200,11 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="muse_glimmer_mm_fsdp+tp+sp",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_mm_tp2_cp2_pp2],
+            test_descr="Muse Glimmer multimodal TP+CP+PP+SP",
+            test_name="muse_glimmer_mm_tp+cp+pp+sp",
+            ngpu=8,
+            use_real_pg=True,
+        ),
     ]

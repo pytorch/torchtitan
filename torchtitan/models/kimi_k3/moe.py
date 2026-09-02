@@ -89,12 +89,12 @@ class KimiGroupedExperts(GroupedExperts):
 
         gate_RF = self._grouped_mm(
             A=x_RD.bfloat16(),
-            B_t=w1_EFD.bfloat16().transpose(-2, -1),
+            weight_EOI=w1_EFD,
             offs=offsets_E,
         )
         up_RF = self._grouped_mm(
             A=x_RD.bfloat16(),
-            B_t=w3_EFD.bfloat16().transpose(-2, -1),
+            weight_EOI=w3_EFD,
             offs=offsets_E,
         )
 
@@ -102,7 +102,7 @@ class KimiGroupedExperts(GroupedExperts):
 
         return self._grouped_mm(
             A=h_RF,
-            B_t=w2_EDF.bfloat16().transpose(-2, -1),
+            weight_EOI=w2_EDF,
             offs=offsets_E,
         ).type_as(x_RD)
 

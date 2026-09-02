@@ -44,18 +44,18 @@ class GraphTrainerScaledDotProductAttention(ScaledDotProductAttention):
 
     def forward(
         self,
-        q_TNH: torch.Tensor,
-        k_TNH: torch.Tensor,
-        v_TNH: torch.Tensor,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        out_BLNH = super().forward(
-            q_TNH.unsqueeze(0),
-            k_TNH.unsqueeze(0),
-            v_TNH.unsqueeze(0),
+        out_1THV = super().forward(
+            q_THK.unsqueeze(0),
+            k_THK.unsqueeze(0),
+            v_THV.unsqueeze(0),
             **kwargs,
         )
-        return out_BLNH.squeeze(0)
+        return out_1THV.squeeze(0)
 
 
 @contextmanager
