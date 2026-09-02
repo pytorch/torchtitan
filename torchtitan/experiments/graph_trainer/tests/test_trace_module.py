@@ -182,15 +182,15 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.dynamic_shapes import _fakeify_input
 
         x = torch.randn(2, 4)
-        mark_dynamic(x, 0)
+        mark_dynamic(x, 0, min=2, max=8)
         x._graph_trainer_unrelated_state = "must not be copied"
 
         fake_mode = FakeTensorMode(shape_env=ShapeEnv(), static_shapes=False)
         with fake_mode:
             fake_x = _fakeify_input(fake_mode, x, input_name="x")
 
-        self.assertTrue(hasattr(fake_x, "_dynamo_dynamic_indices"))
-        self.assertTrue(hasattr(fake_x, "_dynamo_dynamic_range"))
+        self.assertEqual(fake_x._dynamo_dynamic_indices, x._dynamo_dynamic_indices)
+        self.assertEqual(fake_x._dynamo_dynamic_range, x._dynamo_dynamic_range)
         self.assertFalse(hasattr(fake_x, "_graph_trainer_unrelated_state"))
 
     def test_mark_dynamic_min_max_preserves_range(self):
