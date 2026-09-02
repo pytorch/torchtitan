@@ -57,17 +57,18 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                 persistent=True,
             )
 
-    def _init_self_buffers(self, *, buffer_device=None):
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None):
         if self.hash:
             if buffer_device is None:
                 buffer_device = self.tid2eid.device
-            with torch.device(buffer_device):
-                self.tid2eid = _build_hash_routing_table(
-                    self.vocab_size,
-                    self.num_experts,
-                    self.top_k,
-                    device=buffer_device,
-                )
+            # The build below takes the device explicitly; no default-device
+            # context switch is needed here.
+            self.tid2eid = _build_hash_routing_table(
+                self.vocab_size,
+                self.num_experts,
+                self.top_k,
+                device=buffer_device,
+            )
 
     def _select_experts(
         self,
@@ -79,7 +80,9 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
     ) -> torch.Tensor:
         if self.hash:
             if input_ids_T is None:
-                raise ValueError("input_ids_T is required for DeepSeek V4 hash routing.")
+                raise ValueError(
+                    "input_ids_T is required for DeepSeek V4 hash routing."
+                )
             return self.tid2eid.to(input_ids_T.device)[input_ids_T]
         return super()._select_experts(
             scores_TE,
@@ -93,13 +96,6 @@ class DeepSeekV4MoE(MoE):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoE.Config):
-        pass
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        input_ids_T: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if input_ids_T is None:
-            return super().forward(x_TD)
-        return super().forward(x_TD, input_ids_T=input_ids_T)
+        # Narrow the router type so hash-routing fields (layer_id, tid2eid)
+        # are visible to config builders.
+        router: DeepSeekV4Router.Config  # pyrefly: ignore [bad-override]

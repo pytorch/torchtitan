@@ -15,11 +15,11 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    token_id_placement,
     norm_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
+    token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
@@ -30,7 +30,7 @@ _attn_sink_placement = dense_param_placement(tp=spmd.S(0))
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
-_replicated_layout = {DP: spmd.R, CP: spmd.R, TP: spmd.R}
+_replicated_layout = dense_param_placement(tp=spmd.R)
 
 
 if TYPE_CHECKING:
@@ -293,12 +293,14 @@ def set_deepseek_v4_layer_sharding(
                 if enable_ep
                 else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
             )
-            layer_cfg.moe.sharding_config.in_src_shardings[
-                "input_ids_T"
-            ] = input_ids_src_placement
-            layer_cfg.moe.sharding_config.in_dst_shardings[
-                "input_ids_T"
-            ] = input_ids_dst_placement
+            moe_sharding_config = layer_cfg.moe.sharding_config or ShardingConfig()
+            in_src_shardings = moe_sharding_config.in_src_shardings or {}
+            in_src_shardings["input_ids_T"] = input_ids_src_placement
+            in_dst_shardings = moe_sharding_config.in_dst_shardings or {}
+            in_dst_shardings["input_ids_T"] = input_ids_dst_placement
+            moe_sharding_config.in_src_shardings = in_src_shardings
+            moe_sharding_config.in_dst_shardings = in_dst_shardings
+            layer_cfg.moe.sharding_config = moe_sharding_config
             router_sharding = router_cfg.sharding_config or ShardingConfig()
             router_sharding.state_shardings["tid2eid"] = _replicated_layout
             router_cfg.sharding_config = router_sharding

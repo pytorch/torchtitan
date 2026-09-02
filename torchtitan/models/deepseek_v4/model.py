@@ -6,14 +6,20 @@
 
 import dataclasses as dc
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
 from .mhc import HcHead, HcPost, HcPre
+
+if TYPE_CHECKING:
+    from .attention import Attention
+    from .moe import DeepSeekV4MoE
+    from .mtp import MTPBlock
 
 
 class DeepSeekV4TransformerBlock(TransformerBlock):
@@ -21,6 +27,10 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
+        # Redeclared with the DeepSeek V4 specific types so sharding and MTP
+        # build helpers can access V4-only fields (e.g. router.layer_id).
+        attention: "Attention.Config"  # pyrefly: ignore [bad-override]
+        moe: "DeepSeekV4MoE.Config | None" = None  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -30,19 +40,16 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         cfg = config
 
         self.attention = cfg.attention.build()
-        self.attention_norm = (
-            cfg.attention_norm.build() if cfg.attention_norm is not None else None
-        )
-        self.ffn_norm = cfg.ffn_norm.build() if cfg.ffn_norm is not None else None
+        self.attention_norm = cfg.attention_norm.build()
+        self.ffn_norm = cfg.ffn_norm.build()
         if cfg.moe is not None:
+            assert cfg.moe is not None
             self.moe = cfg.moe.build()
-            self.feed_forward = None
             self.moe_enabled = True
         else:
+            assert cfg.feed_forward is not None
             self.moe = None
-            self.feed_forward = (
-                cfg.feed_forward.build() if cfg.feed_forward is not None else None
-            )
+            self.feed_forward = cfg.feed_forward.build()
             self.moe_enabled = False
 
         self.hc_attn_pre = cfg.hc_attn_pre.build()
@@ -203,9 +210,9 @@ class DeepSeekV4Model(Decoder):
         attention_masks: AttentionMasksType | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
-        if self.mtp_layers and self.tok_embeddings is None:
+        if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
-        if self.mtp_layers and self._skip_lm_head:
+        if len(self.mtp_layers) > 0 and self._skip_lm_head:
             raise ValueError(
                 "DeepSeek V4 MTP cannot skip the LM head because chunked "
                 "cross entropy is not supported."
@@ -223,7 +230,7 @@ class DeepSeekV4Model(Decoder):
         main_hidden = self.hc_head(h)
         main_hidden = self.norm(main_hidden) if self.norm is not None else main_hidden
 
-        if not self.mtp_layers:
+        if len(self.mtp_layers) == 0:
             if self._skip_lm_head or self.lm_head is None:
                 return main_hidden
             return self.lm_head(main_hidden)
@@ -235,8 +242,7 @@ class DeepSeekV4Model(Decoder):
             positions,
         )
         return [
-            self.lm_head(item) if self.lm_head is not None else item
-            for item in outputs
+            self.lm_head(item) if self.lm_head is not None else item for item in outputs
         ]
 
     def mtp_forward(

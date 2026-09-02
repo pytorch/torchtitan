@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -21,6 +22,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         model_config: DeepSeekV4Model.Config,
         hf_assets_path: str | None,
     ):
+        # V4 configs reuse the V3 decoder layout, so the V3 adapter's init
+        # accepts them; the narrower subclass type trips pyrefly here.
+        # pyrefly: ignore [bad-argument-type]
         super().__init__(model_config, hf_assets_path)
 
         self.from_hf_map = {
@@ -74,41 +78,45 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             cr = self.compress_ratios[layer_id]
             if cr != 1:
                 comp = "compressor" if cr == 4 else "compressor_128"
-                self.from_hf_map.update({
-                    f"layers.{layer_id}.attn.compressor.ape": (
-                        f"layers.{layer_id}.attention.{comp}.ape"
-                    ),
-                    f"layers.{layer_id}.attn.compressor.norm.weight": (
-                        f"layers.{layer_id}.attention.{comp}.norm.weight"
-                    ),
-                    f"layers.{layer_id}.attn.compressor.wgate.weight": (
-                        f"layers.{layer_id}.attention.{comp}.wgate.weight"
-                    ),
-                    f"layers.{layer_id}.attn.compressor.wkv.weight": (
-                        f"layers.{layer_id}.attention.{comp}.wkv.weight"
-                    ),
-                })
+                self.from_hf_map.update(
+                    {
+                        f"layers.{layer_id}.attn.compressor.ape": (
+                            f"layers.{layer_id}.attention.{comp}.ape"
+                        ),
+                        f"layers.{layer_id}.attn.compressor.norm.weight": (
+                            f"layers.{layer_id}.attention.{comp}.norm.weight"
+                        ),
+                        f"layers.{layer_id}.attn.compressor.wgate.weight": (
+                            f"layers.{layer_id}.attention.{comp}.wgate.weight"
+                        ),
+                        f"layers.{layer_id}.attn.compressor.wkv.weight": (
+                            f"layers.{layer_id}.attention.{comp}.wkv.weight"
+                        ),
+                    }
+                )
             if cr == 4:
-                self.from_hf_map.update({
-                    f"layers.{layer_id}.attn.indexer.compressor.ape": (
-                        f"layers.{layer_id}.attention.indexer.compressor.ape"
-                    ),
-                    f"layers.{layer_id}.attn.indexer.compressor.norm.weight": (
-                        f"layers.{layer_id}.attention.indexer.compressor.norm.weight"
-                    ),
-                    f"layers.{layer_id}.attn.indexer.compressor.wgate.weight": (
-                        f"layers.{layer_id}.attention.indexer.compressor.wgate.weight"
-                    ),
-                    f"layers.{layer_id}.attn.indexer.compressor.wkv.weight": (
-                        f"layers.{layer_id}.attention.indexer.compressor.wkv.weight"
-                    ),
-                    f"layers.{layer_id}.attn.indexer.wq_b.weight": (
-                        f"layers.{layer_id}.attention.indexer.wq_b.weight"
-                    ),
-                    f"layers.{layer_id}.attn.indexer.weights_proj.weight": (
-                        f"layers.{layer_id}.attention.indexer.weights_proj.weight"
-                    ),
-                })
+                self.from_hf_map.update(
+                    {
+                        f"layers.{layer_id}.attn.indexer.compressor.ape": (
+                            f"layers.{layer_id}.attention.indexer.compressor.ape"
+                        ),
+                        f"layers.{layer_id}.attn.indexer.compressor.norm.weight": (
+                            f"layers.{layer_id}.attention.indexer.compressor.norm.weight"
+                        ),
+                        f"layers.{layer_id}.attn.indexer.compressor.wgate.weight": (
+                            f"layers.{layer_id}.attention.indexer.compressor.wgate.weight"
+                        ),
+                        f"layers.{layer_id}.attn.indexer.compressor.wkv.weight": (
+                            f"layers.{layer_id}.attention.indexer.compressor.wkv.weight"
+                        ),
+                        f"layers.{layer_id}.attn.indexer.wq_b.weight": (
+                            f"layers.{layer_id}.attention.indexer.wq_b.weight"
+                        ),
+                        f"layers.{layer_id}.attn.indexer.weights_proj.weight": (
+                            f"layers.{layer_id}.attention.indexer.weights_proj.weight"
+                        ),
+                    }
+                )
             if layer_id < model_config.layers[0].moe.router.n_hash_layers:
                 self.from_hf_map.update(
                     {
@@ -122,12 +130,13 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
     @staticmethod
     def _first_number(key: str) -> str:
-        return re.search(r"\d+", key).group(0)
+        match = re.search(r"\d+", key)
+        if match is None:
+            raise ValueError(f"Expected a layer number in key: {key}")
+        return match.group(0)
 
     def _map_layer(self, key: str, mapping: dict[str, str]) -> str:
-        return mapping[self._abstract_key(key, count=1)].format(
-            self._first_number(key)
-        )
+        return mapping[self._abstract_key(key, count=1)].format(self._first_number(key))
 
     @staticmethod
     def _is_v4_special_titan_key(key: str) -> bool:

@@ -15,7 +15,6 @@ from torchtitan.models.common.attention import BaseAttention, FlexAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
 
 from .compressor import Compressor, Indexer
 
@@ -94,9 +93,7 @@ class DSV4FlexAttention(FlexAttention):
         """
         window = min(seqlen, self.window_size)
         q_idx = torch.arange(seqlen, device=device).unsqueeze(1)
-        idxs = (q_idx - window + 1).clamp_min(0) + torch.arange(
-            window, device=device
-        )
+        idxs = (q_idx - window + 1).clamp_min(0) + torch.arange(window, device=device)
         idxs = torch.where(idxs <= q_idx, idxs, -1)
         return idxs.unsqueeze(0).expand(bsz, -1, -1)
 
@@ -285,7 +282,7 @@ class SlidingWindowAttention(DSV4FlexAttention):
     class Config(DSV4FlexAttention.Config):
         pass
 
-    def forward(
+    def forward(  # pyrefly: ignore[bad-param-name-override]
         self,
         q,
         swa_k,
@@ -306,7 +303,7 @@ class HeavilyCompressedAttention(DSV4FlexAttention):
     class Config(DSV4FlexAttention.Config):
         pass
 
-    def forward(
+    def forward(  # pyrefly: ignore[bad-param-name-override]
         self,
         q,
         swa_k,
@@ -329,7 +326,7 @@ class CompressedSparseAttention(DSV4FlexAttention):
     class Config(DSV4FlexAttention.Config):
         pass
 
-    def forward(
+    def forward(  # pyrefly: ignore[bad-param-name-override]
         self,
         q,
         swa_k,
@@ -365,7 +362,7 @@ class Attention(BaseAttention):
     class Config(BaseAttention.Config):
         dim: int
         n_heads: int
-        inner_attention: Module.Config
+        inner_attention: DSV4FlexAttention.Config  # pyrefly: ignore [bad-override]
         rope: RoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64

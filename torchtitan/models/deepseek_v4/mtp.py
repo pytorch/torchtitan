@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -41,7 +42,7 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         self.mtp_norm = config.mtp_norm.build()
         self.hc_head = config.hc_head.build()
 
-    def forward(
+    def forward(  # pyrefly: ignore[bad-param-name-override]
         self,
         mtp_input_embed: torch.Tensor,
         prev_hc_hidden: torch.Tensor,
@@ -57,9 +58,7 @@ class MTPBlock(DeepSeekV4TransformerBlock):
                 f"{tuple(prev_hc_hidden.shape)}."
             )
 
-        valid_mask = mtp_input_valid_mask.view(-1, 1, 1).to(
-            dtype=prev_hc_hidden.dtype
-        )
+        valid_mask = mtp_input_valid_mask.view(-1, 1, 1).to(dtype=prev_hc_hidden.dtype)
         prev_hc_hidden = prev_hc_hidden * valid_mask
 
         hidden = self.e_proj(self.enorm(mtp_input_embed)).unsqueeze(1)

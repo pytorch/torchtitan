@@ -122,8 +122,10 @@ class KimiLatentMoE(MoE):
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
 
-    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        weights_TK, expert_ids_TK, scores_TE = self.router(x_TD, self.expert_bias_E)
+    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
+        weights_TK, expert_ids_TK, scores_TE = self.router(
+            x_TD, self.expert_bias_E, **router_kwargs
+        )
         routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
             -1, expert_ids_TK, True
         )

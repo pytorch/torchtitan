@@ -985,12 +985,16 @@ class HelionCosSinRoPE(CosSinRoPE):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if key is None or inverse:
+            return super().forward(query, key, positions, inverse=inverse)
         out = _apply_helion_cossin_rope(query, key, self.cache, positions)
         if out is None:
-            return super().forward(query, key, positions)
+            return super().forward(query, key, positions, inverse=inverse)
         return out
 
 
@@ -1016,12 +1020,16 @@ class HelionComplexRoPE(ComplexRoPE):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if key is None or inverse:
+            return super().forward(query, key, positions, inverse=inverse)
         out = _apply_helion_complex_rope(query, key, self.cache, positions)
         if out is None:
-            return super().forward(query, key, positions)
+            return super().forward(query, key, positions, inverse=inverse)
         return out
 
 

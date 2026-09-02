@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -43,11 +44,16 @@ class HcSplitSinkhorn(Module):
         pre, post, comb = mixes.split([hc_mult, hc_mult, hc_mult * hc_mult], dim=-1)
         comb = comb.unflatten(-1, (hc_mult, hc_mult))
 
-        pre = torch.sigmoid(
-            pre * hc_scale[0] + hc_base[:hc_mult].view(*([1] * (pre.ndim - 1)), hc_mult)
-        ) + self.eps
+        pre = (
+            torch.sigmoid(
+                pre * hc_scale[0]
+                + hc_base[:hc_mult].view(*([1] * (pre.ndim - 1)), hc_mult)
+            )
+            + self.eps
+        )
         post = 2 * torch.sigmoid(
-            post * hc_scale[1] + hc_base[hc_mult : 2 * hc_mult].view(*([1] * (post.ndim - 1)), hc_mult)
+            post * hc_scale[1]
+            + hc_base[hc_mult : 2 * hc_mult].view(*([1] * (post.ndim - 1)), hc_mult)
         )
         comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(
             *([1] * (comb.ndim - 2)), hc_mult, hc_mult
@@ -157,9 +163,7 @@ class HcHead(Module):
         self.hc_fn = nn.Parameter(
             torch.empty(config.hc_mult, hc_dim, dtype=torch.float32)
         )
-        self.hc_base = nn.Parameter(
-            torch.empty(config.hc_mult, dtype=torch.float32)
-        )
+        self.hc_base = nn.Parameter(torch.empty(config.hc_mult, dtype=torch.float32))
         self.hc_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
     def forward(self, x):
