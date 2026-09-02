@@ -22,7 +22,6 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
-    _resolve_rope,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -85,7 +84,7 @@ class Attention(BaseAttention):
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         self.inner_attention = config.inner_attention.build()
         # Keep the canonical module registered only under Decoder.rope_modules.
-        object.__setattr__(self, "rope", _resolve_rope(config.rope, rope_modules))
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
     def forward(
         self,

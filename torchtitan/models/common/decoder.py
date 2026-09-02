@@ -35,22 +35,6 @@ from torchtitan.protocols.module import Module, ModuleDict
 __all__ = ["Decoder", "TransformerBlock"]
 
 
-def _rope_config(layer_config):
-    attention_config = getattr(layer_config, "attention", None)
-    return getattr(attention_config, "rope", None)
-
-
-def _register_rope_modules(layer_configs, rope_modules: ModuleDict) -> None:
-    """Build one canonical RoPE module for each layer configuration key."""
-    for layer_config in layer_configs:
-        rope_config = _rope_config(layer_config)
-        if rope_config is None:
-            continue
-        key = rope_config.rope_key()
-        if key not in rope_modules:
-            rope_modules[key] = rope_config.build()
-
-
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
 # ffn vs. moe naming and creation, etc.
@@ -267,11 +251,19 @@ class Decoder(BaseModel):
         self.tok_embeddings = config.tok_embeddings.build()
 
         self.rope_modules = ModuleDict()
-        _register_rope_modules(config.layers, self.rope_modules)
+        for layer_config in config.layers:
+            attention_config = getattr(layer_config, "attention", None)
+            rope_config = getattr(attention_config, "rope", None)
+            if rope_config is None:
+                continue
+            key = rope_config.rope_key()
+            if key not in self.rope_modules:
+                self.rope_modules[key] = rope_config.build()
 
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
-            rope_config = _rope_config(layer_config)
+            attention_config = getattr(layer_config, "attention", None)
+            rope_config = getattr(attention_config, "rope", None)
             if rope_config is None:
                 layer = layer_config.build()
             else:
