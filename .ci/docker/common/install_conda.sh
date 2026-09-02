@@ -47,6 +47,8 @@ install_pip_dependencies() {
   # --no-deps: the image ships no torch on purpose, every job installs a nightly.
   pip_install --no-deps \
     "git+https://github.com/meta-pytorch/torch_checkpointing.git@main"
+  pip_install --no-deps \
+    "git+https://github.com/meta-pytorch/remat.git@main"
   popd
 }
 

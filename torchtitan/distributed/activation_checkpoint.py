@@ -14,6 +14,7 @@ from typing import Annotated, cast
 import torch
 import torch._functorch.config
 import torch.nn as nn
+import torch_remat as remat
 import tyro
 from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -287,6 +288,116 @@ class SelectiveAC(ActivationCheckpointing):
         )
 
 
+class RematAC(ActivationCheckpointing):
+    """Retain model-declared regions and recompute the rest of each block.
+
+    Models must declare compatible regions and provide an explicit save policy
+    before selecting this activation-checkpointing implementation.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationCheckpointing.Config):
+        save_regions: list[str]
+        """
+        Qualified save-region glob patterns, relative to a transformer block.
+        Save regions are exposed by model code through
+        ``AVAILABLE_REMAT_SAVE_REGIONS``. Everything outside a retained region
+        is recomputed.
+
+        Every pattern must match at least one region in the complete model.
+        Wildcards are expanded in the startup policy report so broad matches
+        are visible before training begins.
+
+        NB: Save-region names are relative to a transformer block, so the same
+        policy applies to every transformer block. Per-block remat policies are
+        not currently supported.
+        """
+
+        preserve_rng_state: bool = False
+        """
+        Must remain false. torch_remat requires explicit RecomputeStateHooks for
+        random state that can advance inside retained regions.
+        """
+
+        _save_regions_validated: Annotated[bool, tyro.conf.Suppress] = field(
+            default=False, repr=False
+        )
+        """
+        Internal marker set after validation against the complete model. It is
+        carried through Config.build so pipeline-local model parts do not reject
+        selectors that matched regions assigned to another stage.
+        """
+
+    def _validate_config(self) -> "RematAC.Config":
+        config = cast("RematAC.Config", self.config)
+        if config.preserve_rng_state:
+            raise ValueError(
+                "RematAC does not support preserve_rng_state=True. Register a "
+                "torch_remat RecomputeStateHook for random state used in retained "
+                "regions."
+            )
+        if config.debug:
+            raise ValueError(
+                "RematAC does not support the activation checkpoint debug option."
+            )
+        return config
+
+    def _wrap_block(
+        self, module: nn.Module, *, base_fqn: str | None = None
+    ) -> nn.Module:
+        config = self._validate_config()
+        checkpoint_region_name = base_fqn or type(module).__name__
+        checkpointed_forward = remat.checkpoint(
+            region_name=checkpoint_region_name,
+            determinism_check=config.determinism_check,
+            preserve_rng_state=False,
+        )(module.forward)
+        module.forward = checkpointed_forward
+        return module
+
+    @staticmethod
+    def validate_save_regions(config: "RematAC.Config", model: nn.Module) -> None:
+        """Validate selectors globally and log the resolved per-layer policy."""
+        if config._save_regions_validated:
+            return
+
+        from torchtitan.models.common.remat import (
+            find_remat_checkpoint_blocks,
+            resolve_remat_save_policy,
+        )
+
+        policy = resolve_remat_save_policy(
+            find_remat_checkpoint_blocks(model), config.save_regions
+        )
+        policy.validate()
+        logger.info("\n%s", policy.format())
+        config._save_regions_validated = True
+
+    def apply(self, model: nn.Module) -> None:
+        from torchtitan.models.common.remat import resolve_remat_save_policy
+
+        config = self._validate_config()
+        layers = model.get_submodule("layers")
+        transformer_blocks = list(layers.named_children())
+        if not transformer_blocks:
+            logger.info("RematAC found no transformer blocks in this model part")
+            return
+
+        self.validate_save_regions(config, model)
+        checkpoint_blocks = [
+            (f"layers.{layer_id}", transformer_block)
+            for layer_id, transformer_block in transformer_blocks
+        ]
+        policy = resolve_remat_save_policy(checkpoint_blocks, config.save_regions)
+        policy.install()
+        for layer_id, transformer_block in transformer_blocks:
+            transformer_block = self._wrap_block(
+                transformer_block, base_fqn=f"layers.{layer_id}"
+            )
+            layers.register_module(layer_id, transformer_block)
+        logger.info("Applied RematAC to %d transformer blocks", len(transformer_blocks))
+
+
 class MemoryBudgetAC(ActivationCheckpointing):
     """Let the compiler partitioner trade compute for memory via a memory budget.
 
@@ -335,7 +446,20 @@ class MemoryBudgetAC(ActivationCheckpointing):
 # every nested Config class is named "Config" and would otherwise collide.
 ActivationCheckpointingConfig = (
     Annotated[SelectiveAC.Config, tyro.conf.subcommand("selective")]
+    | Annotated[RematAC.Config, tyro.conf.subcommand("remat")]
     | Annotated[FullAC.Config, tyro.conf.subcommand("full")]
     | Annotated[MemoryBudgetAC.Config, tyro.conf.subcommand("memory-budget")]
     | Annotated[None, tyro.conf.subcommand("none")]
 )
+
+
+def validate_activation_checkpointing_compile(
+    config: ActivationCheckpointingConfig, *, model_compile_enabled: bool
+) -> None:
+    """Validate activation-checkpointing compatibility with model compilation."""
+    if isinstance(config, RematAC.Config) and model_compile_enabled:
+        raise ValueError(
+            "Remat activation checkpointing does not support torch.compile. "
+            "Disable model compilation or select a different activation "
+            "checkpointing policy."
+        )

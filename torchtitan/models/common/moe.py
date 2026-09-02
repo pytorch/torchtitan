@@ -11,6 +11,7 @@ import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch import nn
 from torch.distributed.tensor import DTensor
 
@@ -213,11 +214,11 @@ class TokenChoiceTopKRouter(Module):
         self.route_scale = config.route_scale
         self._debug_force_load_balance = config._debug_force_load_balance
 
-    def _debug_force_load_balance_routing(
+    def _debug_force_load_balance_expert_ids(
         self, scores_TE: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Balanced round-robin expert assignment.
-        Returns expert IDs and scores with shape ``(T, K)``.
+        Returns expert IDs with shape ``(T, K)``.
         """
         num_tokens = scores_TE.shape[0]
         # Round-robin indices with exact balance
@@ -229,8 +230,7 @@ class TokenChoiceTopKRouter(Module):
             ).reshape(num_tokens, self.top_k)
             % self.num_experts
         )
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        return topk_expert_ids_TK, topk_scores_TK
+        return topk_expert_ids_TK
 
     def _get_node_limited_routing_scores(
         self,
@@ -274,6 +274,21 @@ class TokenChoiceTopKRouter(Module):
 
         return scores_for_choice_TE
 
+    def _select_expert_ids(self, scores_for_choice_TE: torch.Tensor) -> torch.Tensor:
+        if self.num_expert_groups is not None:
+            scores_for_choice_TE = self._get_node_limited_routing_scores(
+                scores_for_choice_TE
+            )
+        _, topk_expert_ids_TK = torch.topk(
+            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        )
+
+        if self._debug_force_load_balance:
+            topk_expert_ids_TK = self._debug_force_load_balance_expert_ids(
+                scores_for_choice_TE
+            )
+        return topk_expert_ids_TK
+
     def forward(
         self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -303,25 +318,17 @@ class TokenChoiceTopKRouter(Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
-        _, topk_expert_ids_TK = torch.topk(
-            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
-        )
+        # Routing choices must remain identical between forward and replay.
+        topk_expert_ids_TK = remat.region(
+            self._select_expert_ids,
+            "routing_decision",
+            recompute=False,
+        )(scores_for_choice_TE)
+        remat.recompute_needs_tensor(topk_expert_ids_TK)
 
         # NOTE: The expert_bias is only used for routing. The gating value
         #       topk_scores_TK is still derived from the original scores.
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-
-        # debug override: balanced round-robin routing
-        if self._debug_force_load_balance:
-            (
-                topk_expert_ids_TK,
-                topk_scores_TK,
-            ) = self._debug_force_load_balance_routing(scores_TE)
 
         if self.route_norm:
             denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20

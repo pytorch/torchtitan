@@ -9,9 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from torchtitan.distributed.activation_checkpoint import RematAC
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
-from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
+from torchtitan_recipes.tests.models import (
+    llama3_debugmodel_fsdp2_tp2_pp2,
+    llama3_debugmodel_remat_fsdp2_tp2_cp2,
+)
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
 from tests.integration_tests.b200 import build_b200_tests_list
@@ -63,6 +67,18 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
         config.parallelism.num_pp_microbatches
         >= config.parallelism.pipeline_parallel_degree
     )
+
+
+def test_llama3_remat_numerics_config() -> None:
+    config = llama3_debugmodel_remat_fsdp2_tp2_cp2()
+
+    assert isinstance(config.activation_checkpoint, RematAC.Config)
+    assert config.activation_checkpoint.save_regions == [
+        "attention.qkv",
+        "attention.inner_attention",
+        "attention.wo",
+    ]
+    assert config.training.steps == 10
 
 
 def test_parse_multiple_integration_test_suites() -> None:
@@ -122,6 +138,7 @@ def test_models_select_fake_and_real_pg_cases() -> None:
 
     assert {
         "deepseek_v3_fsdp+ep",
+        "llama3_fsdp+tp+cp+remat",
         "qwen3_moe_fsdp+tp+cp+ep_param_groups",
         "kimi_k2_5_muon_fsdp+ep",
         "muse_glimmer_text_fsdp",

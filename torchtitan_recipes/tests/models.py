@@ -7,7 +7,7 @@
 """Configurations for the ``models`` integration test suite."""
 
 from torchtitan.components.optimizer import default_adamw
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_checkpoint import RematAC, SelectiveAC
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
@@ -53,6 +53,18 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    return config
+
+
+def llama3_debugmodel_remat_fsdp2_tp2_cp2() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_tp2_cp2()
+    config.activation_checkpoint = RematAC.Config(
+        save_regions=[
+            "attention.qkv",
+            "attention.inner_attention",
+            "attention.wo",
+        ]
+    )
     return config
 
 

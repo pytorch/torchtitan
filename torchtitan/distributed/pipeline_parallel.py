@@ -27,7 +27,10 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    RematAC,
+)
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -92,6 +95,12 @@ def pipeline_llm(
         )
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
+
+    # RematAC is later applied independently to each local pipeline part. Resolve
+    # its selectors against the complete model first so a pattern absent from
+    # one stage is accepted only when it matches another stage.
+    if isinstance(ac_config, RematAC.Config):
+        RematAC.validate_save_regions(ac_config, model)
 
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = _pipeline_module_split(
