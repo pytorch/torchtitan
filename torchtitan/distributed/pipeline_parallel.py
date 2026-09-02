@@ -495,8 +495,6 @@ def _split_module(
         # policy for shared root modules should be revisited separately.
         if module_name == "rope_modules":
             continue
-        if module_name in modules_to_keep:
-            continue
         # Handle layer-like structures (e.g., "layers.0", "layers.1")
         if isinstance(
             module_value, (nn.ModuleDict, nn.ModuleList, ModuleDict, ModuleList)
