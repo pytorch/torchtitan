@@ -9,6 +9,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common import Linear
@@ -40,6 +41,8 @@ def _situ_glu(
 class KimiFeedForward(FeedForward):
     """FeedForward with Kimi's SiTU activation."""
 
+    AVAILABLE_REMAT_SAVE_REGIONS = FeedForward.AVAILABLE_REMAT_SAVE_REGIONS
+
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
         beta: float = 1.0
@@ -51,13 +54,32 @@ class KimiFeedForward(FeedForward):
         self.linear_beta = config.linear_beta
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(
-            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
+        w1_out = remat.region(
+            self.w1,
+            self.remat_region_name("w1"),
+            recompute=self.should_recompute_remat_region("w1"),
+        )(x)
+        w3_out = remat.region(
+            self.w3,
+            self.remat_region_name("w3"),
+            recompute=self.should_recompute_remat_region("w3"),
+        )(x)
+        remat.recompute_needs_tensor(w1_out, w3_out)
+        out = remat.region(
+            self.w2,
+            self.remat_region_name("w2"),
+            recompute=self.should_recompute_remat_region("w2"),
+        )(
+            _situ_glu(w1_out, w3_out, self.beta, self.linear_beta),
         )
+        remat.recompute_needs_tensor(out)
+        return out
 
 
 class KimiGroupedExperts(GroupedExperts):
     """``common/moe.py::GroupedExperts`` with Kimi's SiTU activation."""
+
+    AVAILABLE_REMAT_SAVE_REGIONS = GroupedExperts.AVAILABLE_REMAT_SAVE_REGIONS
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
@@ -87,24 +109,39 @@ class KimiGroupedExperts(GroupedExperts):
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        gate_RF = self._grouped_mm(
+        gate_RF = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w1"),
+            recompute=self.should_recompute_remat_region("w1"),
+        )(
             A=x_RD.bfloat16(),
             B_t=w1_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        up_RF = self._grouped_mm(
+        up_RF = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w3"),
+            recompute=self.should_recompute_remat_region("w3"),
+        )(
             A=x_RD.bfloat16(),
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
+        remat.recompute_needs_tensor(gate_RF, up_RF)
 
         h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
 
-        return self._grouped_mm(
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.should_recompute_remat_region("w2"),
+        )(
             A=h_RF,
             B_t=w2_EDF.bfloat16().transpose(-2, -1),
             offs=offsets_E,
-        ).type_as(x_RD)
+        )
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
 
 
 class KimiLatentMoE(MoE):

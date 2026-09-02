@@ -325,6 +325,8 @@ def _debugmodel(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    *,
+    q_lora_rank: int = 0,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -342,7 +344,7 @@ def _debugmodel(
         n_dense_layers=n_dense_layers,
         dim=dim,
         n_heads=n_heads,
-        q_lora_rank=0,
+        q_lora_rank=q_lora_rank,
         kv_lora_rank=512,
         qk_nope_head_dim=128,
         qk_rope_head_dim=rope_dim,
@@ -387,6 +389,21 @@ def _debugmodel(
             dim=dim,
             num_mtp_layers=num_mtp_layers,
         ),
+    )
+
+
+def _debugmodel_q_lora(
+    attn_backend: str,
+    moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None = None,
+    num_mtp_layers: int = 0,
+) -> DeepSeekV3Model.Config:
+    return _debugmodel(
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+        num_mtp_layers=num_mtp_layers,
+        q_lora_rank=128,
     )
 
 
@@ -611,6 +628,7 @@ def _671b(
 
 deepseekv3_configs = {
     "debugmodel": _debugmodel,
+    "debugmodel_q_lora": _debugmodel_q_lora,
     "16B": _16b,
     "236B": _236b,
     "671B": _671b,

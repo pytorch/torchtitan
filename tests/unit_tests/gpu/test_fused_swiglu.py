@@ -23,6 +23,7 @@ import torch
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.remat import available_remat_save_regions
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -77,6 +78,7 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         fused = _build_fused()
         self.assertIsInstance(fused.w13, Linear)
         self.assertEqual(tuple(fused.w13.weight.shape), (2 * _HIDDEN, _DIM))
+        self.assertEqual(available_remat_save_regions(fused), ["w13", "w2"])
         self.assertEqual(
             {name for name, _ in fused.named_parameters()},
             {"w13.weight", "w2.weight"},
@@ -179,6 +181,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
             _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         ).build()
         self.assertIsInstance(fused, DistGEMMFusedSwiGLU)
+        self.assertEqual(available_remat_save_regions(fused), ["w13", "w2"])
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
         fused = dist_gemm_fused_swiglu(

@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch import nn
 from torch.distributed.tensor import DTensor
 
@@ -20,7 +21,12 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import (
+    AllToAllDispatchMetadata,
+    AllToAllTokenDispatcher,
+    LocalDispatchMetadata,
+    LocalTokenDispatcher,
+)
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -32,7 +38,21 @@ from .token_dispatcher import LocalTokenDispatcher
 #   R = routed tokens assigned to local experts
 
 
+class _RematDispatchOutput(NamedTuple):
+    """Tensor-only dispatcher output accepted by ``torch_remat.region``."""
+
+    routed_input_RD: torch.Tensor  # noqa: N815
+    num_tokens_per_local_expert_e: torch.Tensor
+    token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
+    topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
+    permuted_indices_R: torch.Tensor | None  # noqa: N815
+    input_splits_EP: torch.Tensor | None  # noqa: N815
+    output_splits_EP: torch.Tensor | None  # noqa: N815
+
+
 class GroupedExperts(Module):
+    AVAILABLE_REMAT_SAVE_REGIONS = ("w1", "w3", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -91,21 +111,33 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(
-                A=x_RD.bfloat16(),
-                B_t=w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
-            )
+        w1_out_RF = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w1"),
+            recompute=self.should_recompute_remat_region("w1"),
+        )(
+            A=x_RD.bfloat16(),
+            B_t=w1_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
-        h_RF = h_RF * self._grouped_mm(
+        w3_out_RF = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w3"),
+            recompute=self.should_recompute_remat_region("w3"),
+        )(
             A=x_RD.bfloat16(),
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        return self._grouped_mm(
-            A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_RD)
+        remat.recompute_needs_tensor(w1_out_RF, w3_out_RF)
+        h_RF = F.silu(w1_out_RF) * w3_out_RF
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.should_recompute_remat_region("w2"),
+        )(A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E)
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
@@ -124,6 +156,10 @@ class RoutedExperts(Module):
     """Routed-expert ``local_map`` region: composes token_dispatcher + inner_experts
     as sibling nodes so each can be overridden independently."""
 
+    # Populated per instance. Use exact types because dispatcher subclasses can
+    # change padding, metadata, or asynchronous state-lifetime contracts.
+    AVAILABLE_REMAT_SAVE_REGIONS: tuple[str, ...] = ()
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         inner_experts: GroupedExperts.Config
@@ -133,6 +169,78 @@ class RoutedExperts(Module):
         super().__init__()
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
+        if type(self.token_dispatcher) in (
+            LocalTokenDispatcher,
+            AllToAllTokenDispatcher,
+        ):
+            self.AVAILABLE_REMAT_SAVE_REGIONS = ("dispatch", "combine")
+
+    def _dispatch_with_tensor_metadata(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> _RematDispatchOutput:
+        (
+            routed_input_RD,
+            num_tokens_per_local_expert_e,
+            metadata,
+        ) = self.token_dispatcher.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        if isinstance(metadata, AllToAllDispatchMetadata):
+            return _RematDispatchOutput(
+                routed_input_RD=routed_input_RD,
+                num_tokens_per_local_expert_e=num_tokens_per_local_expert_e,
+                token_indices_experts_sorted_N=(
+                    metadata.token_indices_experts_sorted_N
+                ),
+                topk_scores_experts_sorted_N=(metadata.topk_scores_experts_sorted_N),
+                permuted_indices_R=metadata.permuted_indices,
+                input_splits_EP=torch.tensor(
+                    metadata.input_splits, dtype=torch.int64, device="cpu"
+                ),
+                output_splits_EP=torch.tensor(
+                    metadata.output_splits, dtype=torch.int64, device="cpu"
+                ),
+            )
+        assert isinstance(metadata, LocalDispatchMetadata)
+        return _RematDispatchOutput(
+            routed_input_RD=routed_input_RD,
+            num_tokens_per_local_expert_e=num_tokens_per_local_expert_e,
+            token_indices_experts_sorted_N=metadata.token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=metadata.topk_scores_experts_sorted_N,
+            permuted_indices_R=None,
+            input_splits_EP=None,
+            output_splits_EP=None,
+        )
+
+    @staticmethod
+    def _restore_dispatch_metadata(
+        output: _RematDispatchOutput,
+    ) -> LocalDispatchMetadata | AllToAllDispatchMetadata:
+        if output.permuted_indices_R is None:
+            return LocalDispatchMetadata(
+                token_indices_experts_sorted_N=(output.token_indices_experts_sorted_N),
+                topk_scores_experts_sorted_N=(output.topk_scores_experts_sorted_N),
+            )
+
+        assert output.input_splits_EP is not None
+        assert output.output_splits_EP is not None
+        # Standard AllToAll only permutes rows, so its pre-permutation shape is
+        # identical to the retained routed activation's shape.
+        return AllToAllDispatchMetadata(
+            token_indices_experts_sorted_N=output.token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=output.topk_scores_experts_sorted_N,
+            input_shape=output.routed_input_RD.shape,
+            permuted_indices=output.permuted_indices_R,
+            input_splits=output.input_splits_EP.tolist(),
+            output_splits=output.output_splits_EP.tolist(),
+        )
 
     def forward(
         self,
@@ -147,25 +255,68 @@ class RoutedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
-        (
-            routed_input_RD,
-            num_global_tokens_per_local_expert_e,
-            metadata,
-        ) = self.token_dispatcher.dispatch(
-            x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
-        )
+        if not self.should_recompute_remat_region("dispatch"):
+            dispatch_output = remat.region(
+                self._dispatch_with_tensor_metadata,
+                self.remat_region_name("dispatch"),
+                recompute=self.should_recompute_remat_region("dispatch"),
+            )(
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
+            remat.recompute_needs_tensor(
+                dispatch_output.routed_input_RD,
+                dispatch_output.num_tokens_per_local_expert_e,
+                dispatch_output.token_indices_experts_sorted_N,
+                dispatch_output.topk_scores_experts_sorted_N,
+            )
+            if dispatch_output.permuted_indices_R is not None:
+                assert dispatch_output.input_splits_EP is not None
+                assert dispatch_output.output_splits_EP is not None
+                remat.recompute_needs_tensor(
+                    dispatch_output.permuted_indices_R,
+                    dispatch_output.input_splits_EP,
+                    dispatch_output.output_splits_EP,
+                )
+            routed_input_RD = dispatch_output.routed_input_RD
+            num_global_tokens_per_local_expert_e = (
+                dispatch_output.num_tokens_per_local_expert_e
+            )
+            metadata = self._restore_dispatch_metadata(dispatch_output)
+        else:
+            (
+                routed_input_RD,
+                num_global_tokens_per_local_expert_e,
+                metadata,
+            ) = self.token_dispatcher.dispatch(
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
-        out_TD = self.token_dispatcher.combine(
-            routed_output_RD,
-            metadata,
-            x_TD,
-        )
+        if "combine" in self.remat_region_names:
+            out_TD = remat.region(
+                self.token_dispatcher.combine,
+                self.remat_region_name("combine"),
+                recompute=self.should_recompute_remat_region("combine"),
+            )(
+                routed_output_RD,
+                metadata,
+                x_TD,
+            )
+            remat.recompute_needs_tensor(out_TD)
+        else:
+            out_TD = self.token_dispatcher.combine(
+                routed_output_RD,
+                metadata,
+                x_TD,
+            )
         return out_TD
 
     def parallelize(self, parallel_dims) -> None:
@@ -188,6 +339,11 @@ class TokenChoiceTopKRouter(Module):
     (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
     This reduces cross-node communication in distributed settings.
     """
+
+    AVAILABLE_REMAT_SAVE_REGIONS: tuple[str, ...] = ("routing_decision",)
+    # topk may resolve ties differently during replay on some backends. Retain
+    # the chosen expert IDs so backward cannot silently use different routes.
+    REQUIRED_REMAT_SAVE_REGIONS: tuple[str, ...] = ("routing_decision",)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -213,11 +369,11 @@ class TokenChoiceTopKRouter(Module):
         self.route_scale = config.route_scale
         self._debug_force_load_balance = config._debug_force_load_balance
 
-    def _debug_force_load_balance_routing(
+    def _debug_force_load_balance_expert_ids(
         self, scores_TE: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Balanced round-robin expert assignment.
-        Returns expert IDs and scores with shape ``(T, K)``.
+        Returns expert IDs with shape ``(T, K)``.
         """
         num_tokens = scores_TE.shape[0]
         # Round-robin indices with exact balance
@@ -229,8 +385,7 @@ class TokenChoiceTopKRouter(Module):
             ).reshape(num_tokens, self.top_k)
             % self.num_experts
         )
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        return topk_expert_ids_TK, topk_scores_TK
+        return topk_expert_ids_TK
 
     def _get_node_limited_routing_scores(
         self,
@@ -274,6 +429,21 @@ class TokenChoiceTopKRouter(Module):
 
         return scores_for_choice_TE
 
+    def _select_expert_ids(self, scores_for_choice_TE: torch.Tensor) -> torch.Tensor:
+        if self.num_expert_groups is not None:
+            scores_for_choice_TE = self._get_node_limited_routing_scores(
+                scores_for_choice_TE
+            )
+        _, topk_expert_ids_TK = torch.topk(
+            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        )
+
+        if self._debug_force_load_balance:
+            topk_expert_ids_TK = self._debug_force_load_balance_expert_ids(
+                scores_for_choice_TE
+            )
+        return topk_expert_ids_TK
+
     def forward(
         self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -303,25 +473,16 @@ class TokenChoiceTopKRouter(Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
-        _, topk_expert_ids_TK = torch.topk(
-            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
-        )
+        topk_expert_ids_TK = remat.region(
+            self._select_expert_ids,
+            self.remat_region_name("routing_decision"),
+            recompute=self.should_recompute_remat_region("routing_decision"),
+        )(scores_for_choice_TE)
+        remat.recompute_needs_tensor(topk_expert_ids_TK)
 
         # NOTE: The expert_bias is only used for routing. The gating value
         #       topk_scores_TK is still derived from the original scores.
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-
-        # debug override: balanced round-robin routing
-        if self._debug_force_load_balance:
-            (
-                topk_expert_ids_TK,
-                topk_scores_TK,
-            ) = self._debug_force_load_balance_routing(scores_TE)
 
         if self.route_norm:
             denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
@@ -353,6 +514,8 @@ class MoE(Module):
     3. Shared experts compute their output.
     4. Routed and shared expert outputs are summed.
     """
+
+    AVAILABLE_REMAT_SAVE_REGIONS = ("router",)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -411,11 +574,12 @@ class MoE(Module):
         token count.
         """
         # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
-        (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E)
+        (topk_scores_TK, topk_expert_ids_TK, scores_TE,) = remat.region(
+            self.router,
+            self.remat_region_name("router"),
+            recompute=self.should_recompute_remat_region("router"),
+        )(x_TD, self.expert_bias_E)
+        remat.recompute_needs_tensor(topk_scores_TK, topk_expert_ids_TK, scores_TE)
 
         # Build a one-hot routing map (T, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on
@@ -430,10 +594,10 @@ class MoE(Module):
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
-        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
-        #       first in the forward pass, and then in the backward pass. However, this has no
-        #       effect on the expert bias update thanks to the torch.sign() operator.
-        if self.training:
+        # PyTorch activation checkpointing replays this mutation, and the optimizer
+        # compensates for that double count. torch_remat exposes its replay state,
+        # so avoid the second mutation entirely for RematAC.
+        if self.training and not remat.is_recomputing():
             with torch.no_grad():
                 self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 

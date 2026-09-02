@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.models.common.attention import (
@@ -35,6 +36,9 @@ class Attention(BaseAttention):
 
     This is DeepSeek V3-specific and NOT shared with other models.
     """
+
+    # Populated per instance because wq and wq_a/wq_b are mutually exclusive.
+    AVAILABLE_REMAT_SAVE_REGIONS: tuple[str, ...] = ()
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
@@ -68,9 +72,11 @@ class Attention(BaseAttention):
         self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
 
+        query_remat_save_regions: tuple[str, ...]
         if self.q_lora_rank == 0:
             assert config.wq is not None, "wq is required when q_lora_rank == 0"
             self.wq = config.wq.build()
+            query_remat_save_regions = ("wq",)
         else:
             assert (
                 config.wq_a is not None and config.wq_b is not None
@@ -78,6 +84,14 @@ class Attention(BaseAttention):
             self.wq_a = config.wq_a.build()
             self.q_norm = config.q_norm.build()
             self.wq_b = config.wq_b.build()
+            query_remat_save_regions = ("wq_a", "wq_b")
+
+        self.AVAILABLE_REMAT_SAVE_REGIONS = query_remat_save_regions + (
+            "wkv_a",
+            "wkv_b",
+            "inner_attention",
+            "wo",
+        )
 
         # TODO(fegin): revisit
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
@@ -104,10 +118,26 @@ class Attention(BaseAttention):
 
         # Query projection
         if self.q_lora_rank == 0:
-            q = self.wq(x)
+            q = remat.region(
+                self.wq,
+                self.remat_region_name("wq"),
+                recompute=self.should_recompute_remat_region("wq"),
+            )(x)
+            remat.recompute_needs_tensor(q)
         else:
-            q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
+            q = remat.region(
+                self.wq_a,
+                self.remat_region_name("wq_a"),
+                recompute=self.should_recompute_remat_region("wq_a"),
+            )(x)
+            remat.recompute_needs_tensor(q)
+            q = self.q_norm(q)
+            q = remat.region(
+                self.wq_b,
+                self.remat_region_name("wq_b"),
+                recompute=self.should_recompute_remat_region("wq_b"),
+            )(q)
+            remat.recompute_needs_tensor(q)
 
         # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
         with spmd.local():
@@ -124,13 +154,24 @@ class Attention(BaseAttention):
         )
 
         # Key-value projection
-        kv = self.wkv_a(x)
+        kv = remat.region(
+            self.wkv_a,
+            self.remat_region_name("wkv_a"),
+            recompute=self.should_recompute_remat_region("wkv_a"),
+        )(x)
+        remat.recompute_needs_tensor(kv)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
-        kv = self.wkv_b(self.kv_norm(kv))
+        kv = self.kv_norm(kv)
+        kv = remat.region(
+            self.wkv_b,
+            self.remat_region_name("wkv_b"),
+            recompute=self.should_recompute_remat_region("wkv_b"),
+        )(kv)
+        remat.recompute_needs_tensor(kv)
 
         with (
             spmd.local()
@@ -148,11 +189,21 @@ class Attention(BaseAttention):
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        output = self.inner_attention(
-            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
-        ).contiguous()
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.should_recompute_remat_region("inner_attention"),
+        )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
+        remat.recompute_needs_tensor(output)
+        output = output.contiguous()
         output = output.view(num_tokens, -1)
-        return self.wo(output)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.should_recompute_remat_region("wo"),
+        )(output)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

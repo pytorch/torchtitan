@@ -9,6 +9,7 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.models.common.remat import available_remat_save_regions
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
@@ -106,6 +107,27 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_situ_ffn_remat_regions(self):
+        with torch.device("meta"):
+            model = _small_model_config().build()
+
+        self.assertEqual(
+            available_remat_save_regions(model.layers["0"]),
+            ["feed_forward.w1", "feed_forward.w3", "feed_forward.w2"],
+        )
+        self.assertEqual(
+            available_remat_save_regions(model.layers["1"]),
+            [
+                "moe.routed_experts.inner_experts.w1",
+                "moe.routed_experts.inner_experts.w3",
+                "moe.routed_experts.inner_experts.w2",
+                "moe.router.routing_decision",
+                "moe.shared_experts.w1",
+                "moe.shared_experts.w3",
+                "moe.shared_experts.w2",
+            ],
+        )
+
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()

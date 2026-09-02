@@ -80,6 +80,13 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_dist_gemm_remat_tp2],
+            test_descr="Dist GEMM with attention and FFN remat (FSDP2 + TP2)",
+            test_name="dist_gemm+remat",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.qwen3_moe_deepep_fsdp4_ep4],
             test_descr="Qwen3 FSDP+DeepEP",
             test_name="qwen3_fsdp+deepep",

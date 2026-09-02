@@ -6,7 +6,7 @@
 
 """Configurations for the ``h100`` integration test suite."""
 
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullAC, RematAC
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -17,6 +17,15 @@ from torchtitan.models.llama3.config_registry import (
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.trainer import Trainer
+
+
+_DIST_GEMM_REMAT_TEST_SAVE_REGIONS = (
+    "attention.qkv",
+    "attention.inner_attention",
+    "attention.wo",
+    "feed_forward.w13",
+    "feed_forward.w2",
+)
 
 
 def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
@@ -30,6 +39,14 @@ def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
 def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
     config = llama3_debugmodel_dist_gemm()
     config.parallelism.tensor_parallel_degree = 2
+    return config
+
+
+def llama3_debugmodel_dist_gemm_remat_tp2() -> Trainer.Config:
+    config = llama3_debugmodel_dist_gemm_tp2()
+    config.activation_checkpoint = RematAC.Config(
+        save_regions=list(_DIST_GEMM_REMAT_TEST_SAVE_REGIONS)
+    )
     return config
 
 

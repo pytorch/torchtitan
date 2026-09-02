@@ -54,6 +54,18 @@ class Module(nn.Module, Configurable):
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
+    # RematAC replaces these defaults on each region-bearing module. Outside an
+    # enclosing torch_remat checkpoint, their values do not affect execution.
+    remat_region_names: dict[str, str] = {}
+    is_remat_save_region: dict[str, bool] = {}
+
+    def remat_region_name(self, local_name: str) -> str:
+        """Return a region's configured qualified name or its local name."""
+        return self.remat_region_names.get(local_name, local_name)
+
+    def should_recompute_remat_region(self, local_name: str) -> bool:
+        """Return whether a region should recompute, defaulting to true."""
+        return not self.is_remat_save_region.get(local_name, False)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

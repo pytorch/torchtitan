@@ -28,6 +28,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ),
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_remat_fsdp2_tp2_cp2],
+            test_descr="Llama 3 FSDP+TP+CP+remat",
+            test_name="llama3_fsdp+tp+cp+remat",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
             test_descr="Llama 3 FSDP+TP+PP",
             test_name="llama3_fsdp+tp+pp",
@@ -53,6 +62,31 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
             ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_remat_fsdp8_ep8],
+            test_descr="DeepSeek V3 FSDP+EP with NVIDIA Megatron H100 remat policy",
+            test_name="deepseek_v3_fsdp+ep+remat",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_remat_dispatch_fsdp4_ep2],
+            test_descr="DeepSeek V3 FSDP+EP with remat dispatch and combine",
+            test_name="deepseek_v3_fsdp+ep+remat_dispatch",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_remat_fsdp2_pp2_ep2],
+            test_descr=(
+                "DeepSeek V3 FSDP+PP+EP with NVIDIA Megatron H100 remat policy"
+            ),
+            test_name="deepseek_v3_fsdp+pp+ep+remat",
+            ngpu=4,
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],
@@ -82,6 +116,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             configs=[recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8],
             test_descr="Qwen3 MoE FSDP+TP+CP+EP (param groups)",
             test_name="qwen3_moe_fsdp+tp+cp+ep_param_groups",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.qwen3_debugmodel_moe_param_groups_remat_fsdp2_tp2_cp2_ep8],
+            test_descr="Qwen3 MoE FSDP+TP+CP+EP+remat (param groups)",
+            test_name="qwen3_moe_fsdp+tp+cp+ep+remat_param_groups",
             ngpu=8,
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
@@ -189,6 +232,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             configs=[recipes.muse_glimmer_debugmodel_fsdp8],
             test_descr="Muse Glimmer text FSDP",
             test_name="muse_glimmer_text_fsdp",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_remat_fsdp8],
+            test_descr="Muse Glimmer text FSDP+remat",
+            test_name="muse_glimmer_text_fsdp+remat",
             ngpu=8,
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"

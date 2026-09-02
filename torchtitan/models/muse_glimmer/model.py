@@ -11,6 +11,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
@@ -82,6 +83,8 @@ class Attention(GQAttention):
     - per-layer sliding-window selection from a window-keyed mask dict.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("qkv", "inner_attention", "o_gate", "wo")
+
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
         # Muse Glimmer-specific per-layer iRoPE flag: the shared GQAttention always
@@ -118,7 +121,12 @@ class Attention(GQAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
-        xq, xk, xv = self.qkv_linear(x_TD)
+        xq, xk, xv = remat.region(
+            self.qkv_linear,
+            self.remat_region_name("qkv"),
+            recompute=self.should_recompute_remat_region("qkv"),
+        )(x_TD)
+        remat.recompute_needs_tensor(xq, xk, xv)
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).
@@ -139,20 +147,38 @@ class Attention(GQAttention):
         if isinstance(attention_masks, dict):
             attention_masks = attention_masks[_window_mask_key(self.window_size)]
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.should_recompute_remat_region("inner_attention"),
+        )(
             xq,
             xk,
             xv,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        remat.recompute_needs_tensor(output)
+        output = output.contiguous()
         output = output.view(num_tokens, -1)
 
         if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_TD))
+            gate = remat.region(
+                self.o_gate,
+                self.remat_region_name("o_gate"),
+                recompute=self.should_recompute_remat_region("o_gate"),
+            )(x_TD)
+            remat.recompute_needs_tensor(gate)
+            output = output * torch.sigmoid(gate)
 
-        return self.wo(output)
+        output = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.should_recompute_remat_region("wo"),
+        )(output)
+        remat.recompute_needs_tensor(output)
+        return output
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):

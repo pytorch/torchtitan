@@ -6,12 +6,21 @@
 
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from torchtitan.distributed.activation_checkpoint import RematAC
+from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
-from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
+from torchtitan_recipes.tests.models import (
+    deepseek_v3_debugmodel_fsdp4_ep2,
+    deepseek_v3_debugmodel_q_lora_remat_tp2_cp2,
+    deepseek_v3_debugmodel_q_lora_tp2_cp2,
+    deepseek_v3_debugmodel_remat_dispatch_fsdp4_ep2,
+    llama3_debugmodel_fsdp2_tp2_pp2,
+)
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
 from tests.integration_tests.b200 import build_b200_tests_list
@@ -65,6 +74,43 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     )
 
 
+def test_deepseek_query_lora_remat_numerics_configs() -> None:
+    baseline = deepseek_v3_debugmodel_q_lora_tp2_cp2()
+    remat = deepseek_v3_debugmodel_q_lora_remat_tp2_cp2()
+
+    for config in (baseline, remat):
+        assert config.model_spec is not None
+        assert config.model_spec.flavor == "debugmodel_q_lora"
+        model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
+        assert model_config.layers[0].attention.q_lora_rank == 128
+        assert config.parallelism.data_parallel_shard_degree == 1
+        assert config.parallelism.tensor_parallel_degree == 2
+        assert config.parallelism.context_parallel_degree == 2
+        assert config.parallelism.enable_sequence_parallel
+        assert config.training.steps == 10
+
+    assert baseline.activation_checkpoint is None
+    assert isinstance(remat.activation_checkpoint, RematAC.Config)
+
+
+def test_deepseek_dispatch_remat_numerics_configs() -> None:
+    baseline = deepseek_v3_debugmodel_fsdp4_ep2()
+    remat = deepseek_v3_debugmodel_remat_dispatch_fsdp4_ep2()
+
+    for config in (baseline, remat):
+        assert config.parallelism.data_parallel_shard_degree == 4
+        assert config.parallelism.expert_parallel_degree == 2
+        assert config.training.steps == 10
+        assert config.training.disable_cuda_graphs
+
+    assert baseline.activation_checkpoint is None
+    assert isinstance(remat.activation_checkpoint, RematAC.Config)
+    assert remat.activation_checkpoint.save_regions == [
+        "moe.routed_experts.dispatch",
+        "moe.routed_experts.combine",
+    ]
+
+
 def test_parse_multiple_integration_test_suites() -> None:
     assert _parse_test_suites("features,models,h100,b200") == (
         "features",
@@ -81,6 +127,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "deepseek_v3_fsdp+cp+tp+minimal_async_ep+sdc_replay",
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
+        "dist_gemm+remat",
         "float8",
         "fsdp+tp+cp+compile+float8",
         "fsdp_symm_mem",
@@ -122,12 +169,18 @@ def test_models_select_fake_and_real_pg_cases() -> None:
 
     assert {
         "deepseek_v3_fsdp+ep",
+        "llama3_fsdp+tp+cp+remat",
         "qwen3_moe_fsdp+tp+cp+ep_param_groups",
+        "qwen3_moe_fsdp+tp+cp+ep+remat_param_groups",
         "kimi_k2_5_muon_fsdp+ep",
         "muse_glimmer_text_fsdp",
+        "muse_glimmer_text_fsdp+remat",
         "muse_glimmer_mm_fsdp+tp+sp",
     } <= fake_pg_model_tests
-    assert {"deepseek_v3_fsdp+cp+pp+ep"} <= real_pg_model_tests
+    assert {
+        "deepseek_v3_fsdp+cp+pp+ep",
+        "deepseek_v3_fsdp+ep+remat_dispatch",
+    } <= real_pg_model_tests
 
 
 def test_flux_fake_pg_filters_real_collective_cases() -> None:

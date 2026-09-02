@@ -16,6 +16,7 @@ sharding can DTensor-wrap it before it meets the head-sharded q/k) and
 Shape suffixes:
 - T = packed visual tokens
 - D = vision dim
+- F = vision MLP hidden dim
 - H = num heads
 - Dh = head dim
 """
@@ -24,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
@@ -69,6 +71,8 @@ def create_block_diagonal_mask(
 class VisionMLP(Module):
     """Feed-forward network with GELU activation (fc1 -> act -> fc2)."""
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("fc1", "fc2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         fc1: Linear.Config
@@ -84,7 +88,19 @@ class VisionMLP(Module):
         self.act_fn = config.act_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        fc1_out_TF = remat.region(
+            self.linear_fc1,
+            self.remat_region_name("fc1"),
+            recompute=self.should_recompute_remat_region("fc1"),
+        )(x)
+        remat.recompute_needs_tensor(fc1_out_TF)
+        out_TD = remat.region(
+            self.linear_fc2,
+            self.remat_region_name("fc2"),
+            recompute=self.should_recompute_remat_region("fc2"),
+        )(self.act_fn(fc1_out_TF))
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class VisionAttention(Module):
@@ -94,6 +110,8 @@ class VisionAttention(Module):
     applied via the injected ``rope_apply`` callable so this class is reused
     across models with different rotary formulations.
     """
+
+    AVAILABLE_REMAT_SAVE_REGIONS = ("qkv", "inner_attention", "proj")
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -120,6 +138,15 @@ class VisionAttention(Module):
         self.proj = config.proj.build()
         self.flex_attention = config.inner_attention.build()
 
+    def _project_qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project and split Q/K/V into local attention heads."""
+        q_THDh = local_head_split(self.wq(x_TD), self.head_dim)
+        k_THDh = local_head_split(self.wk(x_TD), self.head_dim)
+        v_THDh = local_head_split(self.wv(x_TD), self.head_dim)
+        return q_THDh, k_THDh, v_THDh
+
     def forward(
         self,
         x: torch.Tensor,
@@ -132,17 +159,29 @@ class VisionAttention(Module):
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_THDh = local_head_split(self.wq(x), self.head_dim)
-        k_THDh = local_head_split(self.wk(x), self.head_dim)
-        v_THDh = local_head_split(self.wv(x), self.head_dim)
+        q_THDh, k_THDh, v_THDh = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.should_recompute_remat_region("qkv"),
+        )(x)
+        remat.recompute_needs_tensor(q_THDh, k_THDh, v_THDh)
 
         q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
-        out_THDh = self.flex_attention(
-            q_THDh, k_THDh, v_THDh, attention_masks=attention_mask
-        )
+        out_THDh = remat.region(
+            self.flex_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.should_recompute_remat_region("inner_attention"),
+        )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
+        remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
-        return self.proj(out_TD)
+        out_TD = remat.region(
+            self.proj,
+            self.remat_region_name("proj"),
+            recompute=self.should_recompute_remat_region("proj"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class VisionTransformerBlock(Module):

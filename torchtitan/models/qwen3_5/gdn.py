@@ -435,6 +435,10 @@ class GatedDeltaNet(Module):
     is processed as a single continuous stream.
     """
 
+    # TODO: Add remat save regions after deciding whether the six input
+    # projections should be independently selectable or grouped into larger
+    # semantic regions. The inner GDN kernel and out_proj also need regions.
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         key_head_dim: int

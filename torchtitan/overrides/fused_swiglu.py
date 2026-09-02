@@ -52,6 +52,7 @@ from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 import triton
 import triton.language as tl
 
@@ -457,6 +458,8 @@ class FusedSwiGLU(FeedForward):
     Inherits :class:`FeedForward` so ``isinstance(x, FeedForward)`` checks hold.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("w13", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         w13: Linear.Config
@@ -470,9 +473,21 @@ class FusedSwiGLU(FeedForward):
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = self.w13(x).unflatten(-1, (-1, 2))
+        gate_up = remat.region(
+            self.w13,
+            self.remat_region_name("w13"),
+            recompute=self.should_recompute_remat_region("w13"),
+        )(x)
+        remat.recompute_needs_tensor(gate_up)
+        gate_up = gate_up.unflatten(-1, (-1, 2))
         gate, up = gate_up.unbind(-1)
-        return self.w2(_fused_silu_and_mul(gate, up))
+        out = remat.region(
+            self.w2,
+            self.remat_region_name("w2"),
+            recompute=self.should_recompute_remat_region("w2"),
+        )(_fused_silu_and_mul(gate, up))
+        remat.recompute_needs_tensor(out)
+        return out
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
@@ -521,6 +536,8 @@ class DistGEMMFusedSwiGLU(FusedSwiGLU):
     only the pair of ``torch.cat`` calls it does in dgrad.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("w13", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(FusedSwiGLU.Config):
         """Binds ``Config.build()`` to this module rather than the parent, so it
@@ -530,31 +547,53 @@ class DistGEMMFusedSwiGLU(FusedSwiGLU):
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_unfused()
-            return super().forward(x)
-
-        # w13.weight is (2 * hidden/R, dim) per rank, with gate/up rows
-        # interleaved. The output columns retain that ordering.
-        h = AllGatherLinear.apply(
-            x,
-            self.w13.weight,
-            self.w13.bias,
-            tp_group,
-            tp_group.group_name,
-        )
+            h = remat.region(
+                self.w13,
+                self.remat_region_name("w13"),
+                recompute=self.should_recompute_remat_region("w13"),
+            )(x)
+        else:
+            # w13.weight is (2 * hidden/R, dim) per rank, with gate/up rows
+            # interleaved. The output columns retain that ordering.
+            h = remat.region(
+                AllGatherLinear.apply,
+                self.remat_region_name("w13"),
+                recompute=self.should_recompute_remat_region("w13"),
+            )(
+                x,
+                self.w13.weight,
+                self.w13.bias,
+                tp_group,
+                tp_group.group_name,
+            )
+        remat.recompute_needs_tensor(h)
         # The output columns carry that same alternation, so splitting the
         # trailing axis into (hidden/R, 2) recovers the halves. They come out as
-        # strided views, which need no contiguous() here: the kernel is passed
-        # each input's strides. silu_and_mul_op is called directly rather than via
-        # _fused_silu_and_mul because these are already plain local 2D tensors --
-        # there is no DTensor to local_map over.
+        # strided views, which need no contiguous() here.
         gate, up = h.unflatten(-1, (-1, 2)).unbind(-1)
-        y_flat = LinearReduceScatter.apply(
-            silu_and_mul_op(gate, up),
-            self.w2.weight,
-            self.w2.bias,
-            tp_group,
-            tp_group.group_name,
-        )
+        if tp_group is None:
+            h = _fused_silu_and_mul(gate, up)
+            y_flat = remat.region(
+                self.w2,
+                self.remat_region_name("w2"),
+                recompute=self.should_recompute_remat_region("w2"),
+            )(h)
+        else:
+            # These are already plain local 2D tensors, so the TP path calls the
+            # kernel directly instead of using the DTensor-aware helper.
+            h = silu_and_mul_op(gate, up)
+            y_flat = remat.region(
+                LinearReduceScatter.apply,
+                self.remat_region_name("w2"),
+                recompute=self.should_recompute_remat_region("w2"),
+            )(
+                h,
+                self.w2.weight,
+                self.w2.bias,
+                tp_group,
+                tp_group.group_name,
+            )
+        remat.recompute_needs_tensor(y_flat)
         return y_flat
 
 

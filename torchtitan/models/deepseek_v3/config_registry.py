@@ -73,6 +73,12 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
+def deepseek_v3_debugmodel_q_lora() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.model_spec = model_registry("debugmodel_q_lora")
+    return config
+
+
 def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry("debugmodel", num_mtp_layers=1)

@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
@@ -92,6 +93,8 @@ class Qwen35Attention(BaseAttention):
     gated ``wq`` doesn't fit a fused QKV projection that TP-shards by head.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("qkv", "inner_attention", "wo")
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -137,11 +140,12 @@ class Qwen35Attention(BaseAttention):
     ) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
 
-        # wq is 2x wider: produces query + gate
-        xq_gate_TN2H = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
-        xq_TNH, gate_TNH = xq_gate_TN2H.chunk(2, dim=-1)
-        xk_TNH = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_TNH = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        xq_TNH, gate_TNH, xk_TNH, xv_TNH = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.should_recompute_remat_region("qkv"),
+        )(x_TD)
+        remat.recompute_needs_tensor(xq_TNH, gate_TNH, xk_TNH, xv_TNH)
 
         # QK norm (before RoPE)
         xq_TNH = self.q_norm(xq_TNH)
@@ -161,19 +165,42 @@ class Qwen35Attention(BaseAttention):
         xq_TNH = torch.cat([xq_TNR, xq_TNP], dim=-1)
         xk_TNH = torch.cat([xk_TNR, xk_TNP], dim=-1)
 
-        out_TNH = self.inner_attention(
+        out_TNH = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.should_recompute_remat_region("inner_attention"),
+        )(
             xq_TNH,
             xk_TNH,
             xv_TNH,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        remat.recompute_needs_tensor(out_TNH)
+        out_TNH = out_TNH.contiguous()
 
         # Output gating
         out_TNH = out_TNH * torch.sigmoid(gate_TNH)
         out_TD = out_TNH.view(num_tokens, -1)
-        return self.wo(out_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.should_recompute_remat_region("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
+
+    def _project_qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project Q/K/V together as one remat boundary; WQ also produces gate."""
+        num_tokens = x_TD.shape[0]
+        xq_gate_TN2H = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_TNH, gate_TNH = xq_gate_TN2H.chunk(2, dim=-1)
+        xk_TNH = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
+        xv_TNH = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        return xq_TNH, gate_TNH, xk_TNH, xv_TNH
 
 
 class Qwen35TransformerBlock(Module):
