@@ -191,40 +191,6 @@ def test_reload_updates_output_in_place():
         assert getattr(mod, name).data_ptr() == ptrs[name], name
 
 
-def test_override_swaps_the_config_and_remaps_sharding():
-    """The override claims a stock GroupedExperts and carries its layouts over."""
-    from torchtitan.models.common.moe import GroupedExperts
-    from torchtitan.overrides.mxfp8_inference_grouped_experts import (
-        mxfp8_inference_grouped_experts,
-    )
-    from torchtitan.protocols.sharding import ShardingConfig
-
-    gate_layout, down_layout = {"tp": "gate"}, {"tp": "down"}
-    cfg = GroupedExperts.Config(
-        dim=D,
-        hidden_dim=F,
-        num_experts=E,
-        sharding_config=ShardingConfig(
-            state_shardings={
-                "w1_EFD": gate_layout,
-                "w3_EFD": gate_layout,
-                "w2_EDF": down_layout,
-            }
-        ),
-    )
-    out = mxfp8_inference_grouped_experts(cfg)
-    assert isinstance(out, MXFP8InferenceGroupedExperts.Config)
-    state = out.sharding_config.state_shardings
-    assert set(state) == {"w13_qdata", "w13_scales", "w2_EDF_qdata", "w2_EDF_scales"}
-    assert state["w13_qdata"] is gate_layout and state["w13_scales"] is gate_layout
-    assert state["w2_EDF_qdata"] is down_layout
-
-    # Not a stock GroupedExperts.Config -> left alone, so stacking overrides is
-    # a no-op rather than a corruption.
-    already = MXFP8InferenceGroupedExperts.Config(dim=D, hidden_dim=F, num_experts=E)
-    assert mxfp8_inference_grouped_experts(already) is already
-
-
 @pytest.mark.parametrize(
     "dim,hidden_dim",
     [(D, F), (96, 100)],  # the second pads on both axes: 2F=200 rows, D/32=3 cols
@@ -245,11 +211,11 @@ def test_allocated_blocked_scales_match_the_kernel(dim, hidden_dim):
 def test_override_claims_the_qat_converted_config():
     """The override must claim the config the 30B path actually produces.
 
-    ``MXFP8GroupedExpertsQATConverter`` runs before generator overrides, so the
-    config arriving here is ``MXFP8QATGroupedExperts.Config``, not a stock
-    ``GroupedExperts.Config``. Declining it leaves the generator on the training
-    experts module while the trainer publishes quantized names, which
-    ``load_state_dict(strict=False)`` then drops in silence.
+    The mxfp8 converter runs first, so the config arriving here is
+    ``MXFP8QATGroupedExperts.Config``. That class comes from a factory, and the
+    generator actor builds its own copy, so the override has to match it by
+    ``isinstance``. An identity check declines there in silence and leaves the
+    generator on the training module while the trainer publishes quantized names.
     """
     from torchtitan.components.quantization.mx import _get_mxfp8_qat_grouped_experts_cls
     from torchtitan.models.common.moe import GroupedExperts

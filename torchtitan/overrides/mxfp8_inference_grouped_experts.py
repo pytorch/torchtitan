@@ -8,16 +8,13 @@
 
 """Routed experts stored as MXFP8, for a generator fed pre-quantized weights.
 
-The trainer quantizes the expert weights and fuses gate with up before it
-publishes them (see ``mxfp8_utils``), so the parameters here are the
-grouped-GEMM operands themselves. The generator holds no high-precision copy and
-has no cache to invalidate. For ``E`` experts, hidden dim ``F`` and model dim
-``D``, the parameters are::
+Requires, on top of listing this override on the generator:
 
-    w13_qdata     (E, 2F, D)     e4m3   quant view (E, N=2F, K=D)
-    w13_scales    (E, 2F, D/32)  e8m0   one scale per 32 of K
-    w2_EDF_qdata  (E, D, F)      e4m3   quant view (E, N=D,  K=F)
-    w2_EDF_scales (E, D, F/32)   e8m0
+1. ``PolicyTrainer.Config.transfer_mxfp8_experts``, so the trainer publishes the
+   expert weights already quantized instead of in bf16.
+2. ``MXFP8GroupedExpertsQATConverter`` on the model spec. It replaces the
+   experts with ``MXFP8QATGroupedExperts``, the config this override expects to
+   swap, and pads each expert's token group for the quantized grouped GEMM.
 
 The scales are stored unswizzled because that is the layout that survives
 resharding, and so is the layout the trainer publishes. The GEMM needs them
@@ -104,12 +101,6 @@ class MXFP8InferenceGroupedExperts(Module):
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Allocate the GEMM-layout scales, sized from the sharded parameters.
-
-        This cannot happen in ``__init__``, where the parameter shapes are still
-        global. For qwen3-30b ``w13_scales`` is ``(128, 1536, 64)`` there, while
-        a rank at EP=4/TP=2 holds ``(32, 768, 64)``. Reading the shape off the
-        parameter at this point yields the local one, so the module never needs
-        to know either parallelism degree.
 
         The swizzled shape is predicted rather than obtained by swizzling a
         tensor of zeros. torchao's ``triton_mx_block_rearrange_per_group_3d``
@@ -220,14 +211,6 @@ def _mxfp8_inference_sharding(base: ShardingConfig) -> ShardingConfig:
 def mxfp8_inference_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
-    # The factory is memoized, so this is the same class the MXFP8 converter
-    # produced.
-    from torchtitan.components.quantization.mx import _get_mxfp8_qat_grouped_experts_cls
-
-    MXFP8QATGroupedExperts = _get_mxfp8_qat_grouped_experts_cls(GroupedExperts)
-    if type(cfg) not in (GroupedExperts.Config, MXFP8QATGroupedExperts.Config):
-        return cfg
-
     # No meaningful initializer for quantized parameters: every value arrives
     # from the trainer. Zeroing just defines them until the first sync.
     quantized = derive(
