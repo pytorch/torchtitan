@@ -703,16 +703,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # Two optimizer steps initialize lazy optimizer state and establish
             # the steady-state allocator behavior before the graph pool is fixed.
             num_warmup_iterations = 2 * self.gradient_accumulation_steps
+            restore_gradients_for = (
+                tuple(
+                    parameter
+                    for model_part in self.model_parts
+                    for parameter in model_part.parameters()
+                )
+                if self._should_restore_graph_owned_gradients()
+                else None
+            )
             if parallel_dims.pp_enabled:
                 self.pp_fwd_bwd_fn = wrap_with_cuda_graph(
                     self.pp_fwd_bwd_fn,
                     num_warmup_iterations=num_warmup_iterations,
+                    restore_gradients_for=restore_gradients_for,
                 )
             else:
                 self.fwd_bwd_fn = wrap_with_cuda_graph(
                     self.fwd_bwd_fn,
                     num_warmup_iterations=num_warmup_iterations,
+                    restore_gradients_for=restore_gradients_for,
                 )
+
+    def _should_restore_graph_owned_gradients(self) -> bool:
+        return (
+            not self.config.training.disable_cuda_graphs
+            and self.gradient_accumulation_steps == 1
+        )
+
+    def _should_clear_gradients_to_none(self) -> bool:
+        return (
+            self.config.training.disable_cuda_graphs
+            or self._should_restore_graph_owned_gradients()
+        )
 
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
@@ -895,7 +918,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=self._should_clear_gradients_to_none())
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
         should_log = self.metrics_processor.should_log(self.step)
