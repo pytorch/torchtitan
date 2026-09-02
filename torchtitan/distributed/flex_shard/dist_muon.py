@@ -16,6 +16,7 @@ from functools import partial
 from typing import Any, cast, NoReturn, overload
 
 import torch
+import torch.distributed as dist
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -60,6 +61,7 @@ def build_dist_muon(
     *,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
+    deduplicate_compute_mesh_axis: str | None = None,
     **kwargs: Any,
 ) -> DistMuon:
     """Construct a DistMuon optimizer with FlexShard redistribution.
@@ -72,11 +74,18 @@ def build_dist_muon(
     batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
     complete matrices. A single 2D matrix without ``BlockShard`` uses
     whole-matrix compute such as ``Owned``.
+
+    ``deduplicate_compute_mesh_axis`` may name an active replicated storage
+    mesh axis. Coordinate zero then runs the existing DistMuon update while
+    every other coordinate updates only its replicated momentum state. Updated
+    local parameter shards are broadcast from coordinate zero. This removes
+    duplicate Muon compute without changing the optimizer state layout.
     """
     return DistMuon(
         _normalize_param_groups(params),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
+        deduplicate_compute_mesh_axis=deduplicate_compute_mesh_axis,
         **kwargs,
     )
 
@@ -239,6 +248,10 @@ def _initialize_dist_muon(
     )
     optimizer._initialize_plan(compute_layouts)
     optimizer._validate_plan_across_ranks()
+    optimizer._replica_compute_deduplication = _resolve_replica_compute_deduplication(
+        optimizer._parameter_compute_layouts,
+        mesh_axis_name=optimizer._deduplicate_compute_mesh_axis,
+    )
     optimizer._redistribution_runtime = _BucketedRedistributionRuntime[
         _ParameterComputeLayout
     ](tensor_device)
@@ -266,6 +279,8 @@ class DistMuon(Optimizer):
     _prepared_compute_layouts: dict[str, _PreparedParameterComputeLayout]
     _specs: tuple[_BucketSpec, ...]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
+    _replica_compute_deduplication: _ReplicaComputeDeduplication | None
+    _deduplicate_compute_mesh_axis: str | None
     _param_groups_frozen: bool
 
     def __init__(
@@ -282,7 +297,15 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
+        deduplicate_compute_mesh_axis: str | None = None,
     ) -> None:
+        if deduplicate_compute_mesh_axis is not None and (
+            not isinstance(deduplicate_compute_mesh_axis, str)
+            or not deduplicate_compute_mesh_axis
+        ):
+            raise ValueError(
+                "deduplicate_compute_mesh_axis must be a non-empty string or None"
+            )
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -295,6 +318,7 @@ class DistMuon(Optimizer):
         }
         self._first_step_validated = False
         self._param_groups_frozen = False
+        self._deduplicate_compute_mesh_axis = deduplicate_compute_mesh_axis
         super().__init__(params, defaults)
         self._validate_groups()
         self._param_groups_frozen = True
@@ -320,13 +344,19 @@ class DistMuon(Optimizer):
                 loss = closure()
 
         self._preflight_step()
-        self._redistribution_runtime.run(
-            self._bucket_plans,
-            local_tensor_spec=self._local_tensor_spec,
-            prepare=self._prepare_local,
-            compute=self._compute_update,
-            finalize=self._apply_update,
-        )
+        replica_deduplication = self._replica_compute_deduplication
+        if replica_deduplication is None or replica_deduplication.is_owner:
+            self._redistribution_runtime.run(
+                self._bucket_plans,
+                local_tensor_spec=self._local_tensor_spec,
+                prepare=self._prepare_local,
+                compute=self._compute_update,
+                finalize=self._apply_update,
+            )
+        else:
+            self._update_momentum_only()
+        if replica_deduplication is not None:
+            self._broadcast_replica_parameters(replica_deduplication)
         return loss
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
@@ -606,6 +636,46 @@ class DistMuon(Optimizer):
             out=out,
         )
         torch.autograd.graph.increment_version(momentum_state)
+
+    def _update_momentum_only(self) -> None:
+        for compute_layout in self._parameter_compute_layouts:
+            grad, momentum, momentum_state, group = self._local_gradient_and_momentum(
+                compute_layout
+            )
+            _update_muon_momentum(
+                grad,
+                momentum,
+                momentum=group["momentum"],
+            )
+            torch.autograd.graph.increment_version(momentum_state)
+
+    @staticmethod
+    def _broadcast_replica_parameters(
+        replica_deduplication: _ReplicaComputeDeduplication,
+    ) -> None:
+        # Backends require a globally consistent collective order when several
+        # process groups are active, so finish one group before starting another.
+        for broadcast_group in replica_deduplication.parameter_broadcast_groups:
+            works: list[dist.Work] = []
+            for param in broadcast_group.params:
+                local_parameter = param.to_local().detach()
+                if not local_parameter.numel():
+                    continue
+                work = dist.broadcast(
+                    local_parameter,
+                    src=broadcast_group.source_rank,
+                    group=broadcast_group.process_group,
+                    async_op=True,
+                )
+                assert work is not None
+                works.append(work)
+            for work in works:
+                work.wait()
+
+        if not replica_deduplication.is_owner:
+            for broadcast_group in replica_deduplication.parameter_broadcast_groups:
+                for param in broadcast_group.params:
+                    torch.autograd.graph.increment_version(param)
 
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
@@ -904,6 +974,94 @@ class _ParameterComputeLayout:
         return isinstance(
             self.storage_to_compute_transition, _NoRedistributionTransition
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplicaParameterBroadcastGroup:
+    process_group: dist.ProcessGroup
+    source_rank: int
+    params: tuple[DTensor, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplicaComputeDeduplication:
+    is_owner: bool
+    parameter_broadcast_groups: tuple[_ReplicaParameterBroadcastGroup, ...]
+
+
+def _resolve_replica_compute_deduplication(
+    compute_layouts: Sequence[_ParameterComputeLayout],
+    *,
+    mesh_axis_name: str | None,
+) -> _ReplicaComputeDeduplication | None:
+    if mesh_axis_name is None:
+        return None
+
+    is_owner: bool | None = None
+    broadcast_process_groups: list[dist.ProcessGroup] = []
+    broadcast_source_ranks: list[int] = []
+    broadcast_params: list[list[DTensor]] = []
+    for compute_layout in compute_layouts:
+        param = compute_layout.param
+        mesh_axis_names = param.device_mesh.mesh_dim_names
+        if mesh_axis_names is None or mesh_axis_name not in mesh_axis_names:
+            raise ValueError(
+                f"Muon parameter {compute_layout.fqn!r} cannot deduplicate compute "
+                f"on missing storage mesh axis {mesh_axis_name!r}"
+            )
+        storage_mesh_axis = mesh_axis_names.index(mesh_axis_name)
+        mesh_axis_size = param.device_mesh.size(storage_mesh_axis)
+        if mesh_axis_size <= 1:
+            raise ValueError(
+                f"Muon parameter {compute_layout.fqn!r} cannot deduplicate compute "
+                f"on size-{mesh_axis_size} storage mesh axis {mesh_axis_name!r}"
+            )
+        if type(param.placements[storage_mesh_axis]) is not Replicate:
+            raise ValueError(
+                f"Muon parameter {compute_layout.fqn!r} requires Replicate storage "
+                f"on compute-deduplication mesh axis {mesh_axis_name!r}; got "
+                f"{param.placements[storage_mesh_axis]!r}"
+            )
+
+        replicate_mesh = param.device_mesh[mesh_axis_name]
+        mesh_coordinate = param.device_mesh.get_coordinate()
+        assert mesh_coordinate is not None
+        parameter_is_owner = mesh_coordinate[storage_mesh_axis] == 0
+        if is_owner is None:
+            is_owner = parameter_is_owner
+        elif is_owner != parameter_is_owner:
+            raise ValueError(
+                "all DistMuon parameters must select the same local replica owner"
+            )
+        process_group = replicate_mesh.get_group()
+        source_rank = _device_mesh_ranks(replicate_mesh)[0]
+        for group_index, existing_process_group in enumerate(broadcast_process_groups):
+            if existing_process_group is process_group:
+                assert broadcast_source_ranks[group_index] == source_rank
+                broadcast_params[group_index].append(param)
+                break
+        else:
+            broadcast_process_groups.append(process_group)
+            broadcast_source_ranks.append(source_rank)
+            broadcast_params.append([param])
+
+    assert is_owner is not None
+    return _ReplicaComputeDeduplication(
+        is_owner=is_owner,
+        parameter_broadcast_groups=tuple(
+            _ReplicaParameterBroadcastGroup(
+                process_group=process_group,
+                source_rank=source_rank,
+                params=tuple(params),
+            )
+            for process_group, source_rank, params in zip(
+                broadcast_process_groups,
+                broadcast_source_ranks,
+                broadcast_params,
+                strict=True,
+            )
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1834,7 +1992,11 @@ def _prepare_muon_input(
     out: Tensor,
 ) -> Tensor:
     """Update momentum and prepare the Tensor passed to Muon computation."""
-    momentum_buffer.lerp_(gradient, 1 - momentum)
+    _update_muon_momentum(
+        gradient,
+        momentum_buffer,
+        momentum=momentum,
+    )
     if nesterov:
         torch.lerp(
             gradient,
@@ -1845,6 +2007,15 @@ def _prepare_muon_input(
     else:
         out.copy_(momentum_buffer)
     return out
+
+
+def _update_muon_momentum(
+    gradient: Tensor,
+    momentum_buffer: Tensor,
+    *,
+    momentum: float,
+) -> None:
+    momentum_buffer.lerp_(gradient, 1 - momentum)
 
 
 def _compute_muon_direction(
