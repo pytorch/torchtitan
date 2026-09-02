@@ -870,9 +870,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for input_dict, labels in microbatches:
                 for key, value in input_dict.items():
                     if isinstance(value, torch.Tensor):
-                        input_dict[key] = value.to(self.device)
+                        input_dict[key] = value.to(self.device, non_blocking=True)
                 input_dict_mbs.append(input_dict)
-                label_mbs.append(labels.to(self.device))
+                label_mbs.append(labels.to(self.device, non_blocking=True))
 
             if parallel_dims.pp_enabled:
                 fwd_bwd_input_dict = input_dict_mbs
