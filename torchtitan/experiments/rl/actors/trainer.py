@@ -120,6 +120,7 @@ class PolicyTrainer(Actor, Configurable):
         training_dtype = TORCH_DTYPE_MAP[config.training.dtype]
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
+        self._routing_weight_sync_attached = False
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -482,17 +483,12 @@ class PolicyTrainer(Actor, Configurable):
         this returns and any number of generators can read the staged copy.
         """
         state_dict = self.model.state_dict()
-        if self._transfer_dtype is not None:
-            # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
-            # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
-            # Exclude buffers from the cast: FSDP mixed precision casts params to the compute dtype but
-            # leaves buffers at their registered dtype (same as pretraining), e.g. the fp32
-            # expert_bias_E load-balance bias in MoE. The generator keeps those buffers at the same
-            # registered dtype, so casting them here would mismatch its state dict and fail torchstore's
-            # dtype check on weight sync.
-            # Strip the AC wrapper's `_checkpoint_wrapped_module` segment so buffer FQNs match state_dict() keys.
-            # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
-            #   CPU-staged path.
+        if (
+            self._transfer_dtype is not None
+            and not self._routing_weight_sync_attached
+        ):
+            # Legacy CPU-staged sync does not preserve per-key wire dtypes, so
+            # cast parameters here while keeping registered buffers unchanged.
             buffer_names = self._weight_sync_buffer_names()
             state_dict = {
                 name: (
@@ -524,3 +520,4 @@ class PolicyTrainer(Actor, Configurable):
             transfer_dtype=self._transfer_dtype,
             preserve_dtype_keys=self._weight_sync_buffer_names(),
         )
+        self._routing_weight_sync_attached = True
