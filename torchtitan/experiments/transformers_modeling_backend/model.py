@@ -1195,19 +1195,18 @@ class HFTransformerModel(BaseModel):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        if parallelism.spmd_backend == "spmd_types":
-            from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-            from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
-            input_sharding = decoder_input_sharding()
-            # DSA attention masks are dense tensors but are not decoder inputs;
-            # preserve the old trainer behavior by annotating only declared names.
-            annotated = annotate_input_spmd_types(
-                parallel_dims,
-                {name: batch[name] for name in input_sharding if name in batch},
-                input_sharding,
-            )
-            batch.update(annotated)
+        input_sharding = decoder_input_sharding()
+        # DSA attention masks are dense tensors but are not decoder inputs;
+        # preserve the old trainer behavior by annotating only declared names.
+        annotated = annotate_input_spmd_types(
+            parallel_dims,
+            {name: batch[name] for name in input_sharding if name in batch},
+            input_sharding,
+        )
+        batch.update(annotated)
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch

@@ -23,7 +23,6 @@ from torchtitan.distributed.parallel_dims import (
     ParallelDims,
     unfold_dp_axes,
 )
-from torchtitan.distributed.utils import get_spmd_backend
 
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
@@ -32,6 +31,7 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 
 __all__ = [
     "annotate_input_spmd_types",
+    "annotate_replicated_parameters",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
@@ -137,8 +137,6 @@ def _spmd_mesh_stack() -> list[DeviceMesh | None]:
 
 def current_spmd_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    if get_spmd_backend() != "spmd_types":
-        return None
     stack = _spmd_mesh_stack()
     if not stack:
         return None
@@ -159,10 +157,6 @@ def spmd_mesh_size(axis_name: str) -> int:
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    assert (
-        get_spmd_backend() == "spmd_types"
-    ), "set_current_spmd_mesh() is only valid under spmd_types backend"
-
     stack = _spmd_mesh_stack()
     stack.append(mesh)
     if mesh is None:
@@ -183,8 +177,8 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
 
 @contextlib.contextmanager
 def maybe_set_sparse_mesh() -> Iterator[None]:
-    """Activate the registered sparse mesh under spmd_types, otherwise no-op."""
-    if get_spmd_backend() != "spmd_types" or (mesh := spmd_sparse_mesh()) is None:
+    """Activate the registered sparse mesh, if present."""
+    if (mesh := spmd_sparse_mesh()) is None:
         yield
         return
 
@@ -228,6 +222,16 @@ def annotate_input_spmd_types(
     return input_dict
 
 
+def annotate_replicated_parameters(
+    module: torch.nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Annotate unsharded module parameters as replicated on the dense mesh."""
+    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+        for param in module.parameters():
+            spmd.assert_type(param, spmd.R)
+
+
 def _per_axis_types(
     layout: spmd.SpmdType,
 ) -> dict[MeshAxisName, spmd.PerMeshAxisSpmdType]:
@@ -266,7 +270,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
     or we should write collective-based (not placement-based) redistributions
-    once the partial_dtensor backend is removed.
+    with explicit collectives.
     """
 
     def _normalize_partition_spec(

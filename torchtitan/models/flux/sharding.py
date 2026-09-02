@@ -13,8 +13,7 @@ from torch import nn
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
@@ -72,10 +71,7 @@ def set_flux_sharding_config(config: "FluxModel.Config") -> None:
 
 
 def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
-    # TODO(pianpwk): Infer these from the active SPMD mesh instead.
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
-        for param in model.parameters():
-            spmd.assert_type(param, spmd.R)
+    annotate_replicated_parameters(model, parallel_dims)
 
 
 def annotate_flux_forward_inputs(
@@ -88,9 +84,6 @@ def annotate_flux_forward_inputs(
     clip_encodings: torch.Tensor,
     timesteps: torch.Tensor,
 ) -> None:
-    if get_spmd_backend() != "spmd_types":
-        return
-
     sequence_type = {
         DP: spmd.S(0),
         CP: spmd.S(1),

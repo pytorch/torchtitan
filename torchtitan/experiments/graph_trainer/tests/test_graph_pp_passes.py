@@ -21,6 +21,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
+    get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
@@ -425,7 +426,6 @@ class _GraphPPDsv3FSDPTest(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
 
@@ -436,7 +436,7 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
 
         self._setup()
         traced_block = _trace_dsv3_moe_block_stage(
-            fsdp_mesh=self.parallel_dims.get_mesh("fsdp")
+            fsdp_mesh=get_simple_fsdp_mesh(self.parallel_dims)
         )
 
         fw_module, bw_module, meta = partition_joint_graph(
@@ -770,7 +770,7 @@ class GraphPPFSDPCollectiveSplitDsv3Test(_GraphPPDsv3FSDPTest):
             raise unittest.SkipTest("real FSDP collective trace requires 2 GPUs")
 
         self._setup()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         traced_block = _trace_dsv3_moe_block_stage(fsdp_mesh=fsdp_mesh)
         deduplicate_fsdp_unshard_chains_pass(
             traced_block.traced.gm,

@@ -126,8 +126,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.parallel_dims = parallel_dims = ParallelDims.from_config(
             config.parallelism, world_size
         )
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
-
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
             dp_degree, dp_rank = batch_mesh.size(), batch_mesh.get_local_rank()
@@ -323,10 +321,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
-            spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd_types"
-                and config.debug.spmd_typechecking
-            ),
+            spmd_typechecking=config.debug.spmd_typechecking,
         )
 
     def close(self) -> None:

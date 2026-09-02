@@ -69,7 +69,6 @@ import triton.language as tl
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import derive, override
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
@@ -832,7 +831,7 @@ class FusedMLAAttention(Attention):
 
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     q,
                     spmd.V,
@@ -869,11 +868,7 @@ class FusedMLAAttention(Attention):
                 self.qk_nope_head_dim,
             )
             k, v = k.squeeze(0), v.squeeze(0)
-            if (
-                get_spmd_backend() == "spmd_types"
-                and spmd.is_type_checking()
-                and not torch.compiler.is_compiling()
-            ):
+            if spmd.is_type_checking() and not torch.compiler.is_compiling():
                 for tensor in (k, v):
                     spmd.assert_type(
                         tensor,

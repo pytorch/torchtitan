@@ -27,7 +27,6 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 _active_parametrization = True
@@ -52,7 +51,6 @@ class MixedPrecisionPolicy:
 """
 [Note: SimpleFSDP and spmd_types]
 
-Under spmd_types backend, SimpleFSDP differs slightly under model-parallel (TP/EP).
 Params arrive as annotated plain tensors, pre-sharded in module.parallelize,
 instead of DTensors.
 
@@ -76,8 +74,8 @@ def _prepare_spmd_parameter_for_fsdp(
 ) -> tuple[torch.Tensor, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]]:
     """Prepare an SPMD-annotated parameter for SimpleFSDP.
 
-    For the spmd_types backend, record the parameter's model-parallel axis types
-    for ReplicateComputation and restore its DTensor wrapper on ``non_dp_mesh``.
+    Record the parameter's model-parallel axis types for ReplicateComputation
+    and restore its DTensor wrapper on ``non_dp_mesh``.
     """
     non_dp_mesh_types = {}
     if non_dp_mesh is None:
@@ -229,7 +227,7 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
-        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType] | None = None,
+        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType],
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -246,8 +244,6 @@ class ReplicateComputation(Module):
         # non_dp_mesh_types stores local type for non-FSDP (model-parallel) axes
         # (e.g. TP on dense, EP on sparse), so SimpleFSDP handles any TP/EP grad
         # reductions it's responsible for.
-        if get_spmd_backend() == "spmd_types":
-            assert non_dp_mesh_types is not None
         self.non_dp_mesh_types = non_dp_mesh_types
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
@@ -279,31 +275,20 @@ class ReplicateComputation(Module):
                 grad_placements=self.grad_placements
             )
 
-            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
-            non_dp_mesh_dim_names = tuple(
-                x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
-            )
-            non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
-
-            if self.non_dp_mesh_types is not None:
-                output = replicated_local_tensor
-                for axis, axis_type in self.non_dp_mesh_types.items():
-                    if axis_type is spmd.R:
-                        # handle any BWD all-reduces on non-FSDP-axes that FSDP is responsible for.
-                        # e.g. TP RMSNorm w/ SP on, is annotated as spmd.R, we add P->I in BWD.
-                        # if SP off, annotation is spmd.I, no effect.
-                        output = spmd.convert(
-                            output,
-                            axis,
-                            src=spmd.I,
-                            dst=spmd.R,
-                            op_dtype=self.param_dtype,
-                            backward_options={"op_dtype": self.reduce_dtype},
-                        )
-            else:
-                output = DTensor.from_local(
-                    replicated_local_tensor, non_dp_mesh, non_dp_placements
-                )
+            output = replicated_local_tensor
+            for axis, axis_type in self.non_dp_mesh_types.items():
+                if axis_type is spmd.R:
+                    # Handle any backward all-reduces on non-FSDP axes that
+                    # FSDP is responsible for. For example, TP RMSNorm with SP
+                    # uses R, so add P->I in backward. I remains a no-op.
+                    output = spmd.convert(
+                        output,
+                        axis,
+                        src=spmd.I,
+                        dst=spmd.R,
+                        op_dtype=self.param_dtype,
+                        backward_options={"op_dtype": self.reduce_dtype},
+                    )
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
                 placements=self.compute_placements,
@@ -370,13 +355,12 @@ def data_parallel(
 
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
-                if get_spmd_backend() == "spmd_types":
-                    p, non_dp_mesh_types = _prepare_spmd_parameter_for_fsdp(
-                        p,
-                        p_name,
-                        non_dp_mesh,
-                    )
-                    param_non_dp_mesh_types[p_name] = non_dp_mesh_types
+                p, non_dp_mesh_types = _prepare_spmd_parameter_for_fsdp(
+                    p,
+                    p_name,
+                    non_dp_mesh,
+                )
+                param_non_dp_mesh_types[p_name] = non_dp_mesh_types
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
@@ -409,11 +393,7 @@ def data_parallel(
                 param_sharding=param_sharding,
                 mode=mode,
                 mp_policy=mp_policy,
-                non_dp_mesh_types=(
-                    param_non_dp_mesh_types.get(param_name, {})
-                    if get_spmd_backend() == "spmd_types"
-                    else None
-                ),
+                non_dp_mesh_types=param_non_dp_mesh_types.get(param_name, {}),
             ),
         )
     return model

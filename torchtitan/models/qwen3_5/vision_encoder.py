@@ -22,7 +22,6 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import _maybe_wrap_positions, CosSinRoPE
@@ -116,7 +115,7 @@ def _compute_learned_pos_embeds(
                 pos_embeds[i] = pos_hw_block
 
     packed_pos_embeds = torch.cat([pos_embeds[i] for i in range(len(grids))], dim=0)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         packed_pos_embeds = spmd.mutate_type(
             packed_pos_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
         )
@@ -188,7 +187,7 @@ def _compute_2d_rope_cache(
             .expand(merged_h, merged_w, merge_size, merge_size)
             .reshape(-1)
         )
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             row_idx = spmd.mutate_type(row_idx, "tp", src=spmd.R, dst=spmd.I)
             col_idx = spmd.mutate_type(col_idx, "tp", src=spmd.R, dst=spmd.I)
 
@@ -210,7 +209,7 @@ def _compute_2d_rope_cache(
 
     # Compute cos/sin in float32 for numerical precision
     packed_rope_embeds = torch.cat([rope_embeds[i] for i in range(len(grids))], dim=0)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         packed_rope_embeds = spmd.mutate_type(
             packed_rope_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
         )
@@ -257,7 +256,7 @@ class VisionRotaryEmbedding(Module):
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
         seq = _maybe_wrap_positions(seq, self.inv_freq)
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
 

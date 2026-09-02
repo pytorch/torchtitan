@@ -37,7 +37,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
@@ -49,7 +48,7 @@ from torchtitan.protocols.module import Module, ModuleDict
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
     """Annotate a tensor created inside the vision forward."""
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         return spmd.mutate_type(
             tensor,
             src=spmd.R,

@@ -23,7 +23,6 @@ from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
@@ -31,48 +30,6 @@ from torchtitan.tools.utils import device_module, device_type
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
-
-
-_spmd_backend = "spmd_types"
-
-
-def set_spmd_backend(spmd_backend: str) -> None:
-    """Set the active SPMD backend for distributed runtime helpers."""
-    global _spmd_backend
-    _spmd_backend = spmd_backend
-
-
-def get_spmd_backend() -> str:
-    """Return the active SPMD backend."""
-    return _spmd_backend
-
-
-def check_dtensor_placements_match(
-    actual: tuple[Placement, ...],
-    expected: tuple[Placement, ...],
-    tensor_ndim: int,
-) -> bool:
-    """Compare DTensor placements, normalizing negative Shard dims to tensor rank."""
-    if len(actual) != len(expected):
-        return False
-
-    def normalize_dim(dim: int, ndim: int) -> int:
-        return dim + ndim if dim < 0 else dim
-
-    for actual_placement, expected_placement in zip(actual, expected, strict=True):
-        if isinstance(actual_placement, Shard) and isinstance(
-            expected_placement, Shard
-        ):
-            if normalize_dim(actual_placement.dim, tensor_ndim) != normalize_dim(
-                expected_placement.dim, tensor_ndim
-            ):
-                return False
-            continue
-
-        if actual_placement != expected_placement:
-            return False
-
-    return True
 
 
 def _dist_reduce(
@@ -402,7 +359,7 @@ def get_spmd_context(
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
-            if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
+            if parallel_dims is not None:
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
                 from torchtitan.distributed.spmd_types import (

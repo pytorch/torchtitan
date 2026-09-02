@@ -172,7 +172,6 @@ def _prepare_layers(model):
 class _FakeParallelDims:
     """Minimal ParallelDims stub for tests that don't use full distributed setup."""
 
-    spmd_backend = "spmd_types"
     tp_enabled = False
     ep_enabled = False
     tp = 1

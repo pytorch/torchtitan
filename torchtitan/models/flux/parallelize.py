@@ -52,19 +52,13 @@ def parallelize_flux(
     if ac_config is not None:
         apply_ac(model)
 
-    if parallelism.spmd_backend == "spmd_types":
-        model.parallelize(parallel_dims)
-        annotate_dp_cp_params_as_r(model, parallel_dims)
+    model.parallelize(parallel_dims)
+    annotate_dp_cp_params_as_r(model, parallel_dims)
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
-    if parallelism.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-        dp_mesh_dims = None
-        assert dp_mesh is not None
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
     apply_fsdp(
         model,
         dp_mesh,
@@ -198,12 +192,7 @@ def parallelize_encoders(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    if parallel_dims.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-        dp_mesh_dims = None
-        assert dp_mesh is not None
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
     fsdp_config: dict[str, Any] = {
         "mesh": dp_mesh,
         "mp_policy": mp_policy,
@@ -217,8 +206,7 @@ def parallelize_encoders(
     # CLIP Text encoder has low computation / communication ratio, so it's not necessary to apply FSDP to it.
     hf_module = t5_model.hf_module
     assert isinstance(hf_module, nn.Module)
-    if parallel_dims.spmd_backend == "spmd_types":
-        annotate_dp_cp_params_as_r(hf_module, parallel_dims)
+    annotate_dp_cp_params_as_r(hf_module, parallel_dims)
     # pyrefly: ignore [missing-attribute, not-iterable]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)

@@ -171,14 +171,6 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
-    """
-    SPMD backend selector.
-
-    - "partial_dtensor": use DTensor for model-parallel axes only.
-    - "spmd_types": use the spmd_types path.
-    """
-
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -259,11 +251,6 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.spmd_backend not in {"partial_dtensor", "spmd_types"}:
-            raise ValueError(
-                "parallelism.spmd_backend must be either 'partial_dtensor' "
-                "or 'spmd_types'."
-            )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
@@ -351,7 +338,7 @@ class DebugConfig:
     """Choose the base RNG seed used for training"""
 
     spmd_typechecking: bool = False
-    """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
+    """Enable global SPMD type checking."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""

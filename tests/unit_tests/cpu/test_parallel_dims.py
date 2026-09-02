@@ -523,7 +523,6 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
-            spmd_backend="partial_dtensor",
         )
 
         # Test mesh building
@@ -537,13 +536,15 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertIn("batch", parallel_dims._single_axis_meshes)
         self.assertIn("loss", parallel_dims._single_axis_meshes)
         self.assertIn("dp_replicate", parallel_dims._single_axis_meshes)
-        self.assertIn("fsdp", parallel_dims._single_axis_meshes)
+        self.assertIn("dp", parallel_dims._single_axis_meshes)
+        self.assertIn("dp_shard", parallel_dims._single_axis_meshes)
         self.assertIn("cp", parallel_dims._single_axis_meshes)
         self.assertIn("tp", parallel_dims._single_axis_meshes)
 
         # Validate 1D mesh sizes - all should be 1 for single rank
         self.assertEqual(parallel_dims._single_axis_meshes["dp_replicate"].size(), 1)
-        self.assertEqual(parallel_dims._single_axis_meshes["fsdp"].size(), 1)
+        self.assertEqual(parallel_dims._single_axis_meshes["dp"].size(), 1)
+        self.assertEqual(parallel_dims._single_axis_meshes["dp_shard"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["tp"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["batch"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["loss"].size(), 1)
@@ -554,7 +555,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
 
         # Validate 2D mesh shapes
         dp_replicate_fsdp_mesh = parallel_dims.get_optional_mesh(
-            ["dp_replicate", "fsdp"]
+            ["dp_replicate", "dp_shard"]
         )
         self.assertIsNone(dp_replicate_fsdp_mesh)  # Both dimensions have size 1
         dp_replicate_efsdp_mesh = parallel_dims.get_optional_mesh(
@@ -569,7 +570,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertIsNone(parallel_dims.get_optional_mesh("cp"))
 
         # Test get_optional_mesh with list input
-        self.assertIsNone(parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"]))
+        self.assertIsNone(parallel_dims.get_optional_mesh(["dp_replicate", "dp_shard"]))
 
         # Test get_all_one_dimensional_meshes returns empty when all dimensions have size 1
         one_d_meshes = parallel_dims.get_all_one_dimensional_meshes()
@@ -591,12 +592,11 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
-            spmd_backend="partial_dtensor",
         )
         parallel_dims.build_mesh()
 
         # Should accept list input
-        result = parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
+        result = parallel_dims.get_optional_mesh(["dp_replicate", "dp_shard"])
         # Returns None because both dimensions have size 1
         self.assertIsNone(result)
 
@@ -645,13 +645,13 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
 
 
 class TestDenseStorageAxes(DTensorTestBase):
-    """Which dense storage axes each backend exposes."""
+    """Dense storage mesh axes exposed by ParallelDims."""
 
     @property
     def world_size(self):
         return 8
 
-    def _build(self, spmd_backend: str) -> ParallelDims:
+    def _build(self) -> ParallelDims:
         pd = ParallelDims(
             dp_replicate=2,
             dp_shard=2,
@@ -660,26 +660,16 @@ class TestDenseStorageAxes(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=8,
-            spmd_backend=spmd_backend,
         )
         pd.build_mesh()
         return pd
 
     @with_comms
-    def test_partial_dtensor_flattens_dp_shard_into_fsdp(self):
+    def test_keeps_dp_shard_separate(self):
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
         ):
-            axes = self._build("partial_dtensor").get_all_one_dimensional_meshes()
-            self.assertIn("fsdp", axes)
-            self.assertNotIn("dp_shard", axes)
-
-    @with_comms
-    def test_spmd_types_keeps_dp_shard_separate(self):
-        with patch(
-            "torchtitan.distributed.parallel_dims.device_type", self.device_type
-        ):
-            axes = self._build("spmd_types").get_all_one_dimensional_meshes()
+            axes = self._build().get_all_one_dimensional_meshes()
             self.assertNotIn("fsdp", axes)
             self.assertIn("dp", axes)
             self.assertIn("dp_shard", axes)
@@ -706,7 +696,6 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
-                spmd_backend="partial_dtensor",
             )
             pd.build_mesh()
 
@@ -717,7 +706,8 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
 
             one_d_meshes = pd.get_all_one_dimensional_meshes()
             self.assertNotIn("efsdp", one_d_meshes)
-            self.assertIn("fsdp", one_d_meshes)
+            self.assertIn("dp", one_d_meshes)
+            self.assertIn("dp_shard", one_d_meshes)
             self.assertIn("tp", one_d_meshes)
             # Every reported axis must own a usable process group.
             for name, mesh in one_d_meshes.items():
@@ -777,7 +767,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
-                spmd_backend="partial_dtensor",
             )
 
             # Test mesh building
@@ -791,7 +780,8 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIn("batch", parallel_dims._single_axis_meshes)
             self.assertIn("loss", parallel_dims._single_axis_meshes)
             self.assertIn("dp_replicate", parallel_dims._single_axis_meshes)
-            self.assertIn("fsdp", parallel_dims._single_axis_meshes)
+            self.assertIn("dp", parallel_dims._single_axis_meshes)
+            self.assertIn("dp_shard", parallel_dims._single_axis_meshes)
             self.assertIn("cp", parallel_dims._single_axis_meshes)
             self.assertIn("tp", parallel_dims._single_axis_meshes)
             self.assertIn("ep", parallel_dims._single_axis_meshes)
@@ -808,9 +798,8 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertEqual(
                 parallel_dims._single_axis_meshes["dp_replicate"].size(), 2
             )
-            self.assertEqual(
-                parallel_dims._single_axis_meshes["fsdp"].size(), 2
-            )  # dp_shard * cp = 2 * 1
+            self.assertEqual(parallel_dims._single_axis_meshes["dp"].size(), 4)
+            self.assertEqual(parallel_dims._single_axis_meshes["dp_shard"].size(), 2)
             self.assertEqual(parallel_dims._single_axis_meshes["cp"].size(), 1)
             self.assertEqual(parallel_dims._single_axis_meshes["tp"].size(), 2)
             self.assertEqual(parallel_dims._single_axis_meshes["ep"].size(), 1)
@@ -819,11 +808,13 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             )  # fsdp * tp / ep = 2 * 2 / 1 = 4
 
             # Validate 2D mesh shapes
-            dp_replicate_fsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            dp_replicate_fsdp_mesh = parallel_dims.get_mesh(
+                ["dp_replicate", "dp_shard"]
+            )
             self.assertIsNotNone(dp_replicate_fsdp_mesh)
             self.assertEqual(
                 dp_replicate_fsdp_mesh.shape, (2, 2)
-            )  # (dp_replicate, fsdp)
+            )  # (dp_replicate, dp_shard)
             # efsdp mesh only exists when ep > 1, so dp_replicate_efsdp should be None when ep=1
             dp_replicate_efsdp_mesh = parallel_dims.get_optional_mesh(
                 ["dp_replicate", "efsdp"]
@@ -832,7 +823,8 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             # Test get_mesh returns valid meshes for enabled dimensions (size > 1)
             self.assertIsNotNone(parallel_dims.get_mesh("tp"))
             self.assertIsNotNone(parallel_dims.get_mesh("dp_replicate"))
-            self.assertIsNotNone(parallel_dims.get_mesh("fsdp"))
+            self.assertIsNotNone(parallel_dims.get_mesh("dp"))
+            self.assertIsNotNone(parallel_dims.get_mesh("dp_shard"))
             self.assertIsNotNone(parallel_dims.get_mesh("batch"))
             self.assertIsNotNone(parallel_dims.get_mesh("loss"))
 
@@ -842,16 +834,17 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIsNone(parallel_dims.get_optional_mesh("ep"))
 
             # Test get_mesh with 2D mesh names
-            self.assertIsNotNone(parallel_dims.get_mesh(["dp_replicate", "fsdp"]))
-            hsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            self.assertIsNotNone(parallel_dims.get_mesh(["dp_replicate", "dp_shard"]))
+            hsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "dp_shard"])
             self.assertEqual(hsdp_mesh.shape, (2, 2))
 
             # Test get_all_one_dimensional_meshes returns only enabled meshes
             one_d_meshes = parallel_dims.get_all_one_dimensional_meshes()
             self.assertGreater(len(one_d_meshes), 0)
-            # Should include: dp_replicate, fsdp, tp, batch, loss (all with size > 1)
+            # Includes the enabled data- and tensor-parallel axes.
             self.assertIn("dp_replicate", one_d_meshes)
-            self.assertIn("fsdp", one_d_meshes)
+            self.assertIn("dp", one_d_meshes)
+            self.assertIn("dp_shard", one_d_meshes)
             self.assertIn("tp", one_d_meshes)
             self.assertIn("batch", one_d_meshes)
             self.assertIn("loss", one_d_meshes)
@@ -864,7 +857,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertNotIn("efsdp", one_d_meshes)
 
             # Test that we can get 2D meshes via get_mesh() instead
-            dp_replicate_fsdp = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            dp_replicate_fsdp = parallel_dims.get_mesh(["dp_replicate", "dp_shard"])
             self.assertIsNotNone(dp_replicate_fsdp)
             self.assertEqual(dp_replicate_fsdp.ndim, 2)
 

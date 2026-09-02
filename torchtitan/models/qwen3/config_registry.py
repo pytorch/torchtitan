@@ -71,7 +71,6 @@ def qwen3_debugmodel() -> Trainer.Config:
 
 def qwen3_debugmodel_nvfp4() -> Trainer.Config:
     config = qwen3_debugmodel()
-    config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
     )
@@ -90,7 +89,6 @@ def qwen3_debugmodel_nvfp4() -> Trainer.Config:
 
 def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config = qwen3_debugmodel()
-    config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -244,7 +242,6 @@ def qwen3_1_7b() -> Trainer.Config:
 
 def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     config = sft_qwen3_8b_math()
-    config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     config.compile = CompileConfig(enable=True, components=["model"])
     # Keep the last 15% of decoder layers and the lm_head in bf16.

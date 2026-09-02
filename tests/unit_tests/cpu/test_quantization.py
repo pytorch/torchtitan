@@ -247,22 +247,14 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         ("qwen3", "qwen3_8b_first_85_pct_layers_nvfp4"),
     ],
 )
-def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
-    monkeypatch, module, recipe
-):
+def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
     _nvfp4_linear_cls()
     import torchtitan.components.quantization.nvfp4 as nvfp4_mod
 
     monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
     base_args = ["--module", module, "--config", recipe]
 
-    config = ConfigManager().parse_args(base_args)
-    assert config.parallelism.spmd_backend == "spmd_types"
-
-    overridden = ConfigManager().parse_args(
-        [*base_args, "--parallelism.spmd_backend", "partial_dtensor"]
-    )
-    assert overridden.parallelism.spmd_backend == "partial_dtensor"
+    ConfigManager().parse_args(base_args)
 
 
 @pytest.mark.parametrize(

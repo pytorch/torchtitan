@@ -113,7 +113,6 @@ def build_trainer_model(
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     parallel_dims = ParallelDims(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -122,7 +121,6 @@ def build_trainer_model(
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
         world_size=dist.get_world_size(),
-        spmd_backend=parallelism.spmd_backend,
     )
     train_context = dist_utils.get_spmd_context(
         parallel_dims=parallel_dims,
@@ -293,12 +291,11 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
     vllm_sd = vllm_model.state_dict()
-    if wrapper.parallel_dims.spmd_backend == "spmd_types":
-        vllm_sd = plain_tensor_to_dtensor_state_dict(
-            vllm_sd,
-            state_dict_layouts=wrapper.get_state_dict_layouts(),
-            parallel_dims=wrapper.parallel_dims,
-        )
+    vllm_sd = plain_tensor_to_dtensor_state_dict(
+        vllm_sd,
+        state_dict_layouts=wrapper.get_state_dict_layouts(),
+        parallel_dims=wrapper.parallel_dims,
+    )
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -315,10 +312,9 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    if wrapper.parallel_dims.spmd_backend == "spmd_types":
-        vllm_model.load_state_dict(
-            dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
-        )
+    vllm_model.load_state_dict(
+        dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
+    )
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)

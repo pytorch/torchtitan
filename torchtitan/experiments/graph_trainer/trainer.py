@@ -11,8 +11,9 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.distributed import utils as dist_utils
+
+from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -262,10 +263,7 @@ class GraphTrainer(Trainer):
                 )
         with self.train_context():
             precompile_meshes = None
-            if (
-                self.config.compile.precompile_artifact_dir
-                and self.config.parallelism.spmd_backend == "spmd_types"
-            ):
+            if self.config.compile.precompile_artifact_dir:
                 from torchtitan.experiments.graph_trainer.precompile import (
                     get_spmd_precompile_meshes,
                 )

@@ -61,9 +61,7 @@ def main():
         pp=1,
         ep=1,
         world_size=world,
-        spmd_backend="spmd_types",
     )
-    dist_utils.set_spmd_backend("spmd_types")
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
@@ -77,7 +75,6 @@ def main():
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
-    cfg.parallelism.spmd_backend = "spmd_types"
     cfg.debug.seed = 42
     cfg.debug.deterministic = True
 

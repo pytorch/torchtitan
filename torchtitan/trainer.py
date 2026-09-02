@@ -134,8 +134,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self._validate_cuda_graphs()
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
                 # TODO(sanketpurandare): Enable SPMD typechecking under PP.
@@ -146,8 +145,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
                 and self.model_spec is not None
                 and any(self.model_spec.model.traverse(FlexAttention.Config))
@@ -333,10 +331,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 f"divisible by {seq_len_divisor} for the configured "
                 "sequence/context parallelism."
             )
-
-        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
-        # backends share one runtime mesh/type mechanism.
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -628,10 +622,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
-            spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd_types"
-                and config.debug.spmd_typechecking
-            ),
+            spmd_typechecking=config.debug.spmd_typechecking,
         )
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:

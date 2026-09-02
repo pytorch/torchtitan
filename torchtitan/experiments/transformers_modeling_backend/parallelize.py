@@ -103,13 +103,6 @@ def parallelize_hf_transformers(
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
-    if parallel_dims.spmd_backend != "spmd_types":
-        raise ValueError(
-            "The Transformers modeling backend only supports "
-            "parallelism.spmd_backend='spmd_types'; "
-            f"got '{parallel_dims.spmd_backend}'."
-        )
-
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
     # the flex kernel's local_map redistributes
     # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel

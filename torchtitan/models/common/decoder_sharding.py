@@ -280,10 +280,8 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     ``local_map`` converts DTensors to local tensors before the kernel runs,
     then wraps outputs back.
 
-    Declares placements over the full dense SPMD axis set (DP/CP/TP) so
-    the LocalMap composes under ``spmd_types`` (where the surrounding mesh
-    is multi-axis); under ``partial_dtensor``, the (tp,)-only mesh only
-    consumes the ``TP`` placement and the rest are ignored.
+    Declares placements over the full dense SPMD axis set (DP/CP/TP) so the
+    local region composes with the surrounding multi-axis mesh.
 
     With CP, q stays token-sharded on the CP axis while k/v are
     unsharded (``R``) on CP -- the local_map boundary all-gathers k/v so the

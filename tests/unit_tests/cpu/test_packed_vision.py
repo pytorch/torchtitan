@@ -15,7 +15,6 @@ from spmd_types.checker import typecheck
 from torch.nn.attention.flex_attention import create_mask
 
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
@@ -291,31 +290,26 @@ class TestPackedVision(unittest.TestCase):
         token_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis), None)
         index_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis))
 
-        previous_backend = get_spmd_backend()
-        set_spmd_backend("spmd_types")
-        try:
-            with spmd.set_current_mesh(
-                {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
-                local_axes=(dp_axis,),
-            ):
-                spmd.assert_type(inputs_TD, token_type, token_spec)
-                spmd.assert_type(
-                    vision_bank_VD,
-                    {dp_axis: spmd.V, cp_axis: spmd.R, tp_axis: spmd.R},
+        with spmd.set_current_mesh(
+            {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
+            local_axes=(dp_axis,),
+        ):
+            spmd.assert_type(inputs_TD, token_type, token_spec)
+            spmd.assert_type(
+                vision_bank_VD,
+                {dp_axis: spmd.V, cp_axis: spmd.R, tp_axis: spmd.R},
+            )
+            spmd.assert_type(
+                vision_bank_indices_T,
+                token_type,
+                index_spec,
+            )
+            with typecheck(strict_mode="strict", local=False):
+                result_TD = gather_vision_embeds(
+                    inputs_TD,
+                    vision_bank_VD=vision_bank_VD,
+                    vision_bank_indices_T=vision_bank_indices_T,
                 )
-                spmd.assert_type(
-                    vision_bank_indices_T,
-                    token_type,
-                    index_spec,
-                )
-                with typecheck(strict_mode="strict", local=False):
-                    result_TD = gather_vision_embeds(
-                        inputs_TD,
-                        vision_bank_VD=vision_bank_VD,
-                        vision_bank_indices_T=vision_bank_indices_T,
-                    )
-        finally:
-            set_spmd_backend(previous_backend)
 
         self.assertEqual(spmd.get_local_type(result_TD), token_type)
         self.assertEqual(spmd.get_partition_spec(result_TD), token_spec)
