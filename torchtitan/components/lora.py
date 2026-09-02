@@ -139,15 +139,15 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
 
 
 class LoRAConverter(ModelConfigConverter):
-    """Apply LoRA adapters to Linear layers in a model.
+    """Apply LoRA adapters to supported projection layers in a model.
 
-    Operates on the model config tree: target Linear configs are replaced
-    with ``LoRALinear.Config`` (which builds a LoRA subclass with frozen base
-    and trainable adapters). Non-target modules are replaced with dynamic
-    frozen config subclasses that freeze direct parameters at build time.
+    The base converter supports ``Linear.Config``. Subclasses may extend
+    ``_supports_lora`` and ``_make_lora_config`` for other projection types.
+    Non-target modules are replaced with dynamic frozen config subclasses that
+    freeze direct parameters at build time.
 
-    When ``target_modules`` is None (default), every ``Linear.Config`` is
-    converted.  When specified, only configs whose FQN's last segment matches
+    When ``target_modules`` is None (default), every supported projection is
+    converted. When specified, only configs whose FQN's last segment matches
     one of the entries are converted (e.g. ``["wq", "wv"]``).
     """
 
@@ -161,7 +161,7 @@ class LoRAConverter(ModelConfigConverter):
 
         target_modules: list[str] | None = None
         """Module names to apply LoRA to (matched against the last segment of the FQN).
-        None means all Linear layers. An empty list means no layers."""
+        None means all supported projection layers. An empty list means no layers."""
 
     def __init__(self, config: Config, **kwargs):
         if config.rank <= 0:
@@ -175,7 +175,7 @@ class LoRAConverter(ModelConfigConverter):
         if self.target_modules is None:
             logger.info(
                 f"LoRA training active with rank={self.rank}, alpha={self.alpha} "
-                f"(all Linear layers)"
+                f"(all supported projection layers)"
             )
         else:
             logger.info(
@@ -183,8 +183,18 @@ class LoRAConverter(ModelConfigConverter):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
-    def _make_lora_config(self, cfg: Linear.Config):
-        """Create a LoRALinear.Config from a base Linear.Config."""
+    def _supports_lora(self, cfg: Module.Config) -> bool:
+        """Return whether this converter can adapt ``cfg`` with LoRA.
+
+        Subclasses may extend this hook for projection types that do not
+        inherit from ``Linear.Config``.
+        """
+        return isinstance(cfg, Linear.Config)
+
+    def _make_lora_config(self, cfg: Module.Config) -> Module.Config:
+        """Create an adapter config for a supported projection."""
+        if not isinstance(cfg, Linear.Config):
+            raise TypeError(f"Unsupported LoRA config type: {type(cfg).__name__}")
         assert cfg._owner is not None
         lora_cls = _get_lora_cls(cfg._owner)
         return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
@@ -196,9 +206,9 @@ class LoRAConverter(ModelConfigConverter):
     def convert(self, model_config: Module.Config) -> Module.Config:
         """Walk the module config tree from leaves to root.
 
-        Target Linear modules get their config replaced with
-        ``LoRALinear.Config``. All other module configs become frozen config
-        subclasses so LoRA training updates only adapter parameters.
+        Target projection modules get their config replaced with an adapter
+        config. All other module configs become frozen config subclasses so
+        LoRA training updates only adapter parameters.
         """
         converted_root = model_config
         matched = set()
@@ -207,7 +217,7 @@ class LoRAConverter(ModelConfigConverter):
         for fqn, cfg, parent, attr in reversed(configs):
             assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
-            is_target = isinstance(cfg, Linear.Config) and (
+            is_target = self._supports_lora(cfg) and (
                 self.target_modules is None or last_segment in self.target_modules
             )
 
