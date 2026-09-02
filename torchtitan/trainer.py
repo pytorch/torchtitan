@@ -364,6 +364,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             dp_degree, dp_rank = 1, 0
 
+        # Resolve the global per-step token budget before model configs are
+        # built.  Model configs may need the concrete value (for example
+        # aux-loss normalization denominators).
+        self.num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+        )
+        num_tokens_per_dp_rank = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+            * self.num_pp_microbatches
+        )
+        num_tokens_per_train_step, self.gradient_accumulation_steps = (
+            dist_utils.resolve_num_tokens_per_train_step(
+                num_tokens_per_microbatch_per_dp_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                ),
+                num_pp_microbatches=self.num_pp_microbatches,
+                num_tokens_per_train_step=(
+                    config.training.num_tokens_per_train_step
+                ),
+                dp_degree=dp_degree,
+            )
+        )
+        config.training.num_tokens_per_train_step = num_tokens_per_train_step
+
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq, debug=config.training.gc_debug
@@ -452,26 +476,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             compile_config=config.compile,
         )
 
-        self.num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
-        )
-        num_tokens_per_dp_rank = (
-            config.training.num_tokens_per_microbatch_per_dp_rank
-            * self.num_pp_microbatches
-        )
-        num_tokens_per_train_step = config.training.num_tokens_per_train_step
-        if num_tokens_per_train_step < 0:
-            num_tokens_per_train_step = num_tokens_per_dp_rank * dp_degree
-        if num_tokens_per_train_step % (num_tokens_per_dp_rank * dp_degree) != 0:
-            raise ValueError(
-                "training.num_tokens_per_train_step "
-                f"({num_tokens_per_train_step}) must be divisible by the number "
-                "of tokens processed globally in one gradient accumulation "
-                f"iteration ({num_tokens_per_dp_rank * dp_degree})."
-            )
-        self.gradient_accumulation_steps = num_tokens_per_train_step // (
-            num_tokens_per_dp_rank * dp_degree
-        )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
