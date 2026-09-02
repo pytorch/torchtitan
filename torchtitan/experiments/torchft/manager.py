@@ -39,7 +39,7 @@ class TorchFTManager(Configurable):
         enable: bool = False
         """
         Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
-        And --fault_tolerance.data_parallel_replicate_degree should be 1 and
+        And --parallelism.data_parallel_replicate_degree should be 1 and
         --fault_tolerance.group_size will be used to control the maximum
         replicate group size as the replicate group size is dynamic.
         Note that this is still an experimental feature.
@@ -61,9 +61,11 @@ class TorchFTManager(Configurable):
 
         group_size: int = 0
         """
-        The number of TorchFT replicate groups. This number will be used for
-        dataloader to split the dataset across the replicate groups and FSDP
-        dimension
+        The number of ranks in each TorchFT replicate group (replica group
+        size). The world is split into ``world_size // group_size`` replicate
+        groups; the dataloader shards the dataset across
+        ``group_size``-scaled DP (see ``get_dp_info``) and the FSDP dimension
+        spans one replicate group.
         """
 
         min_replica_size: int = 1
