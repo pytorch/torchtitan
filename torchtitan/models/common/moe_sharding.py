@@ -423,7 +423,7 @@ def set_moe_sharding_config(
     moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
 
     if isinstance(moe_cfg.aux_loss, SeqwiseLoadBalanceLoss.Config):
-        assert moe_cfg.aux_loss.counts is not None  # filled by __post_init__
+        assert moe_cfg.aux_loss.counts is not None
         moe_cfg.aux_loss.counts.sharding_config = _seqwise_counts_sharding_config(
             enable_ep=enable_ep
         )

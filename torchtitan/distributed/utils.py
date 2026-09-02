@@ -60,9 +60,7 @@ def resolve_num_tokens_per_train_step(
     ``num_tokens_per_train_step < 0`` requests exactly one gradient
     accumulation step.
     """
-    num_tokens_per_dp_rank = (
-        num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches
-    )
+    num_tokens_per_dp_rank = num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches
     tokens_per_grad_step = num_tokens_per_dp_rank * dp_degree
     if num_tokens_per_train_step < 0:
         num_tokens_per_train_step = tokens_per_grad_step

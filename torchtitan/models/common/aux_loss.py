@@ -14,7 +14,7 @@ defers per-step metric readout. Contract:
 - Normalization: `inject` scales by `1 / per_step_denominator`, set by the
   trainer from the resolved per-step token count (token:
   num_tokens_per_train_step; sequence: num_tokens_per_train_step //
-  max_context_length; batch: 1 -- not microbatch/PP-additive, see PR #3000).
+  max_context_length; batch: 1 (an O(1) per-step statistic).
 - Accumulation: in the autograd backward (once per microbatch, so AC recompute
   never double counts); `_zero_aux_losses` snapshots and clears per step
   (optimizer pre-hook).
@@ -52,9 +52,8 @@ class _AuxLossInjection(torch.autograd.Function):
     per microbatch, so AC recompute never double counts. `spmd_typecheck`
     declares the in/out types (the body is opaque to the checker).
 
-    TODO: with the move to torch_remat as the AC solution, the backward
-    accumulation may no longer be needed as a double-counting workaround;
-    revisit then (see review discussion).
+    TODO(anijain2305): Once torch_remat is the AC backend, backward accumulation may no
+    longer be needed to avoid double counting.
     """
 
     @staticmethod
@@ -143,7 +142,6 @@ num-token tensor sizes are resolved (`-1` = unset; plain field so `build()`'s
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
-            # After ``to_empty()``, the existing buffer records the target device.
             buffer_device = self._acc_sum.device
         with torch.device(buffer_device):
             self._acc_sum = torch.zeros((), dtype=torch.float32)

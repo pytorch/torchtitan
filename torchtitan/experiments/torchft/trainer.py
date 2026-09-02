@@ -97,17 +97,14 @@ class FaultTolerantTrainer(Trainer):
         self.num_pp_microbatches = num_pp_microbatches
 
         # Resolve the global per-step token budget before model configs are
-        # built.  Model configs may need the concrete value (for example
-        # aux-loss normalization denominators).
+        # built.
         num_tokens_per_train_step, self.gradient_accumulation_steps = (
             dist_utils.resolve_num_tokens_per_train_step(
                 num_tokens_per_microbatch_per_dp_rank=(
                     config.training.num_tokens_per_microbatch_per_dp_rank
                 ),
                 num_pp_microbatches=num_pp_microbatches,
-                num_tokens_per_train_step=(
-                    config.training.num_tokens_per_train_step
-                ),
+                num_tokens_per_train_step=config.training.num_tokens_per_train_step,
                 dp_degree=batch_degree,
             )
         )

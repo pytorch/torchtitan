@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 import spmd_types as spmd
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -24,7 +23,6 @@ from torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-
 from .token_dispatcher import LocalTokenDispatcher
 
 # Shape suffix legend
@@ -343,12 +341,8 @@ class TokenChoiceTopKRouter(Module):
 class _SeqwiseCounts(Module):
     """Folded-stream routing counts and prob sums (DeepSeek-V3 Sec A.2 Eqs 18-20).
 
-    The folded ``(T, E)`` stream is treated as one sequence. The child aggregates
-    over the token dim inside its forward, producing ``(2E,)`` stats that are
-    Partial on the token-partition axes (CP, plus TP under EP) and Varying on the
-    DP-local axis. Its ``sharding_config`` boundary then all-reduces those Partial
-    axes to Invariant; concatenating the two tensors keeps the output single-valued
-    so the config-based redistribution layer can attach to this module boundary.
+    Produces ``(2E,)`` stats by aggregating over the token dimension. The
+    sharding semantics are declared in the attached ``ShardingConfig``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -372,10 +366,6 @@ class _SeqwiseCounts(Module):
         )
         probs_TE = scores_TE / scores_TE.sum(dim=-1, keepdim=True)
         combined_T2E = torch.cat([routing_map_TE, probs_TE], dim=-1)
-        # Aggregate over the full token stream first: summing a token dim that
-        # is sharded on (DP, CP[, TP]) yields Partial stats on CP and TP while
-        # preserving V on DP under the caller's ``dp_local_context()`` region.
-        # The boundary performs the P -> I all-reduces on CP/TP.
         return combined_T2E.sum(dim=0)
 
 
@@ -384,9 +374,7 @@ class SeqwiseLoadBalanceLoss(LoggedAuxLoss):
 
     The one-hot counts (Eq 18) are non-differentiable, so the gradient reaches the
     router only through the normalized probs (Eq 19) and the top-k score carrier.
-    Counts are all-reduced at the ``_SeqwiseCounts`` boundary; the per-sequence
-    ``1/T`` derives from the reduced counts, so it is CP-correct and varlen-safe.
-    The framework normalizes by the per-step sequence count (Eq 17 convention).
+    The framework normalizes by the per-step sequence count.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -394,11 +382,8 @@ class SeqwiseLoadBalanceLoss(LoggedAuxLoss):
         top_k: int
         # Sequence-wise is this loss's fixed semantics: the per-sequence value
         # is already token-count-normalized inside Eqs 18/20, so the framework
-        # normalizes by the per-step sequence count (asserted in ``__init__``).
+        # normalizes by the per-step sequence count.
         aggregation_level: Literal["token", "sequence", "batch"] = "sequence"
-        # Child config; its sharding_config (P -> I over CP, and TP under EP)
-        # is set by set_moe_sharding_config. Plain field (None sentinel) so
-        # build()'s replace keeps the injected object.
         counts: _SeqwiseCounts.Config | None = None
 
         def __post_init__(self):
@@ -422,7 +407,7 @@ class SeqwiseLoadBalanceLoss(LoggedAuxLoss):
                 f"spmd_types, got {get_spmd_backend()!r}. The per-sequence "
                 "counts all-reduce relies on spmd_types mesh semantics."
             )
-        assert config.counts is not None  # filled by __post_init__
+        assert config.counts is not None
         super().__init__(config)
         self._seqwise_counts = config.counts.build()
 
@@ -445,12 +430,6 @@ class SeqwiseLoadBalanceLoss(LoggedAuxLoss):
             f_E = counts_E * (E / (self._seqwise_counts.top_k * num_tokens))
             p_E = prob_sums_E / num_tokens
             loss = (f_E * p_E).sum()
-            # ``inject`` returns the carrier unchanged, so the MoE output
-            # tensor stays untouched (the scalar-loss-only contract under PP);
-            # the aux-loss gradient instead rides the top-k router scores,
-            # which are the activations feeding the gating weights, and
-            # reaches the gate through the ``topk_scores`` -> router graph on
-            # backward.
             return self.inject(loss, carrier=topk_scores_TK)
 
 
