@@ -59,7 +59,8 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     config = llama3_debugmodel_fsdp2_tp2_pp2()
 
     assert (
-        config.parallelism.num_pp_microbatches
+        config.training.local_batch_size
+        // config.parallelism.pipeline_parallel_microbatch_size
         >= config.parallelism.pipeline_parallel_degree
     )
 
