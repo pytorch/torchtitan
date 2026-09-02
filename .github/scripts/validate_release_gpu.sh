@@ -86,6 +86,7 @@ mkdir -p \
 # Copy test support files without copying TorchTitan Python packages. Training
 # subprocesses must import the installed TestPyPI RC rather than the checkout.
 cp "${REPO_ROOT}/run_train.sh" "${VALIDATION_ROOT}/run_train.sh"
+cp "${REPO_ROOT}/pyproject.toml" "${VALIDATION_ROOT}/pyproject.toml"
 cp "${REPO_ROOT}/scripts/loss_compare.py" "${VALIDATION_ROOT}/scripts/loss_compare.py"
 cp -R "${REPO_ROOT}/tests" "${VALIDATION_ROOT}/tests"
 cp \
