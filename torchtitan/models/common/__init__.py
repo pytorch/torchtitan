@@ -71,7 +71,7 @@ __all__ = [
     "QKVLinear",
     "RMSNorm",
     "RoPE",
-"RouterGateLinear",
+    "RouterGateLinear",
     "ScaledBiasRowwiseLinear",
     "ScaledDotProductAttention",
     "SiLU",
