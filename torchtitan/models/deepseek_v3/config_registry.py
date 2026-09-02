@@ -109,6 +109,21 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_mxfp8_fused_mlp() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    # Routed experts via the self-contained MXFP8 fused-MLP override: one
+    # composite runs the whole expert MLP in MXFP8, no quantization converter
+    # needed. The override swaps the token dispatcher for the 128-row-padded
+    # variant its kernels require, which only the EP permute path produces,
+    # hence expert_parallel_degree=2.
+    config.compile = CompileConfig(enable=True, components=["model"])
+    config.override.imports.append(
+        "torchtitan.overrides.mxfp8_fused_mlp.mxfp8_fused_grouped_mlp"
+    )
+    config.parallelism = ParallelismConfig(expert_parallel_degree=2)
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
     config = deepseek_v3_debugmodel()
     config.model_spec = model_registry(
