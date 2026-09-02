@@ -416,6 +416,13 @@ class _StubMesh:
 
 class _StubMixedPrecisionPolicy:
     param_dtype = torch.bfloat16
+    reduce_dtype = torch.bfloat16
+
+
+class _StubOwningLinear:
+    """The owning module the hook reads its WGRAD accumulation settings from."""
+
+    inplace_wgrad_accum = False
 
 
 def test_fsdp_pre_all_gather_pads_an_uneven_shard():
@@ -436,7 +443,7 @@ def test_fsdp_pre_all_gather_pads_an_uneven_shard():
         _StubMesh(5),
         torch.Size([96, 128]),
         None,
-        None,
+        _StubOwningLinear(),
         _StubMixedPrecisionPolicy(),
     )
 
@@ -465,7 +472,7 @@ def test_fsdp_pre_all_gather_casts_while_padding():
         _StubMesh(5),
         torch.Size([96, 128]),
         None,
-        None,
+        _StubOwningLinear(),
         _Fp32Policy(),
     )
 
@@ -503,6 +510,114 @@ def test_fsdp_pre_all_gather_rejects_a_non_zero_shard_dim():
             _StubMesh(2),
             torch.Size([96, 128]),
             None,
-            None,
+            _StubOwningLinear(),
             _StubMixedPrecisionPolicy(),
         )
+
+
+def _make_unsharded_mxfp8_linear(*, inplace_wgrad_accum: bool) -> MXFP8Linear:
+    linear = (
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            bias=False,
+            inplace_wgrad_accum=inplace_wgrad_accum,
+        )
+        .build()
+        .cuda()
+        .bfloat16()
+    )
+    return _install_unsharded_weight(linear)
+
+
+def test_mxfp8_inplace_wgrad_accum_matches_ordinary_accumulation():
+    """Two backwards must reach the same gradient with the option on or off.
+
+    This is the property that matters: folding the second contribution into
+    the first buffer is a scheduling change, not a change of what is computed.
+    The two are not bitwise identical -- one accumulates in the GEMM epilogue
+    in FP32, the other rounds each contribution to BF16 and adds in a separate
+    kernel -- so compare relative error over the whole gradient rather than
+    elementwise, whose absolute scale here runs to tens.
+    """
+    torch.manual_seed(0)
+    inputs = [
+        torch.randn(64, 128, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    ]
+    grads = [
+        torch.randn(64, 128, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    ]
+
+    results = {}
+    for enabled in (False, True):
+        torch.manual_seed(1)
+        linear = _make_unsharded_mxfp8_linear(inplace_wgrad_accum=enabled)
+        for x, grad_out in zip(inputs, grads, strict=True):
+            linear(x).backward(grad_out)
+        results[enabled] = linear.weight.grad.clone()
+
+    # The two hold the gradient in different dtypes on purpose -- the in-place
+    # path accumulates in the FSDP reduce dtype -- so compare values.
+    fused, ordinary = results[True].float(), results[False].float()
+    relative_error = (fused - ordinary).norm() / ordinary.norm()
+    assert relative_error < 1e-2, f"relative L2 error {relative_error:.5f}"
+
+
+def test_mxfp8_inplace_wgrad_accum_folds_in_the_second_contribution():
+    """Two backwards must sum, with neither contribution lost nor counted twice."""
+    linear = _make_unsharded_mxfp8_linear(inplace_wgrad_accum=True)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    linear(x).backward(grad_out)
+    after_one = linear.weight.grad.clone()
+
+    linear(x).backward(grad_out)
+    after_two = linear.weight.grad
+
+    # Same input and grad twice, so the running gradient must have doubled.
+    torch.testing.assert_close(
+        after_two.float(), (after_one * 2).float(), rtol=2e-2, atol=2e-2
+    )
+
+
+def test_mxfp8_inplace_wgrad_accum_keeps_the_parameter_dtype():
+    """Turning the option on must not change the gradient dtype.
+
+    The gradient dtype is the parameter dtype either way. It is not a knob
+    here: reduce-scatter rejects an FSDP group whose gradients disagree, so
+    widening one layer's gradient is not this layer's decision to make. See
+    test_mxfp8_fsdp.py for the group-level contract.
+    """
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    for enabled in (False, True):
+        linear = _make_unsharded_mxfp8_linear(inplace_wgrad_accum=enabled)
+        linear(x).backward(grad_out)
+        linear(x).backward(grad_out)
+        assert linear.weight.grad.dtype == torch.bfloat16
+
+
+def test_mxfp8_inplace_wgrad_accum_rejects_torch_compile():
+    """The protocol reads and clears parameter.grad, which the compiler cannot see."""
+    linear = _make_unsharded_mxfp8_linear(inplace_wgrad_accum=True)
+    compiled = torch.compile(linear, fullgraph=True)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(Exception, match="runs eagerly only"):
+        compiled(x)
+
+
+def test_mxfp8_inplace_wgrad_accum_rejects_fx_tracing():
+    """GraphTrainer traces with make_fx, which ``is_compiling()`` does not see.
+
+    Tracing would run the backward once, while parameter.grad is still None,
+    and freeze the first-contribution branch into the graph -- so the option
+    has to be refused here too, not silently ignored.
+    """
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    linear = _make_unsharded_mxfp8_linear(inplace_wgrad_accum=True)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="runs eagerly only"):
+        make_fx(linear, tracing_mode="fake")(x)
