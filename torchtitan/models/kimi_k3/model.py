@@ -35,8 +35,8 @@ from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, H = heads,
-# K = key head dimension, V = value head dimension,
+# T = packed tokens, D = model dimension, C = projection channels, H = heads,
+# K = query/key head dimension, V = value head dimension,
 # N = attention-residual entries.
 
 

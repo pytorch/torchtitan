@@ -141,22 +141,22 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
         fused = _build_fused()
         num_tokens = 6
         x_TD = torch.randn(num_tokens, _DIM)
-        xq_TNH, xk_TNH, xv_TNH = fused(x_TD)
+        xq_THK, xk_THK, xv_THV = fused(x_TD)
 
-        self.assertEqual(xq_TNH.shape, (num_tokens, _N_HEADS, _HEAD_DIM))
-        self.assertEqual(xk_TNH.shape, (num_tokens, _N_KV_HEADS, _HEAD_DIM))
-        self.assertEqual(xv_TNH.shape, (num_tokens, _N_KV_HEADS, _HEAD_DIM))
-        self.assertTrue(xq_TNH.is_contiguous())
-        self.assertTrue(xk_TNH.is_contiguous())
-        self.assertTrue(xv_TNH.is_contiguous())
+        self.assertEqual(xq_THK.shape, (num_tokens, _N_HEADS, _HEAD_DIM))
+        self.assertEqual(xk_THK.shape, (num_tokens, _N_KV_HEADS, _HEAD_DIM))
+        self.assertEqual(xv_THV.shape, (num_tokens, _N_KV_HEADS, _HEAD_DIM))
+        self.assertTrue(xq_THK.is_contiguous())
+        self.assertTrue(xk_THK.is_contiguous())
+        self.assertTrue(xv_THV.is_contiguous())
 
         sd = fused.state_dict()
-        ref_q_TNH = (x_TD @ sd["wq.weight"].T).view(num_tokens, _N_HEADS, _HEAD_DIM)
-        ref_k_TNH = (x_TD @ sd["wk.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
-        ref_v_TNH = (x_TD @ sd["wv.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
-        torch.testing.assert_close(xq_TNH, ref_q_TNH)
-        torch.testing.assert_close(xk_TNH, ref_k_TNH)
-        torch.testing.assert_close(xv_TNH, ref_v_TNH)
+        ref_q_THK = (x_TD @ sd["wq.weight"].T).view(num_tokens, _N_HEADS, _HEAD_DIM)
+        ref_k_THK = (x_TD @ sd["wk.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        ref_v_THV = (x_TD @ sd["wv.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        torch.testing.assert_close(xq_THK, ref_q_THK)
+        torch.testing.assert_close(xk_THK, ref_k_THK)
+        torch.testing.assert_close(xv_THV, ref_v_THV)
 
     def test_raw_pointer_read_needs_contiguous(self):
         """A consumer reading the base pointer with contiguous head-major strides

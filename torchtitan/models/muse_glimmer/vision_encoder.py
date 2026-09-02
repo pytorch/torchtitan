@@ -50,7 +50,11 @@ from torchtitan.protocols.module import Module, ModuleDict
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
     """Annotate a tensor created inside the vision forward."""
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        return spmd.mutate_type(tensor, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I})
+        return spmd.mutate_type(
+            tensor,
+            src=spmd.R,
+            dst={"dp": spmd.V, "cp": spmd.R, "tp": spmd.I},
+        )
     return tensor
 
 

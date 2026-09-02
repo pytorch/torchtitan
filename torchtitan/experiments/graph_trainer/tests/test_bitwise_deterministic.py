@@ -400,6 +400,9 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    @unittest.skip(
+        "Precompiled artifacts do not provide example inputs for CUDA graph setup"
+    )
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":

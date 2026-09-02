@@ -275,7 +275,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
 def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     """Install a ``LocalMapConfig`` on an inner-attention config.
 
-    q/k/v use ``(T, N, H)`` layout. DP/CP shard T and TP shards N.
+    q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
+    shards H.
     ``local_map`` converts DTensors to local tensors before the kernel runs,
     then wraps outputs back.
 
@@ -298,14 +299,14 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     out_src: SpmdType = q_placements
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "q_TNH": q_placements,
-            "k_TNH": kv_src_placements,
-            "v_TNH": kv_src_placements,
+            "q_THK": q_placements,
+            "k_THK": kv_src_placements,
+            "v_THV": kv_src_placements,
         },
         in_dst_shardings={
-            "q_TNH": q_placements,
-            "k_TNH": kv_dst_placements,
-            "v_TNH": kv_dst_placements,
+            "q_THK": q_placements,
+            "k_THK": kv_dst_placements,
+            "v_THV": kv_dst_placements,
         },
         out_src_shardings=out_src,
         local_map=LocalMapConfig(
