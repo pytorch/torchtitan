@@ -42,8 +42,7 @@ The implementation differs from Megatron Core in several important ways:
   rather than Megatron MLA's YaRN cos/sin output layout.
 * V remains a zero-copy view of TorchTitan's packed KV projection; Megatron's
   fused KV path materializes a separate V output.
-* It preserves TorchTitan eager's BF16/FP16 reduction-rounding boundary and
-  wraps local results back into DTensors.
+* It preserves TorchTitan eager's BF16/FP16 reduction-rounding boundary.
 * Flattened offsets use 64-bit arithmetic because the traced 671B local tensors
   exceed 2**31 elements.
 * Every Triton launch is exposed as a stable ``torch.library`` custom operator,
@@ -66,7 +65,6 @@ import spmd_types as spmd
 import torch
 import triton
 import triton.language as tl
-from torch.distributed.tensor import DTensor
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.attention import AttentionMasksType
@@ -635,9 +633,8 @@ class _FusedMLAQ(torch.autograd.Function):
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
         ctx.mark_dirty(q)
-        q_local = _to_local_for_mutation(q)
         _fused_mla_q_rope_op(
-            q_local,
+            q,
             rope_cache_real,
             positions,
             q_nope_dim,
@@ -653,9 +650,8 @@ class _FusedMLAQ(torch.autograd.Function):
         # from fused_mla_q(...).sum()). Match Megatron's fused MLA path by
         # materializing only non-contiguous gradients before rotating in place.
         grad_q = grad_q.contiguous()
-        grad_q_local = _to_local_for_mutation(grad_q)
         _fused_mla_q_rope_op(
-            grad_q_local,
+            grad_q,
             rope_cache_real,
             positions,
             ctx.q_nope_dim,
@@ -718,39 +714,12 @@ class _FusedMLAKV(torch.autograd.Function):
         return grad_kv, grad_k_pe, None, None, None
 
 
-def _to_local(tensor: torch.Tensor) -> torch.Tensor:
-    return tensor.to_local() if isinstance(tensor, DTensor) else tensor
-
-
-def _to_local_for_mutation(tensor: torch.Tensor) -> torch.Tensor:
-    if isinstance(tensor, DTensor):
-        # DTensor.to_local() is an autograd view produced by _ToTorchTensor.
-        # Mutating that view inside a custom Function is forbidden because it
-        # would obscure the Function's custom backward. The underlying local
-        # tensor carries the same autograd history without introducing that
-        # extra view; DTensor.from_local() below restores the wrapper around the
-        # custom Function's output.
-        return tensor._local_tensor
-    return tensor
-
-
-def _from_local(local: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
-    if isinstance(spec, DTensor):
-        return DTensor.from_local(
-            local,
-            spec.device_mesh,
-            spec.placements,
-            run_check=False,
-        )
-    return local
-
-
 def _resolve_positions(
     positions: torch.Tensor | None,
     reference: torch.Tensor,
 ) -> torch.Tensor:
     if positions is not None:
-        pos = _to_local(positions)
+        pos = positions
         if pos.ndim == 1:
             pos = pos.unsqueeze(0)
         batch = reference.shape[0]
@@ -769,10 +738,8 @@ def fused_mla_q(
     q_nope_dim: int,
 ) -> torch.Tensor:
     """Apply ComplexRoPE in place to Q's positional tail."""
-    q_local = _to_local(q)
-    cache_local = _to_local(rope_cache)
-    positions_local = _resolve_positions(positions, q_local)
-    cache_real = torch.view_as_real(cache_local).contiguous()
+    positions_local = _resolve_positions(positions, q)
+    cache_real = torch.view_as_real(rope_cache).contiguous()
     return _FusedMLAQ.apply(q, cache_real, positions_local, q_nope_dim)
 
 
@@ -784,19 +751,15 @@ def fused_mla_kv(
     q_nope_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Materialize K and expose V with a fused custom backward."""
-    kv_local = _to_local(kv)
-    kpe_local = _to_local(k_pe)
-    cache_local = _to_local(rope_cache)
-    positions_local = _resolve_positions(positions, kv_local)
-    cache_real = torch.view_as_real(cache_local).contiguous()
-    k_local, v_local = _FusedMLAKV.apply(
-        kv_local,
-        kpe_local,
+    positions_local = _resolve_positions(positions, kv)
+    cache_real = torch.view_as_real(rope_cache).contiguous()
+    return _FusedMLAKV.apply(
+        kv,
+        k_pe,
         cache_real,
         positions_local,
         q_nope_dim,
     )
-    return _from_local(k_local, kv), _from_local(v_local, kv)
 
 
 class FusedMLAAttention(Attention):

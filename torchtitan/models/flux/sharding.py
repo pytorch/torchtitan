@@ -9,11 +9,8 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
-from torch import nn
 
-from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 if TYPE_CHECKING:
@@ -68,10 +65,6 @@ def set_flux_sharding_config(config: "FluxModel.Config") -> None:
 
     for block_cfg in config.single_blocks:
         set_flux_inner_attention_local_map(block_cfg.inner_attention)
-
-
-def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
-    annotate_replicated_parameters(model, parallel_dims)
 
 
 def annotate_flux_forward_inputs(

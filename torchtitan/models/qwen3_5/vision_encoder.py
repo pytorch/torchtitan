@@ -19,12 +19,10 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_wrap_positions, CosSinRoPE
+from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
@@ -78,20 +76,12 @@ def _compute_learned_pos_embeds(
     )
 
     for (h, w), indices in hw_to_indices.items():
-        if isinstance(pos_grid, DTensor):
-            pos_hw = local_map(F.interpolate, out_placements=(pos_grid.placements,),)(
-                pos_grid,
-                size=[h, w],  # pyrefly: ignore [unexpected-keyword]
-                mode="bilinear",  # pyrefly: ignore [unexpected-keyword]
-                align_corners=True,  # pyrefly: ignore [unexpected-keyword]
-            )
-        else:
-            pos_hw = F.interpolate(
-                pos_grid,
-                size=[h, w],
-                mode="bilinear",
-                align_corners=True,
-            )
+        pos_hw = F.interpolate(
+            pos_grid,
+            size=[h, w],
+            mode="bilinear",
+            align_corners=True,
+        )
 
         # (1, dim, h, w) → (h*w, dim)
         pos_hw = pos_hw.squeeze(0).permute(1, 2, 0).reshape(-1, dim).to(dtype)
@@ -255,7 +245,6 @@ class VisionRotaryEmbedding(Module):
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        seq = _maybe_wrap_positions(seq, self.inv_freq)
         if spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
@@ -387,23 +376,12 @@ class Qwen35VisionEncoder(Module):
             self.config.dim,
         )
 
-        if isinstance(self._cached_freq_table, DTensor):
-            rope_cache = local_map(
-                _compute_2d_rope_cache,
-                out_placements=(self._cached_freq_table.placements,),
-            )(
-                self._cached_freq_table,
-                grids,  # pyrefly: ignore [bad-argument-count]
-                self.spatial_merge_size,
-                head_dim,
-            )
-        else:
-            rope_cache = _compute_2d_rope_cache(
-                self._cached_freq_table,
-                grids,
-                self.spatial_merge_size,
-                head_dim,
-            )
+        rope_cache = _compute_2d_rope_cache(
+            self._cached_freq_table,
+            grids,
+            self.spatial_merge_size,
+            head_dim,
+        )
 
         return learned_pos, rope_cache
 

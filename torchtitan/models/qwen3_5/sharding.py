@@ -280,8 +280,7 @@ def _set_full_attention_sharding(
         in_src_shardings={"x_TD": attention_input_layout},
         in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
     )
-    # The per-layer rope ``cache`` buffer is a Replicate DTensor; MRoPE builds the
-    # position-resolved cache from it (``positions`` stays a plain input).
+    # The per-layer rope ``cache`` buffer is replicated on TP.
     attention_cfg.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
@@ -357,7 +356,7 @@ def _set_deltanet_sharding(
         out_dst_shardings=head_placement,
     )
 
-    # The inner GDN is the DTensor-to-local boundary for the head-parallel
+    # The inner GDN is the local SPMD boundary for the head-parallel
     # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
     # and intentionally remains outside local_map's positional placements.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(

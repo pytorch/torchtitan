@@ -60,21 +60,6 @@ def _dist_reduce_tensor(
 ) -> torch.Tensor:
     """Perform a distributed reduction without moving the result to the CPU."""
     needs_wait = False
-    if isinstance(x, DTensor):
-        # The loss is a DTensor only on the TP axis, so unwrap it to a plain
-        # tensor and let the reduction below run over ``mesh``.
-        assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
-            f"_dist_reduce received a DTensor with unsupported placements "
-            f"{x.placements}; only Replicate/Partial are supported."
-        )
-        if extra_pg is not None:
-            raise ValueError(
-                "_dist_reduce does not support DTensor input combined with "
-                "extra_pg: pass a plain tensor when using extra_pg."
-            )
-        x = x.to_local()
-
-    # Plain tensor path.
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
         needs_wait = True
@@ -133,12 +118,13 @@ def set_determinism(
     distinct_seed_mesh_dims: list[str],
 ) -> None:
     """
-    Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
-    across dimensions denoted by `distinct_seed_mesh_dims`. An example use case is pipeline parallelism,
-    where we want to have the same seed across SPMD groups, but different seeds across PP groups.
+    Set the same distributed RNG seed for all axes in the world mesh, but use
+    different seeds across axes named by ``distinct_seed_mesh_dims``. For
+    example, pipeline stages should use different seeds while ranks within an
+    SPMD group use the same seed.
 
-    Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
-    and DTensor manages its own RNG tracker, but we could extend to support both if needed.
+    This uses PyTorch's DTensor RNG tracker because it provides mesh-aware RNG
+    offsets for sharded parameter initialization.
 
     Set Determinism flags for increased reproducibility with loss of performance.
 

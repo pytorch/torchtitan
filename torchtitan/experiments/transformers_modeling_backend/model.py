@@ -41,13 +41,11 @@ class HFFlexKernel(Module):
 
     Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this
     forward with ``local_map`` (driven by the ``ShardingConfig`` set in
-    hf_sharding.py): q/k/v arrive head-sharded as DTensors, are converted to
-    local tensors so the document ``mask_mod`` -- which closes over a plain
-    ``positions`` tensor -- sees plain tensors, and the output is wrapped back
-    head-sharded. Expressing the sharding declaratively
+    hf_sharding.py): q/k/v are plain local tensors carrying head-sharded SPMD
+    annotations, and the output receives the corresponding head-sharded
+    annotation. Expressing the sharding declaratively
     (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with Titan's own
-    attention and lets it ride the ``spmd_types`` backend switch, instead of a
-    hand-rolled ``local_map`` call.
+    attention instead of requiring a hand-rolled ``local_map`` call.
 
     The HF attention module and the BlockMask ride as passthrough keyword args
     (non-tensors, so ``local_map`` leaves them untouched). CP is not handled

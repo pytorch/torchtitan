@@ -226,7 +226,13 @@ def annotate_replicated_parameters(
     module: torch.nn.Module,
     parallel_dims: ParallelDims,
 ) -> None:
-    """Annotate unsharded module parameters as replicated on the dense mesh."""
+    """Annotate parameters not distributed by ``Module.parallelize``.
+
+    FSDP needs SPMD annotations to translate plain parameters to DTensor
+    storage on the full mesh. This helper is for FSDP-only models whose
+    parameters have no model-parallel ``ShardingConfig`` and are therefore
+    replicated on every dense mesh axis.
+    """
     with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
         for param in module.parameters():
             spmd.assert_type(param, spmd.R)

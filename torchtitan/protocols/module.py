@@ -16,7 +16,6 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 from spmd_types import SpmdType
-from torch.distributed.tensor import distribute_tensor, DTensor
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
@@ -92,27 +91,8 @@ class Module(nn.Module, Configurable):
 
         self._init_self_parameters()
 
-        # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``),
-        # replacing any DTensor entry with a plain tensor. Restore DTensor-ness
-        # by re-distributing the freshly computed global tensor to the original
-        # placements. ``distribute_tensor`` supports Replicate / Shard / Partial.
-        dtensor_meta = {
-            name: (buf.device_mesh, buf.placements)
-            for name, buf in self._buffers.items()
-            if isinstance(buf, DTensor)
-        }
         with self._preserve_buffer_spmd_types():
             self._init_self_buffers(buffer_device=buffer_device)
-        for name, (mesh, placements) in dtensor_meta.items():
-            new_buf = self._buffers.get(name)
-            if new_buf is None or isinstance(new_buf, DTensor):
-                continue
-            persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(
-                name,
-                distribute_tensor(new_buf, mesh, list(placements)),
-                persistent=persistent,
-            )
 
     def _apply(self, fn, recurse=True):
         """Override to preserve annotations across model.to_empty() in trainer.py"""
@@ -355,9 +335,7 @@ class Module(nn.Module, Configurable):
         """Distribute params and buffers per ``state_shardings``.
 
         Each entry resolves its own mesh via ``resolve_mesh``, so different
-        params on the same Module may live on different meshes. An
-        already-DTensor param/buffer indicates it was distributed by a
-        sibling (e.g. weight tying); skip but verify placements agree.
+        params on the same Module may live on different meshes.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None

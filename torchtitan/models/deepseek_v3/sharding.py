@@ -106,9 +106,8 @@ def _set_deepseek_v3_layer_sharding(
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    # Low-rank projections and norms keep Replicate weights on TP. We still
-    # distribute them (Replicate DTensor) so DTensor activations flow through
-    # without mixing plain Tensor + DTensor in the matmul.
+    # Low-rank projections and norms keep replicated weights on TP so their
+    # SPMD types compose with the surrounding activations.
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
@@ -125,7 +124,7 @@ def _set_deepseek_v3_layer_sharding(
         assert attention.wq is not None
         attention.wq.sharding_config = colwise_config()
     else:
-        # Low-rank: wq_a + q_norm stay Replicate DTensors; wq_b is Colwise.
+        # Low-rank: wq_a + q_norm stay replicated; wq_b is colwise.
         assert attention.wq_a is not None
         assert attention.wq_b is not None
         attention.wq_a.sharding_config = replicate_weight

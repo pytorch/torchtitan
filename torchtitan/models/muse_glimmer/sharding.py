@@ -95,8 +95,7 @@ def _set_tok_embeddings_sharding(
     # children) lets the norm run on a Partial output. Confirm once we start
     # validating spmd_types with MUSE_GLIMMER.
     # Currently, without the following reassignment, emb_cfg.embedding and
-    # emb_cfg.norm do not have sharding at all, so we get a mixed operation error
-    # between Tensor and DTensor.
+    # emb_cfg.norm do not have sharding at all, so their SPMD layouts are unknown.
     emb_cfg = config.tok_embeddings
     emb_cfg.embedding.sharding_config = emb_cfg.sharding_config
     emb_cfg.sharding_config = None

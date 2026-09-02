@@ -164,9 +164,6 @@ def main():
     train_context = dist_utils.get_spmd_context(parallel_dims=parallel_dims)
     with torch.no_grad(), train_context():
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
-    loc_logits = (
-        loc_logits.to_local() if hasattr(loc_logits, "to_local") else loc_logits
-    )
 
     # Reconstruct full logits in global order via all-gather + index scatter.
     gathered_logits = [torch.empty_like(loc_logits) for _ in range(cp)]

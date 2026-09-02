@@ -794,21 +794,16 @@ class FusedQKVLinear(BaseQKVLinear):
                     spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
                 )
 
-        hpk, hd = self.heads_per_kv, self.head_dim
-
-        def _split(t):
-            local_num_tokens = t.shape[0]
-            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
-            # split leaves xk/xv as strided views into the fused buffer; vLLM
-            # attention/KV-cache kernels read raw memory assuming a contiguous
-            # head-major layout, so materialize all three contiguously here.
-            return (
-                xq.reshape(local_num_tokens, -1, hd).contiguous(),
-                xk.reshape(local_num_tokens, -1, hd).contiguous(),
-                xv.reshape(local_num_tokens, -1, hd).contiguous(),
-            )
-
-        return _split(qkv)
+        local_num_tokens = qkv.shape[0]
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        # split leaves xk/xv as strided views into the fused buffer; vLLM
+        # attention/KV-cache kernels read raw memory assuming a contiguous
+        # head-major layout, so materialize all three contiguously here.
+        return (
+            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+        )
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:

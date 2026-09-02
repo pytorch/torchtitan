@@ -18,7 +18,6 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
@@ -413,7 +412,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
@@ -885,12 +884,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 loss = fwd_bwd()
             detached_loss = loss.detach()
-            local_loss = (
-                detached_loss.to_local()
-                if isinstance(detached_loss, DTensor)
-                else detached_loss
-            )
-            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
+            loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
             if should_log:
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the

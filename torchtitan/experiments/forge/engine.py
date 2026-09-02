@@ -169,7 +169,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model, config.training.max_context_length
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         if config.training.enable_cpu_offload:
             init_device = "cpu"
             buffer_device = device_type

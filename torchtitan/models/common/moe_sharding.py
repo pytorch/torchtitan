@@ -86,9 +86,9 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdType:
 
 
 def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
-    """Router gate: Replicate weights, output stays DTensor.
+    """Router gate with replicated weights.
 
-    EP off: input Replicate, gate computes on all tokens, output DTensor(Replicate).
+    EP off: input Replicate, gate computes on all tokens, output stays Replicate.
     EP on: input Shard(0) on tokens, gate computes on the local shard, and the
            output remains Shard(0).
     """
@@ -259,8 +259,8 @@ def _routed_experts_sharding_configs(
                         experts_input_grad_layout,
                         experts_input_grad_layout,
                         experts_input_grad_layout,
-                        # num_local_tokens_per_expert_E is routing metadata, but it is
-                        # still a DTensor input to local_map and must have placements.
+                        # num_local_tokens_per_expert_E is routing metadata, but it
+                        # still needs an input-gradient type at the local boundary.
                         tokens_per_expert_layout,
                     )
                 ),
@@ -274,8 +274,8 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
     """``ShardingConfig`` at the MoE boundary.
 
     Input arrives at sp_layout and is redistributed to desired_input_layouts.
-    Output is redistributed to sp_layout. MoE.forward() operates on DTensors;
-    the DTensor->local conversion happens at the RoutedExperts boundary.
+    Output is redistributed to sp_layout. RoutedExperts runs in a local SPMD
+    region.
     """
     sp_layout = (
         dense_sequence_parallel_placement()
@@ -315,7 +315,7 @@ def set_moe_sharding_config(
 
     - ``moe`` (wrapper): input/output redistribution on ``{TP}``.
       Always set when ``tp_enabled``.
-    - ``moe.router.gate``: Replicate weights, output stays DTensor.
+    - ``moe.router.gate``: Replicate weights and output.
     - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP plan with
       Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
       None``).

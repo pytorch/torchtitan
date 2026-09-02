@@ -277,8 +277,8 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
     shards H.
-    ``local_map`` converts DTensors to local tensors before the kernel runs,
-    then wraps outputs back.
+    ``local_map`` defines how the local tensors' SPMD annotations change across
+    the kernel.
 
     Declares placements over the full dense SPMD axis set (DP/CP/TP) so the
     local region composes with the surrounding multi-axis mesh.
@@ -359,7 +359,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     ``enable_sp=True``  -> SequenceParallel: activations are ``Shard(0)`` between
     the embedding, norm, and output layers.
     ``enable_sp=False`` -> activations stay ``Replicate``; root norm is left
-    unsharded (equivalent to the legacy ``NoParallel`` plan).
+    unsharded.
     """
     activation_layout = (
         dense_sequence_parallel_placement()

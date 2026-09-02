@@ -27,7 +27,7 @@ from torchtitan.models.gpt_oss.model import GptOssModel
 def _raise_dynamo_recompile_limit(
     model: GptOssModel,
 ) -> None:
-    # TP/EP sharding can compile a block before every DTensor local tensor has
+    # TP/EP sharding can compile a block before every local tensor has
     # resolved from AsyncCollectiveTensor to a plain Tensor. Dynamo specializes
     # on both states, and fullgraph=True turns the recompile cap into a hard
     # failure instead of falling back. GPT-OSS needs a slightly higher cap

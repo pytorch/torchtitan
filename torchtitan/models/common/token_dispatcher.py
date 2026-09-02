@@ -376,8 +376,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         When ep_mesh is None (EP=1), falls back to local dispatch — no
         all-to-all communication, just local token reordering with padding.
 
-        With SP, x_TD/topk_scores_TK/topk_expert_ids_TK are already
-        the local SP shard (from DTensor Shard to_local via LocalMapConfig).
+        With SP, x_TD/topk_scores_TK/topk_expert_ids_TK are already the local
+        SP shard provided by the surrounding local SPMD region.
 
         Args:
             x_TD: ``(T, D)`` local token shard

@@ -240,7 +240,7 @@ class GatedDeltaKernel(Module):
     """Stateless dispatch to the configured FLA gated delta kernel.
 
     Provides a module boundary for the sharding code to wrap forward with
-    DTensor-to-local conversion -- same pattern as FlexAttention. Handles Q/K
+    local SPMD boundary -- same pattern as FlexAttention. Handles Q/K
     head expansion for grouped linear attention internally so that
     repeat_interleave runs on local tensors under TP. A pure-torch reference
     implementation lives in ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``;

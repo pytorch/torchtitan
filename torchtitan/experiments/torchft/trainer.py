@@ -148,7 +148,7 @@ class FaultTolerantTrainer(Trainer):
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
