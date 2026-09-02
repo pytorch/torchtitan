@@ -818,6 +818,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # TODO: PP+FSDP unexpectedly puts the loss back to the CPU.
         if self.pp_has_last_stage:
             assert losses is not None
+            # Backward has consumed these losses. Detach the original tensors so
+            # their autograd graphs cannot retain per-microbatch receive buffers.
+            for loss in losses:
+                loss.detach_()
             return torch.sum(torch.stack(losses)).to(self.device)
         return torch.tensor([-1.0], device=self.device)
 
