@@ -125,9 +125,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="Qwen3.5 MoE FSDP+TP+EP",
             test_name="qwen3_5_moe_fsdp+tp+ep",
             ngpu=8,
-            golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/qwen3_5_a10g.txt"
-            ),
+            # NOTE: This topology is not bitwise deterministic with Real PG on
+            # A10G, so this case provides end-to-end coverage without a golden.
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
