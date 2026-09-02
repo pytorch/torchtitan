@@ -18,6 +18,11 @@ from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_s
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.remat import (
+    is_remat_recomputing,
+    maybe_remat_recompute_needs,
+    maybe_remat_save_region,
+)
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -33,6 +38,8 @@ from .token_dispatcher import LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
+    AVAILABLE_REMAT_SAVE_REGIONS = ("w1", "w3", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -91,21 +98,23 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(
-                A=x_RD.bfloat16(),
-                B_t=w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
-            )
+        w1_out_RF = maybe_remat_save_region(self._grouped_mm, "w1", owner=self)(
+            A=x_RD.bfloat16(),
+            B_t=w1_EFD.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
-        h_RF = h_RF * self._grouped_mm(
+        w3_out_RF = maybe_remat_save_region(self._grouped_mm, "w3", owner=self)(
             A=x_RD.bfloat16(),
             B_t=w3_EFD.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
-        return self._grouped_mm(
+        maybe_remat_recompute_needs(self, w1_out_RF, w3_out_RF)
+        h_RF = F.silu(w1_out_RF) * w3_out_RF
+        out_RD = maybe_remat_save_region(self._grouped_mm, "w2", owner=self)(
             A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_RD)
+        )
+        maybe_remat_recompute_needs(self, out_RD)
+        return out_RD.type_as(x_RD)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
@@ -354,6 +363,8 @@ class MoE(Module):
     4. Routed and shared expert outputs are summed.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("router",)
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int = 8
@@ -411,11 +422,10 @@ class MoE(Module):
         token count.
         """
         # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
-        (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E)
+        (topk_scores_TK, topk_expert_ids_TK, scores_TE,) = maybe_remat_save_region(
+            self.router, "router", owner=self
+        )(x_TD, self.expert_bias_E)
+        maybe_remat_recompute_needs(self, topk_scores_TK, topk_expert_ids_TK, scores_TE)
 
         # Build a one-hot routing map (T, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on
@@ -430,10 +440,10 @@ class MoE(Module):
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
-        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
-        #       first in the forward pass, and then in the backward pass. However, this has no
-        #       effect on the expert bias update thanks to the torch.sign() operator.
-        if self.training:
+        # PyTorch activation checkpointing replays this mutation, and the optimizer
+        # compensates for that double count. torch_remat exposes its replay state,
+        # so avoid the second mutation entirely for RematAC.
+        if self.training and not is_remat_recomputing(self):
             with torch.no_grad():
                 self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 

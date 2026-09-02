@@ -12,6 +12,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
 )
+from torchtitan.models.deepseek_v3.remat import deepseek_v3_remat_config
 from torchtitan.models.gpt_oss.config_registry import (
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
@@ -86,6 +87,28 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
     return _configure_fsdp_numerics(deepseek_v3_debugmodel(), expert_parallel_degree=8)
+
+
+def deepseek_v3_debugmodel_remat_fsdp8_ep8() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_fsdp8_ep8()
+    config.activation_checkpoint = deepseek_v3_remat_config()
+    return config
+
+
+def deepseek_v3_debugmodel_remat_fsdp2_pp2_ep2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 4
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.expert_parallel_degree = 2
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    config.activation_checkpoint = deepseek_v3_remat_config()
+    return config
 
 
 def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:

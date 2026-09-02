@@ -10,6 +10,10 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.remat import (
+    maybe_remat_recompute_needs,
+    maybe_remat_save_region,
+)
 from torchtitan.protocols.module import Module
 
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
@@ -38,6 +42,8 @@ class FeedForward(Module):
     Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS = ("w1", "w3", "w2")
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         w1: Linear.Config
@@ -51,7 +57,14 @@ class FeedForward(Module):
         self.w3 = config.w3.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        w1_out = maybe_remat_save_region(self.w1, "w1", owner=self)(x)
+        w3_out = maybe_remat_save_region(self.w3, "w3", owner=self)(x)
+        maybe_remat_recompute_needs(self, w1_out, w3_out)
+        out = maybe_remat_save_region(self.w2, "w2", owner=self)(
+            F.silu(w1_out) * w3_out
+        )
+        maybe_remat_recompute_needs(self, out)
+        return out
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -61,6 +74,8 @@ class SigmoidGatedFeedForward(FeedForward):
     FeedForward so weight FQNs are flat (no nested ``ffn.`` level), which keeps
     the weights directly shardable.
     """
+
+    AVAILABLE_REMAT_SAVE_REGIONS = FeedForward.AVAILABLE_REMAT_SAVE_REGIONS
 
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
