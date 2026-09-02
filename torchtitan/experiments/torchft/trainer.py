@@ -114,7 +114,6 @@ class FaultTolerantTrainer(Trainer):
             num_tokens_per_train_step=config.training.num_tokens_per_train_step,
             dp_degree=batch_degree,
         )
-        config.training.num_tokens_per_train_step = num_tokens_per_train_step
 
         # build dataloader
         num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank

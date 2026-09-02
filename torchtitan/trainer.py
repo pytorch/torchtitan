@@ -366,8 +366,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             dp_degree, dp_rank = 1, 0
 
         # Resolve the global per-step token budget before model configs are
-        # built.  Model configs may need the concrete value (for example
-        # aux-loss normalization denominators).
+        # built.
         self.num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
@@ -375,17 +374,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.training.num_tokens_per_microbatch_per_dp_rank
             * self.num_pp_microbatches
         )
-        num_tokens_per_train_step, self.gradient_accumulation_steps = (
-            dist_utils.resolve_num_tokens_per_train_step(
-                num_tokens_per_microbatch_per_dp_rank=(
-                    config.training.num_tokens_per_microbatch_per_dp_rank
-                ),
-                num_pp_microbatches=self.num_pp_microbatches,
-                num_tokens_per_train_step=(
-                    config.training.num_tokens_per_train_step
-                ),
-                dp_degree=dp_degree,
-            )
+        (
+            num_tokens_per_train_step,
+            self.gradient_accumulation_steps,
+        ) = dist_utils.resolve_num_tokens_per_train_step(
+            num_tokens_per_microbatch_per_dp_rank=(
+                config.training.num_tokens_per_microbatch_per_dp_rank
+            ),
+            num_pp_microbatches=self.num_pp_microbatches,
+            num_tokens_per_train_step=config.training.num_tokens_per_train_step,
+            dp_degree=dp_degree,
         )
         config.training.num_tokens_per_train_step = num_tokens_per_train_step
 

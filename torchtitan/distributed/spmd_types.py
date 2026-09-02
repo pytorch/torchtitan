@@ -25,7 +25,6 @@ from torchtitan.distributed.parallel_dims import (
 )
 from torchtitan.distributed.utils import get_spmd_backend
 
-
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
 # PartitionSpec is immutable, so sharing it across a model deepcopy is safe.
 setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
@@ -161,11 +160,7 @@ def spmd_mesh_size(axis_name: str) -> int:
 def dp_local_context() -> contextlib.AbstractContextManager[None]:
     """Context manager treating the DP mesh axis as a local axis.
 
-    Under the folded-token training layout, every DP rank owns an independent
-    token stream. Operations that should not reduce across DP (per-rank hidden
-    streams, MoE per-sequence load-balance counts) run with DP marked local so
-    global SPMD checking preserves Varying@DP instead of promoting it to
-    Partial. A no-op outside spmd_types or when DP has size 1.
+    A no-op outside spmd_types or when DP has size 1.
     """
     if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
         return spmd.set_current_mesh(local_axes=("dp",))
