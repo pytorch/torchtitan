@@ -37,6 +37,7 @@ from torch_checkpointing.distributed_metadata import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
 from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
+from torch_checkpointing.hf.resharder import HFSafetensorsDTensorResharder
 from torch_checkpointing.logging_utils import checkpoint_logging_context, EventLogger
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
@@ -67,10 +68,12 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+_DEFAULT_ITEM_SPEC = ItemSpec(requires_copy=False)
 
 # Index the HF consolidation writes at the root of a final export; the
 # backend names it after the checkpoint item it consolidated.
 _HF_INDEX_FILE_NAME = f"{MODEL}.safetensors.index.json"
+_HF_SINGLE_FILE_NAME = f"{MODEL}.safetensors"
 
 # Logger the backend emits its checkpoint events and metrics on.
 _BACKEND_LOGGER_NAME = "torch_checkpointing"
@@ -216,6 +219,7 @@ def _default_backend_config(
     *,
     storage_config: StorageConfig | None = None,
     items: dict[str, ItemSpec] | None = None,
+    default: ItemSpec | None = _DEFAULT_ITEM_SPEC,
     subprocess_init_fn: Callable[..., None] | None = None,
     subprocess_init_args: tuple[Any, ...] = (),
     pre_finalize_callback: Callable[[str, EventLogger], None] | None = None,
@@ -231,7 +235,7 @@ def _default_backend_config(
             subprocess_init_fn = _init_subprocess_logging
     return BackendCheckpointManager.Config(
         items=_item_specs() if items is None else items,
-        default=ItemSpec(requires_copy=False),
+        default=default,
         save=save_config,
         storage_config=storage_config,
         subprocess_init_fn=subprocess_init_fn,
@@ -355,10 +359,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def _load(self, step: int = -1) -> bool:
+        from_hf = False
         has_checkpoint_folder = self._storage.isdir(self.folder)
         load_step = -1
         if has_checkpoint_folder:
-            load_step = self._find_load_step() if step == -1 else step
+            load_step = self._find_native_load_step() if step == -1 else step
         if step != -1 and not has_checkpoint_folder:
             raise FileNotFoundError(
                 f"--checkpoint.load_step={step} not found because "
@@ -366,16 +371,32 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             )
 
         if load_step == -1:
-            if self.initial_load_in_hf:
-                raise ValueError(
-                    "TorchCheckpointingManager does not yet support loading "
-                    "Hugging Face checkpoints."
-                )
-            if not self.initial_load_path:
+            from_hf = self.initial_load_in_hf
+            if from_hf:
+                if self.initial_load_in_hf_quantized:
+                    raise ValueError(
+                        "TorchCheckpointingManager does not support loading "
+                        "quantized Hugging Face checkpoints."
+                    )
+                if self.sd_adapter is None:
+                    raise ValueError(
+                        "checkpoint.initial_load_in_hf is True, but sd_adapter "
+                        "is not provided."
+                    )
+                checkpoint_id = self.initial_load_path or self.sd_adapter.hf_assets_path
+                if not checkpoint_id:
+                    raise ValueError(
+                        "checkpoint.initial_load_in_hf requires either "
+                        "checkpoint.initial_load_path or model.hf_assets_path."
+                    )
+                model_only = True
+            elif not self.initial_load_path:
                 logger.info("No checkpoint was provided, this is a fresh start.")
                 return False
-            checkpoint_id = self.initial_load_path
-            model_only = self.initial_load_model_only
+            else:
+                checkpoint_id = self.initial_load_path
+                model_only = self.initial_load_model_only
+
             if not self._storage.isdir(checkpoint_id):
                 raise ValueError(
                     f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
@@ -390,9 +411,14 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                 )
 
-        if not self._is_valid_checkpoint(checkpoint_id):
+        is_valid_checkpoint = (
+            self._is_hf_checkpoint(checkpoint_id)
+            if from_hf
+            else self._is_native_checkpoint(checkpoint_id)
+        )
+        if not is_valid_checkpoint:
             raise ValueError(
-                f"Checkpoint {checkpoint_id!r} is not a native "
+                f"Checkpoint {checkpoint_id!r} is not a supported "
                 "torch_checkpointing checkpoint."
             )
         logger.info("Loading the checkpoint from %s.", checkpoint_id)
@@ -403,12 +429,40 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # values and resume from a model that is not the one that was saved.
         # exclude_from_loading is applied by _states_to_load, so anything still
         # in `states` here is genuinely required.
-        loaded = self._manager.load(
-            checkpoint_id,
-            into=_stateful_to_state_dict(states),
-            strict=True,
-        )
-        _restore_state_dict(states, loaded)
+        if from_hf:
+            assert self.sd_adapter is not None
+            hf_state = self.sd_adapter.to_hf(_stateful_to_state_dict(states)[MODEL])
+            model_spec = self._manager_config.items[MODEL]
+            hf_model_spec = ItemSpec(
+                requires_copy=model_spec.requires_copy,
+                layout=model_spec.layout,
+                resharder=HFSafetensorsDTensorResharder(),
+                required=model_spec.required,
+            )
+            hf_config = _default_backend_config(
+                _sync_save_config(use_barrier=False),
+                storage_config=self._manager_config.storage_config,
+                items={MODEL: hf_model_spec},
+                default=None,
+            )
+            hf_manager = hf_config.build()
+            try:
+                loaded = hf_manager.load(
+                    checkpoint_id,
+                    into={MODEL: hf_state},
+                    strict=True,
+                )
+            finally:
+                hf_manager.close()
+            native_state = self.sd_adapter.from_hf(loaded[MODEL])
+            _restore_state_dict(states, {MODEL: native_state})
+        else:
+            loaded = self._manager.load(
+                checkpoint_id,
+                into=_stateful_to_state_dict(states),
+                strict=True,
+            )
+            _restore_state_dict(states, loaded)
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             "Finished loading the checkpoint in %.2f seconds.",
@@ -454,6 +508,27 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         return True
 
+    def _find_native_load_step(self) -> int:
+        valid_steps = []
+        for dirname in self._storage.listdir(self.folder):
+            step = self._parse_step(dirname)
+            if step is None:
+                continue
+            checkpoint_dir = filesystem.join(self.folder, dirname)
+            if self._is_native_checkpoint(checkpoint_dir):
+                valid_steps.append(step)
+        return max(valid_steps) if valid_steps else -1
+
+    def _is_native_checkpoint(self, checkpoint_dir: str) -> bool:
+        return self._storage.isfile(
+            filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
+        )
+
+    def _is_hf_checkpoint(self, checkpoint_dir: str) -> bool:
+        return self._storage.isfile(
+            filesystem.join(checkpoint_dir, _HF_INDEX_FILE_NAME)
+        ) or self._storage.isfile(filesystem.join(checkpoint_dir, _HF_SINGLE_FILE_NAME))
+
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         # Either shape this manager publishes. A resumable checkpoint has the
         # backend's metadata at its root. A final HF export does not: its
@@ -461,9 +536,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # were written to, and the root holds the consolidated HF files. Probing
         # only for the former would classify a finished export as abandoned and
         # let the next run's retention delete it.
-        return self._storage.isfile(
-            filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
-        ) or self._storage.isfile(filesystem.join(checkpoint_dir, _HF_INDEX_FILE_NAME))
+        return self._is_native_checkpoint(checkpoint_dir) or self._is_hf_checkpoint(
+            checkpoint_dir
+        )
 
     def _maybe_wait_for_staging(self) -> None:
         # Acquiring the backend lock is what blocks until staging for the last
