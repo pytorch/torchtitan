@@ -52,7 +52,7 @@ def parallelize_llama(
 
     annotate_llama(model)
 
-    if parallel_dims.tp_enabled:
+    if parallelism.spmd_backend == "spmd_types" or parallel_dims.tp_enabled:
         model.parallelize(parallel_dims)
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
