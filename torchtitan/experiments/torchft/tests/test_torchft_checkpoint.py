@@ -163,13 +163,15 @@ class TestFTCheckpointManager(unittest.TestCase):
 
         manager.close()
 
-    def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
+    def _manager(
+        self, participating_rank: int, keep_latest_k: int = 0
+    ) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
             enable=True,
             async_mode="disabled",
             folder=self.test_folder,
             interval=1,
-            keep_latest_k=0,
+            keep_latest_k=keep_latest_k,
             last_save_model_only=False,
             export_dtype="float32",
             exclude_from_loading=[],
@@ -209,6 +211,55 @@ class TestFTCheckpointManager(unittest.TestCase):
             bystander = self._manager(participating_rank=1)
             self.assertIs(False, bystander.save(curr_step=5))
             bystander.close()
+
+    def _make_ft_steps(self, manager, folder, steps):
+        for step in steps:
+            path = os.path.join(folder, f"step-{step}")
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, ".metadata"), "w") as f:
+                f.write("{}")
+
+    def _drain_queue(self, manager):
+        paths = []
+        while not manager.purge_queue.empty():
+            paths.append(manager.purge_queue.get_nowait())
+        return paths
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_ft_folder_purge_keeps_latest_k(self, _mock_rank):
+        manager = self._manager(participating_rank=0, keep_latest_k=2)
+        try:
+            self._make_ft_steps(manager, manager._ft_folder(), [1, 2, 3, 4])
+            manager._purge_stale_checkpoints()
+            purged = self._drain_queue(manager)
+            self.assertEqual(
+                sorted(purged),
+                sorted(os.path.join(manager._ft_folder(), f"step-{s}") for s in (1, 2)),
+            )
+        finally:
+            manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_ft_folder_purge_skipped_for_nonzero_participating_rank(self, _mock_rank):
+        manager = self._manager(participating_rank=1, keep_latest_k=2)
+        try:
+            self._make_ft_steps(manager, manager._ft_folder(), [1, 2, 3, 4])
+            manager._purge_stale_checkpoints()
+            self.assertTrue(manager.purge_queue.empty())
+        finally:
+            manager.close()
+
+    def test_ft_load_falls_back_to_legacy_folder(self):
+        manager = self._manager(participating_rank=0)
+        try:
+            legacy_folder = manager._legacy_ft_folder()
+            self._make_ft_steps(manager, legacy_folder, [3])
+            with mock.patch.object(TorchFTCheckpointManager, "dcp_load") as mock_load:
+                manager._ft_load()
+            (call,) = mock_load.call_args_list
+            self.assertIn("ft-replicat-0", call.kwargs["checkpoint_id"])
+        finally:
+            manager.close()
 
 
 if __name__ == "__main__":

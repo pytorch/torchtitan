@@ -98,7 +98,9 @@ class TorchFTCheckpointManager(CheckpointManager):
             ft_manager.manager if ft_manager and ft_manager.enabled else None
         )
         self.enable_ft_dataloader_checkpoints = (
-            self.ft_manager and config.enable_ft_dataloader_checkpoints
+            self.ft_manager
+            and config.enable_ft_dataloader_checkpoints
+            and dataloader is not None
         )
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
@@ -198,7 +200,44 @@ class TorchFTCheckpointManager(CheckpointManager):
             return bool(self.ft_manager and self.ft_manager.participating_rank() == 0)
         return True
 
+    def _purge_stale_checkpoints(self) -> None:
+        super()._purge_stale_checkpoints()
+        # Per-replica dataloader checkpoints are saved every step (not gated
+        # by interval), so without retention they grow without bound. Purge
+        # them with the same policy as the full checkpoints. Each replica owns
+        # its own folder, so purge it from that replica's participating rank 0
+        # (not just the global rank 0, which only covers replica 0).
+        if self.enable_ft_dataloader_checkpoints and self._should_purge_ft_folder():
+            ft_folder = self._ft_folder()
+            if not self._storage.isdir(ft_folder):
+                return
+            discovered_checkpoints = []
+            for filename in self._storage.listdir(ft_folder):
+                step = self._parse_step(filename)
+                if step is None:
+                    continue
+                path = filesystem.join(ft_folder, filename)
+                if self._is_valid_checkpoint(path):
+                    discovered_checkpoints.append((step, path))
+
+            discovered_checkpoints.sort()
+            to_delete = discovered_checkpoints[: -1 * self.keep_latest_k]
+            for _, path in to_delete:
+                assert self.purge_thread is not None
+                self.purge_queue.put(path)
+
+    def _should_purge_ft_folder(self) -> bool:
+        if self.keep_latest_k <= 0 or not self._storage.isdir(self.folder):
+            return False
+        # pyrefly: ignore [missing-attribute]
+        return bool(self.ft_manager and self.ft_manager.participating_rank() == 0)
+
     def _ft_folder(self) -> str:
+        return filesystem.join(self.folder, f"ft-replica-{self.ft_replica_id}")
+
+    def _legacy_ft_folder(self) -> str:
+        # Folder name used before the "ft-replicat" typo fix; only consulted
+        # on load so runs predating the rename can still resume.
         return filesystem.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
 
     def _ft_save(self, step: int) -> None:
@@ -215,13 +254,18 @@ class TorchFTCheckpointManager(CheckpointManager):
         logger.info(f"Staging torchft checkpoint took {time.monotonic() - begin} secs.")
 
     def _ft_load(self) -> None:
-        step = self._find_load_step(folder=self._ft_folder())
+        folder = self._ft_folder()
+        step = self._find_load_step(folder=folder)
         if step == -1:
-            return
+            # Fall back to the pre-rename folder so older runs still resume.
+            folder = self._legacy_ft_folder()
+            step = self._find_load_step(folder=folder)
+            if step == -1:
+                return
 
         begin = time.monotonic()
         logger.info(f"Loading the FT checkpoint at step {step}.")
-        checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
+        checkpoint_id = self._create_checkpoint_id(step, folder=folder)
         self.dcp_load(
             self.ft_states,
             checkpoint_id=checkpoint_id,
