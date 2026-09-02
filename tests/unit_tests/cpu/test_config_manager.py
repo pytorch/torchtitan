@@ -4,13 +4,31 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
+import io
 import sys
 import unittest
 from unittest import mock
 
 import pytest
 from torchtitan.config import ConfigManager
+
+
+def _assert_invalid_cli_config(
+    config_manager: ConfigManager, args: list[str], message: str
+) -> None:
+    """Check config validation errors across supported Tyro versions."""
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        with pytest.raises((ValueError, SystemExit)) as exc_info:
+            config_manager.parse_args(args)
+
+    if isinstance(exc_info.value, SystemExit):
+        assert exc_info.value.code == 2
+        assert message in stderr.getvalue()
+    else:
+        assert message in str(exc_info.value)
 
 
 class TestConfigManager(unittest.TestCase):
@@ -115,35 +133,37 @@ class TestConfigManager(unittest.TestCase):
 
     def test_pipeline_microbatch_size_must_divide_local_batch_size(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="must be evenly divisible"):
-            config_manager.parse_args(
-                [
-                    "--module",
-                    "llama3",
-                    "--config",
-                    "llama3_debugmodel",
-                    "--training.local_batch_size",
-                    "8",
-                    "--parallelism.pipeline_parallel_degree",
-                    "2",
-                    "--parallelism.pipeline_parallel_microbatch_size",
-                    "3",
-                ]
-            )
+        _assert_invalid_cli_config(
+            config_manager,
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.local_batch_size",
+                "8",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+                "--parallelism.pipeline_parallel_microbatch_size",
+                "3",
+            ],
+            "must be evenly divisible",
+        )
 
     def test_cuda_graphs_reject_pipeline_parallelism(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="do not support pipeline parallelism"):
-            config_manager.parse_args(
-                [
-                    "--module",
-                    "llama3",
-                    "--config",
-                    "llama3_debugmodel",
-                    "--parallelism.pipeline_parallel_degree",
-                    "2",
-                ]
-            )
+        _assert_invalid_cli_config(
+            config_manager,
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+            ],
+            "do not support pipeline parallelism",
+        )
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -153,17 +173,18 @@ class TestConfigManager(unittest.TestCase):
 
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="without CPU synchronization"):
-            config_manager.parse_args(
-                [
-                    "--module",
-                    "deepseek_v3",
-                    "--config",
-                    "deepseek_v3_debugmodel",
-                    "--parallelism.expert_parallel_degree",
-                    "2",
-                ]
-            )
+        _assert_invalid_cli_config(
+            config_manager,
+            [
+                "--module",
+                "deepseek_v3",
+                "--config",
+                "deepseek_v3_debugmodel",
+                "--parallelism.expert_parallel_degree",
+                "2",
+            ],
+            "without CPU synchronization",
+        )
 
     def test_cuda_graphs_allow_non_blocking_hybridep(self):
         config_manager = ConfigManager()
