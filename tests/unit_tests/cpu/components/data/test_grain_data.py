@@ -1024,6 +1024,41 @@ def test_unpacked_text_collator_pads_positions_within_context_window():
     assert int(inputs["positions"].max()) < CONTEXT.max_context_length
 
 
+def test_text_collator_counts_unmasked_labels():
+    sequence = TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([2, 3, IGNORE_INDEX]),
+    )
+
+    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
+
+    assert inputs["num_valid_tokens"] == 2
+    assert inputs["input"][:3].tolist() == [1, 2, 3]
+
+
+def test_loader_batches_carry_valid_token_count():
+    config = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(rows=({"tokens": [1, 10, 11, 2]},)),
+            processor=RowToTokens.Config(),
+        ),
+        collator=TextCollator.Config(),
+        repeat=True,
+    )
+    loader = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        max_context_length=CONTEXT.max_context_length,
+        num_tokens_per_batch=CONTEXT.num_tokens_per_batch,
+    )
+
+    input_dict, labels = next(iter(loader))
+
+    assert input_dict["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 3
+    loader.close()
+
+
 def test_pack_then_pack_then_collate_preserves_aligned_pairs():
     documents = SingleDatasetConfig(
         source=RowsSourceConfig(

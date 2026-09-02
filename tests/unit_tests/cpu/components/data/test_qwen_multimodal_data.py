@@ -315,9 +315,10 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    _, labels = collator([packed])
+    inputs, labels = collator([packed])
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
+    assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4
 
 
 def test_mm_finite_underfilled_tail_flushes():

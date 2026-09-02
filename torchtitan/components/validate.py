@@ -15,7 +15,7 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
-from torchtitan.components.loss import IGNORE_INDEX, LossFunction
+from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
@@ -177,28 +177,30 @@ class Validator(BaseValidator):
 
             try:
                 microbatches = []
-                local_valid_tokens = torch.tensor(
-                    0, dtype=torch.int64, device=device_type
-                )
+                local_valid_tokens = 0
                 for _ in range(num_pp_microbatches):
                     input_dict, labels = next(validation_iterator)
+                    # Popped so the batch reaching the model holds only its kwargs.
+                    local_valid_tokens += input_dict.pop("num_valid_tokens")
                     self.metrics_processor.ntokens_since_last_log += labels.numel()
                     for k, v in input_dict.items():
                         input_dict[k] = v.to(device_type)
                     labels = labels.to(device_type)
-                    local_valid_tokens += (labels != IGNORE_INDEX).sum()
                     microbatches.append((input_dict, labels))
             except StopIteration:
                 break
 
             # All-reduce token count across DP ranks while keeping it on device.
+            local_valid_tokens_tensor = torch.tensor(
+                local_valid_tokens, dtype=torch.int64, device=device_type
+            )
             if parallel_dims.dp_enabled:
                 batch_mesh = parallel_dims.get_mesh("batch")
                 global_valid_tokens = dist_utils.dist_sum_tensor(
-                    local_valid_tokens, batch_mesh, None
+                    local_valid_tokens_tensor, batch_mesh, None
                 )
             else:
-                global_valid_tokens = local_valid_tokens
+                global_valid_tokens = local_valid_tokens_tensor
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
