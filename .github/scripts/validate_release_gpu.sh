@@ -29,7 +29,8 @@ case "${VALIDATION_SUITE}" in
     ;;
 esac
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 RC_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/assets/version.txt")"
 if [[ "${RC_VERSION}" != *rc* ]]; then
   echo "Expected an RC version, got: ${RC_VERSION}"
@@ -75,10 +76,22 @@ install_release_candidate() {
 }
 install_release_candidate
 
-ARTIFACTS="${RUNNER_TEMP}/artifacts-to-be-uploaded"
+ARTIFACTS="${RUNNER_ARTIFACT_DIR:-${RUNNER_TEMP}/artifacts-to-be-uploaded}"
 VALIDATION_ROOT="${RUNNER_TEMP}/validate-release-gpu"
+
+ensure_writable_directory() {
+  local directory="$1"
+  if mkdir -p "${directory}" 2>/dev/null && [[ -w "${directory}" ]]; then
+    return
+  fi
+  sudo mkdir -p "${directory}"
+  sudo chown -R "$(id -u):$(id -g)" "${directory}"
+}
+
+ensure_writable_directory "${ARTIFACTS}"
+ensure_writable_directory "${HF_HOME}"
+ensure_writable_directory "${VALIDATION_ROOT}"
 mkdir -p \
-  "${ARTIFACTS}" \
   "${VALIDATION_ROOT}/scripts" \
   "${VALIDATION_ROOT}/torchtitan/experiments/graph_trainer" \
   "${VALIDATION_ROOT}/torchtitan/models/flux/inference"
