@@ -119,7 +119,14 @@ def gather_vision_embeds(
     vision_bank_VD = vision_bank_VD.to(inputs_TD.dtype)
     is_vision_T1 = (vision_bank_indices_T >= 0).unsqueeze(-1)
     gathered_TD = vision_bank_VD[vision_bank_indices_T.clamp(min=0)]
-    return torch.where(is_vision_T1, gathered_TD, inputs_TD)
+    # The vision bank is DP-local, so global propagation through where omits
+    # DP from the token PartitionSpec. Validate locally, then restore the exact
+    # token layout at the fusion boundary.
+    with spmd.local():
+        fused_TD = torch.where(is_vision_T1, gathered_TD, inputs_TD)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        spmd.assert_type_like(fused_TD, inputs_TD)
+    return fused_TD
 
 
 def scatter_vision_embeds(

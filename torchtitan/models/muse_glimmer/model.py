@@ -16,7 +16,7 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -29,10 +29,7 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.decoder_sharding import (
-    decoder_input_sharding,
-    token_id_placement,
-)
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
@@ -383,6 +380,8 @@ class MuseGlimmerModel(Decoder):
             prepare_context_parallel_input,
         )
 
+        from .sharding import vision_bank_indices_placement
+
         batch: dict[str, Any] = dict(input_dict)
         pixel_values = batch.get("pixel_values")
         grid_thw = batch.get("grid_thw")
@@ -428,7 +427,9 @@ class MuseGlimmerModel(Decoder):
             **decoder_input_sharding(),
             **multimodal_input_sharding(include_cp_axis=True),
         }
-        input_sharding["vision_bank_indices_T"] = token_id_placement()
+        input_sharding["vision_bank_indices_T"] = vision_bank_indices_placement(
+            enable_sp=parallelism.enable_sequence_parallel
+        )
         if parallel_dims.cp_enabled:
             batch = prepare_context_parallel_input(
                 batch,
@@ -438,6 +439,17 @@ class MuseGlimmerModel(Decoder):
                 parallelism.context_parallel_ptrr_mask_key,
             )
         if parallelism.spmd_backend == "spmd_types":
+            if (
+                parallelism.enable_sequence_parallel
+                and parallel_dims.tp_enabled
+                and "vision_bank_indices_T" in batch
+            ):
+                batch["vision_bank_indices_T"] = spmd.shard(
+                    batch["vision_bank_indices_T"],
+                    parallel_dims.get_dense_tp_mesh().get_group(),
+                    src=spmd.I,
+                    dst=spmd.S(0),
+                )
             batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
@@ -505,31 +517,17 @@ class MuseGlimmerModel(Decoder):
         # tok_embeddings) and inject vision features before the decoder layers.
         # On non-embedding pipeline stages tok_embeddings is None and the input
         # is already hidden states, so injection is skipped there.
-        with multimodal_context():
-            if self.tok_embeddings is not None:
-                h_TD = self.tok_embeddings(tokens)
+        if self.tok_embeddings is not None:
+            h_TD = self.tok_embeddings(tokens)
+            with multimodal_context():
                 h_TD = self._prepare_multimodal_embeds(
                     h_TD,
                     pixel_values=pixel_values,
                     grid_thw=grid_thw,
                     vision_bank_indices_T=vision_bank_indices_T,
                 )
-            else:
-                h_TD = tokens
-
-        # torch.where can erase the token PartitionSpec. Restore it before the
-        # layer-0 FSDP pre-forward hook runs ahead of input redistribution.
-        if (
-            self.tok_embeddings is not None
-            and self.vision_projection is not None
-            and get_spmd_backend() == "spmd_types"
-            and spmd.is_type_checking()
-        ):
-            spmd.assert_type(
-                h_TD,
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                spmd.PartitionSpec(("dp", "cp"), None),
-            )
+        else:
+            h_TD = tokens
 
         for layer in self.layers.values():
             h_TD = layer(h_TD, attention_masks, positions)

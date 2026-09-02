@@ -21,7 +21,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
-    token_id_placement,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -40,6 +39,19 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
+def vision_bank_indices_placement(*, enable_sp: bool) -> SpmdType:
+    """Placement for token-aligned indices into the packed vision bank."""
+    token_axes = (DP, CP, TP) if enable_sp else (DP, CP)
+    return SpmdType(
+        {
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.V if enable_sp else spmd.I,
+        },
+        partition_spec=spmd.PartitionSpec(token_axes),
+    )
+
+
 def set_muse_glimmer_sharding_config(
     config: "MuseGlimmerModel.Config",
     *,
@@ -47,9 +59,9 @@ def set_muse_glimmer_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Muse Glimmer sub-configs.
 
-    Text-only models use the standard decoder layout. Multimodal models keep
-    token embeddings and the projected vision bank TP-replicated for fusion;
-    the first decoder layer restores the standard SP or invariant layout.
+    Text-only and multimodal models use the standard decoder activation layout.
+    With SP, each TP rank gathers vision rows for its local token shard, so the
+    vision bank becomes TP-replicated before fusion.
 
     All sub-configs are populated unconditionally -- ``Module.parallelize``
     filters disabled axes at runtime.
@@ -60,7 +72,6 @@ def set_muse_glimmer_sharding_config(
     for layer_cfg in config.layers:
         _set_muse_glimmer_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
-    # Configure the TP-replicated multimodal fusion path.
     if config.vision_encoder is not None:
         _set_multimodal_sharding(config, enable_sp=enable_sp)
 
@@ -99,46 +110,18 @@ def _set_multimodal_sharding(
     *,
     enable_sp: bool,
 ) -> None:
-    """Keep multimodal fusion TP-replicated until the first decoder layer."""
-    fusion_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    decoder_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
-    vision_replicated = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
-
-    emb_cfg = config.tok_embeddings
-    emb_cfg.embedding.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=fusion_layout,
-        local_map=LocalMapConfig(in_grad_placements=None),
-    )
-    emb_cfg.norm.sharding_config = ShardingConfig(
-        in_src_shardings={"input": fusion_layout},
-        in_dst_shardings={"input": fusion_layout},
-        out_src_shardings=fusion_layout,
-        out_dst_shardings=fusion_layout,
-    )
-
+    """Configure token-local multimodal fusion."""
     if config.vision_projection is not None:
         config.vision_projection.sharding_config = vision_invariant_linear_config(
             include_cp_axis=True
         )
     if config.perception_emb_norm is not None:
         vision_norm = invariant_norm_config(include_cp_axis=True)
-        vision_norm.out_dst_shardings = vision_replicated
+        if enable_sp:
+            vision_norm.out_dst_shardings = SpmdType(
+                {DP: spmd.V, CP: spmd.R, TP: spmd.R}
+            )
         config.perception_emb_norm.sharding_config = vision_norm
-
-    if config.layers:
-        config.layers[0].sharding_config = ShardingConfig(
-            in_src_shardings={"x": fusion_layout},
-            in_dst_shardings={"x": decoder_layout},
-            out_src_shardings=decoder_layout,
-        )
 
 
 def _set_muse_glimmer_layer_sharding(
