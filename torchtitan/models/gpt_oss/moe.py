@@ -97,6 +97,8 @@ class GptOssGroupedExperts(GroupedExperts):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Raw expert computation without dispatch/combine.
 

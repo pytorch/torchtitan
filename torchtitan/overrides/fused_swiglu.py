@@ -635,6 +635,8 @@ class FusedGroupedExperts(GroupedExperts):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if isinstance(self.w13, DTensor):
             w13 = self.w13.to_local()
@@ -653,6 +655,8 @@ class FusedGroupedExperts(GroupedExperts):
         )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
+        if routed_scores_R is not None:
+            h_RF = (h_RF.float() * routed_scores_R.reshape(-1, 1)).to(h_RF.dtype)
         return self._grouped_mm(
             A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
         ).type_as(x_RD)
