@@ -667,12 +667,6 @@ class CheckpointManager(BaseCheckpointManager):
             )
         )
 
-    def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
-        """Generate the standardized filesystem path for a checkpoint
-        (e.g., 'checkpoints/step-100')."""
-        folder = folder or self.folder
-        return filesystem.join(folder, f"step-{step}")
-
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -774,21 +768,3 @@ class CheckpointManager(BaseCheckpointManager):
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
         )
-
-    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        """Determine whether a checkpoint should be saved based on
-        the current step, interval, and training status."""
-
-        if not self.enable or self.load_only:
-            return False
-
-        if curr_step == 1 and self.enable_first_step_checkpoint:
-            return True
-
-        if last_step:
-            return True
-
-        if curr_step % self.interval == 0:
-            return True
-
-        return False
