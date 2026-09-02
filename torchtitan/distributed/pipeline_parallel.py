@@ -488,9 +488,13 @@ def _split_module(
     model = copy.deepcopy(whole_model)
     # Create a set of modules to keep for faster lookup
     modules_to_keep = set(module_names)
-    if "rope_modules" in model._modules:
-        modules_to_keep.add("rope_modules")
     for module_name, module_value in model.named_children():
+        # Keep the shared RoPE registry in every PP model part. Its entries are
+        # keyed by RoPE configuration rather than by layer FQN, so it cannot be
+        # selected by the normal layer-pruning logic. The ownership/replication
+        # policy for shared root modules should be revisited separately.
+        if module_name == "rope_modules":
+            continue
         if module_name in modules_to_keep:
             continue
         # Handle layer-like structures (e.g., "layers.0", "layers.1")
