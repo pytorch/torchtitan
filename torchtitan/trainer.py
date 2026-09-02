@@ -9,6 +9,7 @@ import json
 import os
 import time
 from collections.abc import Iterable, Iterator
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
@@ -289,6 +290,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
     fwd_bwd_fn: ForwardBackwardFn
+    _pp_training_schedule_initialized: bool
     gradient_accumulation_steps: int
     num_pp_microbatches: int
     pp_has_first_stage: bool
@@ -634,6 +636,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             ),
         )
         self.fwd_bwd_fn = self._forward_backward_body
+        if parallel_dims.pp_enabled:
+            self._pp_training_schedule_initialized = False
         if not config.training.disable_cuda_graphs:
             self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
 
@@ -805,15 +809,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
-            losses = [] if self.pp_has_last_stage else None
-            self.pp_schedule.step(
-                arg_mbs=arg_mbs if self.pp_has_first_stage else None,
-                kwarg_mbs=kwarg_mbs,
-                target_mbs=target_mbs,
-                losses=losses,
-                loss_kwargs=loss_kwargs,
-                return_outputs=False,
+            loss_context = (
+                self.loss_fn.step_context(num_loss_calls=len(target_mbs))
+                if target_mbs is not None and self._pp_training_schedule_initialized
+                else nullcontext()
             )
+            with loss_context:
+                losses = [] if self.pp_has_last_stage else None
+                self.pp_schedule.step(
+                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                    kwarg_mbs=kwarg_mbs,
+                    target_mbs=target_mbs,
+                    losses=losses,
+                    loss_kwargs=loss_kwargs,
+                    return_outputs=False,
+                )
+            self._pp_training_schedule_initialized = True
 
         # TODO: PP+FSDP unexpectedly puts the loss back to the CPU.
         if self.pp_has_last_stage:
@@ -1003,6 +1014,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             extra_metrics=extra_metrics,
         )
 
+    def _run_validation(self) -> None:
+        self.validator.validate(self.model_parts, self.step)
+        if self.parallel_dims.pp_enabled:
+            # Pipeline eval switches the schedule to forward-only metadata.
+            # The next training call must rebuild backward metadata, which may
+            # invoke the loss once before processing its target microbatches.
+            self._pp_training_schedule_initialized = False
+
     @record
     def train(self):
         config = self.config
@@ -1044,7 +1063,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     if self.config.validator.enable and self.validator.should_validate(
                         self.step
                     ):
-                        self.validator.validate(self.model_parts, self.step)
+                        self._run_validation()
 
                     # signal the profiler that the next profiling step has started
                     profiler.step()

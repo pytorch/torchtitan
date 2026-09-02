@@ -554,7 +554,7 @@ class FaultTolerantTrainer(Trainer):
                 if self.config.validator.enable and self.validator.should_validate(
                     self.step
                 ):
-                    self.validator.validate(self.model_parts, self.step)
+                    self._run_validation()
 
                 # signal the profiler that the next profiling step has started
                 profiler.step()
