@@ -62,7 +62,8 @@ jobs:
       - name: Install CPU unit test dependencies
         run: |
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
-            -r requirements-dev.txt
+            -r requirements-dev.txt \
+            "flash-linear-attention[cpu]==0.5.2"
 
       - name: Verify installed package
         working-directory: ${{ runner.temp }}
