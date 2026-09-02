@@ -228,7 +228,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_8_debug_varlen_batch_invariant",
+                    "--config rl_grpo_qwen3_5_debug_varlen_batch_invariant",
                     "--async-loop.num-training-steps 3",
                     "--hf_assets_path tests/assets/tokenizer",
                     # The debug model has two GDN key heads, so TP cannot exceed 2.
@@ -246,8 +246,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--metrics.no-enable-wandb",
                 ],
             ],
-            "RL GRPO Qwen3.8 hybrid GDN TP=2 batch-invariant",
-            "rl_grpo_qwen3_8_debug_tp2_batch_invariant",
+            "RL GRPO Qwen3.5 hybrid GDN TP=2 batch-invariant",
+            "rl_grpo_qwen3_5_debug_tp2_batch_invariant",
             ngpu=8,
         ),
     ]
