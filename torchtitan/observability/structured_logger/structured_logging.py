@@ -36,6 +36,8 @@ console_logger: logging.Logger = logging.getLogger(__name__)
 # the console logger above.
 _structured_logger: logging.Logger = logging.getLogger("torchtitan.structured_logger")
 _structured_logger.propagate = False
+_SUBPROCESS_INIT_FN_ATTR = "_subprocess_init_fn"
+setattr(_structured_logger, _SUBPROCESS_INIT_FN_ATTR, None)
 
 # Used to check if handler has been already initialized. If so, re-initializing
 # is a no-op
@@ -78,9 +80,82 @@ class ExtraFields(enum.StrEnum):
     LOG_TYPE_NAME = "log_type_name"
     EVENT_NAME = "event_name"
     STEP = "step"
+    CONTEXT = "context"
     VALUE = "value"
     RELATIVE_STEP = "relative_step"
     TASK_NAME = "task_name"
+
+
+class _StructuredRecordForwarder(logging.Handler):
+    """Forward structured records from the root logger to trace handlers.
+
+    ``init_structured_logger`` attaches this handler to ``logging.root``,
+    Python's process-wide root logger, and attaches the trace handlers to the
+    dedicated structured logger. The checkpoint backend uses a separate named
+    logger::
+
+        init_structured_logger(source="trainer", output_dir="./outputs")
+        structured_logger = logging.getLogger("torchtitan.structured_logger")
+        checkpoint_logger = logging.getLogger("torch_checkpointing")
+        checkpoint_logger.setLevel(logging.INFO)
+
+        checkpoint_logger.info(
+            "checkpoint metric",
+            extra=event_extra(
+                "log_metric",
+                event_name="train.checkpoint_write.latency_ms",
+                value=12.5,
+            ),
+        )
+
+    ``checkpoint_logger.propagate`` defaults to ``True``, so normal Python
+    logging propagation sends the checkpoint record to ``logging.root``. This
+    handler then bridges it to ``structured_logger``::
+
+        checkpoint_logger.info(...)
+            -> logging.root                    normal Python propagation
+            -> _StructuredRecordForwarder      handler installed on root
+            -> structured_logger.handle(...)   explicit bridge
+            -> registered trace handlers
+
+    Native TorchTitan structured events take the shorter path::
+
+        log_trace_*()
+            -> structured_logger.info(...)
+            -> registered trace handlers
+
+    They are not logged twice because ``structured_logger.propagate`` is
+    ``False``. Native records stop after its handlers and never reach
+    ``logging.root`` or this forwarder. The bridge is installed on the root so
+    future integrated libraries do not need separate handler installation;
+    any logger with propagation enabled can opt in by emitting a record with
+    ``log_type_name``.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.name == _structured_logger.name:
+            return
+        if getattr(record, str(ExtraFields.LOG_TYPE_NAME), None) is None:
+            return
+        _structured_logger.handle(record)
+
+
+def _ensure_root_forwarder() -> None:
+    root_logger = logging.getLogger()
+    if not any(
+        isinstance(handler, _StructuredRecordForwarder)
+        for handler in root_logger.handlers
+    ):
+        root_logger.addHandler(_StructuredRecordForwarder())
+
+
+def _get_structured_logger_subprocess_init_fn() -> Callable[[], None] | None:
+    if _disabled or not _is_initialized or not _structured_logger.handlers:
+        return None
+    return cast(
+        Callable[[], None],
+        getattr(_structured_logger, _SUBPROCESS_INIT_FN_ATTR),
+    )
 
 
 def event_extra(
@@ -158,8 +233,7 @@ def init_structured_logger(
     JSONL handler is registered; when set, ONLY the listed factories run.
 
     ``rank`` defaults to ``$RANK`` (set by torchrun), so this can run
-    before ``torch.distributed`` init. Idempotent: second and later calls
-    are a no-op.
+    before ``torch.distributed`` init. Repeated calls do not duplicate handlers.
 
     When ``enable=False``, all subsequent ``log_trace_*`` calls become
     no-ops (no handlers are attached).
@@ -175,12 +249,12 @@ def init_structured_logger(
 
     if not enable:
         _disabled = True
+        setattr(_structured_logger, _SUBPROCESS_INIT_FN_ATTR, None)
         console_logger.info(
             "Structured logging disabled via DebugConfig.enable_structured_logging=False"
         )
         return
 
-    # Avoids re-initializing
     if _is_initialized:
         return
 
@@ -209,7 +283,19 @@ def init_structured_logger(
     ):
         _structured_logger.setLevel(logging.INFO)
 
+    setattr(
+        _structured_logger,
+        _SUBPROCESS_INIT_FN_ATTR,
+        functools.partial(
+            init_structured_logger,
+            source=source,
+            output_dir=output_dir,
+            rank=rank,
+        ),
+    )
     _is_initialized = True
+
+    _ensure_root_forwarder()
 
 
 def log_trace_scalar(scalars: dict[str, float | int], *, stacklevel: int = 2) -> None:
