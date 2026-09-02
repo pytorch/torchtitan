@@ -160,16 +160,12 @@ flavors = {
 }
 
 
-_MAX_CONTEXT_LEN = 131072
-
-
-def model_registry(flavor: str, *, seq_len: int | None = None) -> ModelSpec:
-    context_len = seq_len or _MAX_CONTEXT_LEN
+def model_registry(flavor: str, *, seq_len: int) -> ModelSpec:
     return ModelSpec(
         name="transformers_modeling_backend",
         flavor=flavor,
         model=flavors[flavor],
-        max_context_length=context_len,
+        max_context_length=seq_len,
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
