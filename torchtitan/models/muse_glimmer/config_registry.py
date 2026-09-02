@@ -152,13 +152,12 @@ def muse_glimmer_debugmodel_mm() -> Trainer.Config:
     Trains the ``debugmodel_mm`` flavor (debug text decoder that owns a
     scaled-down vision encoder + adapter) end-to-end on the ``cc12m-test`` local
     tar fixture. The shared Grain data pipeline emits packed ``pixel_values`` +
-    ``grid_thw`` + ``special_tokens``; the model derives the vision-placeholder
-    mask from ``special_tokens``. Vision-placeholder positions are already
-    ``IGNORE_INDEX`` in the labels, so a standard ``CrossEntropyLoss`` (wrapped in
-    ``ChunkedLossWrapper``) is used.
+    ``grid_thw`` + ``special_tokens``; preprocessing builds packed-bank
+    indices from the image placeholder token. Vision-placeholder positions are
+    already ``IGNORE_INDEX`` in the labels, so a standard ``CrossEntropyLoss``
+    (wrapped in ``ChunkedLossWrapper``) is used.
 
-    The parallelism smoke suite covers FSDP and FSDP+TP+SP (see
-    ``build_muse_glimmer_mm_test_list``); PP and CP are multimodal follow-ups.
+    The integration smoke suite covers the TP+CP+PP+SP path.
     """
     mm_model_spec = model_registry("debugmodel_mm", attn_backend="flex")
     return Trainer.Config(
