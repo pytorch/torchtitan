@@ -91,6 +91,13 @@ ensure_writable_directory() {
 ensure_writable_directory "${ARTIFACTS}"
 ensure_writable_directory "${HF_HOME}"
 ensure_writable_directory "${VALIDATION_ROOT}"
+
+cleanup_artifacts() {
+  find "${ARTIFACTS}" -type d -name checkpoint -prune -exec rm -rf {} +
+  chmod -R a+rX "${ARTIFACTS}"
+}
+trap cleanup_artifacts EXIT
+
 mkdir -p \
   "${VALIDATION_ROOT}/scripts" \
   "${VALIDATION_ROOT}/torchtitan/experiments/graph_trainer" \
@@ -302,5 +309,3 @@ case "${VALIDATION_SUITE}" in
   torchft) run_torchft_tests ;;
   transformers-modeling-backend) run_transformers_modeling_backend_tests ;;
 esac
-
-find "${ARTIFACTS}" -type d -name checkpoint -prune -exec rm -rf {} +
