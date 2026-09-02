@@ -17,13 +17,7 @@ import numpy as np
 import pytest
 import torch
 
-from torchtitan.components.data.collators import (
-    BatchInputsWithMetadata,
-    Collator,
-    get_batch_num_valid_tokens,
-    TextCollator,
-    TrainerBatch,
-)
+from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
 from torchtitan.components.data.dataset import (
     DatasetConcatConfig,
     DatasetMixConfig,
@@ -1036,33 +1030,10 @@ def test_text_collator_counts_unmasked_labels():
         labels=np.asarray([2, 3, IGNORE_INDEX]),
     )
 
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
 
-    assert get_batch_num_valid_tokens(inputs, labels, ignore_index=IGNORE_INDEX) == 2
+    assert inputs["num_valid_tokens"] == 2
     assert inputs["input"][:3].tolist() == [1, 2, 3]
-
-
-def test_collator_without_token_labels_leaves_count_unset():
-    rows = [
-        ({"input": torch.tensor([1, 2])}, torch.tensor([1.5, 2.5])),
-        ({"input": torch.tensor([3, 4])}, torch.tensor([3.5, 4.5])),
-    ]
-
-    inputs, _ = PairCollator.Config().build(context=CONTEXT)(rows)
-
-    assert not isinstance(inputs, BatchInputsWithMetadata)
-
-
-def test_batch_valid_token_count_falls_back_to_label_scan():
-    labels = torch.tensor([1, IGNORE_INDEX, 2])
-
-    num_valid_tokens = get_batch_num_valid_tokens(
-        {"input": torch.ones(3)},
-        labels,
-        ignore_index=IGNORE_INDEX,
-    )
-
-    assert num_valid_tokens == 2
 
 
 def test_loader_batches_carry_valid_token_count():
@@ -1084,11 +1055,7 @@ def test_loader_batches_carry_valid_token_count():
 
     input_dict, labels = next(iter(loader))
 
-    assert isinstance(input_dict, BatchInputsWithMetadata)
-    assert input_dict.num_valid_tokens == 3
-    assert get_batch_num_valid_tokens(
-        input_dict, labels, ignore_index=IGNORE_INDEX
-    ) == int((labels != IGNORE_INDEX).sum())
+    assert input_dict["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 3
     loader.close()
 
 

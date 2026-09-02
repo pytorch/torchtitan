@@ -19,53 +19,11 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import Configurable
 
 
+# The input dict holds the model's forward kwargs plus ``num_valid_tokens``, the
+# number of labels that contribute to the loss. Collators over token labels
+# count them here so the trainer does not rescan every batch on the critical
+# path; the trainer pops the field before the batch reaches the model.
 TrainerBatch: TypeAlias = tuple[dict[str, Any], torch.Tensor]
-
-
-class BatchInputsWithMetadata(dict[str, Any]):
-    """Model inputs plus batch metadata computed by the data pipeline."""
-
-    num_valid_tokens: int | None
-
-    def __init__(
-        self,
-        inputs: dict[str, Any],
-        *,
-        num_valid_tokens: int | None = None,
-    ) -> None:
-        super().__init__(inputs)
-        self.num_valid_tokens = num_valid_tokens
-
-
-def batch_with_valid_token_count(
-    inputs: dict[str, Any],
-    labels: torch.Tensor,
-) -> TrainerBatch:
-    """Pair collated inputs with labels, recording the loss-bearing label count.
-
-    Only collators whose labels are token targets should call this; the count is
-    meaningless for other label types.
-    """
-    return (
-        BatchInputsWithMetadata(
-            inputs,
-            num_valid_tokens=int((labels != IGNORE_INDEX).sum()),
-        ),
-        labels,
-    )
-
-
-def get_batch_num_valid_tokens(
-    input_dict: dict[str, Any],
-    labels: torch.Tensor,
-    *,
-    ignore_index: int,
-) -> int:
-    """Use a pipeline-provided token count, falling back to a local label scan."""
-    num_valid_tokens = getattr(input_dict, "num_valid_tokens", None)
-    if num_valid_tokens is not None:
-        return num_valid_tokens
-    return int((labels != ignore_index).sum())
 
 
 class Collator(Configurable, ABC):
@@ -119,10 +77,8 @@ class TextCollator(Collator):
                 [positions, torch.zeros(pad_len, dtype=positions.dtype)]
             )
 
-        return batch_with_valid_token_count(
-            {
-                "input": input_ids,
-                "positions": positions,
-            },
-            labels,
-        )
+        return {
+            "input": input_ids,
+            "positions": positions,
+            "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
+        }, labels

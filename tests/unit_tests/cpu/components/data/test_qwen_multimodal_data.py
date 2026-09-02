@@ -11,7 +11,6 @@ import numpy as np
 import pytest
 import torch
 
-from torchtitan.components.data.collators import get_batch_num_valid_tokens
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
@@ -315,11 +314,7 @@ def test_multimodal_collator_preserves_aligned_labels():
     inputs, labels = collator([packed])
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
-    assert (
-        get_batch_num_valid_tokens(inputs, labels, ignore_index=IGNORE_INDEX)
-        == int((labels != IGNORE_INDEX).sum())
-        == 4
-    )
+    assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4
 
 
 def test_mm_finite_underfilled_tail_flushes():
