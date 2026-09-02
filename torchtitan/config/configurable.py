@@ -49,6 +49,8 @@ class Configurable:
             def _convert(val):
                 if hasattr(val, "to_dict"):
                     return val.to_dict()
+                elif hasattr(val, "model_dump"):  # pydantic, e.g. renderer configs
+                    return _convert(val.model_dump())
                 elif dataclasses.is_dataclass(val):
                     return _convert(dataclasses.asdict(val))
                 elif isinstance(val, (list, tuple)):

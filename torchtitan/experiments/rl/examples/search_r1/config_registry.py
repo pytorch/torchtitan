@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import dataclasses
 
+from renderers import Qwen3RendererConfig
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -44,9 +46,11 @@ from torchtitan.experiments.rl.examples.search_r1.rollouter import (
     SearchR1Worker,
 )
 from torchtitan.experiments.rl.losses import DAPOLoss
+from torchtitan.experiments.rl.models.muse_glimmer.renderer import (
+    MuseGlimmerRendererConfig,
+)
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
 from torchtitan.models.muse_glimmer.state_dict_adapter import (
@@ -78,7 +82,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=Qwen3RendererConfig(enable_thinking=False),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -206,7 +210,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),  # TODO: TBD
+        renderer=Qwen3RendererConfig(enable_thinking=False),  # TODO: TBD
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -280,12 +284,9 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
 
     varlen attention is used for both roles so the trainer and the vLLM generator run
     one ModelSpec. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
-    on load, and the renderer (registered below) handles Muse Glimmer's harmony chat
+    on load, and the renderer handles Muse Glimmer's harmony chat
     format and ATEM tool calls.
     """
-    # Muse Glimmer's renderer ships in torchtitan rather than the `renderers` library;
-    # registering makes RendererConfig(name="muse_glimmer") resolve it.
-
     model_spec = muse_glimmer_model_registry("30B", attn_backend="varlen")
     model_spec = dataclasses.replace(
         model_spec, state_dict_adapter=MuseGlimmerStateDictAdapter
@@ -306,7 +307,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RendererConfig(name="muse_glimmer", enable_thinking=True),
+        renderer=MuseGlimmerRendererConfig(),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),

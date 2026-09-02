@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 
 from monarch.actor import ProcMesh, this_host
 
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
+from torchtitan.experiments.rl.renderer import build_renderer
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,
@@ -29,11 +31,12 @@ from torchtitan.experiments.rl.types import RolloutTurnID
 if TYPE_CHECKING:
     from renderers import Renderer
 
+    from renderers.configs import BaseRendererConfig
+
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
 
     from torchtitan.experiments.rl.actors.rollout_worker import RolloutWorkerActor
-    from torchtitan.experiments.rl.renderer import RendererConfig
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +138,7 @@ class Rollouter(Configurable):
     async def setup_async(
         self,
         *,
-        renderer_config: RendererConfig,
+        renderer_config: BaseRendererConfig,
         hf_assets_path: str,
     ) -> None:
         """Spawn and initialize the owned worker proc mesh and actor pool."""
@@ -241,11 +244,12 @@ class RolloutWorker(Configurable):
     async def setup_async(
         self,
         *,
-        renderer_config: RendererConfig,
+        renderer_config: BaseRendererConfig,
         hf_assets_path: str,
     ) -> None:
         """Build runtime dependencies after the worker actor is spawned."""
-        self._renderer = renderer_config.build(tokenizer_path=hf_assets_path)
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=hf_assets_path)
+        self._renderer = build_renderer(tokenizer=tokenizer, config=renderer_config)
 
     def make_env_group(
         self,

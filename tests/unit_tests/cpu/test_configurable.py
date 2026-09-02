@@ -112,6 +112,24 @@ class TestConfigurable(unittest.TestCase):
         obj.config.x = 999
         self.assertEqual(cfg.x, 42)
 
+    def test_to_dict_converts_model_dump_objects(self):
+        """to_dict serializes config values that expose pydantic's model_dump API."""
+
+        class ModelDumpConfig:
+            def model_dump(self):
+                return {"name": "qwen3", "options": {"enable_thinking": False}}
+
+        @dataclass(kw_only=True, slots=True)
+        class Holder(Configurable.Config):
+            renderer: object
+
+        value = Holder(renderer=ModelDumpConfig()).to_dict()
+
+        self.assertEqual(
+            value["renderer"], {"name": "qwen3", "options": {"enable_thinking": False}}
+        )
+        json.dumps(value)
+
     def test_to_dict_two_layer(self):
         """to_dict serializes nested configs (two layers deep)."""
 
