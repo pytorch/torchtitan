@@ -148,6 +148,26 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         self.train_spec = config.model_spec
 
+        # Resolve the global per-step token budget before model configs are
+        # built.  Model configs may need the concrete value (for example
+        # aux-loss normalization denominators).
+        self.num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+        )
+        self.num_tokens_per_train_step, self.gradient_accumulation_steps = (
+            dist_utils.resolve_num_tokens_per_train_step(
+                num_tokens_per_microbatch_per_dp_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                ),
+                num_pp_microbatches=self.num_pp_microbatches,
+                num_tokens_per_train_step=(
+                    config.training.num_tokens_per_train_step
+                ),
+                dp_degree=dp_degree,
+            )
+        )
+        config.training.num_tokens_per_train_step = self.num_tokens_per_train_step
+
         # build model (using meta init)
         self.model_config = model_config = self.train_spec.model
         # set the model args from training configs
@@ -179,40 +199,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.loss_fn = self.train_spec.loss.build(
             config.compile, parallel_dims=parallel_dims
-        )
-
-        # Verify token budgets.
-        num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
-        )
-        self.num_pp_microbatches = num_pp_microbatches
-        self.num_tokens_per_train_step = config.training.num_tokens_per_train_step
-        if self.num_tokens_per_train_step < 0:
-            self.num_tokens_per_train_step = (
-                config.training.num_tokens_per_microbatch_per_dp_rank
-                * self.num_pp_microbatches
-                * dp_degree
-            )
-        if (
-            self.num_tokens_per_train_step
-            % (
-                config.training.num_tokens_per_microbatch_per_dp_rank
-                * self.num_pp_microbatches
-                * dp_degree
-            )
-            != 0
-        ):
-            raise ValueError(
-                "training.num_tokens_per_train_step "
-                f"({self.num_tokens_per_train_step}) must be divisible by the "
-                "number of tokens processed globally in one gradient accumulation "
-                "iteration "
-                f"({config.training.num_tokens_per_microbatch_per_dp_rank * self.num_pp_microbatches * dp_degree})."
-            )
-        self.gradient_accumulation_steps = self.num_tokens_per_train_step // (
-            config.training.num_tokens_per_microbatch_per_dp_rank
-            * self.num_pp_microbatches
-            * dp_degree
         )
 
         # apply parallelisms and initialization
