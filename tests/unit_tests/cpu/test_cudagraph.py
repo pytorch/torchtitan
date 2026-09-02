@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from torchtitan.distributed.cudagraph import (
@@ -15,6 +16,29 @@ from torchtitan.distributed.cudagraph import (
     CUDAGraphWrapper,
     get_cudagraph_annotations,
 )
+
+
+def test_cudagraph_wrapper_uses_configured_warmup_iterations() -> None:
+    with (
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+    ):
+        wrapper = CUDAGraphWrapper(
+            lambda value: value,
+            (torch.tensor(1),),
+            num_warmup_iterations=2,
+        )
+
+    assert wrapper._warmup_remaining == 2
+
+
+def test_cudagraph_wrapper_rejects_negative_warmup_iterations() -> None:
+    with pytest.raises(ValueError, match="must be non-negative"):
+        CUDAGraphWrapper(
+            lambda value: value,
+            (torch.tensor(1),),
+            num_warmup_iterations=-1,
+        )
 
 
 def test_tensor_input_indices_control_replay_copies() -> None:

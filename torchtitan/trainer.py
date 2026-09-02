@@ -639,7 +639,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if parallel_dims.pp_enabled:
             self._pp_training_schedule_initialized = False
         if not config.training.disable_cuda_graphs:
-            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
+            # Two optimizer steps initialize lazy optimizer state and establish
+            # the steady-state allocator behavior before the graph pool is fixed.
+            self.fwd_bwd_fn = wrap_with_cuda_graph(
+                self.fwd_bwd_fn,
+                num_warmup_iterations=2 * self.gradient_accumulation_steps,
+            )
 
         # Build validator if validation is configured
         if config.validator.enable:

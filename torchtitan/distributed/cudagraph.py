@@ -206,6 +206,10 @@ class CUDAGraphWrapper:
             before each replay. This should only be enabled for debugging.
         tensor_input_indices: Indices of inputs that should be copied before
             replay. When omitted, these are inferred from ``example_inputs``.
+        num_warmup_iterations: Number of eager invocations before capture.
+
+    Raises:
+        ValueError: If ``num_warmup_iterations`` is negative.
     """
 
     def __init__(
@@ -215,7 +219,11 @@ class CUDAGraphWrapper:
         static_input_indices: Sequence[int] | None = None,
         should_check_address: bool = False,
         tensor_input_indices: Sequence[int] | None = None,
+        *,
+        num_warmup_iterations: int = 1,
     ):
+        if num_warmup_iterations < 0:
+            raise ValueError("num_warmup_iterations must be non-negative")
         self._fn = fn
         self._num_inputs = len(example_inputs)
         self._static_input_indices = set(static_input_indices or ())
@@ -249,7 +257,7 @@ class CUDAGraphWrapper:
             if not isinstance(inp, torch.Tensor)
         }
         self._graph: torch.cuda.CUDAGraph | None = None
-        self._warmup_remaining = 1
+        self._warmup_remaining = num_warmup_iterations
         self._args: tuple | None = None
         self._output: Any = None
         self._should_check_address = should_check_address
@@ -349,13 +357,25 @@ class CUDAGraphWrapper:
         self._non_tensor_inputs.clear()
 
 
-def wrap_with_cuda_graph(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+def wrap_with_cuda_graph(
+    fn: Callable[_P, _R], *, num_warmup_iterations: int = 1
+) -> Callable[_P, _R]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
     The positional and keyword inputs must keep the same pytree structure and
     tensor metadata across calls. After capture, tensor outputs alias
     graph-owned storage that is overwritten by the next replay.
+
+    Args:
+        fn: Callable to capture.
+        num_warmup_iterations: Number of eager invocations before capture.
+
+    Raises:
+        ValueError: If ``num_warmup_iterations`` is negative.
     """
+
+    if num_warmup_iterations < 0:
+        raise ValueError("num_warmup_iterations must be non-negative")
 
     if not (
         utils.device_type == "cuda"
@@ -388,6 +408,7 @@ def wrap_with_cuda_graph(fn: Callable[_P, _R]) -> Callable[_P, _R]:
             graph_wrapper = CUDAGraphWrapper(
                 flat_fn,
                 flat_inputs,
+                num_warmup_iterations=num_warmup_iterations,
             )
         else:
             assert input_spec is not None
