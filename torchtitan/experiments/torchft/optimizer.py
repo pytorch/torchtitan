@@ -42,6 +42,7 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         for optim in self.optimizers:
             init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
+        self._cache_valid: bool = False
         self._ft_optimizer = torchft.Optimizer(ft_manager.manager, self)
         # Whether to determine quorum using FT.optimizer,
         # in semi-sync training we use the synchronization step to start quorum
@@ -49,8 +50,14 @@ class TorchFTOptimizersContainer(OptimizersContainer):
 
     def init_cache_state_dict(self) -> None:
         self.cache_state_dict = super().state_dict()
+        self._cache_valid = True
 
     def state_dict(self) -> dict[str, Any]:
+        # The cache is only a snapshot: refresh it whenever an optimizer step
+        # or load may have changed the live state so that checkpoint saves and
+        # torchft replica joins always observe current optimizer state.
+        if not self._cache_valid:
+            self.init_cache_state_dict()
         return self.cache_state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -58,6 +65,7 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         # assign instead of copy when doing `load_state_dict()`. Without
         # invalidating the `cache_state_dict`, there will be memory leakage.
         self.cache_state_dict = {}
+        self._cache_valid = False
         super().load_state_dict(state_dict)
         self.init_cache_state_dict()
 
@@ -74,6 +82,7 @@ class TorchFTOptimizersContainer(OptimizersContainer):
             self._use_ft_optimizer = True
         else:
             super().step(*args, **kwargs)
+        self._cache_valid = False
 
     def zero_grad(self, *args, **kwargs) -> None:
         """Calling the correct zero_grad() depending on the caller.
