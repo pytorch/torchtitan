@@ -934,22 +934,30 @@ class VLLMGenerator(Actor, Configurable):
             logger.info("Initializing LLMEngine from EngineArgs...")
             stat_loggers = None
             if self._tp_rank == 0:
-                logger_context = StatLoggerContext(
-                    rank=self._rank,
-                    tp_rank=self._tp_rank,
-                    dp_rank=self._dp_rank,
-                    generator_name=context().actor_instance.actor_id.actor_name,
-                    output_dir=output_dir,
-                )
-
-                def build_stat_logger(vllm_config, engine_index):
-                    return config.vllm_stat_logger.build(
-                        vllm_config=vllm_config,
-                        engine_index=engine_index,
-                        context=logger_context,
+                if not config.vllm_stat_logger.enable:
+                    logger.info(
+                        "VllmOtelStatLogger inactive because "
+                        "vllm_stat_logger.enable=False. To record vLLM metrics, "
+                        "set vllm_stat_logger.enable=True and "
+                        "OTEL_METRICS_EXPORTER=jsonl or otlp"
+                    )
+                else:
+                    logger_context = StatLoggerContext(
+                        rank=self._rank,
+                        tp_rank=self._tp_rank,
+                        dp_rank=self._dp_rank,
+                        generator_name=context().actor_instance.actor_id.actor_name,
+                        output_dir=output_dir,
                     )
 
-                stat_loggers = [build_stat_logger]
+                    def build_stat_logger(vllm_config, engine_index):
+                        return config.vllm_stat_logger.build(
+                            vllm_config=vllm_config,
+                            engine_index=engine_index,
+                            context=logger_context,
+                        )
+
+                    stat_loggers = [build_stat_logger]
             self._engine = LLMEngine.from_engine_args(
                 engine_args, stat_loggers=stat_loggers
             )
