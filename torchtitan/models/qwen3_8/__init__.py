@@ -39,6 +39,8 @@ QWEN3_8_SPECIAL_TOKENS = dict(QWEN3_5_SPECIAL_TOKENS)
 def _qwen3_8_2_4t_a95b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
+    *,
+    seq_len: int,
 ) -> Qwen35Model.Config:
     """Qwen3.8-2.4T-A95B text-only MoE config."""
     dim = 8192
@@ -64,7 +66,7 @@ def _qwen3_8_2_4t_a95b(
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
                 dim=rotary_dim,
-                max_context_length=262144,
+                max_context_length=seq_len,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
             ),
@@ -89,23 +91,37 @@ def _qwen3_8_2_4t_a95b(
 
 
 qwen3_8_configs = {
-    "debugmodel": _debugmodel,
-    "debugmodel_moe": _debugmodel_moe,
-    "27B": _27b,
-    "2.4T-A95B": _qwen3_8_2_4t_a95b,
+    "debugmodel": (_debugmodel, 4096),
+    "debugmodel_moe": (_debugmodel_moe, 4096),
+    "27B": (_27b, 262144),
+    "2.4T-A95B": (_qwen3_8_2_4t_a95b, 262144),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    kwargs = {"attn_backend": attn_backend}
-    if moe_comm_backend is not None:
-        kwargs["moe_comm_backend"] = moe_comm_backend
-    config = qwen3_8_configs[flavor](**kwargs)
+    get_config, max_context_len = qwen3_8_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
+        attn_backend=attn_backend,
+        seq_len=context_len,
+        **(
+            {"moe_comm_backend": moe_comm_backend}
+            if moe_comm_backend is not None
+            else {}
+        ),
+    )
     if converters is not None:
         validate_converter_order(converters)
         for converter_config in converters:
@@ -115,6 +131,7 @@ def model_registry(
         name="qwen3_8",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_qwen3_5,
         pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

@@ -38,13 +38,7 @@ from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .gdn import (
-    GatedDeltaBackend,
-    GatedDeltaKernel,
-    GatedDeltaNet,
-    InnerGatedDeltaNet,
-    RMSNormGated,
-)
+from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, RMSNormGated
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 
 from .parallelize import parallelize_qwen3_5
@@ -265,7 +259,6 @@ def _qwen35_deltanet_config(
     value_head_dim: int,
     layer_id: int,
     conv_kernel_size: int = 4,
-    fla_backend: GatedDeltaBackend = "fla_chunked",
 ) -> GatedDeltaNet.Config:
     """Build a fully-specified GatedDeltaNet.Config."""
     key_dim = n_key_heads * key_head_dim
@@ -302,7 +295,7 @@ def _qwen35_deltanet_config(
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
         inner_gated_delta_net=InnerGatedDeltaNet.Config(
-            kernel=GatedDeltaKernel.Config(backend=fla_backend),
+            kernel=GatedDeltaKernel.Config(),
         ),
         norm=RMSNormGated.Config(
             dim=value_head_dim,
@@ -333,7 +326,6 @@ def _build_qwen35_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: GatedDeltaBackend = "fla_chunked",
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3.5 models."""
     layers = []
@@ -362,7 +354,6 @@ def _build_qwen35_layers(
                 key_head_dim=key_head_dim,
                 value_head_dim=value_head_dim,
                 layer_id=layer_id,
-                fla_backend=fla_backend,
             )
             if not is_full
             else None
@@ -404,7 +395,6 @@ def _build_qwen35_moe_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    fla_backend: GatedDeltaBackend = "fla_chunked",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> list[Qwen35TransformerBlock.Config]:
@@ -435,7 +425,6 @@ def _build_qwen35_moe_layers(
                 key_head_dim=key_head_dim,
                 value_head_dim=value_head_dim,
                 layer_id=layer_id,
-                fla_backend=fla_backend,
             )
             if not is_full
             else None
@@ -518,9 +507,9 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             hidden_dim=512,
             n_key_heads=2,
             n_value_heads=4,
-            key_head_dim=64,
-            value_head_dim=64,
-            fla_backend="fla_chunked",
+            # Attention Gym fused chunk GDN requires K=V=128 on SM80+.
+            key_head_dim=128,
+            value_head_dim=128,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
@@ -583,10 +572,9 @@ def _debugmodel_moe(
             shared_expert_hidden_dim=256,
             n_key_heads=2,
             n_value_heads=4,
-            key_head_dim=64,
-            value_head_dim=64,
+            key_head_dim=128,
+            value_head_dim=128,
             moe_comm_backend=moe_comm_backend,
-            fla_backend="fla_chunked",
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
