@@ -211,7 +211,7 @@ class BlockLayoutTables:
         }
 
 
-def _infer_block_layout_tables_from_stages(
+def infer_block_layout_tables_from_stages(
     stages,
     *,
     pp_size: int,

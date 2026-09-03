@@ -231,8 +231,8 @@ class KimiK3TransformerBlock(Module):
                 self.attention_res_norm,
             )
 
-        opens_block = self.layer_id % self.attn_res_block_size == 0
-        if opens_block:
+        first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
+        if first_layer_in_block:
             block_residual_TND = torch.cat(
                 (
                     block_residual_TND,
@@ -247,7 +247,7 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, None, positions)
-        prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
+        prefix_sum_TD = h_TD if first_layer_in_block else prefix_sum_TD + h_TD
 
         h_TD = _apply_attention_residual(
             prefix_sum_TD,

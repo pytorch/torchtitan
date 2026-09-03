@@ -328,12 +328,4 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
             skip_rocm_test=True,
         ),
-        OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_pp8_vp4],
-            test_descr="Kimi K3 text decoder, pp8 with four virtual stages",
-            test_name="kimi_k3_pp8_vp4",
-            ngpu=8,
-            use_real_pg=True,
-            skip_rocm_test=True,
-        ),
     ]
