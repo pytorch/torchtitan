@@ -56,6 +56,11 @@ __all__ = [
 ]
 
 
+# Match DDP's buffer synchronization cap so temporary coalescing storage is
+# bounded independently of the total Muon parameter size.
+_REPLICA_BROADCAST_BUFFER_SIZE_BYTES = 250 * 1024 * 1024
+
+
 def build_dist_muon(
     params: Iterable[dict[str, Any]],
     *,
@@ -76,10 +81,11 @@ def build_dist_muon(
     whole-matrix compute such as ``Owned``.
 
     ``deduplicate_compute_mesh_axis`` may name an active replicated storage
-    mesh axis. Coordinate zero then runs the existing DistMuon update while
-    every other coordinate updates only its replicated momentum state. Updated
-    local parameter shards are broadcast from coordinate zero. This removes
-    duplicate Muon compute without changing the optimizer state layout.
+    mesh axis. DistMuon balances parameters across that axis, runs each Muon
+    update in exactly one replica, and coalesces broadcasts of the updated local
+    parameter shards from their assigned replicas. Replica peers still update
+    their local momentum state so the optimizer state layout and checkpoint
+    contract do not change.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -246,12 +252,24 @@ def _initialize_dist_muon(
             layout.redistribution_storage_mesh_axis
         ),
     )
-    optimizer._initialize_plan(compute_layouts)
-    optimizer._validate_plan_across_ranks()
     optimizer._replica_compute_deduplication = _resolve_replica_compute_deduplication(
-        optimizer._parameter_compute_layouts,
+        compute_layouts,
         mesh_axis_name=optimizer._deduplicate_compute_mesh_axis,
+        ns_steps_by_group=tuple(group["ns_steps"] for group in optimizer.param_groups),
     )
+    optimizer._parameter_compute_layouts = tuple(compute_layouts)
+    replica_deduplication = optimizer._replica_compute_deduplication
+    optimizer._locally_owned_compute_layouts = (
+        optimizer._parameter_compute_layouts
+        if replica_deduplication is None
+        else tuple(
+            compute_layout
+            for compute_layout in optimizer._parameter_compute_layouts
+            if id(compute_layout.param) in replica_deduplication.owned_parameter_ids
+        )
+    )
+    optimizer._initialize_plan(optimizer._locally_owned_compute_layouts)
+    optimizer._validate_plan_across_ranks()
     optimizer._redistribution_runtime = _BucketedRedistributionRuntime[
         _ParameterComputeLayout
     ](tensor_device)
@@ -280,6 +298,7 @@ class DistMuon(Optimizer):
     _specs: tuple[_BucketSpec, ...]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
     _replica_compute_deduplication: _ReplicaComputeDeduplication | None
+    _locally_owned_compute_layouts: tuple[_ParameterComputeLayout, ...]
     _deduplicate_compute_mesh_axis: str | None
     _param_groups_frozen: bool
 
@@ -345,7 +364,7 @@ class DistMuon(Optimizer):
 
         self._preflight_step()
         replica_deduplication = self._replica_compute_deduplication
-        if replica_deduplication is None or replica_deduplication.is_owner:
+        if replica_deduplication is None or self._bucket_plans:
             self._redistribution_runtime.run(
                 self._bucket_plans,
                 local_tensor_spec=self._local_tensor_spec,
@@ -353,9 +372,8 @@ class DistMuon(Optimizer):
                 compute=self._compute_update,
                 finalize=self._apply_update,
             )
-        else:
-            self._update_momentum_only()
         if replica_deduplication is not None:
+            self._update_unowned_momentum(replica_deduplication.owned_parameter_ids)
             self._broadcast_replica_parameters(replica_deduplication)
         return loss
 
@@ -465,7 +483,7 @@ class DistMuon(Optimizer):
             ),
         )
         self._bucket_plans = result.plans
-        self._parameter_compute_layouts = result.ordered_items
+        self._locally_owned_compute_layouts = result.ordered_items
 
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
@@ -637,8 +655,10 @@ class DistMuon(Optimizer):
         )
         torch.autograd.graph.increment_version(momentum_state)
 
-    def _update_momentum_only(self) -> None:
+    def _update_unowned_momentum(self, owned_parameter_ids: frozenset[int]) -> None:
         for compute_layout in self._parameter_compute_layouts:
+            if id(compute_layout.param) in owned_parameter_ids:
+                continue
             grad, momentum, momentum_state, group = self._local_gradient_and_momentum(
                 compute_layout
             )
@@ -656,26 +676,21 @@ class DistMuon(Optimizer):
         # Backends require a globally consistent collective order when several
         # process groups are active, so finish one group before starting another.
         for broadcast_group in replica_deduplication.parameter_broadcast_groups:
-            works: list[dist.Work] = []
+            local_parameters = []
             for param in broadcast_group.params:
                 local_parameter = param.to_local().detach()
-                if not local_parameter.numel():
-                    continue
-                work = dist.broadcast(
-                    local_parameter,
-                    src=broadcast_group.source_rank,
-                    group=broadcast_group.process_group,
-                    async_op=True,
+                if local_parameter.numel():
+                    local_parameters.append(local_parameter)
+            if local_parameters:
+                dist._broadcast_coalesced(
+                    broadcast_group.process_group,
+                    local_parameters,
+                    _REPLICA_BROADCAST_BUFFER_SIZE_BYTES,
+                    broadcast_group.source_group_rank,
                 )
-                assert work is not None
-                works.append(work)
-            for work in works:
-                work.wait()
 
-        if not replica_deduplication.is_owner:
-            for broadcast_group in replica_deduplication.parameter_broadcast_groups:
-                for param in broadcast_group.params:
-                    torch.autograd.graph.increment_version(param)
+        for param in replica_deduplication.received_parameters:
+            torch.autograd.graph.increment_version(param)
 
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
@@ -980,12 +995,15 @@ class _ParameterComputeLayout:
 class _ReplicaParameterBroadcastGroup:
     process_group: dist.ProcessGroup
     source_rank: int
+    source_group_rank: int
+    dtype: torch.dtype
     params: tuple[DTensor, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _ReplicaComputeDeduplication:
-    is_owner: bool
+    owned_parameter_ids: frozenset[int]
+    received_parameters: tuple[DTensor, ...]
     parameter_broadcast_groups: tuple[_ReplicaParameterBroadcastGroup, ...]
 
 
@@ -993,14 +1011,16 @@ def _resolve_replica_compute_deduplication(
     compute_layouts: Sequence[_ParameterComputeLayout],
     *,
     mesh_axis_name: str | None,
+    ns_steps_by_group: Sequence[int],
 ) -> _ReplicaComputeDeduplication | None:
     if mesh_axis_name is None:
         return None
 
-    is_owner: bool | None = None
-    broadcast_process_groups: list[dist.ProcessGroup] = []
-    broadcast_source_ranks: list[int] = []
-    broadcast_params: list[list[DTensor]] = []
+    layouts_by_process_group: dict[
+        dist.ProcessGroup,
+        list[tuple[_ParameterComputeLayout, int, tuple[int, ...]]],
+    ] = {}
+    process_group_order: list[dist.ProcessGroup] = []
     for compute_layout in compute_layouts:
         param = compute_layout.param
         mesh_axis_names = param.device_mesh.mesh_dim_names
@@ -1023,40 +1043,102 @@ def _resolve_replica_compute_deduplication(
                 f"{param.placements[storage_mesh_axis]!r}"
             )
 
-        replicate_mesh = param.device_mesh[mesh_axis_name]
+        replica_mesh = param.device_mesh[mesh_axis_name]
+        process_group = replica_mesh.get_group()
+        if process_group not in layouts_by_process_group:
+            layouts_by_process_group[process_group] = []
+            process_group_order.append(process_group)
         mesh_coordinate = param.device_mesh.get_coordinate()
         assert mesh_coordinate is not None
-        parameter_is_owner = mesh_coordinate[storage_mesh_axis] == 0
-        if is_owner is None:
-            is_owner = parameter_is_owner
-        elif is_owner != parameter_is_owner:
-            raise ValueError(
-                "all DistMuon parameters must select the same local replica owner"
+        layouts_by_process_group[process_group].append(
+            (
+                compute_layout,
+                mesh_coordinate[storage_mesh_axis],
+                _device_mesh_ranks(replica_mesh),
             )
+        )
+
+    owner_coordinate_by_parameter_id: dict[int, int] = {}
+    source_rank_by_parameter_id: dict[int, int] = {}
+    local_coordinate_by_parameter_id: dict[int, int] = {}
+    for process_group in process_group_order:
+        group_layouts = layouts_by_process_group[process_group]
+        replica_ranks = group_layouts[0][2]
+        if any(
+            candidate_ranks != replica_ranks for _, _, candidate_ranks in group_layouts
+        ):
+            raise ValueError("replica process group has inconsistent mesh rank order")
+        assignments, _loads = _balance_loads_across_partitions(
+            tuple(
+                (
+                    _estimate_muon_compute_cost(
+                        compute_layout.global_compute_shape,
+                        ns_steps_by_group[compute_layout.group_index],
+                    ),
+                    compute_layout.param.numel() * compute_layout.param.element_size(),
+                    compute_layout.fqn,
+                )
+                for compute_layout, _local_coordinate, _replica_ranks in group_layouts
+            ),
+            initial_cumulative_primary_loads=(0,) * len(replica_ranks),
+        )
+        for (
+            compute_layout,
+            local_coordinate,
+            _replica_ranks,
+        ), owner_coordinate in zip(group_layouts, assignments, strict=True):
+            parameter_id = id(compute_layout.param)
+            owner_coordinate_by_parameter_id[parameter_id] = owner_coordinate
+            source_rank_by_parameter_id[parameter_id] = replica_ranks[owner_coordinate]
+            local_coordinate_by_parameter_id[parameter_id] = local_coordinate
+
+    owned_parameter_ids = frozenset(
+        parameter_id
+        for parameter_id, owner_coordinate in owner_coordinate_by_parameter_id.items()
+        if local_coordinate_by_parameter_id[parameter_id] == owner_coordinate
+    )
+    broadcast_process_groups: list[dist.ProcessGroup] = []
+    broadcast_source_ranks: list[int] = []
+    broadcast_dtypes: list[torch.dtype] = []
+    broadcast_params: list[list[DTensor]] = []
+    for compute_layout in compute_layouts:
+        param = compute_layout.param
+        replicate_mesh = param.device_mesh[mesh_axis_name]
         process_group = replicate_mesh.get_group()
-        source_rank = _device_mesh_ranks(replicate_mesh)[0]
+        source_rank = source_rank_by_parameter_id[id(param)]
         for group_index, existing_process_group in enumerate(broadcast_process_groups):
-            if existing_process_group is process_group:
-                assert broadcast_source_ranks[group_index] == source_rank
+            if (
+                existing_process_group is process_group
+                and broadcast_source_ranks[group_index] == source_rank
+                and broadcast_dtypes[group_index] == param.dtype
+            ):
                 broadcast_params[group_index].append(param)
                 break
         else:
             broadcast_process_groups.append(process_group)
             broadcast_source_ranks.append(source_rank)
+            broadcast_dtypes.append(param.dtype)
             broadcast_params.append([param])
 
-    assert is_owner is not None
     return _ReplicaComputeDeduplication(
-        is_owner=is_owner,
+        owned_parameter_ids=owned_parameter_ids,
+        received_parameters=tuple(
+            compute_layout.param
+            for compute_layout in compute_layouts
+            if id(compute_layout.param) not in owned_parameter_ids
+        ),
         parameter_broadcast_groups=tuple(
             _ReplicaParameterBroadcastGroup(
                 process_group=process_group,
                 source_rank=source_rank,
+                source_group_rank=dist.get_group_rank(process_group, source_rank),
+                dtype=dtype,
                 params=tuple(params),
             )
-            for process_group, source_rank, params in zip(
+            for process_group, source_rank, dtype, params in zip(
                 broadcast_process_groups,
                 broadcast_source_ranks,
+                broadcast_dtypes,
                 broadcast_params,
                 strict=True,
             )
@@ -1188,10 +1270,16 @@ def _estimate_muon_compute_cost(
     matrix_shape: torch.Size,
     ns_steps: int,
 ) -> int:
-    rows, columns = matrix_shape
+    *batch_shape, rows, columns = matrix_shape
     short_dim, long_dim = sorted((rows, columns))
     # Each NS step has two s^2 * l matmuls and one s^3 matmul.
-    return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
+    return (
+        math.prod(batch_shape)
+        * ns_steps
+        * short_dim
+        * short_dim
+        * (2 * long_dim + short_dim)
+    )
 
 
 def _balance_loads_across_partitions(
@@ -2096,7 +2184,7 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     # Optimizer.load_state_dict restores group values such as ns_steps after
     # construction, and those values affect compute planning and buffer sizes.
     muon._validate_groups()
-    muon._initialize_plan(muon._parameter_compute_layouts)
+    muon._initialize_plan(muon._locally_owned_compute_layouts)
     muon._validate_plan_across_ranks()
     muon._redistribution_runtime.reserve_buffers(
         muon._bucket_plans,
