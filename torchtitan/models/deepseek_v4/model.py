@@ -5,13 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import cast, TYPE_CHECKING
 
 import torch
+from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 
 from .mhc import HcHead, HcPost, HcPre
 
@@ -144,20 +149,55 @@ class DeepSeekV4Model(Decoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(self, model, seq_len):
-            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            non_embed_params = sum(
-                p.numel()
-                for n, p in model.named_parameters()
-                if p.requires_grad and "tok_embeddings" not in n and "lm_head" not in n
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            """Estimate DeepSeek V4 training FLOPs from the final model config."""
+            deepseek_v4_model = cast(DeepSeekV4Model, model)
+            nparams, active_nparams = get_nparams_and_active_nparams(deepseek_v4_model)
+
+            attention_op_flops = 0
+            for layers in (model_config.layers, model_config.mtp_layers or ()):
+                for layer in layers:
+                    attention = layer.attention
+                    inner_attention = attention.inner_attention
+                    attention_op_flops += quadratic_attention_flops_per_token(
+                        num_heads=attention.n_heads,
+                        qk_head_dim=attention.head_dim,
+                        v_head_dim=attention.head_dim,
+                        seq_len=seq_len,
+                        sliding_window_size=inner_attention.window_size,
+                    )
+
+                    if attention.compress_ratio > 1:
+                        compressed_seq_len = seq_len // attention.compress_ratio
+                        if attention.compress_ratio == 4:
+                            attention_op_flops += (
+                                6
+                                * attention.index_n_heads
+                                * attention.index_head_dim
+                                * compressed_seq_len
+                            )
+                            compressed_seq_len = min(
+                                compressed_seq_len, inner_attention.index_topk
+                            )
+                        attention_op_flops += quadratic_attention_flops_per_token(
+                            num_heads=attention.n_heads,
+                            qk_head_dim=attention.head_dim,
+                            v_head_dim=attention.head_dim,
+                            seq_len=compressed_seq_len,
+                        )
+
+            active_nparams += len(deepseek_v4_model.mtp_layers) * sum(
+                param.numel() for param in deepseek_v4_model.lm_head.parameters()
             )
-            n_layers = self.n_layers + self.n_mtp_layers
-            head_dim = self.layers[0].attention.head_dim
-            n_heads = self.layers[0].attention.n_heads
-            flops_per_token = (
-                6 * non_embed_params + 12 * n_layers * n_heads * head_dim * seq_len
+            active_nparams += (model_config.hc_mult - 1) * sum(
+                param.numel()
+                for mtp_layer in deepseek_v4_model.mtp_layers
+                for param in cast("MTPBlock", mtp_layer).h_proj.parameters()
             )
-            return total_params, int(flops_per_token)
+
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)
