@@ -62,11 +62,12 @@ class TestPackedVision(unittest.TestCase):
             },
         ]
 
-        inputs_T, labels_T, positions_T = collator.collate_text(batch)
+        inputs_T, labels_T, positions_T, padding_mask_T = collator.collate_text(batch)
 
         torch.testing.assert_close(inputs_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(labels_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 4, 0, 1, 2]))
+        self.assertFalse(padding_mask_T.any())
 
     def test_collator_resets_long_padding_positions(self) -> None:
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
@@ -88,12 +89,14 @@ class TestPackedVision(unittest.TestCase):
             }
         ]
 
-        _, labels, positions = collator.collate_text(batch)
+        _, labels, positions, padding_mask = collator.collate_text(batch)
 
         torch.testing.assert_close(labels[3:], torch.full((7,), IGNORE_INDEX))
         torch.testing.assert_close(
             positions, torch.tensor([0, 1, 2, 0, 1, 2, 3, 0, 1, 2])
         )
+        # The tail is padding regardless of how its positions were filled in.
+        torch.testing.assert_close(padding_mask, torch.tensor([False] * 3 + [True] * 7))
 
     def test_collator_concatenates_patches(self) -> None:
         patches_0 = torch.arange(12).view(3, 4)

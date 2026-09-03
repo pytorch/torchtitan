@@ -111,7 +111,26 @@ class TestKimiK3(unittest.TestCase):
         model = config.build()
         positions = torch.arange(4, dtype=torch.int32)
         attention_masks = model.get_attention_masks(positions)
-        self.assertIsInstance(attention_masks, BlockMask)
+        # MLA layers read the BlockMask; KDA layers read document offsets.
+        self.assertIsInstance(attention_masks["quadratic_attention"], BlockMask)
+        self.assertEqual(attention_masks["kda"].cu_seq_q_host, (0, 4))
+
+    def test_padding_run_becomes_one_segment(self):
+        config = _small_model_config()
+        model = config.build()
+        # Two documents (3 and 4 tokens) then the packer's constant-0 padding.
+        positions = torch.cat(
+            [torch.arange(3), torch.arange(4), torch.zeros(5, dtype=torch.long)]
+        )
+        padding_mask = torch.zeros(12, dtype=torch.bool)
+        padding_mask[7:] = True
+        masks = model.get_attention_masks(positions, padding_mask)
+        self.assertEqual(masks["kda"].cu_seq_q_host, (0, 3, 7, 12))
+        # Without the mask the padded tail reads as one document per token.
+        self.assertEqual(
+            model.get_attention_masks(positions)["kda"].cu_seq_q_host,
+            (0, 3, 7, 8, 9, 10, 11, 12),
+        )
 
     @unittest.skipIf(
         not torch.cuda.is_available()

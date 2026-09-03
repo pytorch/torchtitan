@@ -140,8 +140,9 @@ def _packing_output_to_text_sequence(
     packing_output: dict[str, np.ndarray],
 ) -> TextSequence:
     """Finalize packed text by masking padding and canonicalizing positions."""
+    padding_mask = np.asarray(packing_output["input_ids_segment_ids"]) == 0
     labels = np.asarray(packing_output["labels"]).copy()
-    labels[np.asarray(packing_output["input_ids_segment_ids"]) == 0] = IGNORE_INDEX
+    labels[padding_mask] = IGNORE_INDEX
 
     # A zero starts a document. For [0, 1, 2, 0, 1], segment_starts is
     # [0, 0, 0, 3, 3], so subtracting it restores [0, 1, 2, 0, 1].
@@ -153,4 +154,5 @@ def _packing_output_to_text_sequence(
         input_ids=np.asarray(packing_output["input_ids"]),
         labels=labels,
         positions=token_indices - segment_starts,
+        padding_mask=padding_mask,
     )

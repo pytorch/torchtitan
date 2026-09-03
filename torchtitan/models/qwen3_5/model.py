@@ -387,13 +387,17 @@ class Qwen35Model(Decoder):
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        padding_mask = batch.pop("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
         positions = batch.get("positions")
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                )
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
 
@@ -445,35 +449,15 @@ class Qwen35Model(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
     ) -> Qwen35AttentionMaskDict:
         attn_config = self.config.first_attention
 
-        # Multimodal padding uses position 0 for every padded token. A real
-        # document start is position 0 followed by position 1; keep index 0 as
-        # the first start. This avoids routing a single padded sample through
-        # the varlen kernel while retaining boundaries between packed samples.
-        followed_by_one = torch.cat(
-            [
-                positions[1:] == 1,
-                torch.zeros(1, dtype=torch.bool, device=positions.device),
-            ]
-        )
-        first_token = torch.arange(positions.shape[0], device=positions.device) == 0
-        sequence_starts = ((positions == 0) & followed_by_one) | first_token
-        sequence_positions = torch.where(sequence_starts, 0, 1)
         deltanet_metadata = create_varlen_metadata_for_document(
-            sequence_positions,
+            positions,
+            padding_mask=padding_mask,
             include_host_offsets=True,
         )
-        if (
-            deltanet_metadata.cu_seq_q_host is not None
-            and len(deltanet_metadata.cu_seq_q_host) == 2
-            and not (
-                attn_config is not None
-                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
-            )
-        ):
-            deltanet_metadata = None
 
         if attn_config is None:
             quadratic_attention = None
@@ -481,7 +465,7 @@ class Qwen35Model(Decoder):
             # Under varlen both consumers read the same document offsets.
             quadratic_attention = deltanet_metadata
         else:
-            quadratic_attention = super().get_attention_masks(positions)
+            quadratic_attention = super().get_attention_masks(positions, padding_mask)
         # pyrefly: ignore [bad-return]
         return {
             "quadratic_attention": quadratic_attention,

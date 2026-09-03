@@ -445,10 +445,15 @@ def _packing_output_to_mm_sample(
     packing_output: dict[str, Any],
 ) -> dict[str, Any]:
     """Restore Torch token fields and flatten per-document media lists."""
+    # Grain numbers each packed document from 1 and leaves 0 on the padding it
+    # appends, which is the only exact record of what is padding: the packer
+    # pads positions with a constant 0, so positions alone cannot distinguish
+    # padding from a document start.
     return {
         "input_ids": torch.from_numpy(packing_output["input_ids"]),
         "labels": torch.from_numpy(packing_output["labels"]),
         "positions": torch.from_numpy(packing_output["positions"]),
+        "padding_mask": torch.from_numpy(packing_output["input_ids_segment_ids"] == 0),
         "pixel_values": [
             image
             for document_images in packing_output["pixel_values"]

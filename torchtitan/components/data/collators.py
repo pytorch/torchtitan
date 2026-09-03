@@ -69,6 +69,17 @@ class TextCollator(Collator):
             ]
         )
 
+        padding_mask = torch.cat(
+            [
+                (
+                    torch.zeros(len(row.input_ids), dtype=torch.bool)
+                    if row.padding_mask is None
+                    else torch.as_tensor(row.padding_mask)
+                )
+                for row in rows
+            ]
+        )
+
         pad_len = self._num_tokens_per_batch - num_tokens
         if pad_len:
             input_ids = torch.nn.functional.pad(input_ids, (0, pad_len))
@@ -76,9 +87,13 @@ class TextCollator(Collator):
             positions = torch.cat(
                 [positions, torch.zeros(pad_len, dtype=positions.dtype)]
             )
+            padding_mask = torch.nn.functional.pad(
+                padding_mask, (0, pad_len), value=True
+            )
 
         return {
             "input": input_ids,
             "positions": positions,
+            "padding_mask": padding_mask,
             "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
         }, labels

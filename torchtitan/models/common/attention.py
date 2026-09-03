@@ -81,6 +81,7 @@ class VarlenMetadata(NamedTuple):
     max_q: int
     max_k: int
     cu_seq_q_host: tuple[int, ...] | None = None
+    cu_seq_q_cpu: torch.Tensor | None = None
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
@@ -593,16 +594,19 @@ def create_attention_mask(*args, **kwargs):
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
     *,
+    padding_mask: torch.Tensor | None = None,
     include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
     Document boundaries are detected where ``positions`` resets to 0 (same
     convention as :func:`get_document_mask_mod`).
-
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
+        padding_mask: Optional boolean tensor with shape ``[T]``, True on
+            padded tokens. Supplied by the dataloader; when omitted, padded
+            tokens are indistinguishable from document starts.
         include_host_offsets: Also materialize cumulative sequence offsets as
             host metadata for kernels that need it.
 
@@ -612,7 +616,11 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
-    doc_starts = (positions == 0).nonzero(as_tuple=True)[0].to(torch.int32)
+    sequence_starts = positions == 0
+    if padding_mask is not None:
+        follows_padding = F.pad(padding_mask[:-1], (1, 0))
+        sequence_starts = torch.where(padding_mask, ~follows_padding, sequence_starts)
+    doc_starts = sequence_starts.nonzero(as_tuple=True)[0].to(torch.int32)
     packed_cu_seqlens = torch.cat(
         [
             doc_starts,
@@ -627,9 +635,11 @@ def create_varlen_metadata_for_document(
 
     max_seqlen: int
     packed_cu_seqlens_host = None
+    packed_cu_seqlens_cpu = None
     if include_host_offsets:
+        packed_cu_seqlens_cpu = packed_cu_seqlens.cpu()
         packed_cu_seqlens_host = tuple(
-            int(offset) for offset in packed_cu_seqlens.tolist()
+            int(offset) for offset in packed_cu_seqlens_cpu.tolist()
         )
         max_seqlen = max(
             (
@@ -654,6 +664,7 @@ def create_varlen_metadata_for_document(
         max_q=max_seqlen,
         max_k=max_seqlen,
         cu_seq_q_host=packed_cu_seqlens_host,
+        cu_seq_q_cpu=packed_cu_seqlens_cpu,
     )
 
 
