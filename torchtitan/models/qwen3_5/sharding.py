@@ -12,7 +12,7 @@ applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
 Full-attention layers: TP on wq/wk/wv/wo with local SPMD inner attention;
 each layer's MRoPE ``cache`` buffer is sharded Replicate.
 GatedDeltaNet layers: head-sharded TP on projections (ColwiseParallel) and
-out_proj (RowwiseParallel); the FLA kernel and depthwise Conv1d run on local
+out_proj (RowwiseParallel); the GDN kernel and depthwise Conv1d run on local
 tensors in a local SPMD region.
 """
 

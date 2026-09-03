@@ -79,7 +79,6 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
-    cu_seq_q_host: tuple[int, ...] | None = None
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
@@ -591,8 +590,6 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
-    *,
-    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -602,8 +599,6 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
-        include_host_offsets: Also materialize cumulative sequence offsets as
-            host metadata for kernels that need it.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -624,24 +619,7 @@ def create_varlen_metadata_for_document(
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
     seq_lengths = torch.diff(packed_cu_seqlens)
 
-    max_seqlen: int
-    packed_cu_seqlens_host = None
-    if include_host_offsets:
-        packed_cu_seqlens_host = tuple(
-            int(offset) for offset in packed_cu_seqlens.tolist()
-        )
-        max_seqlen = max(
-            (
-                end - start
-                for start, end in zip(
-                    packed_cu_seqlens_host[:-1],
-                    packed_cu_seqlens_host[1:],
-                    strict=False,
-                )
-            ),
-            default=0,
-        )
-    elif seq_lengths.numel() > 0:
+    if seq_lengths.numel() > 0:
         # device to host sync but only done once per model forward
         max_seqlen = int(seq_lengths.max().item())
     else:
@@ -652,7 +630,6 @@ def create_varlen_metadata_for_document(
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
-        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 

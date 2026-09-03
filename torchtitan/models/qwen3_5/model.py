@@ -459,17 +459,10 @@ class Qwen35Model(Decoder):
         first_token = torch.arange(positions.shape[0], device=positions.device) == 0
         sequence_starts = ((positions == 0) & followed_by_one) | first_token
         sequence_positions = torch.where(sequence_starts, 0, 1)
-        deltanet_metadata = create_varlen_metadata_for_document(
-            sequence_positions,
-            include_host_offsets=True,
-        )
-        if (
-            deltanet_metadata.cu_seq_q_host is not None
-            and len(deltanet_metadata.cu_seq_q_host) == 2
-            and not (
-                attn_config is not None
-                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
-            )
+        deltanet_metadata = create_varlen_metadata_for_document(sequence_positions)
+        if deltanet_metadata.cu_seq_q.numel() == 2 and not (
+            attn_config is not None
+            and isinstance(attn_config.inner_attention, VarlenAttention.Config)
         ):
             deltanet_metadata = None
 
