@@ -22,7 +22,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.embedding import Embedding
 
 
@@ -163,27 +162,23 @@ class TestEmbedding(DTensorTestBase):
                     # The module returns P@TP; the Module sharding wrapper owns
                     # the final P -> S(1)/I redistribution.
                     out_type = spmd.S(1) if enable_sp else spmd.I
-                    set_spmd_backend("spmd_types")
-                    try:
-                        with set_current_spmd_mesh(mesh):
-                            with typecheck(strict_mode="strict", local=True):
-                                local_tokens = spmd.assert_type(
-                                    local_tokens, {tp_group: spmd.R}
-                                )
-                                spmd.assert_type(local_tokens, {tp_group: spmd.R})
-                                embedding._parameters["weight"] = spmd.assert_type(
-                                    embedding.weight, {tp_group: spmd.S(0)}
-                                )
-                                local_partial = embedding(local_tokens)
-                                spmd.assert_type(local_partial, {tp_group: spmd.P})
-                                local_output = spmd.redistribute(
-                                    local_partial,
-                                    tp_group,
-                                    src=spmd.P,
-                                    dst=out_type,
-                                )
-                    finally:
-                        set_spmd_backend("spmd_types")
+                    with set_current_spmd_mesh(mesh):
+                        with typecheck(strict_mode="strict", local=True):
+                            local_tokens = spmd.assert_type(
+                                local_tokens, {tp_group: spmd.R}
+                            )
+                            spmd.assert_type(local_tokens, {tp_group: spmd.R})
+                            embedding._parameters["weight"] = spmd.assert_type(
+                                embedding.weight, {tp_group: spmd.S(0)}
+                            )
+                            local_partial = embedding(local_tokens)
+                            spmd.assert_type(local_partial, {tp_group: spmd.P})
+                            local_output = spmd.redistribute(
+                                local_partial,
+                                tp_group,
+                                src=spmd.P,
+                                dst=out_type,
+                            )
 
                     # local matches DTensor bitwise and no-parallel embedding
                     self.assertTrue(

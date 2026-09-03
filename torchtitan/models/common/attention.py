@@ -20,7 +20,6 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor, Replicate
-from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -42,7 +41,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -112,7 +111,7 @@ def local_head_split(
     dp_shard_dim: int = 0,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
+    use_spmd = spmd.is_type_checking()
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     with spmd.local():
@@ -312,7 +311,7 @@ class FlexAttention(Module):
                 return_aux=return_aux,
                 kernel_options=kernel_options,
             )
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             q_local = spmd.get_local_type(q)
             q_ps = spmd.get_partition_spec(q)
             spmd.assert_type(out, q_local, q_ps)
@@ -619,7 +618,7 @@ def create_varlen_metadata_for_document(
             torch.tensor([num_tokens], dtype=torch.int32, device=device),
         ]
     )
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
@@ -720,7 +719,7 @@ class QKVLinear(BaseQKVLinear):
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
                 x = x.view(num_tokens, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                if spmd.is_type_checking():
                     spmd.assert_type(
                         x,
                         spmd.V,
@@ -788,43 +787,23 @@ class FusedQKVLinear(BaseQKVLinear):
         qkv = self.wqkv(x)
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     qkv,
                     spmd.V,
                     spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
                 )
 
-        hpk, hd = self.heads_per_kv, self.head_dim
-
-        def _split(t):
-            local_num_tokens = t.shape[0]
-            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
-            # split leaves xk/xv as strided views into the fused buffer; vLLM
-            # attention/KV-cache kernels read raw memory assuming a contiguous
-            # head-major layout, so materialize all three contiguously here.
-            return (
-                xq.reshape(local_num_tokens, -1, hd).contiguous(),
-                xk.reshape(local_num_tokens, -1, hd).contiguous(),
-                xv.reshape(local_num_tokens, -1, hd).contiguous(),
-            )
-
-        if isinstance(qkv, DTensor):
-            # TEMPORARY: run the split on local tensors so its backward (cat)
-            # does not mix DTensor and plain grads under CP+PP. The asymmetric
-            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
-            # cat() inconsistent grad types in PP's backward metadata inference.
-            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards tokens). TODO: remove once the partial_dtensor
-            # backend is gone.
-            _split = local_map(
-                _split,
-                out_placements=(qkv.placements,) * 3,
-                in_placements=(qkv.placements,),
-                in_grad_placements=(qkv.placements,),
-                device_mesh=qkv.device_mesh,
-            )
-        return _split(qkv)
+        local_num_tokens = qkv.shape[0]
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        # split leaves xk/xv as strided views into the fused buffer; vLLM
+        # attention/KV-cache kernels read raw memory assuming a contiguous
+        # head-major layout, so materialize all three contiguously here.
+        return (
+            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+        )
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:

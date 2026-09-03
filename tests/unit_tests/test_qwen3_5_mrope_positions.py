@@ -18,7 +18,9 @@ These go through the public ``preprocess_inputs`` seam and call
 resolution lives in ``forward`` or in ``preprocess_inputs``.
 """
 
+import contextlib
 import unittest
+from unittest.mock import patch
 
 import torch
 from torch import nn
@@ -68,17 +70,26 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         parallel_dims = ParallelDims(
             dp_replicate=1, dp_shard=1, cp=1, tp=1, pp=1, ep=1, world_size=1
         )
-        # partial_dtensor avoids the spmd_types annotation path, which is
-        # orthogonal to position routing.
-        parallelism = ParallelismConfig(spmd_backend="partial_dtensor")
+        parallelism = ParallelismConfig()
         return model, sink, parallel_dims, parallelism
 
     def _run(self, model, parallel_dims, parallelism, input_dict):
-        inputs, _labels, batch = model.preprocess_inputs(
-            input_dict,
-            parallel_dims=parallel_dims,
-            parallelism=parallelism,
-        )
+        with patch(
+            "torchtitan.models.qwen3_5.model.annotate_input_spmd_types",
+            side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
+        ), patch(
+            "torchtitan.models.qwen3_5.model.set_current_spmd_mesh",
+            side_effect=lambda _mesh: contextlib.nullcontext(),
+        ), patch(
+            "torchtitan.models.qwen3_5.model.annotate_deltanet_cu_seqlens"
+        ), patch.object(
+            parallel_dims, "spmd_dense_mesh", return_value=None
+        ):
+            inputs, _labels, batch = model.preprocess_inputs(
+                input_dict,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
+            )
         model(inputs, **batch)
         return batch
 

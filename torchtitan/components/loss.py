@@ -15,12 +15,9 @@ import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor, Replicate, Shard
-from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -36,17 +33,7 @@ def cross_entropy_loss(
     global_vocab_size: int | None = None,
 ) -> torch.Tensor:
     """Cross-entropy over ``pred[T, V]`` and ``labels[T]`` with sum reduction."""
-    if isinstance(pred, DTensor):
-        assert get_spmd_backend() == "partial_dtensor"
-        if pred.placements == (Shard(1),):
-            return _LossParallelCrossEntropy.apply(
-                pred.to_local().float(),
-                labels,
-                pred.device_mesh.get_group("tp"),
-                pred.shape[-1],
-                "sum",
-            )
-    elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
+    if spmd_mesh_size("tp") > 1:
         return _LossParallelCrossEntropy.apply(
             pred.float(),
             labels,
@@ -270,7 +257,7 @@ class BaseLoss(ABC, Configurable):
         del kwargs
         loss = self.fn(pred, labels)
         # loss: V->P, annotate global_valid_tokens
-        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
+        if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
             if global_valid_tokens is not None:
                 spmd.assert_type(
@@ -305,7 +292,7 @@ class CrossEntropyLoss(BaseLoss):
         del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
         # loss: V->P, annotate global_valid_tokens
-        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
+        if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
             if global_valid_tokens is not None:
                 spmd.assert_type(
@@ -337,9 +324,6 @@ def compute_logprobs(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
 
-    Any DTensor placement handling is centralized here so RL losses that call
-    ``compute_logprobs`` do not need to duplicate the vocab-gather logic.
-
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
     ``[T]``. Both share the single vocab gather + fp32 upcast.
@@ -350,24 +334,12 @@ def compute_logprobs(
     Returns ``logprobs`` when ``return_entropy`` is False, else
     ``(logprobs, entropy)``.
     """
-    if isinstance(logits, DTensor):
-        # TODO: pass `grad_placements=[Replicate(), ...]` to make the autograd
-        # contract explicit (see .claude/rules/distributed.md).
-        # Gather vocab-sharded TP logits before computing per-token logprobs.
-        placements = tuple(
-            Replicate()
-            if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
-            else p
-            for p in logits.placements
-        )
-        logits = logits.redistribute(placements=placements).to_local()
-    elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
-        # spmd_types returns a plain local vocab shard. Labels are global token
+    if spmd_mesh_size("tp") > 1:
+        # The model returns a plain local vocab shard. Labels are global token
         # ids, so cross_entropy needs full-vocab logits.
         # dst=I, not R: the vocab all-gather's grad is the replicated upstream
         # grad sliced back to this rank's vocab shard (I's backward), not an
         # all-reduce (R's backward). The latter over-counts by tp_degree and
-        # diverges from the DTensor path above, whose redistribute grad slices.
         logits = spmd.redistribute(
             logits,
             "tp",
@@ -399,13 +371,7 @@ class GradAccumulator:
     this uses a pre-allocated buffer with in-place copies for better memory efficiency.
 
     Args:
-        reference: Reference tensor for shape, device, and DTensor-ness. If a
-            DTensor, only its device mesh is reused; the placement of the
-            returned DTensor is taken from the first added chunk (see add()),
-            not from this reference, so the buffer is labeled with the actual
-            gradient placement (e.g. Partial(sum) on the TP axis when the
-            forward used a Replicate input with a Shard(0) weight, as in
-            ColwiseParallel lm_head) rather than the activation placement.
+        reference: Reference tensor for shape and device.
         num_chunks: Number of chunks that will be added.
         seq_dim: The sequence dimension along which chunks are accumulated.
         dtype: Dtype for the buffer.
@@ -425,53 +391,18 @@ class GradAccumulator:
         seq_dim: int = 0,
         dtype: torch.dtype,
     ):
-        from torch.distributed.device_mesh import DeviceMesh
-        from torch.distributed.tensor import DTensor, Placement
-
         self.num_chunks = num_chunks
         self.seq_dim = seq_dim
         self._next_idx = 0
-        self._device_mesh: DeviceMesh | None = None
-        # Captured from the first added chunk; see __init__ docstring.
-        self._placements: tuple[Placement, ...] | None = None
-
-        if isinstance(reference, DTensor):
-            self._device_mesh = reference.device_mesh
-            local = reference.to_local()
-        else:
-            local = reference
-
-        self._buffer = torch.zeros_like(local, dtype=dtype)
+        self._buffer = torch.zeros_like(reference, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
         """Add the next chunk gradient sequentially.
 
         Chunks must be added in order (0, 1, 2, ..., num_chunks - 1).
         """
-        from torch.distributed.tensor import DTensor
-
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
-
-        if isinstance(chunk_grad, DTensor):
-            if self._placements is None:
-                self._placements = chunk_grad.placements
-            elif chunk_grad.placements != self._placements:
-                # All chunks come from the same op chain and must share a
-                # placement. Otherwise the buffer mixes frames and result()
-                # would mislabel them.
-                raise ValueError(
-                    f"chunk_grad placement {chunk_grad.placements} does not "
-                    f"match first chunk's placement {self._placements}"
-                )
-            chunk_grad = chunk_grad.to_local()
-        elif self._placements is not None:
-            # Earlier chunks were DTensor but this one is a plain tensor;
-            # mixing the two would silently drop the implied reduction.
-            raise ValueError(
-                "chunk_grad is a plain tensor but earlier chunks were "
-                f"DTensor with placement {self._placements}"
-            )
 
         if chunk_grad.dtype != self._buffer.dtype:
             chunk_grad = chunk_grad.to(self._buffer.dtype)
@@ -487,26 +418,7 @@ class GradAccumulator:
         self._next_idx += 1
 
     def result(self) -> torch.Tensor:
-        """Return the accumulated gradient tensor, wrapped as DTensor if needed.
-
-        When the chunks were Partial(sum), the returned DTensor is also
-        Partial(sum); autograd performs the implied reduction once when this
-        gradient lands on the decoder-side leaf.
-        """
-        from torch.distributed.tensor import DTensor
-
-        if self._device_mesh is not None:
-            if self._placements is None:
-                raise ValueError(
-                    "No DTensor chunk was added; cannot wrap the buffer as "
-                    "DTensor without a known placement. Either pass DTensor "
-                    "chunks to add(), or use a plain reference tensor."
-                )
-            return DTensor.from_local(
-                self._buffer,
-                device_mesh=self._device_mesh,
-                placements=self._placements,
-            )
+        """Return the accumulated gradient tensor."""
         return self._buffer
 
 
@@ -602,14 +514,8 @@ class ChunkedLossWrapper(BaseLoss):
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
 
-        # Chunking always operates on the *local* view: when ``t`` is a
-        # Shard(0) DTensor, chunking the global view would distribute whole
-        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
-        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
-        # local seq=0 and breaking GradAccumulator's slice writes.
-        # ``local_map`` runs the chunking body on plain tensors; under the
-        # non-DTensor (eager) path we call ``_chunk_local`` directly.
-        # Equal chunk sizes also match GradAccumulator's sequential slice
+        # Chunking operates on the local tensor. Equal chunk sizes match
+        # GradAccumulator's sequential slice
         # writes, which use one chunk length for each write offset.
         def _chunk_local(t):
             seq_len = t.shape[0]
@@ -622,27 +528,16 @@ class ChunkedLossWrapper(BaseLoss):
                 c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
             )
 
-        def _chunk(t):
-            if not isinstance(t, DTensor):
-                return _chunk_local(t)
-            p = t.placements
-            wrapped = local_map(
-                _chunk_local,
-                out_placements=(p,) * num_chunks,
-                in_placements=(p,),
-                device_mesh=t.device_mesh,
-            )
-            return wrapped(t)
-
         with spmd.local():
             # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
             # accumulates ``.grad`` for ``GradAccumulator``.
             h_chunks = [
-                c.detach().requires_grad_(requires_grad) for c in _chunk(hidden_states)
+                c.detach().requires_grad_(requires_grad)
+                for c in _chunk_local(hidden_states)
             ]
-            label_chunks = list(_chunk(labels))
+            label_chunks = list(_chunk_local(labels))
             input_chunks = {
-                key: _chunk(value) if isinstance(value, torch.Tensor) else value
+                key: _chunk_local(value) if isinstance(value, torch.Tensor) else value
                 for key, value in loss_inputs.items()
             }
 
@@ -655,7 +550,7 @@ class ChunkedLossWrapper(BaseLoss):
                 )
 
             total_loss = hidden_states.new_zeros((), dtype=torch.float32)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 total_loss = spmd.mutate_type(
                     total_loss,
                     src=spmd.R,

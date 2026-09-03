@@ -69,7 +69,6 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
     config = deepseek_v3_debugmodel_minimal_async_ep()
     config.compile.enable = False
     # TODO: Drop this once the H100 suite is migrated to the spmd_types backend.
-    config.parallelism.spmd_backend = "spmd_types"
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.tensor_parallel_degree = 2

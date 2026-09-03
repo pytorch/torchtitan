@@ -34,8 +34,7 @@ def parallelize_muse_glimmer(
 
     annotate_module_fqns(model)
 
-    if parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
+    model.parallelize(parallel_dims)
 
     parallelized_model = apply_simple_fsdp(
         model, parallel_dims=parallel_dims, training=training

@@ -61,9 +61,7 @@ def main():
         pp=1,
         ep=1,
         world_size=world,
-        spmd_backend="spmd_types",
     )
-    dist_utils.set_spmd_backend("spmd_types")
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
@@ -77,7 +75,6 @@ def main():
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
-    cfg.parallelism.spmd_backend = "spmd_types"
     cfg.debug.seed = 42
     cfg.debug.deterministic = True
 
@@ -167,9 +164,6 @@ def main():
     train_context = dist_utils.get_spmd_context(parallel_dims=parallel_dims)
     with torch.no_grad(), train_context():
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
-    loc_logits = (
-        loc_logits.to_local() if hasattr(loc_logits, "to_local") else loc_logits
-    )
 
     # Reconstruct full logits in global order via all-gather + index scatter.
     gathered_logits = [torch.empty_like(loc_logits) for _ in range(cp)]

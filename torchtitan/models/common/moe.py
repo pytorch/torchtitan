@@ -12,10 +12,8 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -65,25 +63,8 @@ class GroupedExperts(Module):
         local token shard. Keep logical capital suffixes here to avoid encoding
         a specific parallel layout in these local tensor names.
         """
-        if isinstance(self.w1_EFD, DTensor):
-            # Convert parameters from DTensors to plain Tensors, to work with
-            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EFD = self.w1_EFD.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
-        else:
-            w1_EFD = self.w1_EFD
-            w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
-
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        if (
-            get_spmd_backend() == "spmd_types"
-            and spmd.is_type_checking()
-            and spmd_mesh_size("ep") == 1
-        ):
+        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
             for axis in ("dp", "cp"):
                 # if no EP, convert to V for grouped_mm, which would otherwise see
                 # x:R, w1:V, offsets:P in local SPMD typechecking.
@@ -92,12 +73,14 @@ class GroupedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         h_RF = F.silu(
-            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
+            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=self.w1_EFD, offs=offsets_E)
         )
         h_RF = h_RF * self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
+            A=x_RD.bfloat16(), weight_EOI=self.w3_EFD, offs=offsets_E
         )
-        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
+        return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
+            x_RD
+        )
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
@@ -119,7 +102,7 @@ class GroupedExperts(Module):
 
 
 class RoutedExperts(Module):
-    """Routed-expert ``local_map`` region: composes token_dispatcher + inner_experts
+    """Local SPMD region composing token_dispatcher and inner_experts
     as sibling nodes so each can be overridden independently."""
 
     @dataclass(kw_only=True, slots=True)
@@ -141,9 +124,8 @@ class RoutedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
-        on exit. The forward body operates on plain local tensors.
+        When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
+        the local SPMD types for the forward body.
         """
         (
             routed_input_RD,
@@ -337,8 +319,8 @@ class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments (stays on DTensor)
-    2. RoutedExperts.forward() converts DTensor to local, then handles:
+    1. Router computes expert assignments.
+    2. RoutedExperts.forward() enters a local SPMD region, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
@@ -402,9 +384,8 @@ class MoE(Module):
         Under TP, the MoE wrapper's ``sharding_config`` (set by
         ``set_moe_sharding_config``) handles input/output redistribution:
         input is redistributed from sp_layout to desired_input_layouts;
-        output is redistributed to sp_layout. MoE.forward() operates on
-        DTensors; the DTensor->local conversion happens at the GroupedExperts
-        boundary. GroupedExperts operates on local tensors. When EP internally
+        output is redistributed to sp_layout. GroupedExperts operates in a
+        local SPMD region. When EP internally
         sequence-shards tokens across TP, the caller must provide a TP-divisible
         token count.
         """
@@ -416,9 +397,8 @@ class MoE(Module):
         ) = self.router(x_TD, self.expert_bias_E)
 
         # Build a one-hot routing map (T, E) marking the experts each token
-        # is routed to. Under TP/SP the router outputs are DTensors sharded on
-        # the token dim; scatter_ writes along the (replicated) expert dim, so
-        # DTensor runs it as a local op with no redistribution.
+        # is routed to. Under TP/SP the router outputs are token-sharded;
+        # scatter_ writes along the replicated expert dim with no redistribution.
         routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
             -1,
             topk_expert_ids_TK,

@@ -9,13 +9,9 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
-from torch import nn
 
-from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.flux.model.model import FluxModel
@@ -37,12 +33,10 @@ def flux_activation_placement(
     )
 
 
-def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
+def set_flux_inner_attention_local_spmd(inner_attention_cfg) -> None:
     q_layout = flux_activation_placement(cp=spmd.S(1))
     kv_src_layout = flux_activation_placement(cp=spmd.S(1))
     kv_dst_layout = flux_activation_placement(cp=spmd.R)
-    kv_grad_layout = flux_activation_placement(cp=spmd.P)
-
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
             "q_BLHK": q_layout,
@@ -55,27 +49,18 @@ def set_flux_inner_attention_local_map(inner_attention_cfg) -> None:
             "v_BLHV": kv_dst_layout,
         },
         out_src_shardings=q_layout,
-        local_map=LocalMapConfig(
-            in_grad_placements=(q_layout, kv_grad_layout, kv_grad_layout)
-        ),
+        local_spmd=True,
     )
 
 
 def set_flux_sharding_config(config: "FluxModel.Config") -> None:
     for block_cfg in config.double_blocks:
-        set_flux_inner_attention_local_map(block_cfg.img_attn.inner_attention)
-        set_flux_inner_attention_local_map(block_cfg.txt_attn.inner_attention)
-        set_flux_inner_attention_local_map(block_cfg.inner_attention)
+        set_flux_inner_attention_local_spmd(block_cfg.img_attn.inner_attention)
+        set_flux_inner_attention_local_spmd(block_cfg.txt_attn.inner_attention)
+        set_flux_inner_attention_local_spmd(block_cfg.inner_attention)
 
     for block_cfg in config.single_blocks:
-        set_flux_inner_attention_local_map(block_cfg.inner_attention)
-
-
-def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
-    # TODO(pianpwk): Infer these from the active SPMD mesh instead.
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
-        for param in model.parameters():
-            spmd.assert_type(param, spmd.R)
+        set_flux_inner_attention_local_spmd(block_cfg.inner_attention)
 
 
 def annotate_flux_forward_inputs(
@@ -88,9 +73,6 @@ def annotate_flux_forward_inputs(
     clip_encodings: torch.Tensor,
     timesteps: torch.Tensor,
 ) -> None:
-    if get_spmd_backend() != "spmd_types":
-        return
-
     sequence_type = {
         DP: spmd.S(0),
         CP: spmd.S(1),

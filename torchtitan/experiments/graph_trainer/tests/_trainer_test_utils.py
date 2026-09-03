@@ -38,13 +38,17 @@ def build_minimal_trainer(
     compile_numerics_changing_optim: bool = False,
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
+    parallel_dims=None,
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
     trainer.model_parts = [model]
     trainer.loss_fn = CrossEntropyLoss.Config().build()
-    trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
-    trainer.train_context = get_spmd_context()
+    trainer.parallel_dims = parallel_dims or SimpleNamespace(
+        pp_enabled=False,
+        cp_enabled=False,
+    )
+    trainer.train_context = get_spmd_context(parallel_dims=parallel_dims)
     trainer.fwd_bwd_fn = trainer._forward_backward_body
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
@@ -84,14 +88,11 @@ def build_minimal_trainer(
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-                spmd_backend="partial_dtensor",
             ),
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
-        trainer.config = SimpleNamespace(
-            parallelism=SimpleNamespace(spmd_backend="partial_dtensor"),
-        )
+        trainer.config = SimpleNamespace(parallelism=SimpleNamespace())
 
     return trainer

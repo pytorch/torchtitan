@@ -13,7 +13,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
 
 from torchtitan.protocols.module import Module
 
@@ -37,8 +36,6 @@ class Embedding(nn.Embedding, Module):
         self.tp_group: dist.ProcessGroup | None = None
 
     def parallelize(self, parallel_dims: "ParallelDims") -> None:
-        # TODO(pianpwk): delete and rely on `current_spmd_mesh().get_group("tp")`
-        # once the partial_dtensor backend is removed.
         tp_mesh = parallel_dims.get_optional_mesh("tp")
         if tp_mesh is not None:
             self.tp_group = tp_mesh.get_group("tp")
@@ -46,13 +43,10 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the module has a TP group."""
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
         if self.tp_group is None:
             return F.embedding(
                 input,
-                weight,
+                self.weight,
                 self.padding_idx,
                 self.max_norm,
                 self.norm_type,
@@ -62,14 +56,13 @@ class Embedding(nn.Embedding, Module):
 
         tp_pg = self.tp_group
         tp_size = dist.get_world_size(tp_pg)
-        weight = weight.to_local() if isinstance(weight, DTensor) else weight
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
         offset = dist.get_rank(tp_pg) * chunk_size
-        mask = (input >= offset) & (input < offset + weight.shape[0])
-        local_input = (input - offset).clamp(0, weight.shape[0] - 1)
+        mask = (input >= offset) & (input < offset + self.weight.shape[0])
+        local_input = (input - offset).clamp(0, self.weight.shape[0] - 1)
         out = F.embedding(
             local_input,
-            weight,
+            self.weight,
             self.padding_idx,
             self.max_norm,
             self.norm_type,

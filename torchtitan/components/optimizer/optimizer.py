@@ -15,7 +15,6 @@ import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
@@ -452,12 +451,8 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        dtensor_mesh = None
         for transformer_block, moe in _iter_moe_layers(model_parts):
             tokens_per_expert_E = moe.tokens_per_expert_E
-            if isinstance(tokens_per_expert_E, torch.distributed.tensor.DTensor):
-                dtensor_mesh = tokens_per_expert_E.device_mesh
-                tokens_per_expert_E = tokens_per_expert_E.to_local()
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                 # This does not affect to expert choice, but affects the experts usage metrics.
@@ -482,14 +477,6 @@ def register_moe_load_balancing_hook(
                 group=loss_mesh.get_group(),
                 op=torch.distributed.ReduceOp.SUM,
             )
-        if dtensor_mesh is not None:
-            tokens_per_expert_E_by_layer = torch.distributed.tensor.DTensor.from_local(
-                tokens_per_expert_E_by_layer,
-                device_mesh=dtensor_mesh,
-                placements=[Replicate()] * dtensor_mesh.ndim,
-                run_check=False,
-            )
-
         moe_layer_idx = 0
         with torch.no_grad():
             for model_part in model_parts:

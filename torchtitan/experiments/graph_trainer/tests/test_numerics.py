@@ -683,10 +683,10 @@ class TestSimpleFSDP(FSDPTest):
             self.dp_mesh_dim_names = ["dp_replicate"]
             data_parallel_replicate_degree = self.world_size
         elif self.mode == "fully_shard":
-            self.dp_mesh_dim_names = ["fsdp"]
+            self.dp_mesh_dim_names = ["dp_shard"]
             data_parallel_replicate_degree = 1
         elif self.mode == "hybrid_shard":
-            self.dp_mesh_dim_names = ["dp_replicate", "fsdp"]
+            self.dp_mesh_dim_names = ["dp_replicate", "dp_shard"]
             data_parallel_replicate_degree = self.world_size // 2
         else:
             raise ValueError(f"Unsupported mode {self.mode}")
@@ -699,7 +699,6 @@ class TestSimpleFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
     def get_input(self):

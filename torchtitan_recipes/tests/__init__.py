@@ -24,7 +24,6 @@ def _use_spmd_types(config: Trainer.Config, *, typechecking: bool) -> None:
     with FlexAttention, which the debug models use. It is also unsupported
     under compile and under pipeline parallelism.
     """
-    config.parallelism.spmd_backend = "spmd_types"
     config.debug.spmd_typechecking = typechecking
     if typechecking:
         config.activation_checkpoint = None

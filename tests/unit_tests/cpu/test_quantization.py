@@ -193,20 +193,17 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
 
 
 @pytest.mark.parametrize(
-    "sharding_config_factory, input_tp, input_grad_tp",
+    "sharding_config_factory, input_tp",
     [
-        pytest.param(lambda: colwise_config(), spmd.R, spmd.P, id="colwise"),
+        pytest.param(lambda: colwise_config(), spmd.R, id="colwise"),
         pytest.param(
             lambda: rowwise_config(output_sp=True),
-            spmd.S(-1),
             spmd.S(-1),
             id="rowwise",
         ),
     ],
 )
-def test_nvfp4_build_configures_local_spmd_sharding(
-    sharding_config_factory, input_tp, input_grad_tp
-):
+def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, input_tp):
     # Config.build() folds the stock colwise/rowwise sharding into the local
     # SPMD region for the opaque NVFP4 GEMM.
     NVFP4Linear = _nvfp4_linear_cls()
@@ -219,13 +216,10 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         sharding_config=sharding_config_factory(),
     ).build()
     sc = module._sharding_config
-    assert sc.local_map is not None
+    assert sc.local_spmd
     input_layout = dense_activation_placement(tp=input_tp, cp=spmd.S(0))
     assert sc.in_src_shardings == {"x": input_layout}
     assert sc.in_dst_shardings == {"x": input_layout}
-    assert sc.local_map.in_grad_placements == (
-        dense_activation_placement(tp=input_grad_tp, cp=spmd.S(0)),
-    )
     assert "weight" in sc.state_shardings
     assert sc.state_shardings["_sr_seed"] == SpmdType(
         {
@@ -247,22 +241,14 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         ("qwen3", "qwen3_8b_first_85_pct_layers_nvfp4"),
     ],
 )
-def test_nvfp4_recipes_default_to_spmd_types_and_allow_cli_override(
-    monkeypatch, module, recipe
-):
+def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
     _nvfp4_linear_cls()
     import torchtitan.components.quantization.nvfp4 as nvfp4_mod
 
     monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
     base_args = ["--module", module, "--config", recipe]
 
-    config = ConfigManager().parse_args(base_args)
-    assert config.parallelism.spmd_backend == "spmd_types"
-
-    overridden = ConfigManager().parse_args(
-        [*base_args, "--parallelism.spmd_backend", "partial_dtensor"]
-    )
-    assert overridden.parallelism.spmd_backend == "partial_dtensor"
+    ConfigManager().parse_args(base_args)
 
 
 @pytest.mark.parametrize(
