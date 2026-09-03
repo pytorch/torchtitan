@@ -29,11 +29,20 @@ def _parallelize_fn(model, *, compile_config, **kwargs):
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> ModelSpec:
+    get_config, max_context_len = llama3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
     base = build_decoder_config_for_backend(
-        llama3_configs[flavor], attn_backend, tp_gemm_backend=tp_gemm_backend
+        get_config, attn_backend, seq_len=context_len, tp_gemm_backend=tp_gemm_backend
     )
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
@@ -42,6 +51,7 @@ def model_registry(
         name="graph_trainer/llama3",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=_parallelize_fn,
         pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=None,

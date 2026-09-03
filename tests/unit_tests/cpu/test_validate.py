@@ -77,8 +77,14 @@ def _generic_validator(loader):
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
-    row = ({"input": torch.ones(1, 1)}, torch.ones(1, 1, dtype=torch.long))
-    loader = _ClosableLoader([row, row])
+    # A fresh dict per row: the validator pops num_valid_tokens.
+    def row():
+        return (
+            {"input": torch.ones(1, 1), "num_valid_tokens": 1},
+            torch.ones(1, 1, dtype=torch.long),
+        )
+
+    loader = _ClosableLoader([row(), row()])
     validator = _generic_validator(loader)
     model = _FailingModel() if raises else _EchoModel()
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")

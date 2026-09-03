@@ -23,6 +23,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
 from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
+from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
 
 
 class _Tokenizer:
@@ -151,21 +152,24 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
 
 
 @pytest.mark.parametrize(
-    "recipe_name",
+    ("config_registry", "recipe_name"),
     [
-        "qwen35_debugmodel",
-        "qwen35_debugmodel_moe",
-        "qwen35_0_8b",
-        "qwen35_2b",
-        "qwen35_4b",
-        "qwen35_9b",
-        "qwen35_27b",
-        "qwen35_35b_a3b",
-        "qwen35_122b_a10b",
-        "qwen35_397b_a17b",
+        (qwen35_configs, "qwen35_debugmodel"),
+        (qwen35_configs, "qwen35_debugmodel_moe"),
+        (qwen35_configs, "qwen35_0_8b"),
+        (qwen35_configs, "qwen35_2b"),
+        (qwen35_configs, "qwen35_4b"),
+        (qwen35_configs, "qwen35_9b"),
+        (qwen35_configs, "qwen35_27b"),
+        (qwen35_configs, "qwen35_35b_a3b"),
+        (qwen35_configs, "qwen35_122b_a10b"),
+        (qwen35_configs, "qwen35_397b_a17b"),
+        (qwen38_configs, "qwen38_debugmodel"),
+        (qwen38_configs, "qwen38_debugmodel_moe"),
+        (qwen38_configs, "qwen38_27b"),
     ],
 )
-def test_qwen35_recipe_geometry_matches_dataset_processor(recipe_name):
+def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_name):
     registry_state = {
         name: (
             id(dataset),
@@ -178,7 +182,7 @@ def test_qwen35_recipe_geometry_matches_dataset_processor(recipe_name):
         if isinstance(dataset.processor, MultiModalProcessor.Config)
     }
 
-    config = getattr(qwen35_configs, recipe_name)()
+    config = getattr(config_registry, recipe_name)()
     dataset = config.dataloader.dataset
     collator = config.dataloader.collator
 
@@ -311,9 +315,10 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    _, labels = collator([packed])
+    inputs, labels = collator([packed])
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
+    assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4
 
 
 def test_mm_finite_underfilled_tail_flushes():

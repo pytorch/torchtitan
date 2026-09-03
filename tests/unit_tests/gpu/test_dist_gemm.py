@@ -227,7 +227,11 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 
         parallel_dims = self._parallel_dims()
-        attn_cfg = llama3_debugmodel_dist_gemm().model_spec.model.layers[0].attention
+        attn_cfg = (
+            llama3_debugmodel_dist_gemm(seq_len=2048)
+            .model_spec.model.layers[0]
+            .attention
+        )
         with use_spmd_backend("spmd_types"):
             set_gqa_attention_sharding(attn_cfg, enable_sp=True)
             attn = attn_cfg.build().to(self.device_type)

@@ -107,7 +107,10 @@ class TestFusedQKVCheckpointInterop(unittest.TestCase):
             ("qwen3", qwen3_configs, Qwen3StateDictAdapter),
         ):
             with self.subTest(model=config_name):
-                model_config = configs["debugmodel"](attn_backend="flex")
+                build_config, max_context_length = configs["debugmodel"]
+                model_config = build_config(
+                    attn_backend="flex", seq_len=max_context_length
+                )
                 model = model_config.build()
                 model.eval()
 
