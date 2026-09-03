@@ -129,18 +129,6 @@ def spmd_dense_mesh() -> DeviceMesh:
     return mesh
 
 
-def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
-    """Return a non-singleton process group from the current SPMD mesh."""
-    mesh = current_spmd_mesh()
-    if mesh is None:
-        return None
-    names = mesh.mesh_dim_names or ()
-    if axis_name not in names:
-        return None
-    group = mesh.get_group(axis_name)
-    return group if group.size() > 1 else None
-
-
 def spmd_sparse_mesh() -> DeviceMesh | None:
     """Return the registered sparse SPMD mesh, if EP is enabled."""
     return getattr(_MESH_TLS, "sparse_mesh", None)
@@ -171,6 +159,18 @@ def spmd_mesh_size(axis_name: str) -> int:
     if axis_name not in names:
         return 1
     return mesh.size(names.index(axis_name))
+
+
+def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
+    """Return a non-singleton process group from the current SPMD mesh."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        return None
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return None
+    group = mesh.get_group(axis_name)
+    return group if group.size() > 1 else None
 
 
 @contextlib.contextmanager
