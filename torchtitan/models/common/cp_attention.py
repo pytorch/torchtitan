@@ -10,7 +10,7 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 import spmd_types as spmd
 
@@ -25,9 +25,11 @@ from torchtitan.models.common.attention import FlexAttention
 __all__ = [
     "ContextParallelKernel",
     "AllGatherCPFlexAttention",
+    "UlyssesCPFlexAttention",
 ]
 
 _SEQ_DIM = 0
+_HEAD_DIM = 1
 
 
 class ContextParallelKernel:
@@ -81,3 +83,41 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
             for x in (k_THK, v_THV)
         )
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
+
+
+class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
+    """Run FlexAttention with sequence-to-head all-to-all redistribution."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexAttention.Config):
+        shard_attention_mask: ClassVar[bool] = False
+        shard_attention_heads: ClassVar[bool] = True
+
+    @staticmethod
+    def _reshard(
+        x: torch.Tensor, cp_group: dist.ProcessGroup, *, src: int, dst: int
+    ) -> torch.Tensor:
+        """Move the CP sharding of ``x`` from tensor dim ``src`` to ``dst``."""
+        return spmd.redistribute(
+            x.contiguous(),
+            cp_group,
+            src=spmd.S(src),
+            dst=spmd.S(dst),
+        )
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        cp_group = self.cp_group
+        # Shard heads instead of tokens: (T/cp, H, *) -> (T, H/cp, *).
+        q_THK, k_THK, v_THV = (
+            self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)
+            for x in (q_THK, k_THK, v_THV)
+        )
+        out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
+        # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
+        return self._reshard(out_THV, cp_group, src=_HEAD_DIM, dst=_SEQ_DIM)
