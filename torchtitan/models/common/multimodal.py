@@ -6,10 +6,10 @@
 
 """Model-agnostic vision<->text fusion for VLMs.
 
-The decoder embeds the full token sequence; the placeholder tokens
-get a throwaway text embedding that ``scatter_vision_embeds``
-overwrites with the vision encoder's per-item features at the positions
-``get_vision_positions`` locates.
+``get_vision_positions`` and ``scatter_vision_embeds`` support span-based
+fusion over a full token sequence. ``build_vision_bank_indices`` and
+``gather_vision_embeds`` support gather-based fusion by carrying an absolute
+packed-bank row for every placeholder token.
 """
 
 import contextlib
@@ -94,6 +94,39 @@ def get_vision_positions(
             )
         positions.append((i, start, n_tokens))
     return positions
+
+
+def build_vision_bank_indices(
+    tokens_T: torch.Tensor,
+    *,
+    placeholder_id: int,
+) -> torch.Tensor:
+    """Map vision placeholder tokens to absolute packed-bank rows."""
+    vision_mask_T = tokens_T == placeholder_id
+    vision_bank_indices_T = torch.cumsum(vision_mask_T.to(torch.long), dim=0) - 1
+    return vision_bank_indices_T.masked_fill(~vision_mask_T, -1)
+
+
+def gather_vision_embeds(
+    inputs_TD: torch.Tensor,
+    *,
+    vision_bank_VD: torch.Tensor,
+    vision_bank_indices_T: torch.Tensor,
+) -> torch.Tensor:
+    """Gather packed vision features into their placeholder token positions."""
+    if vision_bank_VD.shape[0] == 0:
+        return inputs_TD
+    vision_bank_VD = vision_bank_VD.to(inputs_TD.dtype)
+    is_vision_T1 = (vision_bank_indices_T >= 0).unsqueeze(-1)
+    gathered_TD = vision_bank_VD[vision_bank_indices_T.clamp(min=0)]
+    # The vision bank is DP-local, so global propagation through where omits
+    # DP from the token PartitionSpec. Validate locally, then restore the exact
+    # token layout at the fusion boundary.
+    with spmd.local():
+        fused_TD = torch.where(is_vision_T1, gathered_TD, inputs_TD)
+    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        spmd.assert_type_like(fused_TD, inputs_TD)
+    return fused_TD
 
 
 def scatter_vision_embeds(

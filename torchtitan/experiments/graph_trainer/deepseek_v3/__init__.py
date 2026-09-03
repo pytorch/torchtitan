@@ -29,13 +29,23 @@ def _parallelize_fn(model, *, compile_config, **kwargs):
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ) -> ModelSpec:
+    get_config, max_context_len = deepseekv3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
     base = build_decoder_config_for_backend(
-        deepseekv3_configs[flavor],
+        get_config,
         attn_backend,
+        seq_len=context_len,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
@@ -46,6 +56,7 @@ def model_registry(
         name="graph_trainer/deepseek_v3",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=_parallelize_fn,
         pipelining_fn=graph_pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

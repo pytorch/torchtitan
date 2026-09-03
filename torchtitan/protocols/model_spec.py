@@ -36,6 +36,7 @@ class ModelSpec:
     name: str
     flavor: str
     model: BaseModel.Config
+    max_context_length: int
     # NOTE: Callable fields use bare ``Callable`` instead of the parameterised
     # TypeAliases (e.g. ``ParallelizeFunction``) because tyro's type-parameter
     # resolver does not handle ``Callable[..., X]`` (Ellipsis as param spec).

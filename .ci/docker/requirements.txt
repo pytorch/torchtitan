@@ -8,4 +8,4 @@ safetensors
 einops
 pillow
 spmd_types==0.2.5
-attn-gym[linear]==0.0.5
+attn-gym[linear]==0.0.8

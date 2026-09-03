@@ -12,7 +12,7 @@ applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
 Full-attention layers: TP on wq/wk/wv/wo with local_map for inner attention;
 each layer's MRoPE ``cache`` buffer is sharded Replicate.
 GatedDeltaNet layers: head-sharded TP on projections (ColwiseParallel) and
-out_proj (RowwiseParallel); the FLA kernel and depthwise Conv1d run on local
+out_proj (RowwiseParallel); the GDN kernel and depthwise Conv1d run on local
 tensors via local_map.
 """
 
@@ -120,23 +120,25 @@ def set_qwen35_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
-    # Vision scatter needs the full embedding sequence on every TP rank.
-    config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-        local_map=LocalMapConfig(in_grad_placements=None),
-    )
-    _set_vision_encoder_sharding(config.vision_encoder)
-    # The first layer restores the decoder layout after replicated vision scatter.
-    first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     layer_input_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
+    first_layer_input_layout = layer_input_layout
+    if config.vision_encoder is not None:
+        # Vision scatter needs the full embedding sequence on every TP rank.
+        config.tok_embeddings.sharding_config = ShardingConfig(
+            state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+            in_src_shardings={"input": token_id_placement()},
+            in_dst_shardings={"input": token_id_placement()},
+            out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+            out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+            local_map=LocalMapConfig(in_grad_placements=None),
+        )
+        _set_vision_encoder_sharding(config.vision_encoder)
+        # The first layer restores the decoder layout after replicated vision scatter.
+        first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     for layer_idx, layer_cfg in enumerate(config.layers):
         input_layout = (
             first_layer_input_layout if layer_idx == 0 else layer_input_layout
@@ -358,8 +360,7 @@ def _set_deltanet_sharding(
     )
 
     # The inner GDN is the DTensor-to-local boundary for the head-parallel
-    # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
-    # and intentionally remains outside local_map's positional placements.
+    # convolution and recurrence.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_src_shardings={
             "query_TC": projected_placement,
