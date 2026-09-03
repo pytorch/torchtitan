@@ -130,6 +130,30 @@ def colwise_config() -> ShardingConfig:
     )
 
 
+def qkv_colwise_config() -> ShardingConfig:
+    """Colwise QKV projection whose TP parameter shards are known to be even."""
+    return ShardingConfig(
+        state_shardings={
+            "weight": SpmdType(
+                {DP: spmd.R, CP: spmd.R, TP: spmd.V},
+                partition_spec=spmd.PartitionSpec(
+                    TP,
+                    None,
+                    even_shard_axes={TP},
+                ),
+            ),
+            "bias": SpmdType(
+                {DP: spmd.R, CP: spmd.R, TP: spmd.V},
+                partition_spec=spmd.PartitionSpec(
+                    TP,
+                    even_shard_axes={TP},
+                ),
+            ),
+        },
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
+    )
+
+
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
     RowwiseParallel: weight S(1), bias R (no-op if bias absent).
@@ -198,10 +222,10 @@ def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
     ``FusedQKVLinear`` (single ``wqkv``).
     """
     if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
-        qkv_linear_cfg.wqkv.sharding_config = colwise_config()
+        qkv_linear_cfg.wqkv.sharding_config = qkv_colwise_config()
     elif isinstance(qkv_linear_cfg, QKVLinear.Config):
-        qkv_linear_cfg.wq.sharding_config = colwise_config()
-        qkv_linear_cfg.wkv.sharding_config = colwise_config()
+        qkv_linear_cfg.wq.sharding_config = qkv_colwise_config()
+        qkv_linear_cfg.wkv.sharding_config = qkv_colwise_config()
     else:
         raise TypeError(
             f"set_qkv_linear_sharding requires QKVLinear.Config or "
