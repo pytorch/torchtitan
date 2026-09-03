@@ -23,7 +23,6 @@ from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
-
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
 
 
@@ -95,15 +94,3 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def kimi_k3_debugmodel_32l() -> Trainer.Config:
-    """The debug model at 32 layers, for the pipeline x virtual-stage matrix."""
-    config = kimi_k3_debugmodel()
-    config.model_spec = model_registry("debugmodel_32l")
-    config.loss.loss_fn.global_vocab_size = decoder_vocab_size(config.model_spec)
-    return config
-
-
-
-

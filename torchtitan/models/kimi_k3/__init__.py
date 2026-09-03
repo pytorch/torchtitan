@@ -467,24 +467,32 @@ def _kimi_k3_config(
     )
 
 
+def kimi_k3_full_attention_layers(num_layers: int) -> set[int]:
+    """The MLA layers of a Kimi K3 stack: every fourth layer, and the last.
+
+    The stack repeats (3 KDA + 1 MLA); a remainder shorter than a full group
+    still ends on an MLA layer, which is how the 93-layer model closes
+    (``range(3, 92, 4) | {92}``).
+    """
+    return {i for i in range(num_layers) if i % 4 == 3} | {num_layers - 1}
+
+
 def _debugmodel(
-    attn_backend: str,
-    moe_comm_backend: str,
-    *,
-    num_layers: int = 24,
-    full_attention_layers: set[int] | None = None,
-    attn_res_block_size: int = 12,
+    attn_backend: str, moe_comm_backend: str, *, num_layers: int
 ) -> KimiK3Model.Config:
+    """The debug model: the 93-layer model's layer pattern and block size at a
+    depth chosen to be irregular in the same ways. ``num_layers`` is not a
+    multiple of the block size, so the last block is partial as in the full
+    model, and not a multiple of 4, so the stack ends on the lone MLA layer.
+    """
     dim = 1024
-    if full_attention_layers is None:
-        full_attention_layers = {3, 7, 11, 15, 19, 23}
     return _kimi_k3_config(
         dim=dim,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=num_layers,
-        full_attention_layers=full_attention_layers,
-        attn_res_block_size=attn_res_block_size,
+        full_attention_layers=kimi_k3_full_attention_layers(num_layers),
+        attn_res_block_size=12,
         num_heads=16,
         q_lora_rank=512,
         kv_lora_rank=256,
@@ -513,25 +521,6 @@ def _debugmodel(
     )
 
 
-def _debugmodel_32l(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
-    """The debug model at 32 layers, for the pipeline x virtual-stage matrix.
-
-    The 24-layer flavor cannot express every pp x vp product: 24 is not
-    divisible by 16 (pp4 x vp4, pp8 x vp2) or 32 (pp8 x vp4), and virtual stages
-    are expressed as layers-per-stage. 32 divides all of them, so the same
-    3 KDA : 1 MLA pattern at 32 layers covers the whole cross product with an
-    integer split. The tower stays: it rides with the embedding on the first
-    stage and takes no stage of its own, so the split arithmetic is unchanged.
-    """
-    return _debugmodel(
-        attn_backend,
-        moe_comm_backend,
-        num_layers=32,
-        full_attention_layers=set(range(3, 32, 4)),
-        attn_res_block_size=16,
-    )
-
-
 def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
@@ -539,7 +528,7 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
-        full_attention_layers=set(range(3, 92, 4)) | {92},
+        full_attention_layers=kimi_k3_full_attention_layers(93),
         attn_res_block_size=12,
         num_heads=96,
         q_lora_rank=1536,
@@ -570,8 +559,10 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 
 kimi_k3_configs = {
-    "debugmodel": (_debugmodel, 16384),
-    "debugmodel_32l": (_debugmodel_32l, 16384),
+    # 30 layers: three blocks of 12 with the last one partial, and a lone MLA
+    # layer after seven (3 KDA + 1 MLA) groups; 32 units with the embedding
+    # and the head, which every pipeline shape up to 32 stages divides.
+    "debugmodel": (partial(_debugmodel, num_layers=30), 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }
 
