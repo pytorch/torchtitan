@@ -188,6 +188,19 @@ class RankLocalCache:
         if producer_meta is not None:
             self._producer_meta[mb_index] = list(producer_meta)
 
+    def release_blocks(self, mb_index: int) -> None:
+        """Free the block tensors of ``mb_index``; the gradient slots stay.
+
+        Called when the rank's last virtual stage has run its forward for the
+        micro-batch: no later forward on this rank reads the cache for it, and
+        the backward does not read it at all (channel A rides the autograd
+        graph, channel B the captured-grad slots), so the blocks can go while
+        the micro-batch is still in flight. The slots are popped by the
+        producer's backward and swept by ``drop`` at step end.
+        """
+        self._blocks.pop(mb_index, None)
+        self._producer_meta.pop(mb_index, None)
+
     def drop(self, mb_index: int) -> None:
         self._blocks.pop(mb_index, None)
         self._producer_meta.pop(mb_index, None)
@@ -563,9 +576,19 @@ class CrossStageCacheAdapter(nn.Module):
         # the mb index. Route to the shape-inference helper in that case.
         if _current_mb_index(self._adapter_key()) is None:
             return self._forward_shape_inference(*args, **kwargs)
-        if self._delta_mode:
-            return self._forward_delta(*args, **kwargs)
-        return self._call_wrapped_naive(args, kwargs)
+        if not self._delta_mode:
+            return self._call_wrapped_naive(args, kwargs)
+        out = self._forward_delta(*args, **kwargs)
+        if self._is_last_virtual_stage_on_rank():
+            # The rank's forwards for this micro-batch are done: release its
+            # blocks now rather than at step end, so the cache holds only the
+            # micro-batches between their first and last virtual stage.
+            self._cache.release_blocks(self._current_mb())
+        return out
+
+    def _is_last_virtual_stage_on_rank(self) -> bool:
+        assert self._layout is not None
+        return self.stage_id + self._layout.P >= self.num_stages
 
     def _forward_shape_inference(self, *args, **kwargs):
         """Run wrapped model and reshape its blocks output to the delta
