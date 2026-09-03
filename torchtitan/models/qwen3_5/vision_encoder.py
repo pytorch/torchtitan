@@ -119,8 +119,9 @@ def _compute_learned_pos_embeds(
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_pos_embeds = spmd.mutate_type(
             packed_pos_embeds,
-            src={"dp": spmd.R, "tp": spmd.I},
-            dst={"dp": spmd.V, "tp": spmd.I},
+            "dp",
+            src=spmd.R,
+            dst=spmd.V,
         )
     return packed_pos_embeds
 
@@ -215,8 +216,9 @@ def _compute_2d_rope_cache(
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         packed_rope_embeds = spmd.mutate_type(
             packed_rope_embeds,
-            src={"dp": spmd.R, "tp": spmd.I},
-            dst={"dp": spmd.V, "tp": spmd.I},
+            "dp",
+            src=spmd.R,
+            dst=spmd.V,
         )
     packed_rope_embeds = torch.cat((packed_rope_embeds, packed_rope_embeds), dim=-1)
     rope_cache = torch.cat(
