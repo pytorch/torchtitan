@@ -69,6 +69,7 @@ class TestCarrier(unittest.TestCase):
         self.assertTrue(store.has_deposits(0))
         grad, count = store.collect(0, 0)
         self.assertEqual(count, 2)
+        assert grad is not None
         self.assertTrue(torch.equal(grad, torch.full((4, 2), 2.0)))
         self.assertFalse(store.has_deposits(0))
         self.assertEqual(store.collect(0, 0), (None, 0))

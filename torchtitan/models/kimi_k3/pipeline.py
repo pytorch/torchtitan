@@ -14,6 +14,7 @@ trainer actually applied.
 """
 
 import math
+from typing import cast
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import (
@@ -92,10 +93,15 @@ def kimi_k3_module_fqns_per_model_part(
 def _schedule_stages(schedule: _PipelineSchedule) -> list[AttnResPipelineStage]:
     """The stages a schedule holds on this rank."""
     if isinstance(schedule, PipelineScheduleSingle):
-        return [schedule._stage]
-    if isinstance(schedule, PipelineScheduleMulti):
-        return list(schedule._stages)
-    raise RuntimeError(f"Unexpected pipeline schedule class {type(schedule).__name__}.")
+        stages = [schedule._stage]
+    elif isinstance(schedule, PipelineScheduleMulti):
+        stages = list(schedule._stages)
+    else:
+        raise RuntimeError(
+            f"Unexpected pipeline schedule class {type(schedule).__name__}."
+        )
+    assert all(isinstance(s, AttnResPipelineStage) for s in stages)
+    return cast(list[AttnResPipelineStage], stages)
 
 
 def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
