@@ -113,7 +113,7 @@ def test_extra_resource_attributes_support_arrays_and_overrides(
         extra_resource_attributes={
             "custom.columns": ["request_id", "latency_ms"],
             "model_name": "overridden-model",
-        }
+        },
     ).build(
         vllm_config=_vllm_config(model="original-model"),
         context=_context(output_dir=str(tmp_path)),
@@ -190,18 +190,6 @@ def test_extract_step_stats_prefix_cache_none():
     assert step.kv_cache_usage == 0.1
 
 
-def test_inert_without_exporter(no_otel_env):
-    log = VllmOtelStatLogger.Config().build(
-        vllm_config=_vllm_config(),
-        engine_index=0,
-        context=_context(rank=0, tp_rank=0, dp_rank=0),
-    )
-    assert log._enabled is False
-    # No-ops that must never raise and never touch (uncreated) instruments.
-    log.record(None, None)
-    log.log()
-
-
 def test_logger_does_not_gate_on_tp_rank(
     no_otel_env, monkeypatch, tmp_path, meter_providers
 ):
@@ -215,24 +203,22 @@ def test_logger_does_not_gate_on_tp_rank(
     assert len(meter_providers) == 1
 
 
-def test_exporter_none_is_inert(monkeypatch):
+def test_exporter_none_raises(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "none")
-    log = VllmOtelStatLogger.Config().build(
-        vllm_config=_vllm_config(),
-        engine_index=0,
-        context=_context(rank=0, tp_rank=0, dp_rank=0),
-    )
-    assert log._enabled is False
+
+    with pytest.raises(ValueError, match="unsupported OTEL_METRICS_EXPORTER='none'"):
+        VllmOtelStatLogger.Config().build(
+            vllm_config=_vllm_config(), context=_context()
+        )
 
 
-def test_endpoint_without_exporter_is_inert(no_otel_env, monkeypatch):
+def test_endpoint_without_exporter_raises(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
 
-    log = VllmOtelStatLogger.Config().build(
-        vllm_config=_vllm_config(), context=_context()
-    )
-
-    assert log._enabled is False
+    with pytest.raises(ValueError, match="unsupported OTEL_METRICS_EXPORTER='none'"):
+        VllmOtelStatLogger.Config().build(
+            vllm_config=_vllm_config(), context=_context()
+        )
 
 
 def test_sdk_disabled_is_inert(no_otel_env, monkeypatch, tmp_path, caplog):
@@ -397,9 +383,13 @@ def test_jsonl_export_writes_recorded_metrics(
         assert metrics[name]["sum"] == pytest.approx(expected_sum)
 
 
-def test_record_disables_on_instrument_failure(no_otel_env, caplog):
+def test_record_disables_on_instrument_failure(
+    no_otel_env, monkeypatch, tmp_path, meter_providers, caplog
+):
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
     log = VllmOtelStatLogger.Config().build(
-        vllm_config=_vllm_config(), context=_context()
+        vllm_config=_vllm_config(),
+        context=_context(output_dir=str(tmp_path)),
     )
 
     class FailingCounter:
@@ -407,7 +397,6 @@ def test_record_disables_on_instrument_failure(no_otel_env, caplog):
             raise ValueError("simulated metrics failure")
 
     log._c_gen_tokens = FailingCounter()
-    log._enabled = True
 
     with caplog.at_level(logging.WARNING):
         log.record(None, None)
@@ -416,11 +405,14 @@ def test_record_disables_on_instrument_failure(no_otel_env, caplog):
     assert "record() failed" in caplog.text
 
 
-def test_record_disables_on_extract_failure(no_otel_env):
+def test_record_disables_on_extract_failure(
+    no_otel_env, monkeypatch, tmp_path, meter_providers
+):
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
     log = VllmOtelStatLogger.Config().build(
-        vllm_config=_vllm_config(), context=_context()
+        vllm_config=_vllm_config(),
+        context=_context(output_dir=str(tmp_path)),
     )
-    log._enabled = True
 
     log.record(None, SimpleNamespace())
 
