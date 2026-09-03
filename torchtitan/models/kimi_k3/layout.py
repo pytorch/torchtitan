@@ -4,69 +4,44 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Static block-layout algebra for AttnRes under Interleaved1F1B.
+"""Routing of the block attention residual across pipeline stages.
 
-Given a schedule shape ``(P, V, num_blocks, n_layers, layers_per_block)``
-this module enumerates, offline and deterministically, which block each
-stage commits, which blocks each rank's shared cache holds at every
-virtual-stage entry, and which subset a stage must ship on its outgoing
-P2P (the "delta"). The adapter reads these tables at runtime so no
-metadata ever travels over the wire.
+A block committed at stage ``S`` is read by every later stage. Torch's
+pipeline stages only talk to their neighbours, so the block travels along the
+chain: each hop carries the blocks the receiving rank does not hold yet, and a
+rank keeps what it has seen for its later stages. ``BlockLayoutTables``
+simulates one micro-batch's forward in stage order and tabulates, per stage,
+the blocks it commits, the blocks its rank holds when it runs, the blocks its
+hop carries, and the stages that read a block from their rank's store. The
+tables are a pure function of the split and the stage-to-rank map, so every
+rank computes the same ones and nothing but the blocks travels on the wire.
+
+With ``cache=False`` no rank keeps anything and every hop carries the whole
+stack: the plain transport, kept for comparison.
 """
-
-from __future__ import annotations
 
 import torch
 import torch.distributed as dist
 
 
 class BlockLayoutTables:
-    """Precomputed per-microbatch Interleaved1F1B block-propagation tables.
-
-    Given the tuple ``(P, V, num_blocks, n_layers, layers_per_block)``, this
-    helper simulates the full single-microbatch forward in the schedule's
-    execution order and materializes deterministic lookups:
-
-    * ``commits_at(S)``            -> list[int] of block indices stage ``S`` commits.
-    * ``rank_cache_at_entry(R, v)``-> ``frozenset[int]`` of block indices held in
-      rank ``R``'s cache at the moment its ``v``-th virtual stage calls forward.
-    * ``delta_to_send(S)``         -> list[int] of block indices stage ``S``
-      ships on its P2P send to stage ``S+1`` (``[]`` for the last stage).
-    * ``producer_stage_of_block(b)`` -> int, the stage that commits block ``b``.
-    * ``cache_consumers_of_block(b)`` -> list[int] of stages that pull block ``b``
-      out of THEIR rank-cache (not via the delta buffer).
-
-    A stage may commit more than one block: that happens whenever its layer span
-    is wider than ``layers_per_block`` (e.g. 96 layers over P=2, V=2 with
-    ``attn_res_block_size=12`` puts two boundaries on every stage). Everything
-    here is keyed by the commit's index WITHIN its producer stage, and so is the
-    runtime -- the rank cache stores ``(rank, stage, block_idx_in_producer)`` and
-    the producer installs one augment hook per commit.
-
-    Expected delta sizes for the canonical config
-    ``(P=8, V=2, num_blocks=8, n_layers=16, layers_per_block=2)``:
-
-    * v=0 hops: sizes = [1, 1, 2, 2, 3, 3, 4, 3]
-    * v=1 hops: sizes = [4, 3, 4, 3, 4, 3, 4]
-    """
+    """Per-stage routing of the block stack for one micro-batch."""
 
     def __init__(
         self,
         *,
-        pp_size: int,
-        virtual_stages_per_rank: int,
+        stage_to_rank: dict[int, int],
         num_blocks: int,
         n_layers: int,
         layers_per_block: int,
-        layer_to_stage: dict[int, int] | None = None,
+        layer_to_stage: dict[int, int],
+        cache: bool = True,
     ) -> None:
-        if pp_size < 1 or virtual_stages_per_rank < 1:
-            raise ValueError("pp_size and virtual_stages_per_rank must be >= 1")
         if n_layers <= 0 or layers_per_block <= 0:
             raise ValueError("n_layers and layers_per_block must be positive")
         # A partial final block is legal: K3 uses attn_res_block_size=12 over
-        # 93 layers (report sec 2.2), so the last block holds 9 layers and
-        # never reaches a commit. num_blocks is therefore the CEIL.
+        # 93 layers, so the last block holds 9 layers and never reaches a
+        # commit. num_blocks is therefore the CEIL.
         expected_blocks = -(-n_layers // layers_per_block)
         if num_blocks != expected_blocks:
             raise ValueError(
@@ -74,81 +49,64 @@ class BlockLayoutTables:
                 f"layers_per_block) = {expected_blocks} for n_layers="
                 f"{n_layers}, layers_per_block={layers_per_block}"
             )
-
-        self.P = pp_size
-        self.V = virtual_stages_per_rank
-        self.num_stages = pp_size * virtual_stages_per_rank
+        self.num_stages = len(stage_to_rank)
+        if sorted(stage_to_rank) != list(range(self.num_stages)):
+            raise ValueError(
+                f"stage_to_rank must cover stages 0..{self.num_stages - 1}; "
+                f"got {sorted(stage_to_rank)}"
+            )
+        self.stage_to_rank = dict(stage_to_rank)
         self.num_blocks = num_blocks
         self.n_layers = n_layers
         self.layers_per_block = layers_per_block
-
-        if layer_to_stage is None:
-            if n_layers % self.num_stages != 0:
-                raise ValueError(
-                    f"Default layer_to_stage requires n_layers ({n_layers}) "
-                    f"to be divisible by num_stages ({self.num_stages}). "
-                    f"Pass an explicit layer_to_stage map."
-                )
-            layers_per_stage = n_layers // self.num_stages
-            layer_to_stage = {ell: ell // layers_per_stage for ell in range(n_layers)}
+        self.cache = cache
         self._layer_to_stage = dict(layer_to_stage)
-
         self._commits_at: dict[int, list[int]] = {}
         self._producer_stage_of_block: dict[int, int] = {}
-        self._cache_at_entry: dict[tuple[int, int], frozenset[int]] = {}
+        self._cache_at_entry: dict[int, frozenset[int]] = {}
         self._delta_to_send: dict[int, list[int]] = {}
-
+        self._cache_readers: dict[int, list[int]] = {}
         self._build()
 
-    # ----- public lookups ---------------------------------------------- #
-
+    # ----- lookups ------------------------------------------------------- #
     def commits_at(self, stage_id: int) -> list[int]:
+        """Blocks stage ``stage_id`` opens, in order."""
         return list(self._commits_at.get(stage_id, ()))
 
-    def rank_cache_at_entry(self, rank: int, v: int) -> frozenset[int]:
-        return self._cache_at_entry[(rank, v)]
+    def cache_at_entry(self, stage_id: int) -> frozenset[int]:
+        """Blocks the stage's rank holds when the stage runs."""
+        return self._cache_at_entry[stage_id]
 
     def delta_to_send(self, stage_id: int) -> list[int]:
+        """Blocks the hop from ``stage_id`` to ``stage_id + 1`` carries."""
         return list(self._delta_to_send.get(stage_id, ()))
 
     def producer_stage_of_block(self, block_idx: int) -> int:
         return self._producer_stage_of_block[block_idx]
 
-    def cache_consumers_of_block(self, block_idx: int) -> list[int]:
-        """Stages that consume ``block_idx`` via their shared rank cache."""
-        return list(self._cache_consumers_of_block.get(block_idx, ()))
+    def cache_readers_of_block(self, block_idx: int) -> list[int]:
+        """Stages that take ``block_idx`` from their rank's store."""
+        return list(self._cache_readers.get(block_idx, ()))
 
-    def expected_same_rank_captures(
-        self,
-        producer_stage: int,
-        block_idx_in_producer: int,
-    ) -> int:
-        """Count of later same-rank virtual stages that read producer
-        ``producer_stage``'s ``block_idx_in_producer``-th commit from
-        their shared rank cache.
+    def deposits_expected(self, block_idx: int, owner_stage: int) -> int:
+        """How many later stages on ``owner_stage``'s rank read ``block_idx``
+        from the store.
 
-        Each such consumer triggers exactly one
-        :class:`pipeline_adapter._LocalCacheCapture.backward` deposit
-        into the producer's captured-grad slot for the current mb. The
-        producer-side hook uses this count to turn silent grad loss
-        (a consumer backward that never ran) into an explicit warning
-        at the moment its own backward fires.
+        The owner is the stage that brought the block onto the rank, by
+        committing or by receiving it. Each such reader deposits the block's
+        gradient into the rank store for the owner's backward to collect, so
+        the owner compares the deposits it finds against this count: a
+        missing one is a lost gradient no loss curve shows.
         """
-        commits = self._commits_at.get(producer_stage, [])
-        if block_idx_in_producer < 0 or block_idx_in_producer >= len(commits):
-            return 0
-        b = commits[block_idx_in_producer]
-        producer_rank = producer_stage % self.P
+        rank = self.stage_to_rank[owner_stage]
         return sum(
             1
-            for c in self._cache_consumers_of_block.get(b, [])
-            if c % self.P == producer_rank and c > producer_stage
+            for reader in self._cache_readers.get(block_idx, ())
+            if self.stage_to_rank[reader] == rank and reader > owner_stage
         )
 
-    # ----- the full simulation ----------------------------------------- #
-
+    # ----- the simulation ----------------------------------------------- #
     def _build(self) -> None:
-        # 1) commits_at / producer_stage_of_block from the layer map.
         for stage_id in range(self.num_stages):
             self._commits_at[stage_id] = []
         for ell in range(self.n_layers):
@@ -158,7 +116,6 @@ class BlockLayoutTables:
             stage_id = self._layer_to_stage[ell]
             self._commits_at[stage_id].append(block_idx)
             self._producer_stage_of_block[block_idx] = stage_id
-
         if len(self._producer_stage_of_block) != self.num_blocks:
             raise ValueError(
                 "Internal: not all blocks have a producer stage. "
@@ -166,111 +123,82 @@ class BlockLayoutTables:
                 f"{len(self._producer_stage_of_block)}."
             )
 
-        # 2) Walk the mb forward stage-by-stage and track each rank's cache.
-        # Interleaved1F1B: rank R owns stages R, R+P, ..., R+(V-1)P; forward
-        # runs stage 0 -> num_stages-1, matching the autograd graph.
-        rank_cache: dict[int, set[int]] = {r: set() for r in range(self.P)}
+        # One micro-batch's forward in stage order, which is the data order:
+        # stage S+1 needs S's hidden state. Every rank remembers what it has
+        # seen when the cache is on.
+        held: dict[int, set[int]] = {r: set() for r in set(self.stage_to_rank.values())}
         accumulated: set[int] = set()
-        for r in range(self.P):
-            self._cache_at_entry[(r, 0)] = frozenset()
-
         for stage_id in range(self.num_stages):
-            R = stage_id % self.P
-            v = stage_id // self.P
-            self._cache_at_entry.setdefault((R, v), frozenset(rank_cache[R]))
-
-            for b in self._commits_at[stage_id]:
-                accumulated.add(b)
-                rank_cache[R].add(b)
-            # Receiver cached what it just saw on the wire.
-            rank_cache[R].update(accumulated)
-
+            rank = self.stage_to_rank[stage_id]
+            self._cache_at_entry[stage_id] = frozenset(held[rank])
+            accumulated.update(self._commits_at[stage_id])
+            if self.cache:
+                held[rank].update(accumulated)
             next_stage = stage_id + 1
             if next_stage < self.num_stages:
-                next_R = next_stage % self.P
-                next_v = next_stage // self.P
-                receiver_cache = frozenset(rank_cache[next_R])
-                self._cache_at_entry[(next_R, next_v)] = receiver_cache
-                delta = sorted(accumulated - receiver_cache)
-                self._delta_to_send[stage_id] = delta
+                receiver = held[self.stage_to_rank[next_stage]]
+                self._delta_to_send[stage_id] = sorted(accumulated - receiver)
             else:
                 self._delta_to_send[stage_id] = []
 
-        # 3) cache_consumers_of_block: later stages reading a block from their
-        # RANK CACHE rather than the delta buffer. Each such read deposits one
-        # grad into the producer's slot; expected_same_rank_captures counts them.
-        cache_consumers_of_block: dict[int, list[int]] = {
-            b: [] for b in range(self.num_blocks)
-        }
+        readers: dict[int, list[int]] = {b: [] for b in range(self.num_blocks)}
         for stage_id in range(self.num_stages):
-            R = stage_id % self.P
-            v = stage_id // self.P
-            for b in self._cache_at_entry[(R, v)]:
-                cache_consumers_of_block[b].append(stage_id)
-        self._cache_consumers_of_block = {
-            b: list(stages) for b, stages in cache_consumers_of_block.items()
-        }
+            for b in sorted(self._cache_at_entry[stage_id]):
+                readers[b].append(stage_id)
+        self._cache_readers = readers
 
 
 def infer_block_layout_tables_from_stages(
     stages,
     *,
-    pp_size: int,
+    stage_to_rank: dict[int, int],
     num_blocks: int,
     n_layers: int,
     layers_per_block: int,
-    layer_to_stage: dict[int, int] | None = None,
+    layer_to_stage: dict[int, int],
+    cache: bool = True,
 ) -> BlockLayoutTables:
     """Build :class:`BlockLayoutTables` for the stages a rank holds.
 
     ``layer_to_stage`` is the global map, layer id to stage id, that
-    :func:`gather_layer_to_stage` collects from every rank: under
-    Interleaved1F1B ``stages`` holds only the local rank's stages, so the map
-    cannot be read locally. Any split is accepted as long as every layer sits
-    on exactly one stage and each stage holds a contiguous run of layers in
-    stage order, which is what the delta routing assumes; anything else raises
-    rather than producing tables that are wrong in a way only the gradients
-    would show. Without a map (CPU unit tests) the contiguous equal split is
-    assumed, which requires ``n_layers`` to divide by the stage count.
+    :func:`gather_layer_to_stage` collects from every rank: a rank sees only
+    its own stages, so the map cannot be read locally. Any split is accepted
+    as long as every layer sits on exactly one stage and each stage holds a
+    contiguous run of layers in stage order, which is what the routing
+    assumes; anything else raises rather than producing tables that are wrong
+    in a way only the gradients would show.
     """
-    num_local_stages = len(stages)
-    if num_local_stages < 1:
+    if len(stages) < 1:
         raise ValueError("need at least one stage to infer layout")
-    # Under Interleaved1F1B ``pp_schedule._stages`` returns only the local
-    # rank's stages, so ``len(stages) == V``.
-    V = num_local_stages
-    num_stages = pp_size * V
-
-    if layer_to_stage is not None:
-        if sorted(layer_to_stage) != list(range(n_layers)):
+    num_stages = len(stage_to_rank)
+    if sorted(layer_to_stage) != list(range(n_layers)):
+        raise ValueError(
+            f"layer_to_stage must cover layers 0..{n_layers - 1} exactly once; "
+            f"got {sorted(layer_to_stage)}"
+        )
+    previous = -1
+    for layer_id in range(n_layers):
+        stage_idx = layer_to_stage[layer_id]
+        if not 0 <= stage_idx < num_stages:
             raise ValueError(
-                f"layer_to_stage must cover layers 0..{n_layers - 1} exactly once; "
-                f"got {sorted(layer_to_stage)}"
+                f"layer {layer_id} sits on stage {stage_idx}, outside the "
+                f"{num_stages} stages of this pipeline"
             )
-        previous = -1
-        for layer_id in range(n_layers):
-            stage_idx = layer_to_stage[layer_id]
-            if not 0 <= stage_idx < num_stages:
-                raise ValueError(
-                    f"layer {layer_id} sits on stage {stage_idx}, outside the "
-                    f"{num_stages} stages of this pipeline"
-                )
-            if stage_idx < previous:
-                raise ValueError(
-                    f"layer {layer_id} sits on stage {stage_idx} after layer "
-                    f"{layer_id - 1} on stage {previous}. A non-contiguous "
-                    "pipeline split is not supported: the cross-stage cache "
-                    "would route block deltas to the wrong stages."
-                )
-            previous = stage_idx
-
+        if stage_idx < previous:
+            raise ValueError(
+                f"layer {layer_id} sits on stage {stage_idx} after layer "
+                f"{layer_id - 1} on stage {previous}. A non-contiguous "
+                "pipeline split is not supported: the block routing would "
+                "carry deltas to the wrong stages."
+            )
+        previous = stage_idx
     return BlockLayoutTables(
-        pp_size=pp_size,
-        virtual_stages_per_rank=V,
+        stage_to_rank=stage_to_rank,
         num_blocks=num_blocks,
         n_layers=n_layers,
         layers_per_block=layers_per_block,
         layer_to_stage=layer_to_stage,
+        cache=cache,
     )
 
 
@@ -279,8 +207,7 @@ def local_layer_to_stage(stages) -> dict[int, int]:
     layer_to_stage: dict[int, int] = {}
     for stage in stages:
         submod = getattr(stage, "submod", None)
-        inner = getattr(submod, "wrapped", submod)
-        layers = getattr(inner, "layers", None)
+        layers = getattr(submod, "layers", None)
         stage_idx = getattr(stage, "stage_index", None)
         if layers is None or stage_idx is None:
             continue
@@ -310,9 +237,5 @@ def gather_layer_to_stage(stages, group) -> dict[int, int]:
 
 
 def unstack_blocks(blocks_tensor: torch.Tensor) -> list[torch.Tensor]:
-    """The columns of a ``[T, N, D]`` carrier, as a list of blocks.
-
-    Returns ``[T, D]`` views, one per block. Views share storage with the input
-    so autograd gradients flow back correctly.
-    """
+    """The columns of a ``[T, N, D]`` carrier, as a list of blocks."""
     return [blocks_tensor[:, i] for i in range(blocks_tensor.shape[1])]
