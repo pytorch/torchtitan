@@ -8,8 +8,9 @@ import os
 import time
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import Any
+from typing import Any, cast
 
+import spmd_types as spmd
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -19,7 +20,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.components.validate import Validator
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer as TitanTrainer
@@ -168,36 +169,11 @@ class Trainer(ForgeEngine):
     def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        inputs = input_dict["input"]
-        # Everything except the pipelined input is a model-forward kwarg,
-        # forwarded to all PP stages by the schedule.
-        extra_kwargs: dict[str, Any] = {
-            k: v for k, v in input_dict.items() if k != "input"
-        }
-
-        positions = extra_kwargs.get("positions", None)
-
-        try:
-            # pyrefly: ignore [not-callable]
-            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
-                positions=positions,
-            )
-        except TypeError:
-            pass
-
-        if self.parallel_dims.cp_enabled:
-            cp_input_dict = prepare_context_parallel_input(
-                {"input": inputs, "labels": labels, **extra_kwargs},
-                None,
-                self.parallel_dims.get_mesh("cp"),
-                self.config.parallelism.context_parallel_load_balancer,
-                self.config.parallelism.context_parallel_ptrr_mask_key,
-            )
-            inputs = cp_input_dict.pop("input")
-            labels = cp_input_dict.pop("labels")
-            extra_kwargs = cp_input_dict
-
-        return inputs, labels, extra_kwargs
+        return cast(BaseModel, self.model_parts[0]).preprocess_inputs(
+            {**input_dict, "labels": labels},
+            parallel_dims=self.parallel_dims,
+            parallelism=self.config.parallelism,
+        )
 
     def forward_backward_step(
         self,
@@ -225,10 +201,18 @@ class Trainer(ForgeEngine):
         with self.train_context():
             assert len(model_parts) == 1
             pred = model_parts[0](inputs, **extra_kwargs)
-            loss_sum, _ = self.loss_fn(pred, labels)
-            loss = loss_sum / global_valid_tokens
+            loss_kwargs = {}
+            if "positions" in extra_kwargs:
+                loss_kwargs["positions"] = extra_kwargs["positions"]
+            loss, _ = self.loss_fn(
+                pred,
+                labels,
+                global_valid_tokens,
+                **loss_kwargs,
+            )
             del pred
-            loss.backward()
+            with spmd.no_typecheck():
+                loss.backward()
 
         return loss
 
