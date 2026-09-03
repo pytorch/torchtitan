@@ -102,6 +102,33 @@ def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
     assert config.layers[0].sharding_config is not None
 
 
+def test_multimodal_qwen38_uses_token_local_vision_fusion_layouts() -> None:
+    import spmd_types as spmd
+
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.distributed.spmd_types import _per_axis_types
+
+    build_config, max_context_length = qwen3_8_configs["debugmodel"]
+    config = build_config(attn_backend="flex", seq_len=max_context_length)
+
+    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=False)
+
+    embedding_sharding = config.tok_embeddings.sharding_config
+    assert embedding_sharding is not None
+    assert embedding_sharding.out_dst_shardings is not None
+    embedding_type = _per_axis_types(embedding_sharding.out_dst_shardings)
+    assert isinstance(embedding_type[MeshAxisName.CP], spmd.Shard)
+    assert isinstance(embedding_type[MeshAxisName.TP], spmd.Shard)
+
+    assert config.vision_encoder is not None
+    vision_sharding = config.vision_encoder.sharding_config
+    assert vision_sharding is not None
+    assert vision_sharding.out_dst_shardings is not None
+    vision_type = _per_axis_types(vision_sharding.out_dst_shardings)
+    assert vision_type[MeshAxisName.CP] == spmd.R
+    assert vision_type[MeshAxisName.TP] == spmd.R
+
+
 def test_shared_model_builds_without_vision_encoder() -> None:
     build_config, max_context_length = qwen3_8_configs["debugmodel"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)

@@ -380,7 +380,9 @@ class MuseGlimmerModel(Decoder):
             prepare_context_parallel_input,
         )
 
-        from .sharding import vision_bank_indices_placement
+        from torchtitan.models.common.vision_encoder_sharding import (
+            vision_bank_indices_placement,
+        )
 
         batch: dict[str, Any] = dict(input_dict)
         pixel_values = batch.get("pixel_values")

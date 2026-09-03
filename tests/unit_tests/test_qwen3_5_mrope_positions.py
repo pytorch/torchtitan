@@ -19,6 +19,7 @@ resolution lives in ``forward`` or in ``preprocess_inputs``.
 """
 
 import unittest
+from unittest import mock
 
 import torch
 from torch import nn
@@ -127,6 +128,105 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             batch["attention_masks"]["deltanet"].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
+
+    def test_multimodal_indices_are_built_before_context_parallel_sharding(self):
+        import spmd_types as spmd
+
+        from torchtitan.distributed.parallel_dims import MeshAxisName
+        from torchtitan.distributed.spmd_types import _per_axis_types
+
+        model, _sink, _parallel_dims, parallelism = self._build_stub_model()
+        tokens_T = torch.tensor([7, 7, 1, 9, 9, 9, 7, 2])
+        input_dict = {
+            "input": tokens_T,
+            "positions": torch.arange(tokens_T.shape[0], dtype=torch.int32),
+            "mrope_positions": torch.zeros(tokens_T.shape[0], 3, dtype=torch.int32),
+            "labels": torch.zeros(tokens_T.shape[0]),
+            "pixel_values": torch.randn(4, 8),
+            "grid_thw": torch.tensor([[1, 2, 2]]),
+            "pixel_values_videos": torch.randn(4, 8),
+            "grid_thw_videos": torch.tensor([[1, 2, 2]]),
+            "special_tokens": {"image_id": 7, "video_id": 9},
+        }
+        cp_mesh = mock.Mock()
+        parallel_dims = mock.Mock()
+        parallel_dims.cp_enabled = True
+        parallel_dims.tp_enabled = False
+        parallel_dims.get_mesh.return_value = cp_mesh
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel.api.prepare_context_parallel_input",
+            side_effect=lambda batch, *_args: batch,
+        ) as prepare_cp_input:
+            _inputs, _labels, batch = model.preprocess_inputs(
+                input_dict,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
+            )
+
+        torch.testing.assert_close(
+            batch["image_vision_bank_indices_T"],
+            torch.tensor([0, 1, -1, -1, -1, -1, 2, -1]),
+        )
+        torch.testing.assert_close(
+            batch["video_vision_bank_indices_T"],
+            torch.tensor([-1, -1, -1, 0, 1, 2, -1, -1]),
+        )
+        self.assertNotIn("special_tokens", batch)
+
+        sharded_batch, input_sharding, called_mesh, *_ = prepare_cp_input.call_args.args
+        self.assertIs(sharded_batch, batch)
+        self.assertIs(called_mesh, cp_mesh)
+        for name in (
+            "image_vision_bank_indices_T",
+            "video_vision_bank_indices_T",
+        ):
+            self.assertIsInstance(
+                _per_axis_types(input_sharding[name])[MeshAxisName.CP], spmd.Shard
+            )
+        self.assertEqual(
+            _per_axis_types(input_sharding["pixel_values"])[MeshAxisName.CP],
+            spmd.R,
+        )
+
+    def test_multimodal_fusion_uses_independent_image_and_video_banks(self):
+        from torchtitan.models.qwen3_5.model import Qwen35Model
+
+        model, _sink, _parallel_dims, _parallelism = self._build_stub_model()
+        inputs_TD = torch.zeros(6, 2)
+        image_bank_VD = torch.tensor([[10.0, 11.0], [20.0, 21.0]])
+        video_bank_VD = torch.tensor([[30.0, 31.0], [40.0, 41.0]])
+
+        with mock.patch.object(
+            model,
+            "_get_vision_embeds",
+            side_effect=[
+                (image_bank_VD, torch.tensor([2])),
+                (video_bank_VD, torch.tensor([2])),
+            ],
+        ):
+            result_TD = Qwen35Model._prepare_multimodal_embeds(
+                model,
+                inputs_TD,
+                pixel_values=torch.empty(1),
+                pixel_values_videos=torch.empty(1),
+                grid_thw=torch.empty(1, 3),
+                grid_thw_videos=torch.empty(1, 3),
+                image_vision_bank_indices_T=torch.tensor([-1, 0, 1, -1, -1, -1]),
+                video_vision_bank_indices_T=torch.tensor([-1, -1, -1, 0, 1, -1]),
+            )
+
+        expected_TD = torch.tensor(
+            [
+                [0.0, 0.0],
+                [10.0, 11.0],
+                [20.0, 21.0],
+                [30.0, 31.0],
+                [40.0, 41.0],
+                [0.0, 0.0],
+            ]
+        )
+        torch.testing.assert_close(result_TD, expected_TD)
 
 
 if __name__ == "__main__":

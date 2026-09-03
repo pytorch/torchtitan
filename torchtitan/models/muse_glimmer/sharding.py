@@ -39,19 +39,6 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def vision_bank_indices_placement(*, enable_sp: bool) -> SpmdType:
-    """Placement for token-aligned indices into the packed vision bank."""
-    token_axes = (DP, CP, TP) if enable_sp else (DP, CP)
-    return SpmdType(
-        {
-            DP: spmd.V,
-            CP: spmd.V,
-            TP: spmd.V if enable_sp else spmd.I,
-        },
-        partition_spec=spmd.PartitionSpec(token_axes),
-    )
-
-
 def set_muse_glimmer_sharding_config(
     config: "MuseGlimmerModel.Config",
     *,
