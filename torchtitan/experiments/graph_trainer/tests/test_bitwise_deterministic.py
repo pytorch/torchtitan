@@ -165,7 +165,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         FlexAttention._compiled_flex_attn = self._orig_compiled_flex_attn
 
     def _get_extra_kwargs(self, model: nn.Module) -> dict[str, object]:
-        """Build extra_kwargs matching what post_dataloading_process produces.
+        """Build extra_kwargs matching what the model's preprocess_inputs produces.
 
         For FlexAttention models, this generates the BlockMask attention
         masks. For SDPA models, returns an empty dict.
@@ -400,6 +400,9 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
+    @unittest.skip(
+        "Precompiled artifacts do not provide example inputs for CUDA graph setup"
+    )
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":

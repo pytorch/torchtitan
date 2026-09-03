@@ -209,9 +209,9 @@ def tag_sac_policy(
 
     Annotates forward ``call_function`` nodes with a ``CheckpointPolicy``
     determined by ``policy_fn``. After tagging, a boundary pass forces
-    ``MUST_SAVE`` on recomputable nodes whose output crosses a layer
-    boundary (layer N → layer N+1), since recomputing them would require
-    rerunning the entire preceding layer.
+    ``MUST_SAVE`` on recomputable nodes whose output leaves its producing
+    layer, since recomputing them would require rerunning that layer. This
+    includes the final layer output consumed by the model epilogue.
 
     ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
 
@@ -281,9 +281,10 @@ def tag_sac_policy(
         # because the alternating heuristic is arbitrary.
         node.meta["recompute"] = policy_fn(node)
 
-    # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
-    # feeds into a node in a higher layer, saving it is cheaper than
-    # recomputing the entire preceding layer.
+    # Pass 2: Save recomputable outputs consumed outside their producing
+    # layer. Recreating one would require rerunning that producer layer. A
+    # consumer without a layer FQN is also outside the producer layer; this
+    # covers the final layer output consumed by the model epilogue.
     def _is_recomputable(n: torch.fx.Node) -> bool:
         return n.meta.get("recompute") in (
             CheckpointPolicy.PREFER_RECOMPUTE,
@@ -299,7 +300,7 @@ def tag_sac_policy(
             if (
                 not _is_backward_node(user)
                 and _is_recomputable(user)
-                and _get_layer_id(user) > node_layer_id
+                and _get_layer_id(user) != node_layer_id
             ):
                 node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
                 boundary_saves += 1

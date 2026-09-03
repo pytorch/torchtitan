@@ -7,6 +7,7 @@
 """Config-based sharding helpers for MoE submodules."""
 
 import spmd_types as spmd
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -15,7 +16,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 
 DP = MeshAxisName.DP
@@ -26,7 +27,7 @@ EP = MeshAxisName.EP
 EFSDP = MeshAxisName.EFSDP
 
 
-def expert_param_placement_sparse() -> SpmdLayout:
+def expert_param_placement_sparse() -> SpmdType:
     """Sparse-family placement for routed-expert weights (EP enabled).
 
     Insertion order matches canonical mesh order ``DP_REPLICATE -> EFSDP ->
@@ -38,7 +39,7 @@ def expert_param_placement_sparse() -> SpmdLayout:
     EP always shards on dim 0 (the expert dim of ``(num_experts, *, *)``
     weights).
     """
-    return SpmdLayout(
+    return SpmdType(
         {
             DP_REPLICATE: spmd.R,
             EFSDP: spmd.R,
@@ -47,9 +48,7 @@ def expert_param_placement_sparse() -> SpmdLayout:
     )
 
 
-def expert_param_placement_dense(
-    *, tp_placement: spmd.PerMeshAxisSpmdType
-) -> SpmdLayout:
+def expert_param_placement_dense(*, tp_placement: spmd.PerMeshAxisSpmdType) -> SpmdType:
     """Dense-family placement for routed-expert weights (EP disabled, TP > 1).
 
     Used when expert parallelism is disabled but tensor parallelism shards
@@ -59,7 +58,7 @@ def expert_param_placement_dense(
     placement on the TP axis: ``Shard(1)`` for colwise, ``Shard(2)`` for
     rowwise, ``Replicate()`` for replicated bias.
     """
-    return SpmdLayout(
+    return SpmdType(
         {
             DP: spmd.R,
             CP: spmd.R,
@@ -68,7 +67,7 @@ def expert_param_placement_dense(
     )
 
 
-def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdLayout:
+def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdType:
     """Placement for the ``tokens_per_expert_E`` buffer.
 
     Each DP/CP rank processes different data and accumulates partial token
@@ -77,7 +76,7 @@ def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdLayout:
     each rank sees different tokens) or ``Replicate`` when EP is disabled (all
     TP ranks see the same tokens).
     """
-    return SpmdLayout(
+    return SpmdType(
         {
             DP: spmd.P,
             CP: spmd.P,
@@ -142,7 +141,7 @@ def _shared_expert_colwise_config() -> ShardingConfig:
     )
 
 
-def _shared_expert_rowwise_config(*, output_layout: SpmdLayout) -> ShardingConfig:
+def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
     """Rowwise shared-expert FFN (w2).
 
     Mirrors ``RowwiseParallel``: input is Shard(1) on the feature dim from
@@ -211,7 +210,7 @@ def _routed_experts_sharding_configs(
             if enable_sp
             else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
-        state_shardings: dict[str, SpmdLayout] = {
+        state_shardings: dict[str, SpmdType] = {
             name: expert_param_placement_sparse() for name in expert_param_layout
         }
         experts_input_layout = dense_sequence_parallel_placement()

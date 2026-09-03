@@ -7,4 +7,5 @@ tokenizers >= 0.15.0
 safetensors
 einops
 pillow
-spmd_types==0.2.3
+spmd_types==0.2.5
+attn-gym[linear]==0.0.5

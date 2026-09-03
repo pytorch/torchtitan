@@ -59,6 +59,11 @@ jobs:
             sleep 15
           done
 
+      - name: Install CPU unit test dependencies
+        run: |
+          "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pip install \
+            -r requirements-dev.txt
+
       - name: Verify installed package
         working-directory: ${{ runner.temp }}
         run: |
@@ -116,3 +121,17 @@ jobs:
           assert losses[-1] < losses[0], losses
           print(f"losses={losses}")
           PY
+
+      - name: Run CPU unit tests against installed RC
+        run: |
+          test_root="$RUNNER_TEMP/validate-rc-tests"
+          mkdir -p "$test_root"
+          cp -R tests "$test_root/tests"
+          cp -R scripts "$test_root/scripts"
+          cp pyproject.toml "$test_root/pyproject.toml"
+          cd "$test_root"
+          unset PYTHONPATH
+          "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pytest \
+            tests/unit_tests/cpu \
+            --durations=20 \
+            -vv

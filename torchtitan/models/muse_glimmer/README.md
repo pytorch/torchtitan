@@ -46,12 +46,15 @@ configs are built in [`__init__.py`](./__init__.py).
 
 The `*_mm` flavors make `MuseGlimmerModel` own a vision encoder + adapter
 ([`vision_encoder.py`](./vision_encoder.py)) and run them inside `forward`,
-scattering the projected features into token embeddings at `vision_mask`
-positions.
+building packed vision features and gathering them into token embeddings using
+bank indices prepared before token sharding. Multimodal fusion is TP-replicated;
+the first decoder layer restores the standard decoder layout (sequence-parallel
+when enabled).
 
 ## Parallelism support
 
 Parallelism is applied in [`parallelize.py`](./parallelize.py) (FSDP, HSDP, TP,
-SP, CP, `torch.compile`, and PP). Sharding for Muse Glimmer-specific modules is defined
-in [`sharding.py`](./sharding.py). CP and PP are not yet supported for the
-multimodal path.
+SP, CP, `torch.compile`, and PP). Sharding for Muse Glimmer-specific modules is
+defined in [`sharding.py`](./sharding.py). The multimodal path supports CP,
+TP+CP+SP, and TP+CP+PP+SP while keeping vision computation replicated across
+CP.

@@ -19,19 +19,13 @@ DTensors, avoiding mixed plain-Tensor / DTensor errors in RoPE.
 
 MoE layers are already Titan Module instances with ShardingConfig and
 are handled by ``model.parallelize()`` directly.
-
-TODO: this DTensor-based sharding path is transitional. Core is migrating to
-``spmd_types`` (``spmd_backend="spmd_types"``), where state and activations are
-plain local shards rather than DTensor subclasses. Once that backend is ready,
-the DTensor-based sharding here should be deprecated in favor of it. The
-declarative ``ShardingConfig``/``SpmdLayout`` this module emits is already
-backend-agnostic, so the migration is a backend switch rather than a rewrite.
 """
 
 import inspect
 
 import spmd_types as spmd
 import torch.nn as nn
+from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
@@ -39,7 +33,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig, SpmdLayout
+from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 from torchtitan.tools.logging import logger
 
 DP = MeshAxisName.DP
@@ -51,16 +45,16 @@ def _hf_activation_placement(
     *,
     tp: spmd.PerMeshAxisSpmdType,
     cp: spmd.PerMeshAxisSpmdType = spmd.S(1),
-) -> SpmdLayout:
+) -> SpmdType:
     """Placement for Transformers activations with batch and sequence dims."""
-    return SpmdLayout({DP: spmd.S(0), CP: cp, TP: tp})
+    return SpmdType({DP: spmd.S(0), CP: cp, TP: tp})
 
 
-def _hf_sequence_parallel_placement() -> SpmdLayout:
+def _hf_sequence_parallel_placement() -> SpmdType:
     """Sequence-parallel placement for ``(batch, sequence, hidden)`` tensors."""
-    return SpmdLayout(
+    return SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.V},
-        partition_spec=(DP, (CP, TP), None),
+        partition_spec=spmd.PartitionSpec(DP, (CP, TP), None),
     )
 
 
@@ -92,7 +86,7 @@ def _hf_rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     )
 
 
-def _sp_activation(*, enable_sp: bool) -> SpmdLayout:
+def _sp_activation(*, enable_sp: bool) -> SpmdType:
     """Activation layout for the sequence-parallel region.
 
     When SP is enabled, the sequence dim is sharded across both CP and TP
@@ -116,7 +110,7 @@ def set_hf_sharding_configs(
 
     Root-level and per-layer modules all use ``_sharding_config``.
     MoE layers are skipped (already have ShardingConfig from Titan MoE).
-    Actual DTensor distribution happens later in ``model.parallelize()``.
+    Actual state distribution happens later in ``model.parallelize()``.
 
     Args:
         model: The HFTransformerModel with Module-converted children.
@@ -133,7 +127,9 @@ def set_hf_sharding_configs(
             state_shardings=emb_state,
             in_src_shardings={"input": _hf_activation_placement(tp=spmd.R)},
             in_dst_shardings={"input": _hf_activation_placement(tp=spmd.R)},
+            out_src_shardings=_hf_activation_placement(tp=spmd.P),
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
+            local_map=LocalMapConfig(in_grad_placements=None),
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
@@ -161,6 +157,7 @@ def set_hf_sharding_configs(
             # no-op when TP is absent from the runtime mesh, so no flag is
             # needed: core cross_entropy_loss detects the vocab-sharded pred
             # (spmd_types: tp mesh size > 1) and runs vocab-parallel CE.
+            out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
             out_dst_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
         )
 
@@ -219,9 +216,9 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
 
     # Input layout (b, heads, seq, dim): heads on dim 1 (TP), seq on dim 2 (CP).
     # k/v stay S(2) here; the funcol all-gather in the forward wrap handles CP.
-    heads_in = SpmdLayout({DP: spmd.R, CP: spmd.S(2), TP: spmd.S(1)})
+    heads_in = SpmdType({DP: spmd.R, CP: spmd.S(2), TP: spmd.S(1)})
     # Output layout (b, seq, heads, dim): seq on dim 1 (CP), heads on dim 2 (TP).
-    heads_out = SpmdLayout({DP: spmd.R, CP: spmd.S(1), TP: spmd.S(2)})
+    heads_out = SpmdType({DP: spmd.R, CP: spmd.S(1), TP: spmd.S(2)})
     attn._titan_flex_kernel = HFFlexKernel.Config(
         sharding_config=ShardingConfig(
             in_src_shardings={
@@ -415,6 +412,7 @@ def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings=state,
         in_src_shardings={"hidden_states": sp_layout},
         in_dst_shardings={"hidden_states": sp_layout},
+        out_src_shardings=sp_layout,
         out_dst_shardings=sp_layout,
     )
 

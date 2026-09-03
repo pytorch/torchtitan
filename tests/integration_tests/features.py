@@ -18,6 +18,23 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     """
     return [
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_sdc_replay_cudagraph],
+            test_descr="SDC replay with CUDA graphs",
+            test_name="sdc_replay_cudagraph",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_sdc_replay_mismatch],
+            test_descr="SDC replay detects a distributed gradient mismatch",
+            test_name="sdc_replay_mismatch",
+            ngpu=2,
+            # Cross-rank mismatch propagation (all_reduce + all_gather_object)
+            # requires real collectives.
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_default],
             test_descr="default",
             test_name="default",

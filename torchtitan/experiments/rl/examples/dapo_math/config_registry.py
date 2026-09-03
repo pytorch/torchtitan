@@ -18,7 +18,6 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -26,7 +25,10 @@ from torchtitan.experiments.rl.controller import (
 )
 from torchtitan.experiments.rl.environment import TokenEnv
 from torchtitan.experiments.rl.examples.dapo_math.data import AIME2025Dataset
-from torchtitan.experiments.rl.examples.dapo_math.rollouter import DapoMathRollouter
+from torchtitan.experiments.rl.examples.dapo_math.rollouter import (
+    DapoMathRollouter,
+    DapoMathWorker,
+)
 from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
@@ -67,16 +69,15 @@ def _qwen3_4b_dapo_math_config(
             validation=ValidationConfig(
                 num_samples=num_validation_samples,
             ),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=1, seq_len=max_total_tokens),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=DapoMathRollouter.Config(
             validation_dataset=validation_dataset,
-            token_env=TokenEnv.Config(
-                max_rollout_tokens=max_total_tokens,
-                max_num_turns=1,
+            worker=DapoMathWorker.Config(
+                token_env=TokenEnv.Config(
+                    max_rollout_tokens=max_total_tokens,
+                    max_num_turns=1,
+                ),
             ),
         ),
         renderer=RendererConfig(name="qwen3", enable_thinking=True),
@@ -104,7 +105,10 @@ def _qwen3_4b_dapo_math_config(
                 warmup_steps=0,
                 min_lr_factor=1.0,
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
+                max_context_length=max_total_tokens,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_replicate_degree=1,
                 data_parallel_shard_degree=1,

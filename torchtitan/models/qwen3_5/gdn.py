@@ -26,6 +26,11 @@ from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.protocols.module import Module
 
+# Shape suffixes:
+# T = packed tokens, D = model dimension, C = projection channels,
+# H = attention heads, K = query/key head dimension, V = value head dimension,
+# W = convolution kernel width.
+
 GatedDeltaBackend = Literal["fla_chunked", "fla_fused_recurrent"]
 
 spmd.register_local_autograd_function(ChunkGatedDeltaRuleFunction)
@@ -61,7 +66,7 @@ def _causal_conv1d_varlen(
 
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
 
-    out_BTD, _ = _fla_causal_conv1d(
+    out_1TD, _ = _fla_causal_conv1d(
         x=x_TD.unsqueeze(0),
         weight=weight.squeeze(1),
         bias=None,
@@ -70,7 +75,7 @@ def _causal_conv1d_varlen(
         cu_seqlens=cu_seqlens,
         cu_seqlens_cpu=cu_seqlens_cpu,
     )
-    return out_BTD.squeeze(0)
+    return out_1TD.squeeze(0)
 
 
 class RMSNormGated(Module):
@@ -254,27 +259,27 @@ class GatedDeltaKernel(Module):
 
     def forward(
         self,
-        xq_TNK: torch.Tensor,
-        xk_TNK: torch.Tensor,
-        xv_TNV: torch.Tensor,
-        g_TN: torch.Tensor,
-        beta_TN: torch.Tensor,
+        xq_THK: torch.Tensor,
+        xk_THK: torch.Tensor,
+        xv_THV: torch.Tensor,
+        g_TH: torch.Tensor,
+        beta_TH: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Expand Q/K heads to match V when n_value_heads > n_key_heads
-        if xq_TNK.shape[1] != xv_TNV.shape[1]:
-            assert xv_TNV.shape[1] % xq_TNK.shape[1] == 0
-            repeat = xv_TNV.shape[1] // xq_TNK.shape[1]
-            xq_TNK = xq_TNK.repeat_interleave(repeat, dim=1)
-            xk_TNK = xk_TNK.repeat_interleave(repeat, dim=1)
+        if xq_THK.shape[1] != xv_THV.shape[1]:
+            assert xv_THV.shape[1] % xq_THK.shape[1] == 0
+            repeat = xv_THV.shape[1] // xq_THK.shape[1]
+            xq_THK = xq_THK.repeat_interleave(repeat, dim=1)
+            xk_THK = xk_THK.repeat_interleave(repeat, dim=1)
 
-        xq_BTNK = xq_TNK.unsqueeze(0)
-        xk_BTNK = xk_TNK.unsqueeze(0)
-        xv_BTNV = xv_TNV.unsqueeze(0)
-        g_BTN = g_TN.unsqueeze(0)
-        beta_BTN = beta_TN.unsqueeze(0)
+        xq_1THK = xq_THK.unsqueeze(0)
+        xk_1THK = xk_THK.unsqueeze(0)
+        xv_1THV = xv_THV.unsqueeze(0)
+        g_1TH = g_TH.unsqueeze(0)
+        beta_1TH = beta_TH.unsqueeze(0)
 
         if is_in_batch_invariant_mode() and cu_seqlens is not None:
             if cu_seqlens_cpu is None:
@@ -282,11 +287,11 @@ class GatedDeltaKernel(Module):
                     "Batch-invariant Gated DeltaNet requires CPU cu_seqlens."
                 )
             return _recurrent_gdn_fwd(
-                xq_BTNK,
-                xk_BTNK,
-                xv_BTNV,
-                g_BTN,
-                beta_BTN,
+                xq_1THK,
+                xk_1THK,
+                xv_1THV,
+                g_1TH,
+                beta_1TH,
                 cu_seqlens,
                 cu_seqlens_cpu,
             ).squeeze(0)
@@ -297,22 +302,22 @@ class GatedDeltaKernel(Module):
                     "Qwen3.5 FLA varlen DeltaNet requires a CPU cu_seqlens tensor."
                 )
             result = _fla_chunk_gated_delta_rule(
-                xq_BTNK,
-                xk_BTNK,
-                xv_BTNV,
-                g_BTN,
-                beta_BTN,
+                xq_1THK,
+                xk_1THK,
+                xv_1THV,
+                g_1TH,
+                beta_1TH,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
             )
         elif self.backend == "fla_fused_recurrent":
             result = _fla_fused_recurrent_gated_delta_rule(
-                xq_BTNK,
-                xk_BTNK,
-                xv_BTNV,
-                g_BTN,
-                beta=beta_BTN,
+                xq_1THK,
+                xk_1THK,
+                xv_1THV,
+                g_1TH,
+                beta=beta_1TH,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=cu_seqlens,
             )
@@ -347,13 +352,13 @@ class InnerGatedDeltaNet(Module):
         query_TC: torch.Tensor,
         key_TC: torch.Tensor,
         value_TC: torch.Tensor,
-        a_TN: torch.Tensor,
-        b_TN: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
         conv_k_weight_C1W: torch.Tensor,
         conv_v_weight_C1W: torch.Tensor,
-        A_log_N: torch.Tensor,
-        dt_bias_N: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
         key_head_dim: int,
@@ -401,23 +406,23 @@ class InnerGatedDeltaNet(Module):
                 .transpose(0, 1)
             )
 
-        xq_TNK = causal_conv(query_TC, conv_q_weight_C1W).reshape(
+        xq_THK = causal_conv(query_TC, conv_q_weight_C1W).reshape(
             num_tokens, -1, key_head_dim
         )
-        xk_TNK = causal_conv(key_TC, conv_k_weight_C1W).reshape(
+        xk_THK = causal_conv(key_TC, conv_k_weight_C1W).reshape(
             num_tokens, -1, key_head_dim
         )
-        xv_TNV = causal_conv(value_TC, conv_v_weight_C1W).reshape(
+        xv_THV = causal_conv(value_TC, conv_v_weight_C1W).reshape(
             num_tokens, -1, value_head_dim
         )
-        g_TN = -torch.exp(A_log_N.float()) * F.softplus(a_TN.float() + dt_bias_N)
-        beta_TN = torch.sigmoid(b_TN)
+        g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
+        beta_TH = torch.sigmoid(b_TH)
         return self.kernel(
-            xq_TNK,
-            xk_TNK,
-            xv_TNV,
-            g_TN,
-            beta_TN,
+            xq_THK,
+            xk_THK,
+            xv_THV,
+            g_TH,
+            beta_TH,
             cu_seqlens=cu_seqlens if cu_seqlens_host is not None else None,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
@@ -514,15 +519,15 @@ class GatedDeltaNet(Module):
         key_TC = self.in_proj_k(x_TD)
         value_TC = self.in_proj_v(x_TD)
         gate_TC = self.in_proj_z(x_TD)
-        a_TN = self.in_proj_a(x_TD)
-        b_TN = self.in_proj_b(x_TD)
+        a_TH = self.in_proj_a(x_TD)
+        b_TH = self.in_proj_b(x_TD)
 
-        output_TNV = self.inner_gated_delta_net(
+        output_THV = self.inner_gated_delta_net(
             query_TC,
             key_TC,
             value_TC,
-            a_TN,
-            b_TN,
+            a_TH,
+            b_TH,
             self.conv_q.weight,
             self.conv_k.weight,
             self.conv_v.weight,
@@ -533,7 +538,7 @@ class GatedDeltaNet(Module):
             value_head_dim=self.value_head_dim,
             cu_seqlens_host=cu_seqlens_host,
         )
-        gate_TNV = gate_TC.view(num_tokens, -1, self.value_head_dim)
-        output_TNV = self.norm(output_TNV, gate_TNV)
-        out_TD = output_TNV.reshape(num_tokens, -1)
+        gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
+        output_THV = self.norm(output_THV, gate_THV)
+        out_TD = output_THV.reshape(num_tokens, -1)
         return self.out_proj(out_TD)

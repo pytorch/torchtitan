@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from datasets import Dataset
 
@@ -111,6 +112,12 @@ def test_math_verifier_requires_an_answer_marker() -> None:
     assert score_math_response("work\nAnswer: $34$", "34") == 1.0
     assert score_math_response(r"work\n\boxed{34}", "34") == 1.0
     assert score_math_response("work mentions 34", "34") == 0.0
+
+
+def test_math_verifier_works_in_rollout_worker_thread() -> None:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(score_math_response, "work\nAnswer: $34$", "34")
+        assert result.result() == 1.0
 
 
 def test_reward_handles_equivalent_latex_and_units() -> None:

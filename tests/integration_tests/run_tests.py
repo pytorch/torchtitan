@@ -18,6 +18,7 @@ from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
@@ -27,6 +28,7 @@ _TEST_SUITES_FUNCTION = {
     "features": build_features_test_list,
     "models": build_model_tests_list,
     "h100": build_h100_tests_list,
+    "b200": build_b200_tests_list,
 }
 
 # Held while a test writes its captured output so concurrent tests do not
@@ -125,6 +127,13 @@ def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
         sys.stderr.flush()
 
 
+def _join_override_args(override_args: tuple[str, ...]) -> str:
+    """Safely join legacy shell fragments into a command line."""
+    return shlex.join(
+        token for fragment in override_args for token in shlex.split(fragment)
+    )
+
+
 def _read_golden_spec(golden_numerics_path: Path) -> tuple[int, tuple[str, ...]]:
     columns = ("step", "loss")
     steps: list[int] = []
@@ -217,8 +226,6 @@ def run_single_test(
     for run, override_arg in enumerate(test_flavor.override_args):
         test_output_dir = str(Path(output_dir) / test_name)
         config_fn = test_flavor.configs[run] if test_flavor.configs else None
-        if use_fake_pg and test_flavor.fake_pg_numerics_config is not None:
-            config_fn = test_flavor.fake_pg_numerics_config
         config = config_fn() if config_fn is not None else None
         if use_fake_pg and config is not None:
             validate_fake_pg_compatibility(test_flavor, config)
@@ -250,7 +257,7 @@ def run_single_test(
                 result_path = golden_numerics_path
                 result_arg = f"--import-result={golden_numerics_path}"
 
-            options = shlex.join(override_arg)
+            options = _join_override_args(override_arg)
             command = [
                 sys.executable,
                 "scripts/loss_compare.py",
@@ -296,7 +303,7 @@ def run_single_test(
             env["TORCH_TRACE"] = f"{output_dir}/{test_name}/compile_trace"
             cmd = f"./run_train.sh {dump_folder_arg}"
             if override_arg:
-                cmd += " " + shlex.join(override_arg)
+                cmd += " " + _join_override_args(override_arg)
             result = _run_cmd(cmd, timeout=test_flavor.timeout, env=env)
         returncode = result.returncode
         captured = result.stdout or ""
@@ -375,7 +382,6 @@ def run_tests(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
             f" because --ngpu arg is {args.ngpu}"
         )
-
     failed_tests: list[tuple[str, str]] = []
     execution_mode = getattr(args, "execution_mode", "real_pg")
     export_numerics = getattr(args, "export_numerics", False)
@@ -477,7 +483,7 @@ def main():
     parser.add_argument(
         "--test_suite",
         default="features",
-        help="Comma-separated test suites to run: features, models, h100.",
+        help="Comma-separated test suites to run: features, models, h100, b200.",
     )
     parser.add_argument(
         "--execution_mode",
@@ -527,8 +533,10 @@ def main():
         test_suites = _parse_test_suites(args.test_suite)
     except ValueError as error:
         parser.error(str(error))
-    if args.execution_mode == "fake_pg" and "h100" in test_suites:
-        parser.error("The h100 suite only supports --execution_mode real_pg")
+    hardware_suites = {"h100", "b200"}.intersection(test_suites)
+    if args.execution_mode == "fake_pg" and hardware_suites:
+        suites = ", ".join(sorted(hardware_suites))
+        parser.error(f"The {suites} suite(s) only support --execution_mode real_pg")
     if args.execution_mode == "fake_pg" and args.test_scope == "real_pg_required":
         parser.error("real_pg_required test scope requires --execution_mode real_pg")
     if not os.path.exists(args.output_dir):

@@ -15,7 +15,7 @@ from torchtitan.models.common.attention import (
     VarlenMetadata,
 )
 
-# Tensor shape suffixes: B batch, L seq len, N heads, K key head dim,
+# Tensor shape suffixes: B batch, L seq len, H heads, K query/key head dim,
 # V value head dim.
 
 
@@ -25,11 +25,11 @@ def _l2norm(x: torch.Tensor, dim: int = -1, eps: float = 1e-6) -> torch.Tensor:
 
 
 def _torch_native_gated_delta(
-    q_BLNK: torch.Tensor,
-    k_BLNK: torch.Tensor,
-    v_BLNV: torch.Tensor,
-    g_BLN: torch.Tensor,
-    beta_BLN: torch.Tensor,
+    q_BLHK: torch.Tensor,
+    k_BLHK: torch.Tensor,
+    v_BLHV: torch.Tensor,
+    g_BLH: torch.Tensor,
+    beta_BLH: torch.Tensor,
 ) -> torch.Tensor:
     """Standalone math reference for the gated delta rule recurrence.
 
@@ -37,64 +37,64 @@ def _torch_native_gated_delta(
     numerical baseline for the FLA kernels.
 
     Args:
-        q_BLNK, k_BLNK: (batch, seq, n_heads, key_head_dim)
-        v_BLNV: (batch, seq, n_heads, value_head_dim)
-        g_BLN: (batch, seq, n_heads) -- log-space decay, always negative
-        beta_BLN: (batch, seq, n_heads) -- update gate in (0, 1)
+        q_BLHK, k_BLHK: (batch, seq, num_heads, key_head_dim)
+        v_BLHV: (batch, seq, num_heads, value_head_dim)
+        g_BLH: (batch, seq, num_heads) -- log-space decay, always negative
+        beta_BLH: (batch, seq, num_heads) -- update gate in (0, 1)
 
     Returns:
         output: (batch, seq, n_heads, value_head_dim)
     """
-    B, L, N, K = q_BLNK.shape
-    V = v_BLNV.shape[-1]
-    dtype = q_BLNK.dtype
+    B, L, H, K = q_BLHK.shape
+    V = v_BLHV.shape[-1]
+    dtype = q_BLHK.dtype
 
     # Upcast to float32 -- recurrence accumulates over seqlen steps
-    q_BLNK = _l2norm(q_BLNK.float(), dim=-1) * (K**-0.5)
-    k_BLNK = _l2norm(k_BLNK.float(), dim=-1)
-    v_BLNV, g_BLN, beta_BLN = v_BLNV.float(), g_BLN.float(), beta_BLN.float()
+    q_BLHK = _l2norm(q_BLHK.float(), dim=-1) * (K**-0.5)
+    k_BLHK = _l2norm(k_BLHK.float(), dim=-1)
+    v_BLHV, g_BLH, beta_BLH = v_BLHV.float(), g_BLH.float(), beta_BLH.float()
 
-    out_BLNV = torch.zeros(B, L, N, V, dtype=torch.float32, device=q_BLNK.device)
-    state_BNKV = torch.zeros(B, N, K, V, dtype=torch.float32, device=q_BLNK.device)
+    out_BLHV = torch.zeros(B, L, H, V, dtype=torch.float32, device=q_BLHK.device)
+    state_BHKV = torch.zeros(B, H, K, V, dtype=torch.float32, device=q_BLHK.device)
 
     for t in range(L):
-        q_BNK = q_BLNK[:, t]
-        k_BNK = k_BLNK[:, t]
-        v_BNV = v_BLNV[:, t]
-        g_BN11 = g_BLN[:, t].exp().unsqueeze(-1).unsqueeze(-1)
-        beta_BN1 = beta_BLN[:, t].unsqueeze(-1)
+        q_BHK = q_BLHK[:, t]
+        k_BHK = k_BLHK[:, t]
+        v_BHV = v_BLHV[:, t]
+        g_BH11 = g_BLH[:, t].exp().unsqueeze(-1).unsqueeze(-1)
+        beta_BH1 = beta_BLH[:, t].unsqueeze(-1)
 
-        state_BNKV = state_BNKV * g_BN11
-        kv_mem_BNV = torch.einsum("bnkv,bnk->bnv", state_BNKV, k_BNK)
-        delta_BNV = (v_BNV - kv_mem_BNV) * beta_BN1
-        state_BNKV = state_BNKV + torch.einsum("bnk,bnv->bnkv", k_BNK, delta_BNV)
-        out_BLNV[:, t] = torch.einsum("bnkv,bnk->bnv", state_BNKV, q_BNK)
+        state_BHKV = state_BHKV * g_BH11
+        kv_mem_BHV = torch.einsum("bhkv,bhk->bhv", state_BHKV, k_BHK)
+        delta_BHV = (v_BHV - kv_mem_BHV) * beta_BH1
+        state_BHKV = state_BHKV + torch.einsum("bhk,bhv->bhkv", k_BHK, delta_BHV)
+        out_BLHV[:, t] = torch.einsum("bhkv,bhk->bhv", state_BHKV, q_BHK)
 
-    return out_BLNV.to(dtype)
+    return out_BLHV.to(dtype)
 
 
 def _torch_native_gated_delta_varlen(
-    q_BLNK: torch.Tensor,
-    k_BLNK: torch.Tensor,
-    v_BLNV: torch.Tensor,
-    g_BLN: torch.Tensor,
-    beta_BLN: torch.Tensor,
+    q_BLHK: torch.Tensor,
+    k_BLHK: torch.Tensor,
+    v_BLHV: torch.Tensor,
+    g_BLH: torch.Tensor,
+    beta_BLH: torch.Tensor,
     cu_seqlens_cpu: torch.Tensor,
 ) -> torch.Tensor:
     """Varlen reference: run each packed document through the batched reference."""
-    out_segments_BLNV: list[torch.Tensor] = []
+    out_segments_BLHV: list[torch.Tensor] = []
     cu_seqlens_list = cu_seqlens_cpu.tolist()
     for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
-        out_segments_BLNV.append(
+        out_segments_BLHV.append(
             _torch_native_gated_delta(
-                q_BLNK[:, start:end],
-                k_BLNK[:, start:end],
-                v_BLNV[:, start:end],
-                g_BLN[:, start:end],
-                beta_BLN[:, start:end],
+                q_BLHK[:, start:end],
+                k_BLHK[:, start:end],
+                v_BLHV[:, start:end],
+                g_BLH[:, start:end],
+                beta_BLH[:, start:end],
             )
         )
-    return torch.cat(out_segments_BLNV, dim=1)
+    return torch.cat(out_segments_BLHV, dim=1)
 
 
 def _reference_causal_conv1d_varlen(
@@ -108,21 +108,21 @@ def _reference_causal_conv1d_varlen(
     ``gdn._causal_conv1d_varlen`` for CPU runs.
     """
     conv_kernel_size = weight.shape[-1]
-    out_segments_BTD: list[torch.Tensor] = []
+    out_segments_1TD: list[torch.Tensor] = []
     cu_seqlens_list = cu_seqlens_cpu.tolist()
     for start, end in zip(cu_seqlens_list[:-1], cu_seqlens_list[1:], strict=False):
-        x_segment_BDT = F.pad(
+        x_segment_1DT = F.pad(
             x_TD[start:end].transpose(0, 1).unsqueeze(0),
             [conv_kernel_size - 1, 0],
         )
-        out_segment_BTD = F.conv1d(
-            x_segment_BDT,
+        out_segment_1TD = F.conv1d(
+            x_segment_1DT,
             weight,
             None,
             groups=weight.size(0),
         ).transpose(1, 2)
-        out_segments_BTD.append(out_segment_BTD)
-    return F.silu(torch.cat(out_segments_BTD, dim=1)).squeeze(0)
+        out_segments_1TD.append(out_segment_1TD)
+    return F.silu(torch.cat(out_segments_1TD, dim=1)).squeeze(0)
 
 
 class ReferenceGatedDeltaKernel(nn.Module):
@@ -136,34 +136,34 @@ class ReferenceGatedDeltaKernel(nn.Module):
 
     def forward(
         self,
-        xq_TNK: torch.Tensor,
-        xk_TNK: torch.Tensor,
-        xv_TNV: torch.Tensor,
-        g_TN: torch.Tensor,
-        beta_TN: torch.Tensor,
+        xq_THK: torch.Tensor,
+        xk_THK: torch.Tensor,
+        xv_THV: torch.Tensor,
+        g_TH: torch.Tensor,
+        beta_TH: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
         cu_seqlens_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if xq_TNK.shape[1] != xv_TNV.shape[1]:
-            assert xv_TNV.shape[1] % xq_TNK.shape[1] == 0
-            repeat = xv_TNV.shape[1] // xq_TNK.shape[1]
-            xq_TNK = xq_TNK.repeat_interleave(repeat, dim=1)
-            xk_TNK = xk_TNK.repeat_interleave(repeat, dim=1)
+        if xq_THK.shape[1] != xv_THV.shape[1]:
+            assert xv_THV.shape[1] % xq_THK.shape[1] == 0
+            repeat = xv_THV.shape[1] // xq_THK.shape[1]
+            xq_THK = xq_THK.repeat_interleave(repeat, dim=1)
+            xk_THK = xk_THK.repeat_interleave(repeat, dim=1)
 
-        xq_BLNK = xq_TNK.unsqueeze(0)
-        xk_BLNK = xk_TNK.unsqueeze(0)
-        xv_BLNV = xv_TNV.unsqueeze(0)
-        g_BLN = g_TN.unsqueeze(0)
-        beta_BLN = beta_TN.unsqueeze(0)
+        xq_1THK = xq_THK.unsqueeze(0)
+        xk_1THK = xk_THK.unsqueeze(0)
+        xv_1THV = xv_THV.unsqueeze(0)
+        g_1TH = g_TH.unsqueeze(0)
+        beta_1TH = beta_TH.unsqueeze(0)
 
         if cu_seqlens is None:
             return _torch_native_gated_delta(
-                xq_BLNK, xk_BLNK, xv_BLNV, g_BLN, beta_BLN
+                xq_1THK, xk_1THK, xv_1THV, g_1TH, beta_1TH
             ).squeeze(0)
         assert cu_seqlens_cpu is not None
         return _torch_native_gated_delta_varlen(
-            xq_BLNK, xk_BLNK, xv_BLNV, g_BLN, beta_BLN, cu_seqlens_cpu
+            xq_1THK, xk_1THK, xv_1THV, g_1TH, beta_1TH, cu_seqlens_cpu
         ).squeeze(0)
 
 
@@ -346,33 +346,33 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 .transpose(0, 1)
             )
 
-        query_TNK = causal_conv(model.in_proj_q(x_TD), model.conv_q).reshape(
+        query_THK = causal_conv(model.in_proj_q(x_TD), model.conv_q).reshape(
             num_tokens, -1, model.key_head_dim
         )
-        key_TNK = causal_conv(model.in_proj_k(x_TD), model.conv_k).reshape(
+        key_THK = causal_conv(model.in_proj_k(x_TD), model.conv_k).reshape(
             num_tokens, -1, model.key_head_dim
         )
-        value_TNV = causal_conv(model.in_proj_v(x_TD), model.conv_v).reshape(
+        value_THV = causal_conv(model.in_proj_v(x_TD), model.conv_v).reshape(
             num_tokens, -1, model.value_head_dim
         )
-        gate_TNV = model.in_proj_z(x_TD).reshape(num_tokens, -1, model.value_head_dim)
-        a_TN = model.in_proj_a(x_TD)
-        b_TN = model.in_proj_b(x_TD)
-        decay_TN = -torch.exp(model.A_log.float()) * F.softplus(
-            a_TN.float() + model.dt_bias
+        gate_THV = model.in_proj_z(x_TD).reshape(num_tokens, -1, model.value_head_dim)
+        a_TH = model.in_proj_a(x_TD)
+        b_TH = model.in_proj_b(x_TD)
+        decay_TH = -torch.exp(model.A_log.float()) * F.softplus(
+            a_TH.float() + model.dt_bias
         )
-        update_gate_TN = torch.sigmoid(b_TN)
-        output_TNV = model.inner_gated_delta_net.kernel(
-            query_TNK,
-            key_TNK,
-            value_TNV,
-            decay_TN,
-            update_gate_TN,
+        update_gate_TH = torch.sigmoid(b_TH)
+        output_THV = model.inner_gated_delta_net.kernel(
+            query_THK,
+            key_THK,
+            value_THV,
+            decay_TH,
+            update_gate_TH,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=cu_seqlens_cpu,
         )
-        output_TNV = model.norm(output_TNV, gate_TNV)
-        return model.out_proj(output_TNV.reshape(num_tokens, -1))
+        output_THV = model.norm(output_THV, gate_THV)
+        return model.out_proj(output_THV.reshape(num_tokens, -1))
 
     def test_extracted_forward_matches_main(self):
         torch.manual_seed(42)

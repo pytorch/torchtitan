@@ -1,0 +1,87 @@
+name: B200 Integration
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/b200/*
+    paths:
+      - 'torchtitan/models/kimi_k3/**'
+      - 'torchtitan_recipes/tests/b200.py'
+      - 'tests/integration_tests/b200.py'
+      - '.github/workflows/integration_test_b200.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-test:
+    if: github.repository_owner == 'pytorch'
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 60
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      options: --gpus all
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Run B200 integration tests
+        run: |
+          set -eux
+
+          uv venv --python 3.12
+          source .venv/bin/activate
+
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+
+          uv pip install --pre torch torchvision \
+            --index-url https://download.pytorch.org/whl/nightly/cu130
+          uv pip install -r requirements.txt
+          uv pip install -r .ci/docker/requirements-vlm.txt
+
+          python - <<'PY'
+          import torch
+
+          capability = torch.cuda.get_device_capability()
+          if capability not in ((10, 0), (10, 3)):
+              raise RuntimeError(
+                  f"B200 integration requires SM100 or SM103, got SM{capability[0]}{capability[1]}"
+              )
+          PY
+
+          mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+          CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
+            python -m tests.integration_tests.run_tests \
+            "$RUNNER_TEMP/artifacts-to-be-uploaded/b200" \
+            --test_suite b200 \
+            --execution_mode real_pg \
+            --gpu_arch_type cuda \
+            --ngpu 8
+
+          rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/b200"/*/checkpoint
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b200-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded

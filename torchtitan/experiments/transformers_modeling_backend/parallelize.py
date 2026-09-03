@@ -4,10 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import (
+    CPUOffloadPolicy,
+    DataParallelMeshDims,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
@@ -23,6 +30,8 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
 )
 from torchtitan.tools.logging import logger
 
@@ -94,15 +103,11 @@ def parallelize_hf_transformers(
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
-    # Only the partial-DTensor sharding backend is wired here.
-    # TODO: wire spmd_types (next PR) -- see the migration TODO in hf_sharding.py.
-    if parallel_dims.spmd_backend != "partial_dtensor":
-        raise NotImplementedError(
-            f"The HF transformers backend only supports "
-            f"spmd_backend='partial_dtensor' "
-            f"today; got '{parallel_dims.spmd_backend}'. spmd_types is not yet "
-            "wired for this backend (FSDP mesh resolution, Titan-native "
-            "embedding, and attention kernels are pending)."
+    if parallel_dims.spmd_backend != "spmd_types":
+        raise ValueError(
+            "The Transformers modeling backend only supports "
+            "parallelism.spmd_backend='spmd_types'; "
+            f"got '{parallel_dims.spmd_backend}'."
         )
 
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
@@ -146,37 +151,32 @@ def parallelize_hf_transformers(
         build_and_swap_native_moe(model, parallel_dims)
 
     # 2. Convert HF modules to Module protocol.
-    # TP/EP always need it. CP-only needs it too: the flex kernel's local_map is
-    # what all-gathers k/v across the CP axis, and it is only installed by the
-    # sharding pass below.
-    needs_module_protocol = (
-        parallel_dims.tp_enabled or parallel_dims.ep_enabled or parallel_dims.cp_enabled
+    # The spmd_types backend uses the Module protocol for state distribution,
+    # activation checks, and any TP/EP/CP redistribution.
+    from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
+        set_hf_sharding_configs,
     )
-    if needs_module_protocol:
-        from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
-            set_hf_sharding_configs,
-        )
-        from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
-            convert_hf_to_module,
-        )
+    from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
+        convert_hf_to_module,
+    )
 
-        convert_hf_to_module(model)
+    convert_hf_to_module(model)
 
-        # 3. Set sharding configs on all non-MoE modules
-        set_hf_sharding_configs(
-            model,
-            enable_sp=parallel_dims.tp_enabled,
-        )
+    # 3. Set sharding configs on all non-MoE modules
+    set_hf_sharding_configs(
+        model,
+        enable_sp=parallel_dims.tp_enabled,
+    )
 
-        # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
-        # the CP axis (on the seq dim). Must run before model.parallelize so the
-        # wrap is captured inside the local_map region and operates on the local
-        # (already TP-head-sharded, CP-seq-sharded) tensors.
-        if parallel_dims.cp_enabled:
-            _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
+    # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
+    # the CP axis (on the seq dim). Must run before model.parallelize so the
+    # wrap is captured inside the local_map region and operates on the local
+    # (already TP-head-sharded, CP-seq-sharded) tensors.
+    if parallel_dims.cp_enabled:
+        _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
 
-        # 4. Single parallelize call -- handles TP, EP, MoE, everything
-        model.parallelize(parallel_dims)
+    # 4. Single parallelize call -- handles TP, EP, MoE, everything
+    model.parallelize(parallel_dims)
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
@@ -196,18 +196,12 @@ def parallelize_hf_transformers(
             parallel_dims=parallel_dims,
         )
 
-    dp_mesh_dim_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-
-    edp_mesh_names = (
-        ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
-    )
-    edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
 
     apply_fsdp(
         model,
-        parallel_dims.get_mesh(dp_mesh_dim_names),
+        dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         pp_enabled=parallel_dims.pp_enabled,
@@ -216,6 +210,8 @@ def parallelize_hf_transformers(
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
         ep_degree=parallel_dims.ep,
         dp_mod_ep_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
     )
 
     if training.enable_cpu_offload:
@@ -243,6 +239,8 @@ def apply_fsdp(
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
     dp_mod_ep_mesh: DeviceMesh | None = None,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
+    edp_mesh_dims: DataParallelMeshDims | None = None,
     gradient_divide_factor: int | None = None,
     enable_symm_mem: bool = False,
 ):
@@ -259,7 +257,9 @@ def apply_fsdp(
         reduce_dtype=reduce_dtype,
         cast_forward_inputs=False,
     )
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -305,9 +305,9 @@ def apply_fsdp(
         ):
             from torch.distributed.fsdp._fully_shard._fsdp_common import (
                 FSDPMeshInfo,
-                HSDPMeshInfo,
                 ShardPlacementResult,
             )
+            from torch.distributed.fsdp._fully_shard._fsdp_init import _get_mesh_info
 
             assert dp_mod_ep_mesh is not None
             moe_module = getattr(transformer_block, "mlp", None)
@@ -315,24 +315,18 @@ def apply_fsdp(
             # (with the token_dispatcher as a sibling under routed_experts).
             experts = moe_module.routed_experts.inner_experts
             expert_params = set(experts.parameters())
-            num_local_experts = experts.num_experts // ep_degree
+            num_experts = experts.num_experts
 
-            if dp_mod_ep_mesh.size() > num_local_experts:
+            efsdp_ep_size = dp_mod_ep_mesh["efsdp"].size() * ep_degree
+            if efsdp_ep_size > num_experts:
                 expert_shard_placement = Shard(1)
             else:
                 expert_shard_placement = Shard(0)
 
-            def _get_fsdp_mesh_info(mesh: DeviceMesh) -> FSDPMeshInfo:
-                if mesh.ndim == 1:
-                    return FSDPMeshInfo(mesh=mesh, shard_mesh_dim=0)
-                if mesh.ndim == 2:
-                    return HSDPMeshInfo(
-                        mesh=mesh, replicate_mesh_dim=0, shard_mesh_dim=1
-                    )
-                raise ValueError(f"Expected 1D or 2D FSDP mesh, got {mesh.ndim}D mesh.")
-
-            edp_mesh_info = _get_fsdp_mesh_info(dp_mod_ep_mesh)
-            dp_mesh_info = _get_fsdp_mesh_info(dp_mesh)
+            edp_mesh_info = _get_mesh_info(dp_mod_ep_mesh, edp_mesh_dims)
+            dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
+            assert isinstance(edp_mesh_info, FSDPMeshInfo)
+            assert isinstance(dp_mesh_info, FSDPMeshInfo)
 
             def _shard_placement_fn(
                 param: nn.Parameter,

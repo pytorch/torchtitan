@@ -15,6 +15,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_dist_gemm,
     llama3_debugmodel_float8,
 )
+from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.trainer import Trainer
 
 
@@ -92,4 +93,14 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     config = qwen3_moe_deepep()
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
+    return config
+
+
+def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8_sdc_replay() -> (
+    Trainer.Config
+):
+    config = deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.sdc_replayer = SDCReplayer.Config()
     return config

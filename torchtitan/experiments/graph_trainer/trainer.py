@@ -6,14 +6,16 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
+    compute_parameter_gradients,
     log_timer,
     maybe_register_blockmask_pytree_node,
 )
@@ -21,7 +23,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -41,6 +42,11 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
+from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    remove_parameter_gradient_markers_pass,
+)
+from torchtitan.observability import structured_logger as sl
+from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -90,12 +96,12 @@ def make_fwd_bwd_step(model, loss_fn):
             labels,
             {"global_valid_tokens": global_valid_tokens},
         )
-        params = [
-            p
-            for _, p in model.named_parameters(remove_duplicate=False)
-            if p.requires_grad
+        named_params = [
+            (name, parameter)
+            for name, parameter in model.named_parameters(remove_duplicate=False)
+            if parameter.requires_grad
         ]
-        grads = torch.autograd.grad(loss, params)
+        grads = compute_parameter_gradients(loss, named_params)
         return [loss] + list(grads)
 
     return fwd_bwd_step
@@ -150,7 +156,13 @@ class GraphTrainer(Trainer):
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
-        inputs, labels, extra_kwargs = self.post_dataloading_process(input_dict, labels)
+        with sl.log_trace_span("preprocess_inputs"):
+            inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
+                {**input_dict, "labels": labels},
+                parallel_dims=self.parallel_dims,
+                parallelism=self.config.parallelism,
+            )
+            self.ntokens_seen += labels.numel()
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [
@@ -222,7 +234,6 @@ class GraphTrainer(Trainer):
                         global_valid_tokens,
                         extra_kwargs,
                     )
-
             if self.config.compile.enable_passes:
                 pipeline_fn = PASS_PIPELINE_REGISTRY.get(
                     self.config.compile.pass_pipeline,
@@ -239,6 +250,10 @@ class GraphTrainer(Trainer):
                     self._traced_step.example_inputs,
                     passes,
                     compile_config=self.config.compile,
+                )
+            else:
+                self._traced_step.gm = remove_parameter_gradient_markers_pass(
+                    self._traced_step.gm, self._traced_step.example_inputs
                 )
         with self.train_context():
             outputs = run_traced(self._traced_step, module=model)(
