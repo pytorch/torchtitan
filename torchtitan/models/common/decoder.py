@@ -24,7 +24,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
-    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -157,7 +156,6 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -174,18 +172,6 @@ class Decoder(BaseModel):
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
-
-            if parallelism.context_parallel_degree > 1:
-                # ShardingConfig-based CP requires the spmd_types backend.
-                validate_cp_backend(parallelism)
-                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
-                    self.traverse(VarlenAttention.Config)
-                ):
-                    raise NotImplementedError(
-                        "Context Parallel is not supported with "
-                        "ScaledDotProductAttention or VarlenAttention. "
-                        "Use FlexAttention or disable CP."
-                    )
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention

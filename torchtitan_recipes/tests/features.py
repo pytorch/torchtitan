@@ -15,6 +15,8 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+
+from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel,
@@ -26,6 +28,7 @@ from torchtitan.models.llama3.config_registry import (
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
+from torchtitan.transforms import apply_transforms, ContextParallelTransform
 
 from . import _use_spmd_types
 
@@ -377,7 +380,10 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
     config = llama3_debugmodel()
     _use_spmd_types(config, typechecking=True)
     config.parallelism.context_parallel_degree = 4
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
@@ -391,7 +397,10 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
     _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
@@ -400,13 +409,19 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
     config = llama3_debugmodel_hsdp2x2()
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
@@ -461,7 +476,10 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
