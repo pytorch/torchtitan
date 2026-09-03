@@ -22,6 +22,7 @@ from torchtitan.models.common import (
     RoPE,
     TransformerBlock,
 )
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -189,6 +190,7 @@ def build_mla_moe_layers(
     router_num_limited_groups: int | None = None,
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
+    aux_loss_coeff: float | None = None,
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
@@ -265,6 +267,7 @@ def build_mla_moe_layers(
                     w1_param_init=linear_init,
                     w2w3_param_init=depth_init(layer_id),
                 ),
+                aux_loss_coeff=aux_loss_coeff,
             )
 
         layers.append(
@@ -355,7 +358,9 @@ def _debugmodel(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=3,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
+        router_route_norm=True,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -427,7 +432,9 @@ def _16b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
+        router_route_norm=True,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -504,6 +511,7 @@ def _236b(
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -581,6 +589,7 @@ def _671b(
         router_num_limited_groups=4,
         router_route_scale=2.5,
         router_route_norm=True,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -615,6 +624,12 @@ def _671b(
             num_mtp_layers=num_mtp_layers,
         ),
     )
+
+
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
 
 
 deepseekv3_configs = {
@@ -660,6 +675,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

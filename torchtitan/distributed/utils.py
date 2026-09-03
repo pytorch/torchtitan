@@ -47,6 +47,36 @@ def get_spmd_backend() -> str:
     return _spmd_backend
 
 
+def resolve_num_tokens_per_train_step(
+    *,
+    num_tokens_per_microbatch_per_dp_rank: int,
+    num_pp_microbatches: int,
+    num_tokens_per_train_step: int,
+    dp_degree: int,
+) -> tuple[int, int]:
+    """Resolve and validate the global per-step token budget.
+
+    Returns ``(num_tokens_per_train_step, gradient_accumulation_steps)``.
+    ``num_tokens_per_train_step < 0`` requests exactly one gradient
+    accumulation step.
+    """
+    num_tokens_per_dp_rank = num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches
+    tokens_per_grad_step = num_tokens_per_dp_rank * dp_degree
+    if num_tokens_per_train_step < 0:
+        num_tokens_per_train_step = tokens_per_grad_step
+    if num_tokens_per_train_step % tokens_per_grad_step != 0:
+        raise ValueError(
+            "training.num_tokens_per_train_step "
+            f"({num_tokens_per_train_step}) must be divisible by the number "
+            "of tokens processed globally in one gradient accumulation "
+            f"iteration ({tokens_per_grad_step})."
+        )
+    return (
+        num_tokens_per_train_step,
+        num_tokens_per_train_step // tokens_per_grad_step,
+    )
+
+
 def check_dtensor_placements_match(
     actual: tuple[Placement, ...],
     expected: tuple[Placement, ...],
