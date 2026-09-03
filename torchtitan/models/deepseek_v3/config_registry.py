@@ -52,6 +52,14 @@ def deepseek_v3_mxfp8_linear_converter_config(
     )
 
 
+def enable_fused_mla(config: Trainer.Config) -> None:
+    # Fuse the MLA Q/KV assembly around ComplexRoPE. Requires ComplexRoPE, so
+    # it does not apply to a DeepSeek-V3 variant configured with another one.
+    override = "torchtitan.overrides.fused_mla.fused_mla"
+    assert override not in config.override.imports
+    config.override.imports.append(override)
+
+
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
