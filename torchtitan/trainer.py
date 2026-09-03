@@ -857,8 +857,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return torch.sum(torch.stack(detached_losses)).to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
-    def train_step(self, data_iterator: Iterator[TrainerBatch]):
+    def _zero_grad(self) -> None:
+        """Clear parameter gradients before one optimizer step."""
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+
+    def train_step(self, data_iterator: Iterator[TrainerBatch]):
+        self._zero_grad()
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
         should_log = self.metrics_processor.should_log(self.step)

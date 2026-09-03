@@ -294,6 +294,24 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    def test_rejects_graph_owned_gradient_state(self):
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            PrecompiledFxTraceArtifact,
+        )
+
+        inputs = torch.randn(2, 3)
+        traced = minimal_fx_tracer(
+            lambda value: [value.sum(), value],
+            graph_state={"accumulator": torch.zeros_like(inputs)},
+            graph_state_output_indices=(1,),
+        )(inputs)
+
+        with self.assertRaisesRegex(ValueError, "graph-owned gradient state"):
+            PrecompiledFxTraceArtifact.from_traced_result(traced)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_standalone_inductor_precompile(self):
         from torchtitan.experiments.graph_trainer.inductor_passes import (
