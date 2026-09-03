@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from torchtitan.models.kimi_k3.model import KimiK3Model
 
 
-def set_expert_parallel_sharding_config(
+def set_kimi_k3_sharding_config(
     config: "KimiK3Model.Config", *, enable_ep: bool, enable_sp: bool = False
 ) -> None:
     """Declare the sharding expert parallel acts on.
