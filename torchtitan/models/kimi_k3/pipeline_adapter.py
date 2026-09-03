@@ -17,11 +17,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import inspect
 import math
 import threading
 import warnings
-
 from dataclasses import dataclass
 
 import torch
@@ -75,17 +76,11 @@ _TOPOLOGY: _TopologyKnobs | None = None
 _WARNED_UNREGISTERED = False
 
 
-def _register_topology(config) -> _TopologyKnobs:
-    """Resolve the topology from ``config`` once. Idempotent, first call wins.
-
-    A field the config does not carry keeps its default.
-    """
+def _register_topology(*, attn_res_cache: bool) -> _TopologyKnobs:
+    """Resolve the topology once. Idempotent, first call wins."""
     global _TOPOLOGY
 
-    defaults = _TopologyKnobs()
-    resolved = _TopologyKnobs(
-        attn_res_cache=bool(getattr(config, "attn_res_cache", defaults.attn_res_cache)),
-    )
+    resolved = _TopologyKnobs(attn_res_cache=bool(attn_res_cache))
     if _TOPOLOGY is not None and _TOPOLOGY != resolved:
         logger.warning(
             "topology re-registered with a different resolution: keeping %r, "
@@ -122,13 +117,11 @@ def _reset_topology_for_testing() -> None:
 
 
 def adapter_enabled() -> bool:
-    """Config gate for the delta-mode block transport. Off by default.
+    """Gate for the delta-mode block transport.
 
     Engaging it changes the order the block grads are summed, so it is not
-    bitwise against the naive transport. It requires Interleaved1F1B, n_layers
-    divisible by the stage count, and an even split
-    (pipeline_parallel_first_stage_less_layers and _last_stage_less_layers both
-    0); anything else passes through on the naive transport.
+    bitwise against the naive transport. It requires Interleaved1F1B (a rank
+    with one stage has nothing to reuse); plain 1F1B runs the naive transport.
     """
     return _topology().attn_res_cache
 
@@ -504,17 +497,10 @@ class CrossStageCacheAdapter(nn.Module):
         self.pp_rank = pp_rank
         self._cache = _get_or_create_rank_cache(self.pp_rank)
         self._layout = layout_tables
+        # Delta mode is the layout tables' presence: the model returns the
+        # carrier it was handed with this stage's commits appended, and
+        # _finish_forward takes the tail past what went in.
         self._delta_mode = layout_tables is not None
-
-        # Delta mode: wrapped returns only own commits. Naive mode: full stack.
-        if hasattr(wrapped, "_return_only_new_blocks"):
-            wrapped._return_only_new_blocks = bool(self._delta_mode)
-        else:
-            warnings.warn(
-                "Wrapped model does not expose _return_only_new_blocks; "
-                "adapter will run in naive (full-stack) mode.",
-                stacklevel=2,
-            )
 
         # Hide ``wrapped.`` from state_dict consumers.
         self._register_state_dict_hook(_strip_wrapped_prefix_hook)
@@ -1004,56 +990,34 @@ def _install_step_drop_patch(
 _KIMI_ATTN_RES_LAST_STAGE_FQNS = ("output_res_proj", "output_res_norm")
 
 
-def _kimi_llm_fqns(
-    num_stages: int,
-    num_layers: int,
-    input_weight: int = 1,
-    output_weight: int = 1,
-) -> list[list[str]]:
-    """Kimi-named version of ``generate_llm_fqn_per_model_part``.
+def kimi_k3_module_fqns_per_model_part(
+    model: nn.Module,
+    *,
+    model_config,
+    parallelism,
+    pp: int,
+) -> list[list[str]] | None:
+    """The pipeline split of a Kimi K3 model, built from its config.
 
-    Substitutes ``tok_embeddings``->``embed_tokens`` and
-    ``output``->``lm_head``. Keeps the layer distribution logic
-    (delegated to core's function, then re-mapped) so any future
-    tweaks there apply to us automatically.
+    Core's layer distribution (``_generate_llm_fqn_per_model_part``) places the
+    embedding, the layers and the head; on top of it this model needs the
+    AttnRes aggregation modules (``output_res_proj``, ``output_res_norm``) on
+    the stage that holds ``lm_head``, since the final block attention runs
+    there, and the vision tower on the stage that holds the embedding, since
+    vision features are spliced into the embeddings and nothing vision-side
+    crosses a stage boundary. Returns None when the split does not apply (no
+    pipeline parallelism, or a config without layers); the caller keeps
+    whatever split the user configured.
     """
-    raw = _generate_llm_fqn_per_model_part(
-        num_stages, num_layers, input_weight, output_weight
-    )
-    rename = {"tok_embeddings": "embed_tokens", "output": "lm_head"}
-    return [[rename.get(n, n) for n in stage] for stage in raw]
-
-
-def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
-    """Populate ``parallelism.module_fqns_per_model_part`` so the PP
-    split uses Kimi module names and the last stage includes the
-    AttnRes final-aggregation modules.
-    """
-    if not any(
-        hasattr(model, n) for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS
-    ) and not hasattr(model, "embed_tokens"):
-        return  # Not a Kimi model; pass through
-    parallelism = kwargs.get("parallelism")
-    if parallelism is None or parallelism.module_fqns_per_model_part is not None:
-        return
-    model_config = kwargs.get("model_config")
-    pp = kwargs["parallel_dims"].pp
     if pp <= 1 or model_config is None:
-        return
-
-    # The flat kimi config stores the layer count at ``num_hidden_layers``; a
-    # Config-tree model carries the layers themselves. Returning early on that
-    # shape skips the injection and the last stage loses AttnRes aggregation.
-    num_layers = getattr(model_config, "num_hidden_layers", None)
-    if num_layers is None:
-        layers = getattr(model_config, "layers", None)
-        num_layers = len(layers) if layers is not None else None
-    if num_layers is None:
-        return
+        return None
+    layers = getattr(model_config, "layers", None)
+    if layers is None:
+        return None
+    num_layers = len(layers)
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-
     if layers_per_stage is not None:
         num_virtual_stages = math.ceil(
             (num_layers + input_weight + output_weight) / layers_per_stage
@@ -1062,60 +1026,60 @@ def _inject_kimi_k3_fqns(model: nn.Module, kwargs: dict) -> None:
         schedule_class = _tt_get_schedule_class(parallelism.pipeline_parallel_schedule)
         stages_per_rank = 1 if issubclass(schedule_class, PipelineScheduleSingle) else 2
         num_virtual_stages = pp * stages_per_rank
-
-    fqns = _kimi_llm_fqns(num_virtual_stages, num_layers, input_weight, output_weight)
-    # ``_kimi_llm_fqns`` emits this folder's historical spellings; map them
-    # back for a model using core's names. FQNs matching no child mean core
-    # sets every child to None -- a stage with no head at all.
-    core_names = {"embed_tokens": "tok_embeddings", "lm_head": "lm_head"}
-    present = {n for n, _ in model.named_children()}
-    fqns = [
-        [core_names[n] if n in core_names and n not in present else n for n in stage]
-        for stage in fqns
-    ]
-    # Append AttnRes tail modules if present (last stage only).
-    extras = [n for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS if hasattr(model, n)]
-    if extras:
-        fqns[-1].extend(extras)
-    # The tower belongs with whichever chunk kept the embedding: vision
-    # features are spliced into the embeddings, so nothing vision-side crosses
-    # a stage boundary. Naming it matters -- core sets every child not named by
-    # some stage to None, so leaving it out gives every stage a None tower and
-    # the first multimodal batch reports "pixel_values were provided without a
-    # vision encoder".
+    fqns = _generate_llm_fqn_per_model_part(
+        num_virtual_stages, num_layers, input_weight, output_weight
+    )
+    # Core spells the head ``output``; this model calls it ``lm_head``. Any
+    # FQN matching no child makes core set that child to None on every stage.
+    fqns = [["lm_head" if n == "output" else n for n in stage] for stage in fqns]
+    tail = [n for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS if hasattr(model, n)]
+    fqns[-1].extend(tail)
     if getattr(model, "vision_encoder", None) is not None:
         embed_stage = next(
-            (
-                stage
-                for stage in fqns
-                if "tok_embeddings" in stage or "embed_tokens" in stage
-            ),
-            fqns[0],
+            (stage for stage in fqns if "tok_embeddings" in stage), fqns[0]
         )
         embed_stage.append("vision_encoder")
-    parallelism.module_fqns_per_model_part = fqns
+    return fqns
 
 
-def pipeline_kimi_k3(model: nn.Module, **kwargs):
-    """``pipelining_fn`` for Kimi Linear (baseline + AttnRes variants).
+def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
+    """``pipelining_fn`` for Kimi K3.
 
     Behavior:
 
-    * Always: patch ``parallelism.module_fqns_per_model_part`` to use this
-      model's names and include the AttnRes aggregation modules on the last
-      stage, then delegate to core ``pipeline_llm``.
-    * When the ``attn_res_cache`` config field is set AND the schedule is
-      Interleaved1F1B AND the model is an AttnRes variant: wrap each stage's
-      ``submod`` in :class:`CrossStageCacheAdapter`.
-    * Otherwise: pass through (plain PP, no cache adapter).
-    """
-    # Resolve the topology knobs from config ONCE. This entry can run
-    # before parallelize, so whichever comes first registers; register_topology is
-    # idempotent and reports a disagreement rather than letting order decide.
-    if hasattr(model, "config"):
-        _register_topology(model.config)
+    * Always: split the model with this model's names and the AttnRes
+      aggregation modules on the last stage, then delegate to core
+      ``pipeline_llm``.
+    * When ``attn_res_cache`` is set AND the schedule is Interleaved1F1B: wrap
+      each stage's ``submod`` in :class:`CrossStageCacheAdapter`, which ships
+      only the blocks the receiver does not hold on each hop.
+    * Otherwise: pass through (plain PP, the whole carrier on every hop).
 
-    _inject_kimi_k3_fqns(model, kwargs)
+    ``attn_res_cache`` is a property of the pipeline transport, not of the
+    model, so it is an argument here; a recipe turns it off with
+    ``functools.partial(pipeline_kimi_k3, attn_res_cache=False)`` as the
+    ``pipelining_fn``. It changes the order the block gradients are summed, so
+    the two transports are not bitwise against each other. Every rank must
+    resolve it identically: a rank without the adapter while its peers have
+    one hangs the first cross-stage hop with nothing pointing at the cause.
+    """
+    # Resolve the topology knobs ONCE. This entry can run before parallelize,
+    # so whichever comes first registers; register_topology is idempotent and
+    # reports a disagreement rather than letting order decide.
+    _register_topology(attn_res_cache=attn_res_cache)
+
+    parallelism = kwargs["parallelism"]
+    if parallelism.module_fqns_per_model_part is None:
+        fqns = kimi_k3_module_fqns_per_model_part(
+            model,
+            model_config=kwargs.get("model_config"),
+            parallelism=parallelism,
+            pp=kwargs["parallel_dims"].pp,
+        )
+        if fqns is not None:
+            kwargs["parallelism"] = dataclasses.replace(
+                parallelism, module_fqns_per_model_part=fqns
+            )
     pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
         model, **kwargs
     )
