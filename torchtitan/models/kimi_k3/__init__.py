@@ -32,6 +32,7 @@ from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
+from .pipeline_adapter import pipeline_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -466,15 +467,24 @@ def _kimi_k3_config(
     )
 
 
-def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
+def _debugmodel(
+    attn_backend: str,
+    moe_comm_backend: str,
+    *,
+    num_layers: int = 24,
+    full_attention_layers: set[int] | None = None,
+    attn_res_block_size: int = 12,
+) -> KimiK3Model.Config:
     dim = 1024
+    if full_attention_layers is None:
+        full_attention_layers = {3, 7, 11, 15, 19, 23}
     return _kimi_k3_config(
         dim=dim,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
-        num_layers=24,
-        full_attention_layers={3, 7, 11, 15, 19, 23},
-        attn_res_block_size=12,
+        num_layers=num_layers,
+        full_attention_layers=full_attention_layers,
+        attn_res_block_size=attn_res_block_size,
         num_heads=16,
         q_lora_rank=512,
         kv_lora_rank=256,
@@ -500,6 +510,25 @@ def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
             init_pos_emb_width=32,
         ),
         attn_backend=attn_backend,
+    )
+
+
+def _debugmodel_32l(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
+    """The debug model at 32 layers, for the pipeline x virtual-stage matrix.
+
+    The 24-layer flavor cannot express every pp x vp product: 24 is not
+    divisible by 16 (pp4 x vp4, pp8 x vp2) or 32 (pp8 x vp4), and virtual stages
+    are expressed as layers-per-stage. 32 divides all of them, so the same
+    3 KDA : 1 MLA pattern at 32 layers covers the whole cross product with an
+    integer split. The tower stays: it rides with the embedding on the first
+    stage and takes no stage of its own, so the split arithmetic is unchanged.
+    """
+    return _debugmodel(
+        attn_backend,
+        moe_comm_backend,
+        num_layers=32,
+        full_attention_layers=set(range(3, 32, 4)),
+        attn_res_block_size=16,
     )
 
 
@@ -542,6 +571,7 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 kimi_k3_configs = {
     "debugmodel": (_debugmodel, 16384),
+    "debugmodel_32l": (_debugmodel_32l, 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }
 
@@ -574,7 +604,7 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k3,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_kimi_k3,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=KimiK3StateDictAdapter,
     )
