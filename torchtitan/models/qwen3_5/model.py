@@ -27,6 +27,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexAttention,
+    local_head_split,
     VarlenAttention,
     VarlenMetadata,
 )
@@ -144,10 +145,10 @@ class Qwen35Attention(BaseAttention):
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_gate_THC = local_head_split(self.wq(x_TD), self.head_dim * 2)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
-        xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        xk_THK = local_head_split(self.wk(x_TD), self.head_dim)
+        xv_THV = local_head_split(self.wv(x_TD), self.head_dim)
 
         # QK norm (before RoPE)
         xq_THK = self.q_norm(xq_THK)

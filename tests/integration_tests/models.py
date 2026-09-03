@@ -116,6 +116,12 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
+            configs=[recipes.qwen35_debugmodel_fsdp2_tp2],
+            test_descr="Qwen3.5 FSDP+TP",
+            test_name="qwen3_5_fsdp+tp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
             test_descr="Qwen3.5 MoE FSDP+TP+EP+PP",
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",

@@ -185,6 +185,17 @@ def qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2() -> Trainer.Config:
     return config
 
 
+def qwen35_debugmodel_fsdp2_tp2() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel
+
+    config = qwen35_debugmodel()
+    _use_spmd_types(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
 
