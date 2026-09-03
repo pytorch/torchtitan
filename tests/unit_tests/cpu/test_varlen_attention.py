@@ -29,17 +29,13 @@ from torchtitan.models.common.rope import ComplexRoPE
 class TestPackedVarlenMetadata(unittest.TestCase):
     def test_document_boundaries(self):
         positions_T = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3])
-        metadata = create_varlen_metadata_for_document(
-            positions_T,
-            include_host_offsets=True,
-        )
+        metadata = create_varlen_metadata_for_document(positions_T)
 
         expected_cu_seq = torch.tensor([0, 3, 5, 9], dtype=torch.int32)
         torch.testing.assert_close(metadata.cu_seq_q, expected_cu_seq)
         torch.testing.assert_close(metadata.cu_seq_k, expected_cu_seq)
         self.assertEqual(metadata.max_q, 4)
         self.assertEqual(metadata.max_k, 4)
-        self.assertEqual(metadata.cu_seq_q_host, (0, 3, 5, 9))
 
 
 class TestPackedVarlenAttention(unittest.TestCase):

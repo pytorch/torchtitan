@@ -3,6 +3,8 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import inspect
+
 import pytest
 import spmd_types as spmd
 import torch
@@ -362,6 +364,29 @@ def test_quantized_grouped_experts():
     assert issubclass(float8_cls, GptOssGroupedExperts)
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
+
+
+@pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
+@pytest.mark.parametrize(
+    "make_quantized_cls",
+    [_get_mxfp8_grouped_experts_cls, _get_float8_grouped_experts_cls],
+    ids=["mxfp8", "float8"],
+)
+def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent_cls):
+    """Every ``_grouped_mm`` override must accept the base class's keywords.
+
+    ``MoE.forward`` calls the seam by keyword, so an override whose parameter
+    names drift raises TypeError at the first expert GEMM rather than at import
+    time -- and only in a MoE training run, which no other unit test reaches.
+    That is how the ``B_t`` -> ``weight_EOI`` rename left the MXFP8 override
+    behind while the float8 one was updated.
+    """
+    base = inspect.signature(parent_cls._grouped_mm)
+    override = inspect.signature(make_quantized_cls(parent_cls)._grouped_mm)
+
+    assert list(override.parameters) == list(base.parameters)
+    for name, parameter in base.parameters.items():
+        assert override.parameters[name].kind == parameter.kind
 
 
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
