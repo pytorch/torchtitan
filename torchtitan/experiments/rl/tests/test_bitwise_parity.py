@@ -259,7 +259,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    engine_kwargs["max_model_len"] = config.model_spec.model.max_context_length
+    assert config.model_spec is not None
+    engine_kwargs["max_model_len"] = config.model_spec.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop

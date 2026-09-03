@@ -118,19 +118,20 @@ def set_qwen35_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
-    # Vision scatter needs the full embedding sequence on every TP rank.
-    config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_shardings={"input": token_id_placement()},
-        out_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        local_spmd=True,
-    )
-    _set_vision_encoder_sharding(config.vision_encoder)
     layer_input_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
+    if config.vision_encoder is not None:
+        # Vision scatter needs the full embedding sequence on every TP rank.
+        config.tok_embeddings.sharding_config = ShardingConfig(
+            state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+            in_shardings={"input": token_id_placement()},
+            out_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+            local_spmd=True,
+        )
+        _set_vision_encoder_sharding(config.vision_encoder)
     for layer_cfg in config.layers:
         layer_cfg.sharding_config = ShardingConfig(
             in_shardings={"x_TD": layer_input_layout},

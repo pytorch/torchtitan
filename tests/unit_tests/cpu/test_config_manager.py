@@ -332,10 +332,10 @@ class TestConfigManager(unittest.TestCase):
         config.compile.enable_async_tensor_parallel = True
         configs = {
             "symm_mem_async_tp": config,
-            "distributed_gemm": llama3_debugmodel_dist_gemm(),
-            "hybrid_ep": deepseek_v3_debugmodel_hybridep(),
-            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(),
-            "deep_ep": qwen3_moe_deepep(),
+            "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
+            "hybrid_ep": deepseek_v3_debugmodel_hybridep(seq_len=2048),
+            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048),
+            "deep_ep": qwen3_moe_deepep(seq_len=512),
         }
 
         for name, config in configs.items():
@@ -350,7 +350,7 @@ class TestConfigManager(unittest.TestCase):
             deepseek_v3_debugmodel_hybridep,
         )
 
-        config = deepseek_v3_debugmodel_hybridep()
+        config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
         dispatcher_configs = list(
             config.model_spec.model.traverse(HybridEPTokenDispatcher.Config)
         )

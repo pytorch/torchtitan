@@ -276,7 +276,8 @@ class TestYaRNScaling(unittest.TestCase):
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import Attention
 
-        model_config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        build_config, max_context_length = deepseekv3_configs["debugmodel"]
+        model_config = build_config("flex", "standard", seq_len=max_context_length)
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)
         attention_config.rope = dataclasses.replace(
@@ -329,7 +330,8 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        model = llama3_configs["debugmodel"]("flex").build()
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        model = build_config("flex", seq_len=max_context_length).build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
         self.assertTrue(all(isinstance(rope, RoPE) for rope in layer_ropes))
@@ -338,60 +340,14 @@ class TestPerLayerRoPECache(unittest.TestCase):
     def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        cfg = llama3_configs["debugmodel"]("flex")
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        cfg = build_config("flex", seq_len=max_context_length)
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 
         self.assertEqual(
             len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
             len(layer_rope_cfgs),
         )
-
-
-class TestUpdateFromConfigSeqLenValidation(unittest.TestCase):
-    """Reject training contexts larger than the RoPE context length."""
-
-    def _make_trainer_config(self, seq_len):
-        from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
-        from torchtitan.trainer import Trainer
-
-        return Trainer.Config(
-            training=dataclasses.replace(
-                TrainingConfig(),
-                num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
-            ),
-            parallelism=ParallelismConfig(),
-            debug=DebugConfig(),
-        )
-
-    def _make_config(self):
-        """Build a minimal Llama3 debug config."""
-        from torchtitan.models.llama3 import llama3_configs
-
-        return llama3_configs["debugmodel"]("flex")
-
-    def test_rejects_oversized_seq_len(self):
-        cfg = self._make_config()
-        rope_max = cfg.max_context_length
-        with self.assertRaises(ValueError):
-            cfg.update_from_config(config=self._make_trainer_config(rope_max + 1))
-
-    def test_accepts_valid_seq_len(self):
-        cfg = self._make_config()
-        rope_max = cfg.max_context_length
-        cfg.update_from_config(config=self._make_trainer_config(rope_max))
-        self.assertEqual(cfg.max_context_length, rope_max)
-
-    def test_vllm_max_model_len_as_seq_len(self):
-        """vLLM wrapper translates max_model_len to TrainingConfig.max_context_length.
-
-        When the training and RoPE context lengths match, the RoPE cache stays
-        at the model's intrinsic maximum.
-        """
-        cfg = self._make_config()
-        original_max = cfg.max_context_length
-        cfg.update_from_config(config=self._make_trainer_config(original_max))
-        self.assertEqual(cfg.max_context_length, original_max)
 
 
 if __name__ == "__main__":

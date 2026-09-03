@@ -55,6 +55,7 @@ def _qwen3_4b_dapo_math_config(
     return Controller.Config(
         model_spec=model_registry(
             "4B",
+            seq_len=max_total_tokens,
             attn_backend="varlen",
             # Compute vocabulary logits in fp32; the rest of the forward uses bf16.
             converters=[LMHeadCastConverter.Config()],

@@ -148,7 +148,7 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
 def test_fake_pg_incompatible_test_requires_explicit_marker(
     test_name: str, incompatibility: str
 ) -> None:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     if test_name == "checkpoint":
         config.checkpoint.enable = True
     elif test_name == "pipeline_parallel":
