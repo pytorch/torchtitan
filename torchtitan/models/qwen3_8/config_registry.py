@@ -42,8 +42,8 @@ def _multimodal_collator_config(
     )
 
 
-def qwen38_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def qwen38_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -67,8 +67,8 @@ def qwen38_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 512,
-            max_context_length=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -79,15 +79,19 @@ def qwen38_debugmodel() -> Trainer.Config:
     )
 
 
-def qwen38_debugmodel_varlen_attn() -> Trainer.Config:
-    config = qwen38_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+def qwen38_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
+    config = qwen38_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
     config.training.disable_cuda_graphs = True
     return config
 
 
-def qwen38_debugmodel_moe() -> Trainer.Config:
-    model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+def qwen38_debugmodel_moe(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry(
+        "debugmodel_moe", seq_len=seq_len, moe_comm_backend="standard"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -106,8 +110,8 @@ def qwen38_debugmodel_moe() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 512,
-            max_context_length=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -126,8 +130,8 @@ def qwen38_debugmodel_moe() -> Trainer.Config:
     )
 
 
-def qwen38_27b() -> Trainer.Config:
-    model_spec = model_registry("27B")
+def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("27B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -145,8 +149,8 @@ def qwen38_27b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -161,9 +165,11 @@ def qwen38_27b() -> Trainer.Config:
     )
 
 
-def qwen38_2_4t_a95b() -> Trainer.Config:
+def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3.8-2.4T-A95B text-only MoE training config."""
-    model_spec = model_registry("2.4T-A95B", moe_comm_backend="standard")
+    model_spec = model_registry(
+        "2.4T-A95B", seq_len=seq_len, moe_comm_backend="standard"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -178,8 +184,8 @@ def qwen38_2_4t_a95b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
