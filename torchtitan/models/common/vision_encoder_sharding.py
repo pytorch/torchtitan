@@ -208,14 +208,14 @@ def set_vision_transformer_block_sharding_config(
         attention_grad_layout = SpmdType({DP: spmd.V, CP: spmd.P, TP: spmd.S(1)})
         block.attn.inner_attention.sharding_config = ShardingConfig(
             in_src_shardings={
-                "q_TNH": attention_layout,
-                "k_TNH": attention_layout,
-                "v_TNH": attention_layout,
+                "q_THK": attention_layout,
+                "k_THK": attention_layout,
+                "v_THV": attention_layout,
             },
             in_dst_shardings={
-                "q_TNH": attention_layout,
-                "k_TNH": attention_layout,
-                "v_TNH": attention_layout,
+                "q_THK": attention_layout,
+                "k_THK": attention_layout,
+                "v_THV": attention_layout,
             },
             out_src_shardings=attention_layout,
             local_spmd=True,
