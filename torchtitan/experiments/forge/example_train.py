@@ -15,7 +15,6 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.components.validate import Validator
@@ -270,7 +269,8 @@ class Trainer(ForgeEngine):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
                 input_dict, labels = next(data_iterator)
-                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                # Popped so the batch reaching the model holds only its kwargs.
+                local_valid_tokens += input_dict.pop("num_valid_tokens")
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
 

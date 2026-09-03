@@ -22,6 +22,8 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     StateDictAdapter for DeepSeekV3 model.
     """
 
+    hf_experts_key_fragment = "mlp.experts"
+
     def __init__(
         self,
         model_config: DeepSeekV3Model.Config,
@@ -228,9 +230,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
-            if "mlp.experts" in key:
+            if self.hf_experts_key_fragment in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
-                layer_num, expert_num = re.findall(r"\d+", key)
+                layer_num, expert_num = re.findall(r"\d+", key)[:2]
                 titan_abstract_key, mapped_layer_num = self._map_from_hf_layer_key(
                     abstract_key,
                     layer_num,

@@ -19,6 +19,10 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import Configurable
 
 
+# The input dict holds the model's forward kwargs plus ``num_valid_tokens``, the
+# number of labels that contribute to the loss. Collators over token labels
+# count them here so the trainer does not rescan every batch on the critical
+# path; the trainer pops the field before the batch reaches the model.
 TrainerBatch: TypeAlias = tuple[dict[str, Any], torch.Tensor]
 
 
@@ -76,4 +80,5 @@ class TextCollator(Collator):
         return {
             "input": input_ids,
             "positions": positions,
+            "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
         }, labels
