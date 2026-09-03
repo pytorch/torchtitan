@@ -373,7 +373,7 @@ class GradAccumulator:
         accumulator = GradAccumulator(hidden_states, num_chunks=4, dtype=torch.float32)
         for chunk_grad in chunk_grads:
             accumulator.add(chunk_grad)
-        full_grad = accumulator.result()
+        full_grad = accumulator.buffer
     """
 
     def __init__(
@@ -387,7 +387,7 @@ class GradAccumulator:
         self.num_chunks = num_chunks
         self.seq_dim = seq_dim
         self._next_idx = 0
-        self._buffer = torch.zeros_like(reference, dtype=dtype)
+        self.buffer = torch.zeros_like(reference, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
         """Add the next chunk gradient sequentially.
@@ -397,22 +397,18 @@ class GradAccumulator:
         if self._next_idx >= self.num_chunks:
             raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
-        if chunk_grad.dtype != self._buffer.dtype:
-            chunk_grad = chunk_grad.to(self._buffer.dtype)
+        if chunk_grad.dtype != self.buffer.dtype:
+            chunk_grad = chunk_grad.to(self.buffer.dtype)
 
         chunk_seq_len = chunk_grad.shape[self.seq_dim]
         start = self._next_idx * chunk_seq_len
         end = start + chunk_seq_len
 
-        slices = [slice(None)] * self._buffer.ndim
+        slices = [slice(None)] * self.buffer.ndim
         slices[self.seq_dim] = slice(start, end)
-        self._buffer[tuple(slices)] = chunk_grad
+        self.buffer[tuple(slices)] = chunk_grad
 
         self._next_idx += 1
-
-    def result(self) -> torch.Tensor:
-        """Return the accumulated gradient tensor."""
-        return self._buffer
 
 
 class ChunkedLossWrapper(BaseLoss):
@@ -604,7 +600,7 @@ class ChunkedLossWrapper(BaseLoss):
                 return total_loss, metrics
 
             assert grad_accumulator is not None
-            accumulated_grad = grad_accumulator.result().to(hidden_states.dtype)
+            accumulated_grad = grad_accumulator.buffer.to(hidden_states.dtype)
 
         with spmd.no_typecheck():
             loss = self._gradient_backprop(
