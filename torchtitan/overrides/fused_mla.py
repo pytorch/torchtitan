@@ -46,6 +46,13 @@ The implementation differs from Megatron Core in several important ways:
   wraps local results back into DTensors.
 * Flattened offsets use 64-bit arithmetic because the traced 671B local tensors
   exceed 2**31 elements.
+* Each head's rope tail is addressed as one contiguous tile and de-interleaved
+  in registers. Addressing the adjacent complex pairs as two stride-2 accesses
+  over the same bytes prevents vectorization: on Triton 3.8 that emits 32
+  scalar 2-byte accesses per program where the tile form emits 4 16-byte
+  vector accesses. The Q kernel is 1.77x faster for it on GB300 at the 671B
+  shape; the K and KV-backward kernels are already bandwidth-bound on their
+  contiguous nope/value copies and do not measurably change.
 * Every Triton launch is exposed as a stable ``torch.library`` custom operator,
   so GraphTrainer's fake-tensor ``make_fx`` trace keeps the fused boundaries.
 
@@ -81,7 +88,32 @@ __all__ = [
     "fused_mla_kv",
 ]
 
+# Autotuned rather than fixed: the best pair tracks head count. At 128 heads
+# any tile from 16 up is within a few percent; at 16 heads one warp beats four
+# by ~1.2x on the KV backward. Wider grids were no faster at either count and
+# tuned 2.4x slower -- an 8-wide tile alone unrolls the KV backward's
+# tl.static_range head loop 16 times.
+_AUTOTUNE_CONFIGS = [
+    triton.Config({"BLOCK_H": block_h}, num_warps=num_warps)
+    for block_h in (16, 32, 64, 128)
+    for num_warps in (1, 4)
+]
 
+# Tuning key: the geometry that changes the best tile. Token count does not --
+# the best config was stable from 4k to 32k tokens -- so runs with a varying
+# microbatch reuse one tuning result instead of re-benchmarking.
+_AUTOTUNE_KEY = ["N_HEADS", "Q_NOPE_DIM", "ROPE_DIM"]
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS,
+    key=_AUTOTUNE_KEY,
+    # This kernel rotates q in place, and the autotuner runs each candidate
+    # against the same buffer. Without this, every trial after the first would
+    # rotate already-rotated data and the chosen config would be benchmarked
+    # (and the caller's tensor left) wrong.
+    restore_value=["q"],
+)
 @triton.jit
 def _fused_q_rope_kernel(
     q,
@@ -98,26 +130,33 @@ def _fused_q_rope_kernel(
     POS_STRIDE_L: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     N_HEADS: tl.constexpr,
-    NUM_HEAD_BLOCKS: tl.constexpr,
     Q_NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_PAIRS: tl.constexpr,
     INVERSE: tl.constexpr,
 ) -> None:
+    # Derived here rather than passed in: BLOCK_H is chosen by the autotuner,
+    # so the host cannot know the block count when it builds the launch.
+    num_head_blocks: tl.constexpr = (N_HEADS + BLOCK_H - 1) // BLOCK_H
     # Production DeepSeek shapes exceed 2**31 elements, so every flattened
     # tensor index must be promoted before multiplying by a stride.
     program = tl.program_id(0).to(tl.int64)
-    head_block = program % NUM_HEAD_BLOCKS
-    token = program // NUM_HEAD_BLOCKS
+    head_block = program % num_head_blocks
+    token = program // num_head_blocks
     seq = token % SEQ_LEN
     batch = token // SEQ_LEN
 
     head = head_block * BLOCK_H + tl.arange(0, BLOCK_H)[:, None]
     pair = tl.arange(0, BLOCK_PAIRS)[None, :]
+    # Each head's rope tail is ROPE_DIM contiguous elements. Address it as one
+    # tile and de-interleave the adjacent pairs in registers: two stride-2
+    # accesses over the same bytes defeat vectorization, so each transaction
+    # would carry half the useful bytes.
+    lane = tl.arange(0, 2 * BLOCK_PAIRS)[None, :]
     head_mask = head < N_HEADS
     pair_mask = pair < ROPE_DIM // 2
-    mask = head_mask & pair_mask
+    lane_mask = head_mask & (lane < ROPE_DIM)
     position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
 
     q_base = (
@@ -126,16 +165,13 @@ def _fused_q_rope_kernel(
         + head * Q_STRIDE_H
         + Q_NOPE_DIM * Q_STRIDE_D
     )
-    q_even = tl.load(
-        q + q_base + (2 * pair) * Q_STRIDE_D,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    q_odd = tl.load(
-        q + q_base + (2 * pair + 1) * Q_STRIDE_D,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
+    q_pairs = tl.reshape(
+        tl.load(q + q_base + lane * Q_STRIDE_D, mask=lane_mask, other=0.0),
+        (BLOCK_H, BLOCK_PAIRS, 2),
+    )
+    q_even, q_odd = tl.split(q_pairs)
+    q_even = q_even.to(tl.float32)
+    q_odd = q_odd.to(tl.float32)
 
     cache_base = position * CACHE_STRIDE_M + pair * CACHE_STRIDE_P
     cos = tl.load(
@@ -157,17 +193,13 @@ def _fused_q_rope_kernel(
         out_odd = q_even * sin + q_odd * cos
 
     tl.store(
-        q + q_base + (2 * pair) * Q_STRIDE_D,
-        out_even,
-        mask=mask,
-    )
-    tl.store(
-        q + q_base + (2 * pair + 1) * Q_STRIDE_D,
-        out_odd,
-        mask=mask,
+        q + q_base + lane * Q_STRIDE_D,
+        tl.reshape(tl.join(out_even, out_odd), (BLOCK_H, 2 * BLOCK_PAIRS)),
+        mask=lane_mask,
     )
 
 
+@triton.autotune(configs=_AUTOTUNE_CONFIGS, key=_AUTOTUNE_KEY)
 @triton.jit
 def _fused_k_rope_kernel(
     kv,
@@ -193,16 +225,16 @@ def _fused_k_rope_kernel(
     K_STRIDE_D: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     N_HEADS: tl.constexpr,
-    NUM_HEAD_BLOCKS: tl.constexpr,
     Q_NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_PAIRS: tl.constexpr,
 ) -> None:
+    num_head_blocks: tl.constexpr = (N_HEADS + BLOCK_H - 1) // BLOCK_H
     program = tl.program_id(0).to(tl.int64)
-    head_block = program % NUM_HEAD_BLOCKS
-    token = program // NUM_HEAD_BLOCKS
+    head_block = program % num_head_blocks
+    token = program // num_head_blocks
     seq = token % SEQ_LEN
     batch = token // SEQ_LEN
 
@@ -224,17 +256,18 @@ def _fused_k_rope_kernel(
     # FP32 complex multiply in a separate program for every head.
     pair = tl.arange(0, BLOCK_PAIRS)
     pair_mask = pair < ROPE_DIM // 2
+    # Load and store the rope tail as one contiguous tile; see the comment in
+    # _fused_q_rope_kernel.
+    lane = tl.arange(0, 2 * BLOCK_PAIRS)
+    lane_mask = lane < ROPE_DIM
     kpe_base = batch * KPE_STRIDE_B + seq * KPE_STRIDE_L
-    kpe_even = tl.load(
-        k_pe + kpe_base + (2 * pair) * KPE_STRIDE_D,
-        mask=pair_mask,
-        other=0.0,
-    ).to(tl.float32)
-    kpe_odd = tl.load(
-        k_pe + kpe_base + (2 * pair + 1) * KPE_STRIDE_D,
-        mask=pair_mask,
-        other=0.0,
-    ).to(tl.float32)
+    kpe_pairs = tl.reshape(
+        tl.load(k_pe + kpe_base + lane * KPE_STRIDE_D, mask=lane_mask, other=0.0),
+        (BLOCK_PAIRS, 2),
+    )
+    kpe_even, kpe_odd = tl.split(kpe_pairs)
+    kpe_even = kpe_even.to(tl.float32)
+    kpe_odd = kpe_odd.to(tl.float32)
 
     position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
     cache_base = position * CACHE_STRIDE_M + pair * CACHE_STRIDE_P
@@ -252,19 +285,15 @@ def _fused_k_rope_kernel(
     out_odd = kpe_even * sin + kpe_odd * cos
 
     rope_base = k_base + Q_NOPE_DIM * K_STRIDE_D
-    rope_mask = head_mask & pair_mask[None, :]
+    rope_mask = head_mask & lane_mask[None, :]
     tl.store(
-        k + rope_base + (2 * pair[None, :]) * K_STRIDE_D,
-        out_even[None, :],
-        mask=rope_mask,
-    )
-    tl.store(
-        k + rope_base + (2 * pair[None, :] + 1) * K_STRIDE_D,
-        out_odd[None, :],
+        k + rope_base + lane[None, :] * K_STRIDE_D,
+        tl.reshape(tl.join(out_even, out_odd), (2 * BLOCK_PAIRS,))[None, :],
         mask=rope_mask,
     )
 
 
+@triton.autotune(configs=_AUTOTUNE_CONFIGS, key=_AUTOTUNE_KEY)
 @triton.jit
 def _fused_kv_backward_kernel(
     grad_k,
@@ -309,7 +338,9 @@ def _fused_kv_backward_kernel(
     batch = token // SEQ_LEN
 
     dim = tl.arange(0, BLOCK_D)[None, :]
-    pair = tl.arange(0, BLOCK_PAIRS)[None, :]
+    # Load and store the rope tail as one contiguous tile; see the comment in
+    # _fused_q_rope_kernel.
+    lane = tl.arange(0, 2 * BLOCK_PAIRS)[None, :]
     grad_pos_even = tl.zeros((BLOCK_PAIRS,), dtype=tl.float32)
     grad_pos_odd = tl.zeros((BLOCK_PAIRS,), dtype=tl.float32)
 
@@ -345,19 +376,18 @@ def _fused_kv_backward_kernel(
             mask=value_mask,
         )
 
-        pair_mask = head_mask & (pair < ROPE_DIM // 2)
-        grad_even = tl.load(
-            grad_k + gk_base + (Q_NOPE_DIM + 2 * pair) * GK_STRIDE_D,
-            mask=pair_mask,
-            other=0.0,
-        ).to(tl.float32)
-        grad_odd = tl.load(
-            grad_k + gk_base + (Q_NOPE_DIM + 2 * pair + 1) * GK_STRIDE_D,
-            mask=pair_mask,
-            other=0.0,
-        ).to(tl.float32)
-        grad_pos_even += tl.sum(grad_even, axis=0)
-        grad_pos_odd += tl.sum(grad_odd, axis=0)
+        lane_mask = head_mask & (lane < ROPE_DIM)
+        grad_pairs = tl.reshape(
+            tl.load(
+                grad_k + gk_base + (Q_NOPE_DIM + lane) * GK_STRIDE_D,
+                mask=lane_mask,
+                other=0.0,
+            ),
+            (BLOCK_H, BLOCK_PAIRS, 2),
+        )
+        grad_even, grad_odd = tl.split(grad_pairs)
+        grad_pos_even += tl.sum(grad_even.to(tl.float32), axis=0)
+        grad_pos_odd += tl.sum(grad_odd.to(tl.float32), axis=0)
 
     # Stock expand-backward materializes the head reduction in the input dtype
     # before ComplexRoPE backward upcasts it. Preserve that rounding boundary.
@@ -386,15 +416,11 @@ def _fused_kv_backward_kernel(
     out_odd = grad_pos_odd * cos - grad_pos_even * sin
 
     gkpe_base = batch * GKPE_STRIDE_B + seq * GKPE_STRIDE_L
+    lane_1d = tl.arange(0, 2 * BLOCK_PAIRS)
     tl.store(
-        grad_k_pe + gkpe_base + (2 * pair_1d) * GKPE_STRIDE_D,
-        out_even,
-        mask=pair_mask_1d,
-    )
-    tl.store(
-        grad_k_pe + gkpe_base + (2 * pair_1d + 1) * GKPE_STRIDE_D,
-        out_odd,
-        mask=pair_mask_1d,
+        grad_k_pe + gkpe_base + lane_1d * GKPE_STRIDE_D,
+        tl.reshape(tl.join(out_even, out_odd), (2 * BLOCK_PAIRS,)),
+        mask=lane_1d < ROPE_DIM,
     )
 
 
@@ -413,12 +439,10 @@ def _fused_mla_q_rope_op(
 ) -> torch.Tensor:
     batch, seq_len, n_heads, q_head_dim = q.shape
     rope_dim = q_head_dim - q_nope_dim
-    # Tuned on GB300 for DeepSeek-V3 671B: B=16, L=4096, H=128. A wide head
-    # tile amortizes position/cache loads without making four warps register-bound.
-    block_h = min(64, triton.next_power_of_2(n_heads))
-    num_head_blocks = triton.cdiv(n_heads, block_h)
     block_pairs = triton.next_power_of_2(rope_dim // 2)
-    _fused_q_rope_kernel[(batch * seq_len * num_head_blocks,)](
+    _fused_q_rope_kernel[
+        lambda meta: (batch * seq_len * triton.cdiv(n_heads, meta["BLOCK_H"]),)
+    ](
         q,
         rope_cache_real,
         positions,
@@ -433,13 +457,10 @@ def _fused_mla_q_rope_op(
         POS_STRIDE_L=positions.stride(1),
         SEQ_LEN=seq_len,
         N_HEADS=n_heads,
-        NUM_HEAD_BLOCKS=num_head_blocks,
         Q_NOPE_DIM=q_nope_dim,
         ROPE_DIM=rope_dim,
-        BLOCK_H=block_h,
         BLOCK_PAIRS=block_pairs,
         INVERSE=inverse,
-        num_warps=4,
     )
     return q
 
@@ -463,11 +484,9 @@ def _fused_mla_k_rope_op(
         dtype=kv.dtype,
         device=kv.device,
     )
-    # This kernel also materializes Q-nope-sized data per head, so its smaller
-    # tile gives better memory-level parallelism than the Q-only RoPE kernel.
-    block_h = min(16, triton.next_power_of_2(n_heads))
-    num_head_blocks = triton.cdiv(n_heads, block_h)
-    _fused_k_rope_kernel[(batch * seq_len * num_head_blocks,)](
+    _fused_k_rope_kernel[
+        lambda meta: (batch * seq_len * triton.cdiv(n_heads, meta["BLOCK_H"]),)
+    ](
         kv,
         k_pe,
         rope_cache_real,
@@ -491,13 +510,10 @@ def _fused_mla_k_rope_op(
         K_STRIDE_D=k.stride(3),
         SEQ_LEN=seq_len,
         N_HEADS=n_heads,
-        NUM_HEAD_BLOCKS=num_head_blocks,
         Q_NOPE_DIM=q_nope_dim,
         ROPE_DIM=rope_dim,
-        BLOCK_H=block_h,
         BLOCK_D=triton.next_power_of_2(q_nope_dim),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
-        num_warps=4,
     )
     return k
 
@@ -542,8 +558,6 @@ def _fused_mla_kv_backward_op(
         dtype=grad_k.dtype,
         device=grad_k.device,
     )
-    # Reduce more heads per program to amortize the shared positional gradient.
-    block_h = min(64, triton.next_power_of_2(n_heads))
     _fused_kv_backward_kernel[(batch * seq_len,)](
         grad_k,
         grad_v,
@@ -576,12 +590,10 @@ def _fused_mla_kv_backward_op(
         Q_NOPE_DIM=q_nope_dim,
         ROPE_DIM=rope_dim,
         V_DIM=v_dim,
-        BLOCK_H=block_h,
         BLOCK_D=triton.next_power_of_2(max(q_nope_dim, v_dim)),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
         ROUND_BF16_SUM=grad_k.dtype == torch.bfloat16,
         ROUND_FP16_SUM=grad_k.dtype == torch.float16,
-        num_warps=4,
     )
     return grad_kv, grad_k_pe
 

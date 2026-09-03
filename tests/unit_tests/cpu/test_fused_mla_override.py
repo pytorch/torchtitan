@@ -9,6 +9,7 @@ import unittest
 from typing import cast
 
 import torch
+import triton
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.testing._internal.common_utils import (
@@ -21,10 +22,32 @@ from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.deepseek_v3.model import Attention, DeepSeekV3Model
-from torchtitan.overrides.fused_mla import fused_mla_kv, fused_mla_q, FusedMLAAttention
+from torchtitan.overrides.fused_mla import (
+    _fused_k_rope_kernel,
+    _fused_kv_backward_kernel,
+    _fused_q_rope_kernel,
+    fused_mla_kv,
+    fused_mla_q,
+    FusedMLAAttention,
+)
 
 
 class TestFusedMLAOverrideConfig(unittest.TestCase):
+    def test_all_kernels_are_autotuned_over_head_geometry(self):
+        """Launch configuration is tuned per shape, not hard-coded."""
+        for kernel in (
+            _fused_q_rope_kernel,
+            _fused_k_rope_kernel,
+            _fused_kv_backward_kernel,
+        ):
+            self.assertIsInstance(kernel, triton.runtime.Autotuner)
+            self.assertEqual(kernel.keys, ["N_HEADS", "Q_NOPE_DIM", "ROPE_DIM"])
+            self.assertGreater(len(kernel.configs), 1)
+        # The Q kernel rotates its input in place, so the autotuner has to
+        # restore it between candidate runs or every trial past the first
+        # measures (and leaves behind) doubly rotated data.
+        self.assertEqual(_fused_q_rope_kernel.restore_value, ["q"])
+
     def test_override_replaces_all_debug_attention_configs(self):
         config = deepseek_v3_debugmodel(seq_len=2048)
         model_spec = config.model_spec
