@@ -133,6 +133,28 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
+class _DenseGradient(torch.autograd.Function):
+    """Identity in forward; the backward hands back a dense gradient.
+
+    ``torch.distributed.pipelining`` sizes a stage's gradient receive buffer
+    from the strides of the next stage's input gradients, which it computes
+    once with ``torch.autograd.grad`` at metadata inference, and c10d refuses
+    a buffer that is not non-overlapping and dense. A stage whose first use of
+    an input is a concatenation, such as the head's final aggregation on a
+    stage that holds no layer or a block-opening layer, gets a view of the
+    concatenation's gradient for that input. Materialising it here keeps the
+    P2P buffers dense; the forward is untouched and the values are the same.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        return grad.contiguous()
+
+
 def _apply_attention_residual(
     partial_block_TD: torch.Tensor | None,
     block_residual_TND: torch.Tensor,
@@ -401,7 +423,11 @@ class KimiK3Model(Decoder):
                 special_tokens=special_tokens,
             )
         else:
-            h_TD = tokens
+            # A pipeline stage: its inputs' gradients travel over P2P, which
+            # needs them dense (see _DenseGradient).
+            h_TD = _DenseGradient.apply(tokens)
+            if block_residual_in is not None:
+                block_residual_in = _DenseGradient.apply(block_residual_in)
 
         num_tokens, D = h_TD.shape
         block_residual_TND = (
