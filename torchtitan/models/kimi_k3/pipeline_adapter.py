@@ -49,7 +49,7 @@ from torchtitan.distributed.pipeline_parallel import (
     pipeline_llm,
 )
 from torchtitan.models.kimi_k3.layout import (
-    _infer_block_layout_tables_from_stages,
+    infer_block_layout_tables_from_stages,
     BlockLayoutTables,
     unstack_blocks,
 )
@@ -1172,7 +1172,7 @@ def pipeline_kimi_k3(model: nn.Module, **kwargs):
     num_blocks = -(-n_layers_total // layers_per_block)
 
     try:
-        layout_tables = _infer_block_layout_tables_from_stages(
+        layout_tables = infer_block_layout_tables_from_stages(
             stages,
             pp_size=pp_size,
             num_blocks=num_blocks,
