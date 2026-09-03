@@ -1,5 +1,6 @@
 ciflow_push_tags:
   - ciflow/b200
+  - ciflow/rocm
   - ciflow/h100.8
   - ciflow/rl
 labeler_config: labeler.yml
