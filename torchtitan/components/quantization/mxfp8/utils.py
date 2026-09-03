@@ -30,7 +30,6 @@ Quantizing before the reshard is safe because a scaling group is 32 contiguous
 elements of ``K`` within one row of one expert, so no split of ``E`` or ``N`` can
 intersect one and a ``K`` split cannot either while each shard's ``K`` stays a
 multiple of 32. Fusing first is safe because it only interleaves rows. Both are
-pinned by ``tests/unit_tests/gpu/test_mxfp8_utils.py``.
 
 Scales go out unswizzled because the swizzle does *not* commute with a ``K``
 split: the blocked layout interleaves across rows and groups, so slicing it
@@ -56,6 +55,86 @@ _EXPERT_KEY = re.compile(r"^(?P<prefix>.*\.)?(?P<name>w1_EFD|w2_EDF|w3_EFD)$")
 
 # MXFP8 scaling-group size, along the contracting dim.
 _BLOCK_SIZE = 32
+# Must match what the inference path quantizes with, so both GEMM operands agree.
+_SCALE_MODE = "rceil"
+
+
+# TODO: remove this in favor of FSDP-managed version
+# similar to https://github.com/pytorch/torchtitan/pull/4203
+class _MXFP8GroupedMMFwdBF16Bwd(torch.autograd.Function):
+    """Grouped GEMM with an MXFP8 forward and a bf16 backward.
+
+    QAT for the routed experts: the forward really is mxfp8, so training sees
+    quantization error, while the backward is a plain bf16 ``torch._grouped_mm``
+    on the saved high-precision tensors (straight-through estimator).
+
+    Adapted from torchao's ``_MXFP8GroupedMM`` with the paths we do not use
+    removed: no emulation, no kernel-preference switch, and no internal token
+    padding. The MXFP8 converter pads token groups in the dispatcher instead (see
+    ``swap_token_dispatcher``), so groups are already aligned on arrival.
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        A_MK: torch.Tensor,
+        B_t_EKN: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        from torchao.prototype.moe_training.kernels.mxfp8 import (
+            mxfp8_quantize_2d_1x32_cutedsl,
+            triton_mx_block_rearrange_per_group_3d,
+        )
+
+        if A_MK.ndim != 2 or B_t_EKN.ndim != 3:
+            raise ValueError(
+                "MXFP8 grouped mm expects a 2D activation and 3D weight, got "
+                f"{A_MK.ndim}D and {B_t_EKN.ndim}D."
+            )
+
+        # Activation: CuteDSL emits the blocked scale layout the GEMM wants, so
+        # there is no separate swizzle pass.
+        act_qdata, act_scales_blocked = mxfp8_quantize_2d_1x32_cutedsl(
+            A_MK, scaling_mode=_SCALE_MODE, offs=offsets_E
+        )
+        # Weight: quantize along K in the (E, N, K) view, then swizzle.
+        w_qdata, w_scales = triton_to_mxfp8_dim0(
+            B_t_EKN.transpose(-2, -1).contiguous(), _BLOCK_SIZE, _SCALE_MODE
+        )
+        w_scales_blocked = triton_mx_block_rearrange_per_group_3d(w_scales)
+
+        out = torch._scaled_grouped_mm(
+            act_qdata,
+            w_qdata.transpose(-2, -1),
+            act_scales_blocked,
+            w_scales_blocked,
+            offs=offsets_E,
+            out_dtype=torch.bfloat16,
+        )
+        ctx.save_for_backward(A_MK, B_t_EKN, offsets_E)
+        return out
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_out_MN: torch.Tensor):
+        A_MK, B_t_EKN, offsets_E = ctx.saved_tensors
+        # grad_out may be non-contiguous (e.g. expanded with stride 0);
+        # torch._grouped_mm needs real strides.
+        grad_out_MN = grad_out_MN.contiguous()
+        grad_A_MK = torch._grouped_mm(
+            grad_out_MN,
+            B_t_EKN.transpose(-2, -1),
+            offs=offsets_E,
+            out_dtype=torch.bfloat16,
+        )
+        grad_B_ENK = torch._grouped_mm(
+            grad_out_MN.transpose(-2, -1),
+            A_MK,
+            offs=offsets_E,
+            out_dtype=torch.bfloat16,
+        )
+        return grad_A_MK, grad_B_ENK.transpose(-2, -1), None
 
 
 def quantize_expert_state_dict_to_mxfp8(
@@ -101,11 +180,11 @@ def quantize_expert_state_dict_to_mxfp8(
             E, F, D = gate_local.shape
             fused = torch.stack([gate_local.bfloat16(), up_local.bfloat16()], dim=2)
             w13 = fused.reshape(E, 2 * F, D).contiguous()
-            w13_qdata, w13_scales = triton_to_mxfp8_dim0(w13, _BLOCK_SIZE, "rceil")
+            w13_qdata, w13_scales = triton_to_mxfp8_dim0(w13, _BLOCK_SIZE, _SCALE_MODE)
 
             # w2 is already (E, N=D, K=F).
             w2 = down_local.bfloat16().contiguous()
-            w2_qdata, w2_scales = triton_to_mxfp8_dim0(w2, _BLOCK_SIZE, "rceil")
+            w2_qdata, w2_scales = triton_to_mxfp8_dim0(w2, _BLOCK_SIZE, _SCALE_MODE)
 
             # Rewrap as DTensors so TorchStore can reshard them. from_local
             # infers the global shape from the local shape and the placements,

@@ -98,6 +98,9 @@ class MXFP8LinearConverter(QuantizationConverter):
         return model_config
 
 
+_mxfp8_experts_cache: dict[type, type] = {}
+
+
 def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
     """Get or create an MXFP8-quantized subclass of *parent_cls*.
 
@@ -155,7 +158,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode
           when computing the e8m0 scale factors.
         """
-        pad_multiple: int = 128
+        pad_multiple: int = 32
         """
         Pad per-expert token groups to this multiple for MXFP8 grouped GEMM alignment.
         The CuTeDSL quantization kernel on sm_100 requires multiples of 128.
@@ -209,10 +212,8 @@ _mxfp8_qat_experts_cache: dict[type, type] = {}
 def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
     """Get or create an MXFP8 QAT subclass of *parent_cls*.
 
-    Like ``_get_mxfp8_grouped_experts_cls`` but the grouped GEMMs use the QAT
-    autograd function via the ``bf16_bwd`` config (real mxfp8 forward, bf16
-    backward), using torchao's default quant kernels for the
-    forward quantization.
+    Like ``_get_mxfp8_grouped_experts_cls`` but the grouped GEMMs run
+    ``_MXFP8GroupedMMFwdBF16Bwd``: real mxfp8 forward, bf16 backward.
     """
     if parent_cls in _mxfp8_qat_experts_cache:
         return _mxfp8_qat_experts_cache[parent_cls]
@@ -224,27 +225,12 @@ def _get_mxfp8_qat_grouped_experts_cls(parent_cls: type) -> type:
         class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
 
-        def __init__(self, config: Config):
-            super().__init__(config)
-            from torchao.prototype.moe_training.config import MXFP8TrainingOpConfig
-            from torchao.prototype.mx_formats.config import ScaleCalculationMode
-            from torchao.quantization.quant_api import quantize_
+        def _grouped_mm(self, *, A, B_t, offs):
+            from torchtitan.components.quantization.mxfp8.utils import (
+                _MXFP8GroupedMMFwdBF16Bwd,
+            )
 
-            # QAT: real mxfp8 forward, high-precision (bf16) backward.
-            # - bf16_bwd=True routes to the autograd function whose backward is a
-            #   plain bf16 torch._grouped_mm (straight-through estimator).
-            op_config = MXFP8TrainingOpConfig(
-                scale_calculation_mode=ScaleCalculationMode.RCEIL,
-                bf16_bwd=True,
-            )
-            # Kept so the inference path can read the scale mode and kernel
-            # preference without going through torchao's weight wrapper.
-            self._mxfp8_op_config = op_config
-            quantize_(
-                self,
-                config=op_config,
-                filter_fn=lambda mod, _fqn: isinstance(mod, GroupedExperts),
-            )
+            return _MXFP8GroupedMMFwdBF16Bwd.apply(A, B_t, offs)
 
     MXFP8QATGroupedExperts.__name__ = f"MXFP8QAT{parent_cls.__name__}"
     MXFP8QATGroupedExperts.__qualname__ = f"MXFP8QAT{parent_cls.__name__}"

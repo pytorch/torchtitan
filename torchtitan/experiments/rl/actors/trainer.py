@@ -6,6 +6,7 @@
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -86,14 +87,14 @@ class PolicyTrainer(Actor, Configurable):
         Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
-        transfer_mxfp8_experts: bool = False
-        """Quantize MoE expert weights to MXFP8 before publishing them.
+        transform_state_dict_fn: Callable[
+            [dict[str, Any]], dict[str, Any]
+        ] | None = None
+        """Rewrites the model state dict just before it is published.
 
-        For a generator whose experts are stored as MXFP8 (see
-        ``torchtitan.overrides.mxfp8_inference_grouped_experts``), which then
-        holds no high-precision copy and quantizes nothing. Halves the bytes on
-        the wire. Must match the generator's experts module: the published names
-        and shapes are its parameters."""
+        Runs after the dtype cast, so it sees exactly what would go on the wire.
+        Whatever it returns must match the generator's parameter names and
+        shapes. Used to publish quantized expert weights."""
 
     def __init__(
         self,
@@ -528,13 +529,8 @@ class PolicyTrainer(Actor, Configurable):
                 for name, tensor in state_dict.items()
             }
 
-        # TODO: express as a post hook instead?
-        if self.config.transfer_mxfp8_experts:
-            from torchtitan.components.quantization.mxfp8_utils import (
-                quantize_expert_state_dict_to_mxfp8,
-            )
-
-            state_dict = quantize_expert_state_dict_to_mxfp8(state_dict)
+        if self.config.transform_state_dict_fn is not None:
+            state_dict = self.config.transform_state_dict_fn(state_dict)
 
         await ts.put_state_dict(
             state_dict,

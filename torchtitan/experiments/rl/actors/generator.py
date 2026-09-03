@@ -1170,7 +1170,6 @@ class VLLMGenerator(Actor, Configurable):
                         with torch.no_grad():
                             with sl.log_trace_span("vllm_engine_step"):
                                 request_outputs = self._engine.step()
-                        self._maybe_profile_decode_step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1215,103 +1214,6 @@ class VLLMGenerator(Actor, Configurable):
                 action=LoopAction.STEP,
                 requests_per_dp_rank=self._request_dispatcher.rank0_route(queued),
             )
-
-    def _decode_only_step(self) -> bool:
-        """True if the engine step just executed was a pure-decode batch.
-
-        A pure-decode batch (every request emitting exactly one token, none
-        consuming its prompt) is what vLLM routes to the FULL cudagraph; any
-        prefill chunk in the batch routes to the PIECEWISE path instead (see
-        vllm cudagraph_dispatcher / CUDAGraphMode.FULL_AND_PIECEWISE). We detect
-        it from the scheduler's running set: every request must be past its
-        prefill (num_computed_tokens >= num_prompt_tokens) and already have
-        emitted at least two tokens, which excludes the prefill-completing step
-        that samples the first token. Best-effort: returns False if the engine
-        internals are not reachable so such a step is simply not counted.
-        """
-        try:
-            scheduler = self._engine.engine_core.engine_core.scheduler
-            running = scheduler.running
-            if not running:
-                return False
-            return all(
-                r.num_computed_tokens >= r.num_prompt_tokens
-                and r.num_output_tokens >= 2
-                for r in running
-            )
-        except Exception:
-            return False
-
-    def _maybe_profile_decode_step(self) -> None:
-        """One-shot torch profiler over a window of pure-decode steps (rank 0).
-
-        Experiment-only, env-gated by ``RL_GEN_PROFILE_DIR``. To measure
-        steady-state FULL-cudagraph decode (not the PIECEWISE mixed prefill
-        path), this only counts steps that (a) happen at policy version >=
-        ``RL_GEN_PROFILE_MIN_VERSION`` (model warmed up past the first weight
-        syncs) and (b) are pure-decode batches (see ``_decode_only_step``). It
-        skips ``RL_GEN_PROFILE_WARMUP`` such steps, records a contiguous run of
-        ``RL_GEN_PROFILE_ACTIVE`` of them, writes one chrome trace, and disables
-        itself. If a prefill step lands inside the active window, the window is
-        discarded and restarted so the trace stays pure decode. Under FULL
-        cudagraphs the CPU side collapses to one graph launch per step; the
-        replayed kernels (mxfp8 activation quant + expert GEMMs vs bf16) show up
-        on the GPU timeline, which is what we compare between the two configs.
-        """
-        prof_dir = os.environ.get("RL_GEN_PROFILE_DIR")
-        if (
-            prof_dir is None
-            or self._rank != 0
-            or getattr(self, "_gen_profile_done", False)
-        ):
-            return
-        min_version = int(os.environ.get("RL_GEN_PROFILE_MIN_VERSION", "2"))
-        if self.policy_version < min_version:
-            return
-
-        prof_active = getattr(self, "_gen_profiler", None) is not None
-        if not self._decode_only_step():
-            # A prefill/PIECEWISE step: never counted. If it lands mid-window,
-            # discard the contaminated window and restart cleanly.
-            if prof_active:
-                self._gen_profiler.__exit__(None, None, None)
-                self._gen_profiler = None
-                reached = self._gen_profile_step
-                self._gen_profile_step = 0
-                logger.info(
-                    f"[decode-profile] discarded window at {reached} decode steps "
-                    "(prefill step); restarting"
-                )
-            return
-
-        warmup = int(os.environ.get("RL_GEN_PROFILE_WARMUP", "30"))
-        active = int(os.environ.get("RL_GEN_PROFILE_ACTIVE", "20"))
-        step = getattr(self, "_gen_profile_step", 0) + 1
-        self._gen_profile_step = step
-        if step == warmup:
-            self._gen_profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-            )
-            self._gen_profiler.__enter__()
-            logger.info(
-                f"[decode-profile] started: policy_version={self.policy_version}, "
-                f"decode-only step {step}"
-            )
-        elif step == warmup + active:
-            prof = self._gen_profiler
-            prof.__exit__(None, None, None)
-            os.makedirs(prof_dir, exist_ok=True)
-            out = os.path.join(prof_dir, "decode_trace.json")
-            prof.export_chrome_trace(out)
-            logger.info(
-                f"[decode-profile] wrote {out} ({active} pure-decode steps, "
-                f"policy_version={self.policy_version})"
-            )
-            self._gen_profiler = None
-            self._gen_profile_done = True
 
     def _fail_outstanding_futures(self, exc: BaseException) -> None:
         """Fail every unresolved future after an exception or engine teardown."""

@@ -18,6 +18,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import MXFP8GroupedExpertsQATConverter
+from torchtitan.components.quantization.mxfp8 import quantize_expert_state_dict_to_mxfp8
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -830,7 +831,7 @@ def _rl_grpo_qwen3_30b_a3b_varlen_tp1_perf(
 
     # Generator-only overrides. In the mxfp8 path, the trainer:
     #   1. Runs mxfp8 fwd + bf16 bwd during forward (`MXFP8QATGroupedExperts`)
-    #   2. Pre-quantizes mxfp8 weights for the generator (`transfer_mxfp8_experts`)
+    #   2. Pre-quantizes mxfp8 weights for the generator (`transform_state_dict_fn`)
     #
     # The generator then reads these pre-quantized weights and compute rollouts
     # directly on them using the `mxfp8_inference_grouped_experts` override.
@@ -844,7 +845,7 @@ def _rl_grpo_qwen3_30b_a3b_varlen_tp1_perf(
                 pad_multiple=128, model_compile_enabled=False
             )
         ]
-        config.trainer.transfer_mxfp8_experts = True
+        config.trainer.transform_state_dict_fn = quantize_expert_state_dict_to_mxfp8
         generator_overrides.append(
             "torchtitan.overrides.mxfp8_inference_grouped_experts."
             "mxfp8_inference_grouped_experts"
