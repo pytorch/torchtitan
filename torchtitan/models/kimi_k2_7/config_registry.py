@@ -102,7 +102,6 @@ def kimi_k2_5_debugmodel(seq_len: int | None = None) -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=8e-4,
-            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -148,7 +147,6 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=3e-4,
-            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -194,7 +192,6 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=3e-4,
-            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -238,7 +235,6 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         optimizer=_dist_muon_optimizer(
             model_spec,
             lr=2.2e-4,
-            parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -259,22 +255,32 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
-    ep_size = parallelism.expert_parallel_degree
-    if ep_size <= 0:
-        raise ValueError("expert_parallel_degree must be positive")
-    if ep_size == 1:
-        return ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-            },
-        )
+def _dist_muon_dense_shardings(
+    sharding: Owned | BlockShard | Shard,
+) -> dict[str, Owned | BlockShard | Shard]:
+    """Apply one compute sharding to both dense storage-axis variants.
 
+    Dense FSDP storage uses ``dp_shard`` without CP. With CP,
+    ``DataParallelMeshDims`` flattens (``dp_shard``, ``cp``) into
+    ``dp_shard_cp``. DistMuon uses only declarations present in the parameter's
+    storage mesh, so declaring both keeps the layout valid across overrides.
+    """
+    return {
+        MeshAxisName.DP_SHARD.value: sharding,
+        f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": sharding,
+    }
+
+
+def _per_expert_compute_layout() -> ComputeLayout:
+    # This layout covers sparse "efsdp"/"ep" storage when EP is enabled and
+    # the dense storage-axis variants when EP is disabled, so post-init does
+    # not need to rebuild expert layouts after parallelism overrides.
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
     # smaller than the EFSDP size, add balanced rank assignment only after
     # benchmarks show that the fixed nonempty EFSDP coordinates are a hotspot.
     return ComputeLayout(
         shardings_by_mesh_axis={
+            **_dist_muon_dense_shardings(Shard(0)),
             MeshAxisName.EFSDP.value: Shard(0),
             MeshAxisName.EP.value: Shard(0),
         },
@@ -290,32 +296,29 @@ def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
     lr: float,
-    parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
     owned = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: Owned(),
-        },
+        shardings_by_mesh_axis=_dist_muon_dense_shardings(Owned()),
     )
     per_query_head = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: BlockShard(
+        shardings_by_mesh_axis=_dist_muon_dense_shardings(
+            BlockShard(
                 dim=0,
-                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
-            )
-        },
+                block_size=attention.qk_nope_head_dim + attention.qk_rope_head_dim,
+            ),
+        ),
     )
     per_key_value_head = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: BlockShard(
+        shardings_by_mesh_axis=_dist_muon_dense_shardings(
+            BlockShard(
                 dim=0,
                 block_size=attention.qk_nope_head_dim + attention.v_head_dim,
-            )
-        },
+            ),
+        ),
     )
-    per_expert = _per_expert_compute_layout(parallelism)
+    per_expert = _per_expert_compute_layout()
     query_shardings: dict[str, ComputeLayout] = (
         {
             "wq_a": owned,
@@ -464,60 +467,12 @@ def _dist_muon_optimizer(
     )
 
 
-def _align_dist_muon_expert_compute_layouts(
-    optimizer_config: OptimizersContainer.Config,
-    *,
-    parallelism: ParallelismConfig,
-) -> OptimizersContainer.Config:
-    """Align routed-expert layouts with the final parallelism config.
-
-    The registry builds compute layouts from the recipe's declared parallelism,
-    but the CLI can still override ``expert_parallel_degree`` afterwards. That
-    override decides whether routed experts use the 1D ``dp_shard`` layout or
-    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
-    """
-    # TODO: Remove this function once parallelism can no longer be overridden
-    # from the CLI; the registry layouts are then already final.
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
-        return optimizer_config
-    compute_sharding_by_fqn = cast(
-        dict[str, ComputeLayout],
-        dist_muon_kwargs["compute_sharding_by_fqn"],
-    )
-    per_expert = _per_expert_compute_layout(parallelism)
-    aligned_shardings = {}
-    changed = False
-    for fqn, compute_layout in compute_sharding_by_fqn.items():
-        if ".moe.routed_experts.inner_experts." in fqn and compute_layout != per_expert:
-            aligned_shardings[fqn] = per_expert
-            changed = True
-        else:
-            aligned_shardings[fqn] = compute_layout
-    if not changed:
-        return optimizer_config
-
-    dist_muon_kwargs["compute_sharding_by_fqn"] = aligned_shardings
-    return replace(
-        optimizer_config,
-        optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
-    )
-
-
 @dataclass(kw_only=True, slots=True)
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimizer = _align_dist_muon_expert_compute_layouts(
-            self.optimizer,
-            parallelism=self.parallelism,
-        )
+        if self.parallelism.expert_parallel_degree <= 0:
+            raise ValueError("expert_parallel_degree must be positive")
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
         if self.parallelism.tensor_parallel_degree > 1:
             # Fail during config parsing, before TP/FSDP creates _StridedShard
