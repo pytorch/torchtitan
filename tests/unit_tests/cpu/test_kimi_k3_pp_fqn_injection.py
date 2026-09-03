@@ -65,7 +65,9 @@ class TestKimiK3Split(unittest.TestCase):
         self.assertEqual(len(fqns), 2)
 
     def test_the_attn_res_tail_lands_on_the_last_stage(self):
-        last = _split(_Model(), 8)[-1]
+        fqns = _split(_Model(), 8)
+        assert fqns is not None
+        last = fqns[-1]
         self.assertIn("output_res_proj", last)
         self.assertIn("output_res_norm", last)
         self.assertIn("lm_head", last)
@@ -75,7 +77,9 @@ class TestKimiK3Split(unittest.TestCase):
         nothing is a stage with pieces missing rather than an error."""
         model = _Model()
         children = {name for name, _ in model.named_children()}
-        for stage in _split(model, 8):
+        fqns = _split(model, 8)
+        assert fqns is not None
+        for stage in fqns:
             for fqn in stage:
                 root = fqn.split(".", 1)[0]
                 self.assertIn(root, children, f"{fqn} matches no child")
@@ -86,6 +90,7 @@ class TestKimiK3Split(unittest.TestCase):
         every stage, and the first multimodal batch reports "pixel_values were
         provided without a vision encoder"."""
         fqns = _split(_MultimodalModel(), 8)
+        assert fqns is not None
         owner = [s for s in fqns if "vision_encoder" in s]
         self.assertEqual(len(owner), 1, "the tower must land on exactly one stage")
         self.assertIn("tok_embeddings", owner[0])
