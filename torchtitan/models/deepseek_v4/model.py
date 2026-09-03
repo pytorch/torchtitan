@@ -157,7 +157,7 @@ class DeepSeekV4Model(Decoder):
             nparams, active_nparams = get_nparams_and_active_nparams(deepseek_v4_model)
 
             attention_op_flops = 0
-            for layers in (model_config.layers, model_config.mtp_layers or ()):
+            for layers in (self.layers, self.mtp_layers or ()):
                 for layer in layers:
                     attention = layer.attention
                     inner_attention = attention.inner_attention
@@ -191,7 +191,7 @@ class DeepSeekV4Model(Decoder):
             active_nparams += len(deepseek_v4_model.mtp_layers) * sum(
                 param.numel() for param in deepseek_v4_model.lm_head.parameters()
             )
-            active_nparams += (model_config.hc_mult - 1) * sum(
+            active_nparams += (self.hc_mult - 1) * sum(
                 param.numel()
                 for mtp_layer in deepseek_v4_model.mtp_layers
                 for param in cast("MTPBlock", mtp_layer).h_proj.parameters()
