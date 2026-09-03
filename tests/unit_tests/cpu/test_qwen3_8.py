@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 import torch
 
-pytest.importorskip("fla")
+pytest.importorskip("attn_gym")
 
 from torchtitan.models.qwen3_5 import Qwen35Model, Qwen35StateDictAdapter
 from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config

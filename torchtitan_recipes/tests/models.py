@@ -221,9 +221,6 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     config = qwen35_debugmodel_varlen_attn(seq_len=512)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
-    # First-run FLA/TileLang kernel compile and autotune exceed the default
-    # 100s train timeout.
-    config.comm.train_timeout_seconds = 600
     config.activation_checkpoint = SelectiveAC.Config()
     _use_spmd_types(config, typechecking=False)
     config.training.disable_cuda_graphs = True
