@@ -37,31 +37,6 @@ class TestKernelSelection(unittest.TestCase):
         assert kernel is not None
         self.assertFalse(issubclass(kernel, ContextParallelKernel))
 
-    def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
-        from torchtitan.models.common.cp_attention import use_cp_kernel
-        from torchtitan.models.llama3 import model_registry
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
-
-        config = llama3_debugmodel()
-        config.model_spec = model_registry("debugmodel", attn_backend="flex")
-        tuned = config.model_spec.model.layers[0].attention.inner_attention
-        tuned.block_size = (256, 128)
-        tuned.kernel_options = {"BACKEND": "FLASH"}
-
-        use_cp_kernel(config, AllGatherCPFlexAttention)
-
-        swapped = config.model_spec.model.layers[0].attention.inner_attention
-        self.assertIsInstance(swapped, AllGatherCPFlexAttention.Config)
-        self.assertEqual(swapped.block_size, (256, 128))
-        self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
-
-    def test_swap_rejects_a_kernel_that_is_not_context_parallel(self):
-        from torchtitan.models.common.cp_attention import use_cp_kernel
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
-
-        with self.assertRaisesRegex(ValueError, "must inherit ContextParallelKernel"):
-            use_cp_kernel(llama3_debugmodel(), FlexAttention)
-
 
 class _FakeMesh:
     def __init__(self, cp_size: int | None):
@@ -81,7 +56,7 @@ def _in_mesh(cp_size):
 
 
 class TestCpGroup(unittest.TestCase):
-    """A CP kernel demands a CP group; it never degrades to plain attention."""
+    """CP kernels require a multi-rank CP group."""
 
     @staticmethod
     def _kernel():
@@ -116,7 +91,6 @@ class TestCpGroup(unittest.TestCase):
             self._kernel().forward(q, k, v)
 
     def test_the_kernel_holds_no_mesh_state(self):
-        """Nothing is captured at parallelize time, so none of it can go stale."""
         self.assertNotIn("parallelize", ContextParallelKernel.__dict__)
 
 

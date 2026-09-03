@@ -109,7 +109,7 @@ this for the comments and docstrings you are adding or rewriting.
 - **Shape-suffix tensor names.** In model code, name tensors with shape
   suffixes (Noam Shazeer convention:
   https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd),
-  e.g. `x_BLD`, `q_BLNH`, `out_TNH`. Capital-letter suffixes denote *logical*
+  e.g. `x_BLD`, `q_BLHK`, `out_THV`. Capital-letter suffixes denote *logical*
   tensor dimensions, not a physical sharding layout -- a name like
   `routed_input_RD` keeps the same suffix whether or not `R` is a local shard
   under EP/SP. Letters are scoped per module, not global: give each module that

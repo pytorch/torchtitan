@@ -19,6 +19,9 @@ from torch_checkpointing.checkpoint_manager import (
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.distributed_metadata import (
+    METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage
@@ -207,6 +210,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _wait_for_saving(self) -> None:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement saving yet."
+        )
+
+    def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
+        return self._storage.isfile(
+            filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
 
     def _maybe_wait_for_staging(self) -> None:

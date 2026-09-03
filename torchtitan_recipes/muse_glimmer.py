@@ -6,20 +6,17 @@
 
 """Context-parallel Muse Glimmer recipes."""
 
-from torchtitan.models.common.cp_attention import (
-    AllGatherCPFlexAttention,
-    use_cp_kernel,
-)
+from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
 from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_30b
 from torchtitan.protocols.module import Module
 from torchtitan.trainer import Trainer
+from torchtitan.transforms import apply_transforms, ContextParallelTransform
 
 
 def _muse_glimmer_30b_cp(*, kernel: type[Module], cp_degree: int) -> Trainer.Config:
     config = muse_glimmer_30b()
-    use_cp_kernel(config, kernel)
     config.parallelism.context_parallel_degree = cp_degree
-    return config
+    return apply_transforms(config, [ContextParallelTransform.Config(kernel=kernel)])
 
 
 def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:

@@ -7,11 +7,14 @@
 import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import cast
+from typing import Any
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -23,6 +26,7 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     VarlenAttention,
 )
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -152,7 +156,6 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -168,32 +171,6 @@ class Decoder(BaseModel):
             if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
-                )
-
-            from torchtitan.models.common.cp_attention import ContextParallelKernel
-
-            cp_enabled = parallelism.context_parallel_degree > 1
-            if cp_enabled:
-                validate_cp_backend(parallelism)
-            for fqn, traversed, _, _ in self.traverse(BaseAttention.Config):
-                # traverse returns the base config type.
-                attention = cast(BaseAttention.Config, traversed)
-                kernel = attention.inner_attention._owner
-                is_cp_kernel = kernel is not None and issubclass(
-                    kernel, ContextParallelKernel
-                )
-                if is_cp_kernel == cp_enabled:
-                    continue
-                if cp_enabled:
-                    raise ValueError(
-                        f"{fqn}.inner_attention must use a ContextParallelKernel, "
-                        "such as AllGatherCPFlexAttention, when the context "
-                        "parallel degree is larger than 1. See an example in "
-                        "torchtitan_recipes/muse_glimmer.py."
-                    )
-                raise ValueError(
-                    f"{fqn}.inner_attention is a ContextParallelKernel but the "
-                    "context parallel degree is 1. Select a non-CP kernel."
                 )
 
             tp = parallelism.tensor_parallel_degree
@@ -356,6 +333,43 @@ class Decoder(BaseModel):
                 get_efficient_causal_mask_mod_for_packed_document(positions),
             ],
         )
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
+        # Function-local import avoids a circular import
+        # (context_parallel.api -> models.common -> decoder).
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions", None)
+        if positions is not None:
+            inner = self.config.first_full_attention_backend
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+
+        input_sharding = decoder_input_sharding()
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
 
     def get_attention_masks(
         self,

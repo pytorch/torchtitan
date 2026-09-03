@@ -9,6 +9,8 @@ import importlib
 import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
+from fractions import Fraction
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -20,13 +22,15 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.logging import logger
@@ -457,6 +461,9 @@ class HFTransformerModel(BaseModel):
 
             self.max_seq_len = training.max_context_length
 
+            if hasattr(config.loss, "global_vocab_size"):
+                config.loss.global_vocab_size = self.vocab_size
+
             self.deterministic = debug.deterministic
 
             # Configure HF-specific settings to match TorchTitan settings
@@ -517,13 +524,132 @@ class HFTransformerModel(BaseModel):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            return get_dense_model_nparams_and_flops(
-                model,
-                n_layers=self.n_layers,
-                n_heads=self.n_heads,
-                head_dims=self.head_dim,
-                seq_len=seq_len,
+            assert isinstance(model, HFTransformerModel)
+            named_parameters = list(model.named_parameters())
+            nparams = sum(param.numel() for _, param in named_parameters)
+            parameter_weights = {
+                id(param): Fraction(1) for _, param in named_parameters
+            }
+
+            lm_head = getattr(model, "lm_head", None)
+            lm_head_parameter_ids = (
+                {id(param) for param in lm_head.parameters()}
+                if isinstance(lm_head, nn.Module)
+                else set()
             )
+            for module in model.modules():
+                if isinstance(module, nn.Embedding):
+                    for param in module.parameters(recurse=False):
+                        if id(param) not in lm_head_parameter_ids:
+                            parameter_weights[id(param)] = Fraction(0)
+
+            for layer in model.layers.values():
+                moe_config = getattr(layer, "_native_moe_config", None)
+                if moe_config is None:
+                    continue
+                active_expert_ratio = Fraction(
+                    moe_config.router.top_k, moe_config.num_experts
+                )
+                if getattr(layer, "_layer_level_moe", False):
+                    moe_block = layer
+                else:
+                    moe_attr = _get_moe_attr_name(layer)
+                    if moe_attr is None:
+                        logger.warning(
+                            "HF MFU calculation could not identify the MoE block; "
+                            "counting all expert parameters as active."
+                        )
+                        continue
+                    moe_block = getattr(layer, moe_attr)
+                for param in moe_block.experts.parameters():
+                    parameter_weights[id(param)] = active_expert_ratio
+
+            nparams_for_matmul = sum(
+                param.numel() * parameter_weights[id(param)]
+                for _, param in named_parameters
+            )
+            assert nparams_for_matmul.denominator == 1
+            active_nparams = nparams_for_matmul.numerator
+
+            if all(
+                hasattr(self, name)
+                for name in ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim")
+            ):
+                qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+                v_head_dim = self.v_head_dim
+            else:
+                qk_head_dim = self.head_dim
+                v_head_dim = self.head_dim
+
+            layer_types = getattr(self, "layer_types", None)
+            if layer_types is None:
+                default_layer_type = (
+                    "sliding_attention"
+                    if getattr(self, "sliding_window", None) is not None
+                    else "full_attention"
+                )
+                layer_types = [default_layer_type] * len(model.layers)
+            else:
+                # Debug flavors can override num_hidden_layers while retaining the full
+                # architecture's layer_types list. Count only the layers that were
+                # built.
+                layer_types = list(layer_types[: len(model.layers)])
+                if len(layer_types) < len(model.layers):
+                    logger.warning(
+                        "HF config defines fewer layer_types than built layers; "
+                        "approximating the remaining layers as full attention."
+                    )
+                    layer_types.extend(
+                        ["full_attention"] * (len(model.layers) - len(layer_types))
+                    )
+
+            attention_op_flops = 0
+            unsupported_layer_types = set()
+            for layer_type in layer_types:
+                if layer_type in ("attention", "full_attention"):
+                    sliding_window_size = None
+                elif layer_type == "sliding_attention":
+                    sliding_window_size = getattr(self, "sliding_window", None)
+                elif layer_type == "chunked_attention":
+                    sliding_window_size = getattr(self, "attention_chunk_size", None)
+                else:
+                    unsupported_layer_types.add(str(layer_type))
+                    sliding_window_size = None
+
+                layer_qk_head_dim = qk_head_dim
+                layer_v_head_dim = v_head_dim
+                if getattr(
+                    self, "model_type", None
+                ) == "gemma4_text" and layer_type in (
+                    "attention",
+                    "full_attention",
+                ):
+                    global_head_dim = getattr(self, "global_head_dim", None)
+                    if global_head_dim is not None:
+                        layer_qk_head_dim = global_head_dim
+                        layer_v_head_dim = global_head_dim
+
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=self.n_heads,
+                    qk_head_dim=layer_qk_head_dim,
+                    v_head_dim=layer_v_head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=sliding_window_size,
+                )
+
+            if unsupported_layer_types:
+                logger.warning(
+                    "HF MFU calculation does not recognize layer types "
+                    f"{sorted(unsupported_layer_types)}; "
+                    "approximating them as full attention."
+                )
+
+            num_flops_per_token = 6 * active_nparams + attention_op_flops
+            logger.info(
+                f"Total parameter count: {nparams:,}, "
+                f"active parameters: {active_nparams:,}"
+            )
+            return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()
@@ -1040,6 +1166,52 @@ class HFTransformerModel(BaseModel):
                 "Could not find rotary_emb in the model. Please check the model structure."
             )
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build the attention mask (when positions are present), CP-shard, return."""
+        # Function-local import avoids a circular import.
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        batch: dict[str, Any] = dict(input_dict)
+        if "attention_masks" not in batch:
+            positions = batch.get("positions")
+            if positions is not None:
+                masks = self.get_attention_masks(positions=positions)
+                if masks is not None:
+                    batch["attention_masks"] = masks
+
+        if parallel_dims.cp_enabled:
+            batch = prepare_context_parallel_input(
+                batch,
+                None,
+                parallel_dims.get_mesh("cp"),
+                parallelism.context_parallel_load_balancer,
+                parallelism.context_parallel_ptrr_mask_key,
+            )
+        if parallelism.spmd_backend == "spmd_types":
+            from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+            from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+
+            input_sharding = decoder_input_sharding()
+            # DSA attention masks are dense tensors but are not decoder inputs;
+            # preserve the old trainer behavior by annotating only declared names.
+            annotated = annotate_input_spmd_types(
+                parallel_dims,
+                {name: batch[name] for name in input_sharding if name in batch},
+                input_sharding,
+            )
+            batch.update(annotated)
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
+
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
 
@@ -1113,18 +1285,10 @@ class HFTransformerModel(BaseModel):
             # the sequence-sharded global positions (load-balancer permuted),
             # which is exactly what RoPE needs for each local shard -- a plain
             # arange would use the wrong positions.
-            # Transformers still requires a batch dimension for RoPE and
-            # attention. Keep it local to this backend boundary; TorchTitan's
-            # dataloader and model-facing contract remain flat.
+            #
+            # The BlockMask is prebuilt in ``preprocess_inputs`` and passed
+            # in via ``attention_masks``.
             kwargs["position_ids"] = positions.unsqueeze(0)
-            # Build the BlockMask here rather than in the core
-            # trainer: the trainer only builds masks for Decoder.Config models,
-            # so this backend opts in by building its own (keeps trainer.py free
-            # of HF-backend special-casing). This outer forward runs eager (only
-            # the inner transformer blocks are compiled), so BlockMask creation
-            # here is safe.
-            if attention_masks is None:
-                attention_masks = self.get_attention_masks(positions)
         else:
             local_seq_len = args[0].shape[0]
             kwargs["position_ids"] = torch.arange(

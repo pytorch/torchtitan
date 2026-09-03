@@ -6,11 +6,10 @@
 
 """Context-parallel attention kernels.
 
-Tensor suffix: ``TNH`` = tokens, heads, head dimension.
+Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
-from dataclasses import dataclass, fields
-from typing import cast, TYPE_CHECKING
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -18,48 +17,18 @@ from torch.distributed.tensor.experimental._context_parallel import flex_cp_allg
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 
-from torchtitan.models.common.attention import BaseAttention, FlexAttention
-from torchtitan.protocols.module import Module
-
-if TYPE_CHECKING:
-    from torchtitan.trainer import Trainer
+from torchtitan.models.common.attention import FlexAttention
 
 __all__ = [
     "ContextParallelKernel",
     "AllGatherCPFlexAttention",
-    "use_cp_kernel",
 ]
 
 _SEQ_DIM = 0
 
 
-def use_cp_kernel(config: "Trainer.Config", kernel: type[Module]) -> None:
-    """Replace each attention kernel config while preserving its fields.
-
-    TODO: Support multiple CP kernels for different attention types.
-    """
-    if not issubclass(kernel, ContextParallelKernel):
-        raise ValueError(f"{kernel.__qualname__} must inherit ContextParallelKernel.")
-    assert config.model_spec is not None, "model_spec is required"
-    for _, traversed, _, _ in config.model_spec.model.traverse(BaseAttention.Config):
-        # traverse returns the base config type.
-        attention = cast(BaseAttention.Config, traversed)
-        existing = attention.inner_attention
-        if not issubclass(kernel.Config, type(existing)):
-            raise ValueError(
-                f"{kernel.__qualname__}.Config must inherit "
-                f"{type(existing).__qualname__}."
-            )
-        attention.inner_attention = kernel.Config(
-            **{f.name: getattr(existing, f.name) for f in fields(existing)}
-        )
-
-
 class ContextParallelKernel:
-    """Mixin for attention kernels that own their CP collectives.
-
-    Note that Flux doesn't use this kernel.
-    """
+    """Mixin for attention kernels that own their CP collectives."""
 
     @property
     def cp_group(self) -> dist.ProcessGroup:
@@ -85,13 +54,14 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
 
     def forward(
         self,
-        q_TNH: torch.Tensor,
-        k_TNH: torch.Tensor,
-        v_TNH: torch.Tensor,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        # TODO(fegin): replace flex_cp_allgather with spmd_types.redistribute.
         pg_name = dist._get_process_group_name(self.cp_group)
-        k_TNH, v_TNH = flex_cp_allgather(
-            k_TNH.contiguous(), v_TNH.contiguous(), _SEQ_DIM, pg_name
+        k_THK, v_THV = flex_cp_allgather(
+            k_THK.contiguous(), v_THV.contiguous(), _SEQ_DIM, pg_name
         )
-        return super().forward(q_TNH, k_TNH, v_TNH, **kwargs)
+        return super().forward(q_THK, k_THK, v_THV, **kwargs)

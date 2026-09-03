@@ -12,7 +12,6 @@ from typing import Any, cast, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
-
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
@@ -21,11 +20,9 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
+from torchtitan.protocols.model import BaseModel
 from torchtitan.tools import utils
 
 ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
@@ -140,74 +137,6 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
 
-    def post_dataloading_process(
-        self,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-        model_parts: list[nn.Module],
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """
-        Post-processing hook after data loading and before model forward pass.
-
-        This method processes the raw data from the dataloader and prepares it for
-        the model's forward pass. It separates the main input tensor from auxiliary
-        inputs and constructs additional keyword arguments (e.g., attention masks).
-
-        Args:
-            input_dict: Dictionary containing tensors from the dataloader. Must
-                contain an "input" key with the main input tensor. May contain
-                additional keys for auxiliary inputs (e.g., position ids).
-            labels: Target labels for the batch.
-            model_parts: List of model parts for accessing model methods.
-
-        Returns:
-            A tuple of (inputs, labels, extra_kwargs) where:
-                - inputs: Main input tensor extracted from input_dict["input"].
-                - labels: Target labels (potentially modified by CP sharding).
-                - extra_kwargs: Additional keyword arguments for the model forward
-                    (e.g. positions, attention_masks), forwarded to every
-                    pipeline-parallel stage.
-        """
-        inputs = input_dict["input"]
-        extra_kwargs: dict[str, Any] = {
-            k: v for k, v in input_dict.items() if k != "input"
-        }
-
-        # TODO: deduplicate with Trainer.post_dataloading_process which has
-        # the same logic; extract a shared function to prevent further drift.
-        # The dataloader always provides per-document positions, which drive
-        # both RoPE and block_causal attention masking.
-        model_config = getattr(model_parts[0], "config", None)
-
-        positions = extra_kwargs.get("positions", None)
-        # positions and attention_masks are optional (Decoder.forward defaults
-        # both to None). Build masks only for the masked backends (Flex/Varlen),
-        # which is where get_attention_masks is defined. A maskless backend (the
-        # SDPA config used by the graph_trainer tests) still receives positions
-        # for RoPE but no masks — it relies on is_causal instead.
-        if isinstance(model_config, Decoder.Config) and positions is not None:
-            attention_backend = model_config.first_full_attention_backend
-            if isinstance(
-                attention_backend, (FlexAttention.Config, VarlenAttention.Config)
-            ):
-                model = cast(Decoder, model_parts[0])
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    positions=positions,
-                )
-
-        if self.parallel_dims.cp_enabled:
-            inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs,
-                labels,
-                extra_kwargs,
-                self.parallel_dims.get_mesh("cp"),
-                inputs.device,
-                self.parallelism.context_parallel_load_balancer,
-                self.parallelism.context_parallel_ptrr_mask_key,
-            )
-
-        return inputs, labels, extra_kwargs
-
     @sl.log_trace_span("eval")
     @torch.no_grad()
     def validate(
@@ -283,8 +212,12 @@ class Validator(BaseValidator):
                 )
 
                 for input_dict, labels in microbatches:
-                    inputs, labels, extra_kwargs = self.post_dataloading_process(
-                        input_dict, labels, model_parts
+                    inputs, labels, extra_kwargs = cast(
+                        BaseModel, model_parts[0]
+                    ).preprocess_inputs(
+                        {**input_dict, "labels": labels},
+                        parallel_dims=self.parallel_dims,
+                        parallelism=self.parallelism,
                     )
                     if self.pp_has_first_stage:
                         arg_mbs.append((inputs,))
@@ -312,9 +245,12 @@ class Validator(BaseValidator):
             else:
                 assert len(microbatches) == 1
                 input_dict, labels = microbatches[0]
-                # Process data (extract inputs, handle attention masks, CP sharding)
-                inputs, labels, extra_kwargs = self.post_dataloading_process(
-                    input_dict, labels, model_parts
+                inputs, labels, extra_kwargs = cast(
+                    BaseModel, model_parts[0]
+                ).preprocess_inputs(
+                    {**input_dict, "labels": labels},
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.parallelism,
                 )
                 with self.validation_context():
                     assert len(model_parts) == 1

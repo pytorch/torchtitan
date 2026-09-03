@@ -2,6 +2,7 @@ name: Lint
 
 on:
   pull_request:
+  workflow_call:
 
 concurrency:
   group: lint-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -68,13 +69,22 @@ jobs:
 
       - name: Get changed files
         id: changed-files
+        if: github.event_name == 'pull_request'
         uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v45.0.6
 
       - name: Lint modified files
+        if: github.event_name == 'pull_request'
         env:
           # Lychee will checks all links in .md and .py files in the next step
           SKIP: lychee-link-checker
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
+
+      - name: Lint all files
+        if: github.event_name != 'pull_request'
+        env:
+          # Lychee checks all links in the next step.
+          SKIP: lychee-link-checker
+        run: pre-commit run --show-diff-on-failure --all-files
 
       - name: Check links with Lychee
         env:

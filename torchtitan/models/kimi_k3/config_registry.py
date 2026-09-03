@@ -19,7 +19,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MultiModalProcessor,
 )
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_patch_budget
+from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
@@ -38,7 +38,7 @@ def _kimi_k3_multimodal_dataloader(
         patch_size=14,
         temporal_patch_size=1,
         spatial_merge_size=2,
-        resize_fn=resize_to_patch_budget,
+        resize_fn=resize_to_navit_patch_grid,
         min_pixels=56 * 56,
         max_pixels=224 * 224,
         max_patches=256,
