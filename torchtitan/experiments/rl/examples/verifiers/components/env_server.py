@@ -10,10 +10,19 @@ import asyncio
 import contextlib
 import multiprocessing
 import os
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
+from functools import partial
 from queue import Empty
 from typing import Any
+
+from verifiers.v1.configs.env import EnvConfig as VerifiersEnvConfig
+from verifiers.v1.configs.serve import (
+    pool_serve_kwargs,
+    ServeConfig as VerifiersServeConfig,
+)
+from verifiers.v1.serve import env_config_data, serve_env
+from verifiers.v1.utils.loaders import resolve_env_config
+from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
@@ -22,41 +31,32 @@ from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
 
 
 def _run_env_server_process(
-    config_path: str,
-    address: str,
+    environment: dict[str, Any],
+    serve: VerifiersServeConfig,
+    local_taskset_module: str | None,
     address_queue: Any,
     death_pipe: Any,
 ) -> None:
-    """Run a Verifiers EnvServer from a TOML file in a spawned process."""
-    import tomllib
-    from functools import partial
-
-    from verifiers.v1.configs.serve import pool_serve_kwargs, ServeConfig
-    from verifiers.v1.serve import env_config_data, serve_env
-    from verifiers.v1.utils.loaders import resolve_env_config
-    from verifiers.v1.utils.logging import setup_logging
+    """Run a Verifiers EnvServer from config data in a spawned process."""
 
     no_proxy = os.environ.get("no_proxy", "")
     no_proxy = ",".join(filter(None, (no_proxy, "127.0.0.1", "localhost")))
     os.environ["no_proxy"] = no_proxy
     os.environ["NO_PROXY"] = no_proxy
 
-    with open(config_path, "rb") as file:
-        data = tomllib.load(file)
-    taskset = data.get("env", {}).get("taskset", {})
-    if taskset_id := taskset.get("id"):
-        taskset["id"] = register_local_taskset_alias(taskset_id)
-    env_config = resolve_env_config(data.get("env"))
-    serve_config = ServeConfig.model_validate(data.get("serve", {}))
+    if local_taskset_module is not None:
+        environment["taskset"]["id"] = register_local_taskset_alias(
+            local_taskset_module
+        )
+    env_config = resolve_env_config(environment)
     serve_env(
-        **pool_serve_kwargs(serve_config.pool),
-        legacy=False,
-        address=address,
+        **pool_serve_kwargs(serve.pool),
+        address=serve.address,
         address_queue=address_queue,
         death_pipe=death_pipe,
         log_setup=partial(setup_logging, "INFO"),
         config_data=env_config_data(env_config),
-        max_concurrent=serve_config.max_concurrent,
+        max_concurrent=serve.max_concurrent,
     )
 
 
@@ -65,20 +65,31 @@ class VerifiersEnvServer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        # TOML file defining the Verifiers environment and server pool.
-        config_path: str
-        # ZMQ address for the local server; port 0 requests an ephemeral port.
-        bind_address: str = "tcp://127.0.0.1:0"
-        # Maximum time to wait for the server process to publish its address.
+        environment: VerifiersEnvConfig
+        """Typed Verifiers environment and agent configuration."""
+
+        serve: VerifiersServeConfig = field(
+            default_factory=lambda: VerifiersServeConfig(address="tcp://127.0.0.1:0")
+        )
+        """Typed Verifiers worker-pool and bind-address configuration."""
+
+        local_taskset_module: str | None = None
+        """Dotted local taskset module to register in the spawned server process."""
+
         startup_timeout_sec: float = 120.0
+        """Maximum time to wait for the server process to publish its address."""
 
         def __post_init__(self) -> None:
-            if not Path(self.config_path).is_file():
-                raise ValueError(
-                    f"Verifiers EnvServer config does not exist: {self.config_path}"
-                )
             if self.startup_timeout_sec <= 0:
                 raise ValueError("startup_timeout_sec must be positive")
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "environment": self.environment.model_dump(mode="json"),
+                "serve": self.serve.model_dump(mode="json"),
+                "local_taskset_module": self.local_taskset_module,
+                "startup_timeout_sec": self.startup_timeout_sec,
+            }
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -98,8 +109,9 @@ class VerifiersEnvServer(Configurable):
         process = context.Process(
             target=_run_env_server_process,
             args=(
-                self.config.config_path,
-                self.config.bind_address,
+                env_config_data(self.config.environment),
+                self.config.serve,
+                self.config.local_taskset_module,
                 address_queue,
                 child_conn,
             ),

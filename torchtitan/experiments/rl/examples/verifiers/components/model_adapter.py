@@ -21,15 +21,27 @@ _SESSION_ID_HEADER = "X-Session-ID"
 
 @dataclass(frozen=True, slots=True)
 class GenerationMetadata:
-    """Metadata for one successful model call not stored in its Verifiers trace."""
+    """TorchTitan completion data that Verifiers does not retain in its trace."""
 
     min_policy_version: int
+    """Oldest policy version used to generate the completion."""
+
     max_policy_version: int
+    """Newest policy version used to generate the completion."""
+
     metrics: list
+    """Generator metrics attached to the corresponding rollout turn."""
 
 
 class GeneratorModelAdapter:
-    """Expose a TorchTitan ``GenerateFn`` through Verifiers' token API."""
+    """Expose a TorchTitan ``GenerateFn`` through Verifiers' model API.
+
+    A Verifiers environment calls a named HTTP model endpoint, while TitanRL
+    supplies an in-process ``GenerateFn`` backed by its generator router. This
+    adapter serves Verifiers' token-generation endpoint, forwards each request
+    to that function, and retains TorchTitan policy-version and metric metadata
+    that the resulting Verifiers trace does not carry.
+    """
 
     def __init__(
         self,
@@ -91,7 +103,7 @@ class GeneratorModelAdapter:
         self.generation_metadata.clear()
 
     def pop_generation_metadata(self, session_id: str) -> list[GenerationMetadata]:
-        """Remove and return generation metadata recorded for one rollout."""
+        """Detach one rollout's metadata for `trace_to_rollout_turns`."""
         self.turn_counts.pop(session_id, None)
         return self.generation_metadata.pop(session_id, [])
 

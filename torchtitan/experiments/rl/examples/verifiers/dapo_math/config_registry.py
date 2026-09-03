@@ -23,7 +23,7 @@ from torchtitan.experiments.rl.controller import (
     Controller,
     ValidationConfig,
 )
-from torchtitan.experiments.rl.examples.verifiers.rollouter import (
+from torchtitan.experiments.rl.examples.verifiers.dapo_math.rollouter import (
     VerifiersMathRollouter,
 )
 from torchtitan.experiments.rl.losses import DAPOLoss

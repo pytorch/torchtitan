@@ -4,4 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Reusable Verifiers adapters and task-specific TitanRL experiments."""
+from torchtitan.experiments.rl.examples.verifiers.dapo_math.rollouter import (
+    VerifiersMathRollouter,
+)
+
+__all__ = ["VerifiersMathRollouter"]

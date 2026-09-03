@@ -6,8 +6,8 @@
 
 """Register TorchTitan's DAPO-Math and AIME datasets with Verifiers.
 
-Verifiers 0.3.0 does not provide a v1 taskset for these datasets. This module
-also serves as an example of exposing a custom dataset as a Verifiers taskset.
+Verifiers does not provide a v1 taskset for these datasets. This DAPO-specific
+module also shows how to expose a custom Verifiers taskset.
 """
 
 from collections.abc import Iterator
@@ -37,13 +37,18 @@ class VerifiersMathTask(vf.Task[VerifiersMathData]):
 
 
 class VerifiersMathTasksetConfig(vf.TasksetConfig):
+    """Configuration discovered by Verifiers when this taskset ID is loaded."""
+
     dataset: Literal["dapo_math", "aime2025"] = "dapo_math"
 
 
 class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetConfig]):
+    """Expose DAPO-Math or AIME samples through the Verifiers taskset API."""
+
     config: VerifiersMathTasksetConfig
 
     def load(self) -> list[VerifiersMathTask]:
+        """Build the tasks consumed by both the dataset and environment server."""
         dataset, num_tasks = _load_math_dataset(self.config.dataset)
         return [
             VerifiersMathTask(
