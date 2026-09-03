@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 """Configurations for the ``features`` integration test suite."""
 
 import os
@@ -15,6 +18,11 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+
+from torchtitan.models.common.cp_attention import (
+    AllGatherCPFlexAttention,
+    UlyssesCPFlexAttention,
+)
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel,
@@ -26,6 +34,7 @@ from torchtitan.models.llama3.config_registry import (
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
+from torchtitan.transforms import apply_transforms, ContextParallelTransform
 
 from . import _use_spmd_types
 
@@ -377,7 +386,23 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.context_parallel_degree = 4
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
+
+
+def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
+    """Attention reshards the CP axis onto the head dimension."""
+    config = llama3_debugmodel()
+    _use_spmd_types(config, typechecking=True)
+    config.parallelism.context_parallel_degree = 2
+    # Head-sharded attention has no per-rank sequence imbalance to balance.
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=UlyssesCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
@@ -391,7 +416,10 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
     _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
@@ -400,13 +428,19 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
     config = llama3_debugmodel_hsdp2x2()
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
@@ -461,7 +495,10 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:

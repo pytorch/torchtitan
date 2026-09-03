@@ -6,12 +6,15 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.attention import AttentionMasksType, VarlenAttention
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -86,14 +89,6 @@ class Qwen3Model(Decoder):
         ) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
-
-            if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layers[0].attention.inner_attention, VarlenAttention.Config
-            ):
-                raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
-                )
 
             from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
 

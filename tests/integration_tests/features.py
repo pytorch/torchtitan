@@ -5,6 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 import torchtitan_recipes.tests.features as recipes
 
 from tests.integration_tests import OverrideDefinitions
@@ -227,6 +230,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="FSDP+CP",
             test_name="fsdp+cp",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_ulysses_cp2],
+            test_descr="Ulysses CP",
+            test_name="cp_ulysses",
+            ngpu=2,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_ddp2_cp2],

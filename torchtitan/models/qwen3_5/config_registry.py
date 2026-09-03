@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 from dataclasses import replace
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -363,7 +366,8 @@ def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
+            # n_kv_heads is 2, so the TP degree cannot exceed 2.
+            tensor_parallel_degree=2,
             expert_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(
@@ -402,7 +406,8 @@ def qwen35_397b_a17b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=8,
+            # n_kv_heads is 2, so the TP degree cannot exceed 2.
+            tensor_parallel_degree=2,
             expert_parallel_degree=16,
         ),
         checkpoint=CheckpointManager.Config(

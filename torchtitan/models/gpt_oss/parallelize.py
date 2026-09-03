@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 import torch._dynamo
 
 from torchtitan.config import (
@@ -21,6 +24,7 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
+from torchtitan.models.common.cp_attention import UlyssesCPFlexAttention
 from torchtitan.models.gpt_oss.model import GptOssModel
 
 
@@ -65,6 +69,16 @@ def parallelize_gptoss(
     dump_folder: str,
     skip_dp: bool = False,
 ):
+    # TODO(fegin): shard the per-head sinks over CP to support Ulysses.
+    if parallel_dims.cp_enabled and isinstance(
+        model.config.first_full_attention_backend, UlyssesCPFlexAttention.Config
+    ):
+        raise NotImplementedError(
+            "GPT-OSS does not support Ulysses context parallel because its "
+            "per-head sinks are sharded over TP but not CP. Use "
+            "AllGatherCPFlexAttention instead."
+        )
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

@@ -12,6 +12,9 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
@@ -220,7 +223,7 @@ class VarlenAttention(Module):
 
 
 class FlexAttention(Module):
-    """Inner attention using ``flex_attention`` with torch.compile and CP support.
+    """Inner attention using ``flex_attention`` with torch.compile.
 
     Query/key inputs use ``[T, H, K]`` and value inputs use ``[T, H, V]``.
     The FlexAttention kernel requires a batch dimension, so inputs are adapted

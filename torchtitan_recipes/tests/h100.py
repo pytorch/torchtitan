@@ -4,9 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 """Configurations for the ``h100`` integration test suite."""
 
 from torchtitan.distributed.activation_checkpoint import FullAC
+
+from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -17,6 +22,7 @@ from torchtitan.models.llama3.config_registry import (
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.trainer import Trainer
+from torchtitan.transforms import apply_transforms, ContextParallelTransform
 
 
 def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
@@ -58,7 +64,10 @@ def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
@@ -75,7 +84,10 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 8
     config.activation_checkpoint = FullAC.Config()
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    )
 
 
 def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:

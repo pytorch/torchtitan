@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
@@ -64,10 +67,8 @@ class FluxModel(BaseModel):
         single_blocks: list[SingleStreamBlock.Config]
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.models.flux.sharding import set_flux_sharding_config
 
-            validate_cp_backend(config.parallelism)
             set_flux_sharding_config(self)
 
         def get_nparams_and_flops(

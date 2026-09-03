@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# Hunks in this file are copied from upstream open PR 4322/4449/4450 (fegin's CP stack) to unblock running;
+# pending rebase and reconcile.
+
 import dataclasses
 import json
 import os
@@ -44,6 +47,7 @@ from torchtitan.distributed.activation_checkpoint import (
     MemoryBudgetAC,
     SelectiveAC,
 )
+from torchtitan.distributed.context_parallel import validate_context_parallel
 from torchtitan.distributed.cudagraph import (
     cudagraph_teardown,
     ForwardBackwardFn,
@@ -125,6 +129,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             self._validate_sdc_replay()
+
+            # Validate features that span config sections once model_spec is set.
+            if self.model_spec is not None:
+                validate_context_parallel(self.model_spec.model, self.parallelism)
 
             num_pp_microbatches = self.parallelism.num_pp_microbatches
             if num_pp_microbatches <= 0:
