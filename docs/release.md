@@ -205,9 +205,8 @@ The workflow runs six GPU jobs: four on 8x A10G runners and two on 8x H100
 runners. All integration suites use real process groups:
 
 - `validate-standard-gpu` with the `core` suite checks the installed RC and
-  dependency versions, all enabled single-GPU and multi-GPU unit tests, the
-  Real-PG feature and model suites, their integrated loss and gradient-norm
-  goldens, and Flux;
+  dependency versions, the DistMuon GPU unit test, the separate 8-GPU feature
+  and model suites, the Llama 3 and Qwen3 loss checks, and Flux;
 - `validate-standard-gpu` with the `graph-trainer` suite runs the standard
   GraphTrainer integrations, numerics, graph passes, profiler, tracing,
   precompile, bitwise-determinism, and SAC peak-memory tests;
@@ -217,8 +216,8 @@ runners. All integration suites use real process groups:
 - `validate-standard-gpu` with the `transformers-modeling-backend` suite
   installs `transformers==5.9.0` and runs the MoE FSDP+TP+EP+CP, dense
   FSDP+TP+PP, dense CP+PP, and SFT integration tests;
-- `validate-h100` runs the base H100 suite, Qwen3 with DeepEP v2, and DeepSeek
-  V3 with HybridEP as separate tests; and
+- `validate-h100` runs the H100 integration suite, including DeepSeek V3 with
+  HybridEP; and
 - `validate-graph-trainer-h100` runs the H100 GraphTrainer integrations, MoE
   numerics, DeepSeek V3 precompile, and bitwise-determinism tests.
 
@@ -387,10 +386,10 @@ Then:
    and run the complete enabled CPU unit-test suite.
 4. **TestPyPI GPU validation:** six GPU jobs, four on 8x A10G runners and two on
    8x H100 runners, install the staged RC and pinned GPU packages. All
-   integration suites use real process groups and cover GPU unit tests,
-   feature/model integration tests, loss and gradient-norm goldens, Flux,
-   GraphTrainer, TorchFT, the Transformers modeling backend, and the dedicated
-   H100 suites.
+   integration suites use real process groups and cover the DistMuon GPU unit
+   test, separate feature/model integration suites, Llama 3 and Qwen3 loss
+   checks, Flux, GraphTrainer, TorchFT, the Transformers modeling backend, and
+   the dedicated H100 suites.
 5. **Release scaling validation:** run a representative full-scale Llama 3
    405B FSDP workload with the staged RC and pinned PyTorch packages. Confirm
    the run completes, loss remains finite and converges, and throughput and

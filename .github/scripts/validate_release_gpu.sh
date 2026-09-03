@@ -157,27 +157,51 @@ PY
 )"
 
 run_core_tests() {
-  CUDA_VISIBLE_DEVICES=0 python -m pytest tests/unit_tests/gpu \
-    -m "not multi_gpu" \
-    --strict-markers \
+  CUDA_VISIBLE_DEVICES=0 python -m pytest \
+    tests/unit_tests/flex_shard/test_dist_muon.py \
     --durations=20 \
     -vv
 
-  python -m pytest tests/unit_tests/gpu \
-    -m multi_gpu \
-    --strict-markers \
-    --durations=20 \
-    -vv
+  local baseline_options="--parallelism.data_parallel_replicate_degree=1"
+  local test_options="--parallelism.data_parallel_replicate_degree=4"
+
+  python scripts/loss_compare.py . . \
+    --baseline-options="${baseline_options}" \
+    --test-options="${test_options}" \
+    --job-dump-folder="${ARTIFACTS}/llama3_fsdp_hsdp" \
+    --assert-equal \
+    --steps=1
+
+  python scripts/loss_compare.py . . \
+    --baseline-options="${baseline_options}" \
+    --job-dump-folder="${ARTIFACTS}/llama3_golden" \
+    --import-result=tests/assets/losses/llama3_cuda.txt \
+    --assert-equal \
+    --steps=100
+
+  python scripts/loss_compare.py . . \
+    --baseline-module=qwen3 \
+    --baseline-config=qwen3_moe_debug \
+    --baseline-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
+    --test-options="--parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4 --parallelism.spmd_backend spmd_types --training.disable_cuda_graphs" \
+    --job-dump-folder="${ARTIFACTS}/qwen3_moe_golden" \
+    --import-result=tests/assets/losses/qwen3_moe_cuda.txt \
+    --assert-equal \
+    --steps=100
 
   python -m tests.integration_tests.run_tests \
     --gpu_arch_type cuda \
-    --test_suite features,models \
-    --execution_mode real_pg \
+    --test_suite features \
     --ngpu 8 \
-    "${ARTIFACTS}/integration_tests"
+    "${ARTIFACTS}/integration_tests/features"
+
+  python -m tests.integration_tests.run_tests \
+    --gpu_arch_type cuda \
+    --test_suite models \
+    --ngpu 8 \
+    "${ARTIFACTS}/integration_tests/models"
 
   python -m tests.integration_tests.flux \
-    --execution_mode real_pg \
     --ngpu 8 \
     "${ARTIFACTS}/flux_tests"
 }
@@ -241,46 +265,16 @@ install_hybrid_ep() {
 }
 
 run_h100_tests() {
-  local status=0
-
   python -m pip install flash-attn-3 \
     --extra-index-url "${PYTORCH_INDEX_URL}"
 
-  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 \
+  install_hybrid_ep
+  CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 \
     python -m tests.integration_tests.run_tests \
     --test_suite h100 \
-    --execution_mode real_pg \
-    --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep+compile \
     --gpu_arch_type cuda \
     --ngpu 8 \
-    "${ARTIFACTS}/h100/base"; then
-    status=1
-  fi
-
-  bash "${REPO_ROOT}/.github/scripts/install_deepep_v2.sh"
-  if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 EP_DISABLE_GIN=1 \
-    TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests \
-    --test_suite h100 \
-    --execution_mode real_pg \
-    --test_name qwen3_fsdp+deepep \
-    --gpu_arch_type cuda \
-    --ngpu 8 \
-    "${ARTIFACTS}/h100/deepep_v2"; then
-    status=1
-  fi
-
-  install_hybrid_ep
-  if ! python -m tests.integration_tests.run_tests \
-    --test_suite h100 \
-    --execution_mode real_pg \
-    --test_name deepseek_v3_fsdp+hybridep+compile \
-    --gpu_arch_type cuda \
-    --ngpu 8 \
-    "${ARTIFACTS}/h100/hybrid_ep"; then
-    status=1
-  fi
-
-  return "${status}"
+    "${ARTIFACTS}/h100"
 }
 
 run_graph_trainer_h100_tests() {

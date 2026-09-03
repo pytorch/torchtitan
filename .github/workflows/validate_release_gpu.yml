@@ -9,10 +9,10 @@ permissions:
 
 # RC GPU validation coverage:
 # - All integration suites use real process groups.
-# - validate-standard-gpu: 8x A10G; GPU unit tests, features/models with
-#   integrated numerics guards, Flux, GraphTrainer, TorchFT, and the
-#   Transformers modeling backend.
-# - validate-h100: 8x H100; core H100 tests, DeepEP v2, and HybridEP.
+# - validate-standard-gpu: 8x A10G; DistMuon, legacy loss checks, feature and
+#   model integration suites, Flux, GraphTrainer, TorchFT, and the Transformers
+#   modeling backend.
+# - validate-h100: 8x H100; the H100 integration suite.
 # - validate-graph-trainer-h100: 8x H100; GraphTrainer DeepSeek and Qwen3 MoE
 #   tests that require H100-class hardware.
 jobs:

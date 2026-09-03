@@ -100,19 +100,13 @@ def llama3_debugmodel_hf_checkpoint_save() -> Trainer.Config:
 def llama3_debugmodel_hf_checkpoint_load() -> Trainer.Config:
     """Loads what ``llama3_debugmodel_hf_checkpoint_save`` wrote.
 
-    The integration runner supplies the per-test output directory to each run.
+    The load path points into the integration runner's output directory, which
+    is ``RUNNER_TEMP`` on GitHub Actions and a relative path elsewhere.
     """
     config = llama3_debugmodel_full_checkpoint_save()
-    test_output_dir = os.getenv(
-        "TORCHTITAN_TEST_OUTPUT_DIR",
-        os.path.join(
-            os.getenv("RUNNER_TEMP", ""),
-            "artifacts-to-be-uploaded/model_only_hf_checkpoint",
-        ),
-    )
     config.checkpoint.initial_load_path = os.path.join(
-        test_output_dir,
-        "hf_checkpoint/step-10/",
+        os.getenv("RUNNER_TEMP", ""),
+        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
     )
     config.checkpoint.initial_load_model_only = True
     config.checkpoint.initial_load_in_hf = True

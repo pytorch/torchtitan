@@ -133,6 +133,6 @@ jobs:
           cd "$test_root"
           unset PYTHONPATH
           "$RUNNER_TEMP/validate-rc-venv/bin/python" -m pytest \
-            tests/unit_tests/cpu \
+            tests/unit_tests \
             --durations=20 \
             -vv
