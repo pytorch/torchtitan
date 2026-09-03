@@ -11,7 +11,7 @@
 Requires, on top of listing this override on the generator:
 
 1. ``PolicyTrainer.Config.transform_state_dict_fn`` set to
-   ``quantize_expert_state_dict_to_mxfp8``, so the trainer publishes the expert
+   ``_quantize_expert_state_dict_to_mxfp8``, so the trainer publishes the expert
    weights already quantized instead of in bf16.
 2. ``MXFP8GroupedExpertsQATConverter`` on the model spec. It replaces the
    experts with ``MXFP8QATGroupedExperts``, the config this override expects to

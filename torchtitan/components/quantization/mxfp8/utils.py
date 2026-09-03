@@ -137,7 +137,7 @@ class _MXFP8GroupedMMFwdBF16Bwd(torch.autograd.Function):
         return grad_A_MK, grad_B_ENK.transpose(-2, -1), None
 
 
-def quantize_expert_state_dict_to_mxfp8(
+def _quantize_expert_state_dict_to_mxfp8(
     state_dict: dict[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     """Replace the bf16 expert weights with the MXFP8 operands the generator stores.

@@ -35,15 +35,6 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
-    # Escape hatch: FA4 is activated by importing ``flash_attn.cute.interface``, which
-    # only ships in a source build of flash-attn (no wheel). Set
-    # TORCHTITAN_FLASH_ATTENTION_IMPL=FA3 to fall back where that build is unavailable.
-    override = os.environ.get("TORCHTITAN_FLASH_ATTENTION_IMPL")
-    if override:
-        # "none" activates no impl, so the varlen op keeps PyTorch's default kernel
-        # (the pre-#4012 behaviour). On Blackwell neither FA3 (Hopper-only) nor FA4
-        # (needs a source build of flash-attn) may be usable.
-        return None if override.lower() == "none" else override
     # Blackwell (SM 10.0) and newer use FA4; Hopper (SM 9.0) uses FA3.
     if has_cuda_capability(10, 0):
         return "FA4"
