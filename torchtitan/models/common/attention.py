@@ -110,17 +110,7 @@ def local_head_split(
     *,
     dp_shard_dim: int = 0,
 ) -> torch.Tensor:
-    # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
-    input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
-    output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
-    with spmd.local():
-        if use_spmd:
-            spmd.assert_type(t, input_type)
-        out = t.view(*t.shape[:-1], -1, head_dim)
-        if use_spmd:
-            spmd.assert_type(out, output_type)
-    return out
+    return t.view(*t.shape[:-1], -1, head_dim)
 
 
 class VarlenAttention(Module):
@@ -693,17 +683,7 @@ class QKVLinear(BaseQKVLinear):
         # actual local heads from sizes as TP may have sharded them.
 
         def local_qkv_head_split(x):
-            # Drop into local region, we can't propagate S(1) -> qkv head unflatten.
-            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
-            with spmd.local():
-                x = x.view(num_tokens, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                    spmd.assert_type(
-                        x,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
-            return x
+            return x.view(num_tokens, -1, self.head_dim)
 
         xq, xk, xv = (
             local_qkv_head_split(xq),
@@ -746,15 +726,6 @@ class FusedQKVLinear(BaseQKVLinear):
         self.register_state_dict_post_hook(self._split_qkv_on_save)
         self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
-    @spmd.local_map(
-        out_types=(
-            (
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
-                spmd.PartitionSpec(("dp", "cp"), "tp", None),
-            ),
-        )
-        * 3
-    )
     def forward(  # pyrefly: ignore[bad-override]
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -763,14 +734,7 @@ class FusedQKVLinear(BaseQKVLinear):
         # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
-        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
-            qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                spmd.assert_type(
-                    qkv,
-                    spmd.V,
-                    spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
-                )
+        qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
 
         hpk, hd = self.heads_per_kv, self.head_dim
 

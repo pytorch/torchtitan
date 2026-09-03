@@ -109,15 +109,7 @@ class Attention(BaseAttention):
             q = self.wq_a(x)
             q = self.wq_b(self.q_norm(q))
 
-        # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
-        with spmd.local():
-            q = q.view(num_tokens, -1, self.qk_head_dim)
-            if spmd.is_type_checking():
-                spmd.assert_type(
-                    q,
-                    spmd.V,
-                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                )
+        q = q.view(num_tokens, -1, self.qk_head_dim)
 
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -131,22 +123,21 @@ class Attention(BaseAttention):
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         kv = self.wkv_b(self.kv_norm(kv))
+        kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = torch.split(
+            kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
 
-        with (
-            spmd.local()
-        ):  # QKV even shard unflatten, but the expand is truly local SPMD
-            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = torch.split(
-                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
+        # Expanding one replicated K head to the local TP head count is truly
+        # local SPMD. The preceding even-shard unflatten is global SPMD.
+        with spmd.local():
             k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for t in [k, v]:
-                    spmd.assert_type(
-                        t,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
+                spmd.assert_type(
+                    k,
+                    spmd.V,
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                )
 
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale

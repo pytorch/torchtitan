@@ -435,9 +435,7 @@ class Attention(BaseAttention):
 
         qr = self.q_norm(self.wq_a(x))
         q = self.wq_b(qr)
-        with spmd.local():
-            q = q.view(num_tokens, -1, self.head_dim)
-            _assert_spmd_attention_type(q, tp=spmd.S(1))
+        q = q.view(num_tokens, -1, self.head_dim)
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
 
