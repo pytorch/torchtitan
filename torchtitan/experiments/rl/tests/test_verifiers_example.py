@@ -9,20 +9,20 @@
 from __future__ import annotations
 
 import asyncio
-import tomllib
 from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("verifiers")
 
+import verifiers.v1 as vf
+from verifiers.v1.harnesses.null import NullHarnessConfig
+
+from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.examples.dapo_math import DapoMathSample
-from torchtitan.experiments.rl.examples.verifiers import taskset
 from torchtitan.experiments.rl.examples.verifiers.components import VerifiersTaskDataset
-from torchtitan.experiments.rl.examples.verifiers.config_registry import (
-    rl_dapo_qwen3_4b_verifiers_8k,
-)
-from torchtitan.experiments.rl.examples.verifiers.rollouter import (
+from torchtitan.experiments.rl.examples.verifiers.dapo_math import taskset
+from torchtitan.experiments.rl.examples.verifiers.dapo_math.rollouter import (
     VerifiersMathRollouter,
 )
 
@@ -53,8 +53,10 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     ]
     monkeypatch.setattr(taskset, "_load_math_dataset", lambda name: (iter(samples), 3))
     config = VerifiersTaskDataset.Config(
-        taskset_id="torchtitan.experiments.rl.examples.verifiers.taskset",
-        taskset_args={"dataset": "dapo_math"},
+        taskset=taskset.VerifiersMathTasksetConfig(
+            id="torchtitan.experiments.rl.examples.verifiers.dapo_math.taskset",
+            dataset="dapo_math",
+        ),
         seed=7,
     )
     first = config.build()
@@ -70,16 +72,27 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
 
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
-    config_path = VerifiersMathRollouter.Config().env_server.config_path
-    with open(config_path, "rb") as file:
-        config = tomllib.load(file)
+    config = VerifiersMathRollouter.Config().env_server
 
-    assert config["env"]["agent"]["runtime"]["type"] == "subprocess"
-    assert config["env"]["agent"]["harness"]["id"] == "null"
+    assert isinstance(config.environment, vf.SingleAgentEnvConfig)
+    assert isinstance(config.environment.agent.runtime, vf.SubprocessConfig)
+    assert isinstance(config.environment.agent.harness, NullHarnessConfig)
+    assert isinstance(config.serve.pool, vf.StaticPoolConfig)
+    assert config.serve.pool.num_workers == 1
+    assert config.local_taskset_module == (
+        "torchtitan.experiments.rl.examples.verifiers.dapo_math.taskset"
+    )
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
-    config = rl_dapo_qwen3_4b_verifiers_8k()
+    config = ConfigManager().parse_args(
+        [
+            "--module",
+            "verifiers.dapo_math",
+            "--config",
+            "rl_dapo_qwen3_4b_verifiers_8k",
+        ]
+    )
     renderer_config = config.renderer.as_renderers_config()
 
     assert isinstance(config.rollouter, VerifiersMathRollouter.Config)

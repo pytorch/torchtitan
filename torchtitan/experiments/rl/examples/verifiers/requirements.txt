@@ -1,2 +1,2 @@
-math-verify==0.9.0
-verifiers==0.3.0
+# The adapter targets the v1 API shipped in this validated release.
+verifiers==0.3.1

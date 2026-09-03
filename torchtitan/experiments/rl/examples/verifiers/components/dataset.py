@@ -7,17 +7,20 @@
 from __future__ import annotations
 
 import importlib
-import random
 import sys
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
+
+import grain.python as grain
+from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
+from verifiers.v1.utils.loaders import load_taskset
 
 from torchtitan.config import Configurable
 
 
 def register_local_taskset_alias(taskset_id: str) -> str:
-    """Register a dotted local taskset under an ID Verifiers 0.3.0 can import."""
+    """Register a dotted local taskset under an importable Verifiers plugin ID."""
     if "." not in taskset_id or "/" in taskset_id:
         return taskset_id
 
@@ -38,84 +41,75 @@ class VerifiersTaskSample:
 
 
 class VerifiersTaskDataset(Configurable):
-    """Load a Verifiers taskset into TorchTitan's resumable dataset contract."""
+    """Adapt one Verifiers taskset to a resumable Grain iterator."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        # Importable Verifiers taskset plugin ID or local dotted module path.
-        taskset_id: str
-        # Keyword arguments used to construct the taskset's config.
-        taskset_args: dict[str, Any] = field(default_factory=dict)
-        # Optional task cap; required when the taskset is infinite.
+        taskset: VerifiersTasksetConfig
+        """Typed configuration for the Verifiers taskset to load."""
+
         num_tasks: int | None = None
-        # Seed used to produce a reproducible task order.
+        """Optional task cap, required when the taskset is infinite."""
+
         seed: int = 42
-        # Whether to reshuffle the task order at initialization and each epoch.
+        """Seed used to produce a reproducible task order."""
+
         shuffle: bool = True
+        """Whether to shuffle the materialized task order before repetition."""
 
         def __post_init__(self) -> None:
             if self.num_tasks is not None and self.num_tasks <= 0:
                 raise ValueError("num_tasks must be positive")
 
-    def __init__(self, config: Config) -> None:
-        # Verifiers is an example-only dependency. Keep the import local so the
-        # rest of TorchTitan RL does not require it.
-        from verifiers.v1.utils.loaders import load_taskset, taskset_config_type
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "taskset": self.taskset.model_dump(mode="json"),
+                "num_tasks": self.num_tasks,
+                "seed": self.seed,
+                "shuffle": self.shuffle,
+            }
 
-        taskset_id = register_local_taskset_alias(config.taskset_id)
-        taskset_config = taskset_config_type(taskset_id).model_validate(
-            {"id": taskset_id, **config.taskset_args}
+    def __init__(self, config: Config) -> None:
+        taskset_config = config.taskset.model_copy(
+            update={"id": register_local_taskset_alias(config.taskset.id)}
         )
         taskset = load_taskset(taskset_config)
         if config.num_tasks is None and taskset.INFINITE:
             raise ValueError(
-                f"Verifiers taskset {config.taskset_id!r} is infinite; "
+                f"Verifiers taskset {config.taskset.id!r} is infinite; "
                 "num_tasks is required"
             )
-        tasks = list(
+        taskset = (
             taskset if config.num_tasks is None else taskset.head(config.num_tasks)
         )
+        if config.shuffle:
+            taskset = taskset.shuffle(config.seed)
+        tasks = list(taskset)
         if not tasks:
             raise ValueError(
-                f"Verifiers taskset {config.taskset_id!r} yielded no tasks"
+                f"Verifiers taskset {config.taskset.id!r} yielded no tasks"
             )
         if config.num_tasks is not None and len(tasks) != config.num_tasks:
             raise ValueError(
-                f"Verifiers taskset {config.taskset_id!r} yielded {len(tasks)} "
+                f"Verifiers taskset {config.taskset.id!r} yielded {len(tasks)} "
                 f"tasks, expected {config.num_tasks}"
             )
 
-        self._samples = [
+        samples = [
             VerifiersTaskSample(task_data=task.data.model_dump(mode="json"))
             for task in tasks
         ]
-        self._rng = random.Random(config.seed)
-        self._shuffle = config.shuffle
-        self._order = list(range(len(self._samples)))
-        self._position = 0
-        if self._shuffle:
-            self._rng.shuffle(self._order)
+        dataset = grain.MapDataset.source(samples)
+        self._iterator = iter(dataset.repeat().to_iter_dataset())
 
     def __iter__(self) -> Iterator[VerifiersTaskSample]:
         return self
 
     def __next__(self) -> VerifiersTaskSample:
-        if self._position == len(self._order):
-            self._position = 0
-            if self._shuffle:
-                self._rng.shuffle(self._order)
-        sample = self._samples[self._order[self._position]]
-        self._position += 1
-        return sample
+        return next(self._iterator)
 
     def state_dict(self) -> dict:
-        return {
-            "rng_state": self._rng.getstate(),
-            "order": list(self._order),
-            "position": self._position,
-        }
+        return self._iterator.get_state()
 
     def load_state_dict(self, state_dict: dict) -> None:
-        self._rng.setstate(state_dict["rng_state"])
-        self._order = list(state_dict["order"])
-        self._position = int(state_dict["position"])
+        self._iterator.set_state(state_dict)
