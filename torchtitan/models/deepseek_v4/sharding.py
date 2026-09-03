@@ -16,6 +16,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    qkv_colwise_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -154,7 +155,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     # can set sharding_config directly (same pattern as deepseek_v3).
     attention.wq_a.sharding_config = _replicate_weight
     attention.q_norm.sharding_config = _replicate_weight
-    attention.wq_b.sharding_config = colwise_config()
+    attention.wq_b.sharding_config = qkv_colwise_config()
     attention.wkv.sharding_config = _replicate_weight
     attention.kv_norm.sharding_config = _replicate_weight
     # wo_a is a Linear holding a grouped LoRA-A weight used via einsum (not a

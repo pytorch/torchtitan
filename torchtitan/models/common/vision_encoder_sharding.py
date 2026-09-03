@@ -133,6 +133,49 @@ def vision_colwise_config(
     )
 
 
+def vision_attn_colwise_config(
+    *,
+    input_tp: spmd.PerMeshAxisSpmdType = spmd.I,
+    include_cp_axis: bool = False,
+) -> ShardingConfig:
+    """Colwise vision attention projection with an even TP parameter shard."""
+    local_type = {DP: spmd.R, TP: spmd.V}
+    if include_cp_axis:
+        local_type[CP] = spmd.R
+    return ShardingConfig(
+        state_shardings={
+            "weight": SpmdType(
+                local_type,
+                partition_spec=spmd.PartitionSpec(
+                    TP,
+                    None,
+                    even_shard_axes={TP},
+                ),
+            ),
+            "bias": SpmdType(
+                local_type,
+                partition_spec=spmd.PartitionSpec(
+                    TP,
+                    even_shard_axes={TP},
+                ),
+            ),
+        },
+        in_src_shardings={
+            "input": _vision_activation_placement(
+                tp=input_tp, include_cp_axis=include_cp_axis
+            ),
+        },
+        in_dst_shardings={
+            "input": _vision_activation_placement(
+                tp=spmd.R, include_cp_axis=include_cp_axis
+            ),
+        },
+        out_src_shardings=_vision_activation_placement(
+            tp=spmd.S(-1), include_cp_axis=include_cp_axis
+        ),
+    )
+
+
 def vision_scaled_bias_rowwise_config(
     *, include_cp_axis: bool = False
 ) -> ShardingConfig:
@@ -194,14 +237,17 @@ def set_vision_transformer_block_sharding_config(
             ),
         },
     )
-    block.attn.wq.sharding_config = vision_colwise_config(
-        input_tp=spmd.R, include_cp_axis=include_cp_axis
+    block.attn.wq.sharding_config = vision_attn_colwise_config(
+        input_tp=spmd.R,
+        include_cp_axis=include_cp_axis,
     )
-    block.attn.wk.sharding_config = vision_colwise_config(
-        input_tp=spmd.R, include_cp_axis=include_cp_axis
+    block.attn.wk.sharding_config = vision_attn_colwise_config(
+        input_tp=spmd.R,
+        include_cp_axis=include_cp_axis,
     )
-    block.attn.wv.sharding_config = vision_colwise_config(
-        input_tp=spmd.R, include_cp_axis=include_cp_axis
+    block.attn.wv.sharding_config = vision_attn_colwise_config(
+        input_tp=spmd.R,
+        include_cp_axis=include_cp_axis,
     )
     block.attn.proj.sharding_config = vision_scaled_bias_rowwise_config(
         include_cp_axis=include_cp_axis

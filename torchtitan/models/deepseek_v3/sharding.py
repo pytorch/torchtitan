@@ -15,6 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     norm_config,
     pre_lm_head_norm_config,
+    qkv_colwise_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
@@ -115,7 +116,7 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_a.sharding_config = replicate_weight
     attention.kv_norm.sharding_config = replicate_weight
 
-    attention.wkv_b.sharding_config = colwise_config()
+    attention.wkv_b.sharding_config = qkv_colwise_config()
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
     set_gqa_inner_attention_local_map(attention.inner_attention)
@@ -123,14 +124,14 @@ def _set_deepseek_v3_layer_sharding(
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:
         assert attention.wq is not None
-        attention.wq.sharding_config = colwise_config()
+        attention.wq.sharding_config = qkv_colwise_config()
     else:
         # Low-rank: wq_a + q_norm stay Replicate DTensors; wq_b is Colwise.
         assert attention.wq_a is not None
         assert attention.wq_b is not None
         attention.wq_a.sharding_config = replicate_weight
         attention.q_norm.sharding_config = replicate_weight
-        attention.wq_b.sharding_config = colwise_config()
+        attention.wq_b.sharding_config = qkv_colwise_config()
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:
