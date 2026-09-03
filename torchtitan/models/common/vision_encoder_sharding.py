@@ -62,6 +62,19 @@ def multimodal_input_sharding(*, include_cp_axis: bool = False) -> dict[str, Spm
     }
 
 
+def vision_bank_indices_placement(*, enable_sp: bool) -> SpmdType:
+    """Placement for token-aligned indices into a packed vision bank."""
+    token_axes = (DP, CP, TP) if enable_sp else (DP, CP)
+    return SpmdType(
+        {
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.V if enable_sp else spmd.I,
+        },
+        partition_spec=spmd.PartitionSpec(token_axes),
+    )
+
+
 def invariant_norm_config(*, include_cp_axis: bool = False) -> ShardingConfig:
     """Norm whose state and activations are invariant across TP ranks."""
     return ShardingConfig(

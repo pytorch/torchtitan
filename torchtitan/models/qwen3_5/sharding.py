@@ -34,7 +34,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
-    token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.common.vision_encoder_sharding import (
@@ -125,26 +124,11 @@ def set_qwen35_sharding_config(
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    first_layer_input_layout = layer_input_layout
     if config.vision_encoder is not None:
-        # Vision scatter needs the full embedding sequence on every TP rank.
-        config.tok_embeddings.sharding_config = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-            in_src_shardings={"input": token_id_placement()},
-            in_dst_shardings={"input": token_id_placement()},
-            out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-            out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-            local_map=LocalMapConfig(in_grad_placements=None),
-        )
-        _set_vision_encoder_sharding(config.vision_encoder)
-        # The first layer restores the decoder layout after replicated vision scatter.
-        first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    for layer_idx, layer_cfg in enumerate(config.layers):
-        input_layout = (
-            first_layer_input_layout if layer_idx == 0 else layer_input_layout
-        )
+        _set_vision_encoder_sharding(config.vision_encoder, enable_sp=enable_sp)
+    for layer_cfg in config.layers:
         layer_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={"x_TD": input_layout},
+            in_src_shardings={"x_TD": layer_input_layout},
             in_dst_shardings={"x_TD": layer_input_layout},
             out_src_shardings=layer_input_layout,
         )
@@ -241,7 +225,9 @@ def _set_shared_expert_gate_sharding(
     )
 
 
-def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
+def _set_vision_encoder_sharding(
+    ve_cfg: "Qwen35VisionEncoder.Config", *, enable_sp: bool
+) -> None:
     """Sharding for the vision encoder.
 
     All activations flow without SP in the vision encoder.
@@ -249,26 +235,31 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": SpmdType({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
+        state_shardings={"pos_embed": SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})},
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
+        out_dst_shardings=SpmdType(
+            {DP: spmd.V, CP: spmd.R, TP: spmd.R if enable_sp else spmd.I}
+        ),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": SpmdType({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
+        state_shardings={"inv_freq": SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})},
+        out_src_shardings=SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I}),
     )
 
-    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
+    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config(
+        include_cp_axis=True
+    )
     set_vision_transformer_block_sharding_config(
         ve_cfg.block,
         rope_cache_dp=spmd.V,
+        include_cp_axis=True,
     )
 
     # Merger sub-modules
     merger = ve_cfg.merger
-    merger.norm.sharding_config = invariant_norm_config()
-    merger.fc1.sharding_config = vision_colwise_config()
-    merger.fc2.sharding_config = vision_scaled_bias_rowwise_config()
+    merger.norm.sharding_config = invariant_norm_config(include_cp_axis=True)
+    merger.fc1.sharding_config = vision_colwise_config(include_cp_axis=True)
+    merger.fc2.sharding_config = vision_scaled_bias_rowwise_config(include_cp_axis=True)
 
 
 def _set_full_attention_sharding(
