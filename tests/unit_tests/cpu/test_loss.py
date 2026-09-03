@@ -249,7 +249,7 @@ class TestGradAccumulator(unittest.TestCase):
         for chunk in chunks:
             acc.add(chunk)
 
-        result = acc.result()
+        result = acc.buffer
         torch.testing.assert_close(result, reference)
 
     def test_accumulate_with_dtype_conversion(self):
@@ -264,7 +264,7 @@ class TestGradAccumulator(unittest.TestCase):
         for chunk in bf16_chunks:
             acc.add(chunk)
 
-        result = acc.result()
+        result = acc.buffer
         self.assertEqual(result.dtype, torch.float32)
         # Verify values match (allowing for bf16 precision loss)
         expected = torch.cat([c.float() for c in bf16_chunks], dim=0)

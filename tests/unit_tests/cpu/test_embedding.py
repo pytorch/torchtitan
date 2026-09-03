@@ -153,7 +153,6 @@ class TestEmbedding(DTensorTestBase):
                             embedding_dim=32,
                         )
                     ).to(self.device_type)
-                    embedding.tp_group = tp_group
                     embedding.weight = nn.Parameter(weight_dtensor.to_local())
                     local_tokens = tokens_dtensor.to_local()
 
