@@ -100,8 +100,10 @@ def deepseek_v3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
 def deepseek_v3_debugmodel_mtp(seq_len: int | None = None) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
-    config.loss = MTPLoss.Config(
-        global_vocab_size=decoder_vocab_size(config.model_spec),
+    config.loss = ChunkedLossWrapper.Config(
+        loss_fn=MTPLoss.Config(
+            global_vocab_size=decoder_vocab_size(config.model_spec),
+        ),
     )
     return config
 

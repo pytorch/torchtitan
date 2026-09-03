@@ -19,6 +19,7 @@ from torchtitan.components.loss import (
     cross_entropy_loss,
     IGNORE_INDEX,
     LossFunction,
+    LossTerm,
 )
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
@@ -264,15 +265,15 @@ class MTPDecoder(Decoder):
             )
             mtp_outputs.append(prev_depth_hidden)
 
-        outputs = [h] + mtp_outputs
+        outputs = (h, *mtp_outputs)
         if self._skip_lm_head:
-            raise ValueError(
-                "skip_lm_head is not supported with MTP decoder until "
-                "ChunkedLoss supports MTP outputs."
+            predictions = outputs
+        else:
+            predictions = tuple(
+                self.lm_head(item) if self.lm_head is not None else item
+                for item in outputs
             )
-        return [
-            self.lm_head(item) if self.lm_head is not None else item for item in outputs
-        ]
+        return predictions
 
 
 def apply_fsdp_to_mtp_decoder(
@@ -317,7 +318,6 @@ def apply_fsdp_to_mtp_decoder(
             del model.layers[key]
 
 
-# TODO: Add ChunkedLoss support for the main and per-depth MTP outputs.
 class MTPLoss(BaseLoss):
     """DeepSeek-V3 multi-token prediction loss."""
 
@@ -335,46 +335,65 @@ class MTPLoss(BaseLoss):
 
     def __call__(
         self,
-        pred: list[torch.Tensor],
+        pred: tuple[torch.Tensor, ...],
         labels: torch.Tensor,
         global_valid_tokens: torch.Tensor | None = None,
-        **kwargs: Any,
+        **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        positions = kwargs.pop("positions", None)
-        del kwargs
-
-        if not isinstance(pred, list):
-            raise ValueError(
-                "MTPLoss expects a list of predictions: main logits followed "
-                "by one tensor per MTP layer."
+        """Compute the weighted main and auxiliary MTP objectives."""
+        loss_terms = self._build_loss_terms(pred, labels, **loss_inputs)
+        loss: torch.Tensor | None = None
+        for loss_term in loss_terms:
+            term_loss, _ = self._compute_loss_term(
+                loss_term.pred,
+                loss_term.labels,
+                **loss_term.inputs,
             )
+            weighted_loss = term_loss * loss_term.weight
+            loss = weighted_loss if loss is None else loss + weighted_loss
+        assert loss is not None
+        with spmd.no_typecheck():
+            if global_valid_tokens is not None:
+                loss = loss / global_valid_tokens
+        return loss, {}
+
+    def _build_loss_terms(
+        self,
+        pred: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor,
+        **loss_inputs: Any,
+    ) -> tuple[LossTerm, ...]:
+        """Build main and depth-aligned MTP loss terms before chunking."""
+        positions = loss_inputs.pop("positions", None)
+        del loss_inputs
+        if not isinstance(pred, tuple):
+            raise ValueError("MTPLoss expects a tuple of MTP predictions.")
         if positions is None:
             raise ValueError("MTPLoss requires positions for MTP predictions.")
         num_mtp_layers = len(pred) - 1
         if num_mtp_layers <= 0:
             raise ValueError(
-                "MTPLoss expects main prediction plus at least one MTP "
-                f"prediction, got {len(pred)} predictions."
+                "MTPLoss expects a main prediction and at least one auxiliary "
+                "prediction."
             )
-
-        main_loss = self.fn(
-            pred[0],
-            labels[: pred[0].shape[0]],
-            global_vocab_size=self.global_vocab_size,
-        )
-        mtp_loss: torch.Tensor | None = None
-
+        mtp_weight = self.mtp_scale / num_mtp_layers
+        loss_terms = [
+            LossTerm(
+                pred[0],
+                labels[: pred[0].shape[0]],
+            )
+        ]
         for label_offset, mtp_pred in enumerate(pred[1:], 1):
             mtp_seq_len = mtp_pred.shape[0]
             if labels.shape[0] < mtp_seq_len:
                 raise ValueError(
-                    f"MTP labels need at least {mtp_seq_len} "
-                    f"tokens for depth {label_offset}, got {labels.shape[0]}."
+                    f"MTP labels need at least {mtp_seq_len} tokens for depth "
+                    f"{label_offset}, got {labels.shape[0]}."
                 )
             if positions.shape[0] < mtp_seq_len:
                 raise ValueError(
-                    f"MTP positions need at least {mtp_seq_len} tokens "
-                    f"for depth {label_offset}, got {positions.shape[0]}."
+                    f"MTP positions need at least {mtp_seq_len} tokens for depth "
+                    f"{label_offset}, got {positions.shape[0]}."
                 )
             mtp_labels = roll_mtp_sequence(
                 labels[:mtp_seq_len],
@@ -382,16 +401,29 @@ class MTPLoss(BaseLoss):
                 fill_value=IGNORE_INDEX,
                 positions=positions[:mtp_seq_len],
             )
-            depth_loss = self.fn(
-                mtp_pred,
-                mtp_labels,
-                global_vocab_size=self.global_vocab_size,
+            assert isinstance(mtp_labels, torch.Tensor)
+            loss_terms.append(
+                LossTerm(
+                    mtp_pred,
+                    mtp_labels,
+                    weight=mtp_weight,
+                )
             )
-            mtp_loss = depth_loss if mtp_loss is None else mtp_loss + depth_loss
-        assert mtp_loss is not None
-        if num_mtp_layers > 1:
-            mtp_loss = mtp_loss / num_mtp_layers
-        loss = main_loss + mtp_loss * self.mtp_scale
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
-        return loss, {}
+        return tuple(loss_terms)
+
+    def _compute_loss_term(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        **loss_inputs: Any,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute one unnormalized MTP cross-entropy term."""
+        del loss_inputs
+        return (
+            self.fn(
+                pred,
+                labels,
+                global_vocab_size=self.global_vocab_size,
+            ),
+            {},
+        )
