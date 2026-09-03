@@ -149,11 +149,12 @@ passed to `MetricsProcessor.Config.build(...)`. `WANDB_PROJECT` defaults to
 
 `VllmOtelStatLogger` exports engine-level rollout metrics through
 [OpenTelemetry](https://opentelemetry.io/). The logger is disabled by default
-and is only registered when `generator.vllm_stat_logger.enable` is true. Once
-enabled, `OTEL_METRICS_EXPORTER` must select `jsonl` or `otlp`. This explicit
-gate prevents inherited OpenTelemetry environment variables from activating
-the logger accidentally. Only TP rank 0 in each DP replica creates the logger
-because all TP ranks see the same engine-aggregate statistics.
+and is only registered when `generator.vllm_stat_logger` contains a
+`VllmOtelStatLogger.Config`. Once enabled, `OTEL_METRICS_EXPORTER` must select
+`jsonl` or `otlp`. This explicit gate prevents inherited OpenTelemetry
+environment variables from activating the logger accidentally. Only TP rank 0
+in each DP replica creates the logger because all TP ranks see the same
+engine-aggregate statistics.
 
 The exported metrics are grouped by OpenTelemetry instrument type:
 
@@ -214,7 +215,6 @@ VLLM_LOG_STATS_INTERVAL=10 \
 python -m torchtitan.experiments.rl.train \
   --module dapo_math \
   --config rl_dapo_qwen3_4b_math_8k \
-  --generator.vllm-stat-logger.enable \
   --metrics.no-enable-wandb
 ```
 
@@ -234,7 +234,6 @@ VLLM_LOG_STATS_INTERVAL=10 \
 python -m torchtitan.experiments.rl.train \
   --module dapo_math \
   --config rl_dapo_qwen3_4b_math_8k \
-  --generator.vllm-stat-logger.enable \
   --metrics.no-enable-wandb
 ```
 

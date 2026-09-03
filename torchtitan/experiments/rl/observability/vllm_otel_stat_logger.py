@@ -152,9 +152,6 @@ class VllmOtelStatLogger(Configurable, StatLoggerBase):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        enable: bool = False
-        """Register the logger to export vLLM metrics through OpenTelemetry."""
-
         extra_resource_attributes: dict[str, AttributeValue] = field(
             default_factory=dict
         )

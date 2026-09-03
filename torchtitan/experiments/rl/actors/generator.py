@@ -13,12 +13,13 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
+import tyro
 from monarch.actor import (
     Actor,
     Channel,
@@ -762,10 +763,10 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
-        vllm_stat_logger: VllmOtelStatLogger.Config = field(
-            default_factory=VllmOtelStatLogger.Config
-        )
-        """Logger instantiated on TP rank 0 to export vLLM metrics."""
+        vllm_stat_logger: Annotated[
+            VllmOtelStatLogger.Config | None, tyro.conf.Suppress
+        ] = None
+        """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -934,11 +935,12 @@ class VLLMGenerator(Actor, Configurable):
             logger.info("Initializing LLMEngine from EngineArgs...")
             stat_loggers = None
             if self._tp_rank == 0:
-                if not config.vllm_stat_logger.enable:
+                vllm_stat_logger_config = config.vllm_stat_logger
+                if vllm_stat_logger_config is None:
                     logger.info(
                         "VllmOtelStatLogger inactive because "
-                        "vllm_stat_logger.enable=False. To record vLLM metrics, "
-                        "set vllm_stat_logger.enable=True and "
+                        "vllm_stat_logger=None. To record vLLM metrics, set it "
+                        "to VllmOtelStatLogger.Config() and set "
                         "OTEL_METRICS_EXPORTER=jsonl or otlp"
                     )
                 else:
@@ -951,7 +953,7 @@ class VLLMGenerator(Actor, Configurable):
                     )
 
                     def build_stat_logger(vllm_config, engine_index):
-                        return config.vllm_stat_logger.build(
+                        return vllm_stat_logger_config.build(
                             vllm_config=vllm_config,
                             engine_index=engine_index,
                             context=logger_context,

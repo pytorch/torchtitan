@@ -68,7 +68,7 @@ def test_context_populates_resource_attributes(
     no_otel_env, monkeypatch, tmp_path, meter_providers
 ):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(model="m"),
         engine_index=3,
         context=_context(
@@ -95,7 +95,7 @@ def test_context_reads_distributed_env_tags(
     monkeypatch.setenv("LOCAL_RANK", "1")
     monkeypatch.setenv("WORLD_SIZE", "8")
 
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(),
         context=_context(rank=3, tp_rank=1, dp_rank=1, output_dir=str(tmp_path)),
     )
@@ -110,7 +110,6 @@ def test_extra_resource_attributes_support_arrays_and_overrides(
 ):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
     VllmOtelStatLogger.Config(
-        enable=True,
         extra_resource_attributes={
             "custom.columns": ["request_id", "latency_ms"],
             "model_name": "overridden-model",
@@ -191,15 +190,11 @@ def test_extract_step_stats_prefix_cache_none():
     assert step.kv_cache_usage == 0.1
 
 
-def test_disabled_by_default():
-    assert VllmOtelStatLogger.Config().enable is False
-
-
 def test_logger_does_not_gate_on_tp_rank(
     no_otel_env, monkeypatch, tmp_path, meter_providers
 ):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(tp_size=2),
         engine_index=0,
         context=_context(rank=1, tp_rank=1, dp_rank=0, output_dir=str(tmp_path)),
@@ -212,7 +207,7 @@ def test_exporter_none_raises(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "none")
 
     with pytest.raises(ValueError, match="unsupported OTEL_METRICS_EXPORTER='none'"):
-        VllmOtelStatLogger.Config(enable=True).build(
+        VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(), context=_context()
         )
 
@@ -221,7 +216,7 @@ def test_endpoint_without_exporter_raises(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
 
     with pytest.raises(ValueError, match="unsupported OTEL_METRICS_EXPORTER='none'"):
-        VllmOtelStatLogger.Config(enable=True).build(
+        VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(), context=_context()
         )
 
@@ -231,7 +226,7 @@ def test_sdk_disabled_is_inert(no_otel_env, monkeypatch, tmp_path, caplog):
     monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
 
     with caplog.at_level(logging.WARNING):
-        log = VllmOtelStatLogger.Config(enable=True).build(
+        log = VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(),
             context=_context(output_dir=str(tmp_path)),
         )
@@ -246,7 +241,7 @@ def test_unsupported_exporter_raises(no_otel_env, monkeypatch, exporter):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", exporter)
 
     with pytest.raises(ValueError, match="unsupported OTEL_METRICS_EXPORTER"):
-        VllmOtelStatLogger.Config(enable=True).build(
+        VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(), context=_context()
         )
 
@@ -255,7 +250,7 @@ def test_jsonl_requires_output_dir(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
 
     with pytest.raises(ValueError, match="requires an output directory.*output_dir=''"):
-        VllmOtelStatLogger.Config(enable=True).build(
+        VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(),
             context=_context(output_dir=""),
         )
@@ -265,7 +260,7 @@ def test_otlp_requires_endpoint(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp")
 
     with pytest.raises(ValueError, match="requires OTEL_EXPORTER_OTLP_ENDPOINT"):
-        VllmOtelStatLogger.Config(enable=True).build(
+        VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(), context=_context()
         )
 
@@ -276,7 +271,7 @@ def test_otlp_requires_http_protobuf(no_otel_env, monkeypatch):
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
 
     with pytest.raises(ValueError, match="uses the OTLP HTTP/protobuf exporter"):
-        VllmOtelStatLogger.Config(enable=True).build(
+        VllmOtelStatLogger.Config().build(
             vllm_config=_vllm_config(), context=_context()
         )
 
@@ -287,7 +282,7 @@ def test_jsonl_export_is_asynchronous(
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
     monkeypatch.setenv("OTEL_METRIC_EXPORT_TIMEOUT", "1234")
     monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "600")
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(),
         context=_context(output_dir=str(tmp_path)),
     )
@@ -318,7 +313,7 @@ def test_jsonl_export_writes_recorded_metrics(
 ):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
     monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "600")
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(model="test-model"),
         context=_context(
             rank=5,
@@ -392,7 +387,7 @@ def test_record_disables_on_instrument_failure(
     no_otel_env, monkeypatch, tmp_path, meter_providers, caplog
 ):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(),
         context=_context(output_dir=str(tmp_path)),
     )
@@ -414,7 +409,7 @@ def test_record_disables_on_extract_failure(
     no_otel_env, monkeypatch, tmp_path, meter_providers
 ):
     monkeypatch.setenv("OTEL_METRICS_EXPORTER", "jsonl")
-    log = VllmOtelStatLogger.Config(enable=True).build(
+    log = VllmOtelStatLogger.Config().build(
         vllm_config=_vllm_config(),
         context=_context(output_dir=str(tmp_path)),
     )
