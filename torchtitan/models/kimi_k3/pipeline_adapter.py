@@ -51,6 +51,7 @@ from torchtitan.distributed.pipeline_parallel import (
 )
 from torchtitan.models.kimi_k3.layout import (
     BlockLayoutTables,
+    gather_layer_to_stage,
     infer_block_layout_tables_from_stages,
     unstack_blocks,
 )
@@ -1129,6 +1130,15 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
         return passthrough
     num_blocks = -(-n_layers_total // layers_per_block)
 
+    # The split is whatever the trainer applied, uneven stages included: each
+    # rank sees only its own stages, so the global layer-to-stage map is one
+    # all-gather over the pipeline group.
+    group = getattr(stages[0], "group", None)
+    layer_to_stage = (
+        gather_layer_to_stage(stages, group)
+        if group is not None and dist.is_initialized()
+        else None
+    )
     try:
         layout_tables = infer_block_layout_tables_from_stages(
             stages,
@@ -1136,6 +1146,7 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
             num_blocks=num_blocks,
             n_layers=n_layers_total,
             layers_per_block=layers_per_block,
+            layer_to_stage=layer_to_stage,
         )
     except ValueError:
         # An unsupported configuration, not a rank-local mishap: falling back

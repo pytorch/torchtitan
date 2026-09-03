@@ -17,6 +17,7 @@ metadata ever travels over the wire.
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 
 
 class BlockLayoutTables:
@@ -218,18 +219,19 @@ def infer_block_layout_tables_from_stages(
     num_blocks: int,
     n_layers: int,
     layers_per_block: int,
+    layer_to_stage: dict[int, int] | None = None,
 ) -> BlockLayoutTables:
-    """Build :class:`BlockLayoutTables` from live ``PipelineStage`` objects.
+    """Build :class:`BlockLayoutTables` for the stages a rank holds.
 
-    The layout itself is the contiguous default (layer ``ell`` on stage
-    ``ell // layers_per_stage``). ``stages`` holds only the local rank's stages,
-    so a complete layer-id -> stage-id map is not obtainable here without a
-    collective; what the local stages DO expose is used to verify the default
-    instead. A non-contiguous split raises rather than producing a layout that
-    is wrong in a way only the gradients would show.
-
-    Stages that expose no ``layers`` attribute (CPU unit tests) leave nothing to
-    verify, which is not an error.
+    ``layer_to_stage`` is the global map, layer id to stage id, that
+    :func:`gather_layer_to_stage` collects from every rank: under
+    Interleaved1F1B ``stages`` holds only the local rank's stages, so the map
+    cannot be read locally. Any split is accepted as long as every layer sits
+    on exactly one stage and each stage holds a contiguous run of layers in
+    stage order, which is what the delta routing assumes; anything else raises
+    rather than producing tables that are wrong in a way only the gradients
+    would show. Without a map (CPU unit tests) the contiguous equal split is
+    assumed, which requires ``n_layers`` to divide by the stage count.
     """
     num_local_stages = len(stages)
     if num_local_stages < 1:
@@ -239,40 +241,28 @@ def infer_block_layout_tables_from_stages(
     V = num_local_stages
     num_stages = pp_size * V
 
-    layer_to_stage: dict[int, int] = {}
-    for stage in stages:
-        submod = getattr(stage, "submod", None)
-        inner = getattr(submod, "wrapped", submod)
-        layers = getattr(inner, "layers", None)
-        if layers is None:
-            continue
-        stage_idx = getattr(stage, "stage_index", None)
-        if stage_idx is None:
-            continue
-        for key in layers.keys():
-            try:
-                layer_id = int(key)
-            except (TypeError, ValueError):
-                continue
-            layer_to_stage[layer_id] = stage_idx
-
-    # Verify, do not adopt: the map above covers this rank's layers only.
-    # BlockLayoutTables raises on its own if the layer count is not divisible,
-    # and its message is the clearer one, so leave that case to it.
-    if layer_to_stage and n_layers % num_stages == 0:
-        layers_per_stage = n_layers // num_stages
-        for layer_id, stage_idx in sorted(layer_to_stage.items()):
-            expected = layer_id // layers_per_stage
-            if stage_idx != expected:
+    if layer_to_stage is not None:
+        if sorted(layer_to_stage) != list(range(n_layers)):
+            raise ValueError(
+                f"layer_to_stage must cover layers 0..{n_layers - 1} exactly once; "
+                f"got {sorted(layer_to_stage)}"
+            )
+        previous = -1
+        for layer_id in range(n_layers):
+            stage_idx = layer_to_stage[layer_id]
+            if not 0 <= stage_idx < num_stages:
                 raise ValueError(
-                    f"layer {layer_id} sits on stage {stage_idx}, but the "
-                    f"contiguous layout this adapter assumes puts it on stage "
-                    f"{expected} (n_layers={n_layers}, num_stages={num_stages}). "
-                    "A non-contiguous pipeline split is not supported: the "
-                    "cross-stage cache would route block deltas to the wrong "
-                    "stages."
+                    f"layer {layer_id} sits on stage {stage_idx}, outside the "
+                    f"{num_stages} stages of this pipeline"
                 )
-    layer_to_stage = None  # type: ignore[assignment]
+            if stage_idx < previous:
+                raise ValueError(
+                    f"layer {layer_id} sits on stage {stage_idx} after layer "
+                    f"{layer_id - 1} on stage {previous}. A non-contiguous "
+                    "pipeline split is not supported: the cross-stage cache "
+                    "would route block deltas to the wrong stages."
+                )
+            previous = stage_idx
 
     return BlockLayoutTables(
         pp_size=pp_size,
@@ -282,6 +272,41 @@ def infer_block_layout_tables_from_stages(
         layers_per_block=layers_per_block,
         layer_to_stage=layer_to_stage,
     )
+
+
+def local_layer_to_stage(stages) -> dict[int, int]:
+    """The layer-to-stage map of the stages this rank holds."""
+    layer_to_stage: dict[int, int] = {}
+    for stage in stages:
+        submod = getattr(stage, "submod", None)
+        inner = getattr(submod, "wrapped", submod)
+        layers = getattr(inner, "layers", None)
+        stage_idx = getattr(stage, "stage_index", None)
+        if layers is None or stage_idx is None:
+            continue
+        for key in layers.keys():
+            try:
+                layer_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            layer_to_stage[layer_id] = stage_idx
+    return layer_to_stage
+
+
+def gather_layer_to_stage(stages, group) -> dict[int, int]:
+    """The global layer-to-stage map, one all-gather over the pipeline group.
+
+    Every rank contributes the map of its own stages; the union is the split
+    the trainer actually applied, uneven stages included.
+    """
+    local = local_layer_to_stage(stages)
+    gathered: list[dict[int, int] | None] = [None] * dist.get_world_size(group)
+    dist.all_gather_object(gathered, local, group=group)
+    merged: dict[int, int] = {}
+    for part in gathered:
+        assert part is not None
+        merged.update(part)
+    return merged
 
 
 def unstack_blocks(blocks_tensor: torch.Tensor) -> list[torch.Tensor]:
