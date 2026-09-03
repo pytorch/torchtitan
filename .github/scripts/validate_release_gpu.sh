@@ -157,7 +157,10 @@ PY
 )"
 
 run_core_tests() {
-  CUDA_VISIBLE_DEVICES=0 python -m pytest \
+  python -m pip install flash-attn-3 \
+    --extra-index-url "${PYTORCH_INDEX_URL}"
+
+  python -m pytest \
     tests/unit_tests/flex_shard/test_dist_muon.py \
     --durations=20 \
     -vv
@@ -189,11 +192,13 @@ run_core_tests() {
     --assert-equal \
     --steps=100
 
-  python -m tests.integration_tests.run_tests \
+  # The legacy HF checkpoint test resolves its load path through RUNNER_TEMP.
+  local feature_runner_temp="${ARTIFACTS}/integration_tests/features"
+  RUNNER_TEMP="${feature_runner_temp}" python -m tests.integration_tests.run_tests \
     --gpu_arch_type cuda \
     --test_suite features \
     --ngpu 8 \
-    "${ARTIFACTS}/integration_tests/features"
+    "${feature_runner_temp}/artifacts-to-be-uploaded"
 
   python -m tests.integration_tests.run_tests \
     --gpu_arch_type cuda \
