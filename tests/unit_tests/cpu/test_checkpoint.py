@@ -35,6 +35,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
+from torchtitan.config import Function
 
 
 class FakeOptimizersContainer:
@@ -185,6 +186,25 @@ class TestCheckpointManager(unittest.TestCase):
         checkpoint = Trainer.Config().checkpoint
         self.assertIsInstance(checkpoint, CheckpointManager.Config)
         self.assertFalse(checkpoint.enable)
+
+    def test_purge_exempt_is_built_from_config(self):
+        self.trainer_config.checkpoint.purge_exempt = Function.Config(
+            fn=lambda step: step % 2 == 0
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        self.assertTrue(manager._is_purge_exempt(2))
+        self.assertFalse(manager._is_purge_exempt(3))
+        manager.close()
 
     def test_legacy_import_path(self):
         from torchtitan.components.checkpointer import (
@@ -1293,6 +1313,21 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
         manager._purge_stale_checkpoints()
 
         self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_purge_keeps_exempt_checkpoints_outside_latest_k(self, _rank):
+        manager = self._manager(
+            keep_latest_k=2,
+            entries=["step-1", "step-2", "step-3", "step-4", "step-5"],
+        )
+        manager.purge_exempt = Function.Config(fn=lambda step: step % 2 == 0).build()
+
+        manager._purge_stale_checkpoints()
+
+        self.assertEqual(
+            {"/checkpoint/step-1", "/checkpoint/step-3"},
+            self._purged(manager),
+        )
 
     def test_parse_step_accepts_only_canonical_names(self):
         manager = CheckpointManager.__new__(CheckpointManager)

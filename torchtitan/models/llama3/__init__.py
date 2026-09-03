@@ -112,7 +112,10 @@ def _build_llama3_layers(
 
 
 def _debugmodel(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 256
     n_heads = 16
@@ -135,7 +138,7 @@ def _debugmodel(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -146,7 +149,10 @@ def _debugmodel(
 
 
 def _1b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 2048
     n_heads = 32
@@ -179,7 +185,7 @@ def _1b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -190,7 +196,10 @@ def _1b(
 
 
 def _3b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 3072
     n_heads = 24
@@ -223,7 +232,7 @@ def _3b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -234,7 +243,10 @@ def _3b(
 
 
 def _8b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 4096
     n_heads = 32
@@ -264,7 +276,7 @@ def _8b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -275,7 +287,10 @@ def _8b(
 
 
 def _70b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 8192
     n_heads = 64
@@ -305,7 +320,7 @@ def _70b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -316,7 +331,10 @@ def _70b(
 
 
 def _405b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Llama3Model.Config:
     dim = 16384
     n_heads = 128
@@ -346,7 +364,7 @@ def _405b(
             ),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -357,23 +375,34 @@ def _405b(
 
 
 llama3_configs = {
-    "debugmodel": _debugmodel,
-    "1B": _1b,
-    "3B": _3b,
-    "8B": _8b,
-    "70B": _70b,
-    "405B": _405b,
+    "debugmodel": (_debugmodel, 131072),
+    "1B": (_1b, 131072),
+    "3B": (_3b, 131072),
+    "8B": (_8b, 131072),
+    "70B": (_70b, 131072),
+    "405B": (_405b, 131072),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = llama3_configs[flavor](
-        attn_backend=attn_backend, tp_gemm_backend=tp_gemm_backend
+    get_config, max_context_len = llama3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
+        attn_backend=attn_backend,
+        tp_gemm_backend=tp_gemm_backend,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -383,6 +412,7 @@ def model_registry(
         name="llama3",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,

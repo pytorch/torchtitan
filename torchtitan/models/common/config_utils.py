@@ -330,7 +330,7 @@ def make_router_config(
     num_experts: int,
     gate_param_init: dict[str, Callable],
     top_k: int = 1,
-    score_func: Literal["sigmoid", "softmax"] = "sigmoid",
+    score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
     route_norm: bool = False,
     route_scale: float = 1.0,
     num_expert_groups: int | None = None,

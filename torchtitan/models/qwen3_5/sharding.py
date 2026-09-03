@@ -120,23 +120,25 @@ def set_qwen35_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
-    # Vision scatter needs the full embedding sequence on every TP rank.
-    config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-        local_spmd=True,
-    )
-    _set_vision_encoder_sharding(config.vision_encoder)
-    # The first layer restores the decoder layout after replicated vision scatter.
-    first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     layer_input_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
+    first_layer_input_layout = layer_input_layout
+    if config.vision_encoder is not None:
+        # Vision scatter needs the full embedding sequence on every TP rank.
+        config.tok_embeddings.sharding_config = ShardingConfig(
+            state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+            in_src_shardings={"input": token_id_placement()},
+            in_dst_shardings={"input": token_id_placement()},
+            out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+            out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+            local_spmd=True,
+        )
+        _set_vision_encoder_sharding(config.vision_encoder)
+        # The first layer restores the decoder layout after replicated vision scatter.
+        first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     for layer_idx, layer_cfg in enumerate(config.layers):
         input_layout = (
             first_layer_input_layout if layer_idx == 0 else layer_input_layout
