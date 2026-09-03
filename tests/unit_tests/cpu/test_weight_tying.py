@@ -17,7 +17,8 @@ from torchtitan.models.llama3.model import Llama3Model
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
     # Start from the standard debugmodel config and adjust weight tying.
-    config = llama3_configs["debugmodel"](attn_backend="flex")
+    build_config, max_context_length = llama3_configs["debugmodel"]
+    config = build_config(attn_backend="flex", seq_len=max_context_length)
     # Replace tok_embeddings param_init based on weight tying flag.
     import dataclasses
     from functools import partial

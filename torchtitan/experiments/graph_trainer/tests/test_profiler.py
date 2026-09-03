@@ -18,16 +18,14 @@ from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-i
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.config.function import Function
+from torchtitan.distributed.cudagraph import (
+    cudagraph_annotate_trace_post_processor,
+    cudagraph_teardown,
+    get_cudagraph_annotations,
+)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
-)
-from torchtitan.experiments.graph_trainer.cudagraph import (
-    _cg_manager,
-    _cudagraph_annotate_trace_file,
-    cudagraph_teardown,
-    get_cudagraph_annotations,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -178,20 +176,24 @@ class TestKernelAnnotationsE2E(TestCase):
         cudagraph_teardown()
 
 
-class TestTracePostProcessorConfig(TestCase):
-    """Verify Profiler.Config.trace_post_processor runs on every trace export."""
+class TestTracePostProcessor(TestCase):
+    """Verify CUDA graph annotations are applied to every profiler trace."""
 
     def test_post_processor_called_with_trace_path(self):
-        """Function.Config in trace_post_processor is invoked with the
-        exported trace file path."""
+        """The CUDA graph post-processor receives the exported trace path."""
 
         calls: list[tuple[str, bool]] = []
 
         def record_call(trace_path: str) -> None:
             calls.append((trace_path, os.path.exists(trace_path)))
 
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "torch.distributed.get_rank", return_value=0
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("torch.distributed.get_rank", return_value=0),
+            patch(
+                "torchtitan.tools.profiler.cudagraph_annotate_trace_post_processor",
+                side_effect=record_call,
+            ),
         ):
             config = Profiler.Config(
                 enable_profiling=True,
@@ -199,7 +201,6 @@ class TestTracePostProcessorConfig(TestCase):
                 profile_freq=4,
                 profiler_warmup=1,
                 profiler_active=1,
-                trace_post_processor=Function.Config(fn=record_call),
             )
             profiler = config.build(global_step=0, base_folder=tmp)
 
@@ -232,10 +233,10 @@ class TestTracePostProcessorConfig(TestCase):
 
         # Seed annotations so the post-processor does real work instead of
         # returning early on an empty annotation map.
-        saved_annotations = _cg_manager.all_annotations
-        _cg_manager.all_annotations = {
-            graph_node_id: [{_MODULE_FQN: "layers.0.attention.wq"}]
-        }
+        annotations = get_cudagraph_annotations()
+        saved_annotations = annotations.copy()
+        annotations.clear()
+        annotations[graph_node_id] = [{_MODULE_FQN: "layers.0.attention.wq"}]
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 trace_path = os.path.join(tmp, "rank0_trace.json.gz")
@@ -243,13 +244,14 @@ class TestTracePostProcessorConfig(TestCase):
                     json.dump(trace, f)
 
                 # Must not raise on the gzip-compressed input.
-                _cudagraph_annotate_trace_file(trace_path)
+                cudagraph_annotate_trace_post_processor(trace_path)
 
                 # And the written-back trace must remain valid gzip JSON.
                 with gzip.open(trace_path, "rt") as f:
                     annotated = json.load(f)
         finally:
-            _cg_manager.all_annotations = saved_annotations
+            annotations.clear()
+            annotations.update(saved_annotations)
 
         fqns = {e.get("args", {}).get(_MODULE_FQN) for e in annotated["traceEvents"]}
         self.assertIn("layers.0.attention.wq", fqns)

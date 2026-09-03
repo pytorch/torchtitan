@@ -12,13 +12,18 @@ import torch
 import torch.nn.functional as F
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
-from attn_gym.linear.kda.short_conv import causal_conv1d
+from attn_gym.linear.short_conv import causal_conv1d
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
+
+# Shape suffixes:
+# T = packed tokens, D = model dimension, C = projection channels,
+# H = attention heads, K = query/key head dimension, V = value head dimension,
+# W = convolution kernel width.
 
 
 class KimiRMSNormGated(Module):
@@ -34,15 +39,15 @@ class KimiRMSNormGated(Module):
         self.eps = config.eps
         self.weight = nn.Parameter(torch.empty(config.dim))
 
-    def forward(self, x_TNV: torch.Tensor, gate_TNV: torch.Tensor) -> torch.Tensor:
-        input_dtype = x_TNV.dtype
-        normalized_TNV = F.rms_norm(
-            x_TNV.float(),
-            (x_TNV.shape[-1],),
+    def forward(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
+        input_dtype = x_THV.dtype
+        normalized_THV = F.rms_norm(
+            x_THV.float(),
+            (x_THV.shape[-1],),
             self.weight.float(),
             self.eps,
         )
-        return (normalized_TNV * gate_TNV.float().sigmoid()).to(input_dtype)
+        return (normalized_THV * gate_THV.float().sigmoid()).to(input_dtype)
 
 
 class KDAKernel(Module):
@@ -65,43 +70,43 @@ class KDAKernel(Module):
 
     def forward(
         self,
-        q_BTNK: torch.Tensor,
-        k_BTNK: torch.Tensor,
-        v_BTNV: torch.Tensor,
-        raw_gate_BTNK: torch.Tensor,
-        raw_beta_BTN: torch.Tensor,
-        A_log_N: torch.Tensor,
-        dt_bias_NK: torch.Tensor,
+        q_1THK: torch.Tensor,
+        k_1THK: torch.Tensor,
+        v_1THV: torch.Tensor,
+        raw_gate_1THK: torch.Tensor,
+        raw_beta_1TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if not q_BTNK.is_cuda:
+        if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
-        capability = torch.cuda.get_device_capability(q_BTNK.device)
+        capability = torch.cuda.get_device_capability(q_1THK.device)
         if capability not in {(10, 0), (10, 3)}:
             raise RuntimeError(
                 "Attention Gym KDA requires Blackwell SM100/SM103; "
                 f"got CUDA capability {capability}."
             )
 
-        gate_BTNK = bound_gate(
-            raw_gate_BTNK,
+        gate_1THK = bound_gate(
+            raw_gate_1THK,
             # TODO: The long-term solution is to specify mixed precision per FQN
             # instead of per layer. https://github.com/pytorch/pytorch/issues/156784
-            A_log_N.float(),
-            dt_bias_NK.float(),
+            A_log_H.float(),
+            dt_bias_HK.float(),
             lower_bound=self.lower_bound,
             impl="fused",
         )
-        output_BTNV, _ = chunk_kda(
-            l2norm(q_BTNK),
-            l2norm(k_BTNK),
-            v_BTNV,
-            gate_BTNK,
-            raw_beta_BTN.float().sigmoid(),
+        output_1THV, _ = chunk_kda(
+            l2norm(q_1THK),
+            l2norm(k_1THK),
+            v_1THV,
+            gate_1THK,
+            raw_beta_1TH.float().sigmoid(),
             cu_seqlens=cu_seqlens,
         )
-        return output_BTNV
+        return output_1THV
 
 
 class InnerKDA(Module):
@@ -128,18 +133,18 @@ class InnerKDA(Module):
         query_TC: torch.Tensor,
         key_TC: torch.Tensor,
         value_TC: torch.Tensor,
-        raw_gate_TNK: torch.Tensor,
-        raw_beta_TN: torch.Tensor,
+        raw_gate_THK: torch.Tensor,
+        raw_beta_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
         conv_k_weight_C1W: torch.Tensor,
         conv_v_weight_C1W: torch.Tensor,
-        A_log_N: torch.Tensor,
-        dt_bias_NK: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
         cu_seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
-        raw_gate_BTNK = raw_gate_TNK.unsqueeze(0)
-        raw_beta_BTN = raw_beta_TN.unsqueeze(0)
-        mixed_qkv_BTC = torch.cat(
+        raw_gate_1THK = raw_gate_THK.unsqueeze(0)
+        raw_beta_1TH = raw_beta_TH.unsqueeze(0)
+        mixed_qkv_1TC = torch.cat(
             (query_TC, key_TC, value_TC),
             dim=-1,
         ).unsqueeze(0)
@@ -147,30 +152,30 @@ class InnerKDA(Module):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
-        conv_output_BTC = causal_conv1d(
-            mixed_qkv_BTC,
+        conv_output_1TC = causal_conv1d(
+            mixed_qkv_1TC,
             conv_weight_C1W[:, 0],
             activation="silu",
             cu_seqlens=cu_seqlens,
         )
-        assert isinstance(conv_output_BTC, torch.Tensor)
+        assert isinstance(conv_output_1TC, torch.Tensor)
 
-        q_BTC, k_BTC, v_BTC = conv_output_BTC.chunk(3, dim=-1)
-        q_BTNK, k_BTNK, v_BTNV = (
+        q_1TC, k_1TC, v_1TC = conv_output_1TC.chunk(3, dim=-1)
+        q_1THK, k_1THK, v_1THV = (
             tensor.unflatten(-1, (-1, self.head_dim))
-            for tensor in (q_BTC, k_BTC, v_BTC)
+            for tensor in (q_1TC, k_1TC, v_1TC)
         )
-        output_BTNV = self.kernel(
-            q_BTNK,
-            k_BTNK,
-            v_BTNV,
-            raw_gate_BTNK,
-            raw_beta_BTN,
-            A_log_N,
-            dt_bias_NK,
+        output_1THV = self.kernel(
+            q_1THK,
+            k_1THK,
+            v_1THV,
+            raw_gate_1THK,
+            raw_beta_1TH,
+            A_log_H,
+            dt_bias_HK,
             cu_seqlens=cu_seqlens,
         )
-        return output_BTNV.squeeze(0)
+        return output_1THV.squeeze(0)
 
 
 class KDA(Module):
@@ -251,16 +256,16 @@ class KDA(Module):
                 f"got {type(attention_masks).__name__}."
             )
         num_tokens = x_TD.shape[0]
-        raw_gate_TNK = self.forget_b(self.forget_a(x_TD)).reshape(
+        raw_gate_THK = self.forget_b(self.forget_a(x_TD)).reshape(
             num_tokens, self.num_heads, self.head_dim
         )
-        raw_beta_TN = self.beta(x_TD).reshape(num_tokens, self.num_heads)
-        out_TNV = self.inner_kda(
+        raw_beta_TH = self.beta(x_TD).reshape(num_tokens, self.num_heads)
+        out_THV = self.inner_kda(
             self.q_proj(x_TD),
             self.k_proj(x_TD),
             self.v_proj(x_TD),
-            raw_gate_TNK,
-            raw_beta_TN,
+            raw_gate_THK,
+            raw_beta_TH,
             self.q_conv.weight,
             self.k_conv.weight,
             self.v_conv.weight,
@@ -269,5 +274,5 @@ class KDA(Module):
             cu_seqlens,
         )
 
-        output_gate_TNV = self.output_gate(x_TD).view_as(out_TNV)
-        return self.output_proj(self.output_norm(out_TNV, output_gate_TNV).flatten(-2))
+        output_gate_THV = self.output_gate(x_TD).view_as(out_THV)
+        return self.output_proj(self.output_norm(out_THV, output_gate_THV).flatten(-2))

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
@@ -17,17 +19,23 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.experiments.transformers_modeling_backend.configs import (
-    TransformersBackendConfig,
-)
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.tools.profiler import Profiler
+from torchtitan.trainer import Trainer
 from . import model_registry
 from .tokenizer import HFBackendTokenizer
 
 
-def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
-    model_spec = model_registry("debugmodel")
+@dataclass(kw_only=True, slots=True)
+class TransformersBackendConfig(Trainer.Config):
+    hf_model: str = ""
+    """HuggingFace model ID (e.g., 'Qwen/Qwen2.5-7B')"""
+
+
+def transformers_modeling_backend_debugmodel(
+    seq_len: int = 2048,
+) -> TransformersBackendConfig:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
@@ -43,8 +51,8 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -62,13 +70,15 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
     )
 
 
-def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
+def transformers_modeling_backend_debugmodel_moe(
+    seq_len: int = 2048,
+) -> TransformersBackendConfig:
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("debugmodel_moe"),
+        model_spec=model_registry("debugmodel_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -78,8 +88,8 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -97,11 +107,13 @@ def transformers_modeling_backend_debugmodel_moe() -> TransformersBackendConfig:
     )
 
 
-def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
+def transformers_modeling_backend_full_moe(
+    seq_len: int = 2048,
+) -> TransformersBackendConfig:
     return TransformersBackendConfig(
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("full_moe"),
+        model_spec=model_registry("full_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -111,8 +123,8 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+            max_context_length=seq_len,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -130,8 +142,10 @@ def transformers_modeling_backend_full_moe() -> TransformersBackendConfig:
     )
 
 
-def transformers_modeling_backend_full() -> TransformersBackendConfig:
-    model_spec = model_registry("full")
+def transformers_modeling_backend_full(
+    seq_len: int = 2048,
+) -> TransformersBackendConfig:
+    model_spec = model_registry("full", seq_len=seq_len)
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
@@ -146,8 +160,8 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -165,7 +179,9 @@ def transformers_modeling_backend_full() -> TransformersBackendConfig:
     )
 
 
-def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
+def transformers_modeling_backend_sft_full(
+    seq_len: int = 2048,
+) -> TransformersBackendConfig:
     """SFT config with real HF pretrained weights loaded via initial_load_in_hf."""
 
     def process_sample(sample):
@@ -178,7 +194,7 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/qwen3_0.6b",
         hf_model="Qwen/Qwen3-0.6B",
-        model_spec=model_registry("sft_full"),
+        model_spec=model_registry("sft_full", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
         optimizer=default_adamw(lr=2e-5),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -188,8 +204,8 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -222,7 +238,9 @@ def transformers_modeling_backend_sft_full() -> TransformersBackendConfig:
     )
 
 
-def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
+def transformers_modeling_backend_sft_debugmodel(
+    seq_len: int = 1024,
+) -> TransformersBackendConfig:
     """SFT debug config for the transformers backend."""
 
     def process_sample(sample):
@@ -235,7 +253,7 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
-        model_spec=model_registry("sft_debugmodel"),
+        model_spec=model_registry("sft_debugmodel", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -249,8 +267,8 @@ def transformers_modeling_backend_sft_debugmodel() -> TransformersBackendConfig:
             # (~152k), so cross-entropy materializes a num_tokens * vocab
             # logits tensor. 16384 tokens is ~9GB in fp32 and OOMs the 22GB
             # CI GPUs.
-            num_tokens_per_microbatch_per_dp_rank=1 * 1024,
-            max_context_length=1024,
+            num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
+            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(

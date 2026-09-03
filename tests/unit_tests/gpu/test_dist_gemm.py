@@ -227,7 +227,11 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 
         parallel_dims = self._parallel_dims()
-        attn_cfg = llama3_debugmodel_dist_gemm().model_spec.model.layers[0].attention
+        attn_cfg = (
+            llama3_debugmodel_dist_gemm(seq_len=2048)
+            .model_spec.model.layers[0]
+            .attention
+        )
         with use_spmd_backend("spmd_types"):
             set_gqa_attention_sharding(attn_cfg, enable_sp=True)
             attn = attn_cfg.build().to(self.device_type)
@@ -239,7 +243,9 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "symmetric memory requires CUDA")
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
 class TestFusedFeedForwardNumerics(DTensorTestBase):
     """The fused FFN must match the stock one under TP+SP.
 
@@ -316,7 +322,9 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         )
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "the fused silu_and_mul is CUDA-only")
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
 class TestFusedSwigluOverlapNumerics(DTensorTestBase):
     """The fused-``w13`` FFN with TP overlap must match the stock FFN under TP+SP.
 

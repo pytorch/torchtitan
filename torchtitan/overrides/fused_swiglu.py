@@ -647,15 +647,15 @@ class FusedGroupedExperts(GroupedExperts):
         E, F, _, D = w13.shape
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        w13_E_D_2F = w13.bfloat16().reshape(E, F * 2, D).transpose(-2, -1)
+        # The fused parameter stores gate and up interleaved as (E, F, 2, D);
+        # the grouped GEMM consumes them as one (E, 2F, D) expert weight.
+        w13_E_2F_D = w13.bfloat16().reshape(E, F * 2, D)
         gate_up_R2F = self._grouped_mm(
-            A=x_RD.bfloat16(), B_t=w13_E_D_2F, offs=offsets_E
+            A=x_RD.bfloat16(), weight_EOI=w13_E_2F_D, offs=offsets_E
         )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return self._grouped_mm(
-            A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_RD)
+        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:

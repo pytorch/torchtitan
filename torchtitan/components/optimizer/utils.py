@@ -32,7 +32,8 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
     Optimizers create their state (e.g. Adam's ``exp_avg``) lazily on the first
     ``step()``. DCP needs the state tensors to exist before save (to read them)
     and before load (to load into them). This runs a step with zero gradients
-    and ``lr=0`` so parameters are untouched, then restores ``lr``.
+    and ``lr=0`` so parameters are untouched, then restores ``lr``. Adam's
+    counters and moments are reset after their tensors are materialized.
 
     No-op if state already exists or any gradient is set, so it is safe to call
     repeatedly and never disturbs an in-progress training step.
@@ -62,6 +63,18 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
                 else 0.0
             )
     optim.step(closure=None)
+
+    # A zero learning rate keeps parameters unchanged, but Adam still advances
+    # its step counter (and coupled weight decay can update its moments). Reset
+    # the materialized state so the first real update remains Adam step 1.
+    if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
+        for state in optim.state.values():
+            state["step"].zero_()
+            state["exp_avg"].zero_()
+            state["exp_avg_sq"].zero_()
+            if "max_exp_avg_sq" in state:
+                state["max_exp_avg_sq"].zero_()
+
     for param_group in optim.param_groups:
         if "lr" in param_group:
             param_group["lr"] = saved_lrs.pop(0)

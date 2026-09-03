@@ -6,44 +6,38 @@
 
 """vLLM paged-cache adapter for TorchTitan's Gated DeltaNet.
 
-The enclosing Qwen3.5 module owns all parameters. This adapter runs the same FLA
-convolution and recurrence kernels as training while reading and updating vLLM's
-paged convolution and SSM states.
+The enclosing Qwen3.5 module owns all parameters. This adapter runs Attention
+Gym's paging-aware convolution and GDN kernels.
 
 Batch-invariant execution has two additional requirements:
 
 * The accumulated SSM cache state uses float32. Decode otherwise rounds the state
   through bfloat16 after every token, unlike a single prefill call. The convolution
   cache stays in model dtype because it only stores trailing input columns.
-* Every recurrence receives a materialized initial state and ``cu_seqlens``. This
-  keeps FLA's Triton specialization identical for fresh prefill and resumed state.
+* Batch-invariant recurrence uses the same Attention Gym scan as the trainer.
 
-The recurrent kernel and materialized state are also used outside batch-invariant
-mode because vLLM generation must support prefix continuation. SSM cache precision
-and prefill kernel selection differ by mode.
+Decode and prefill update the paged convolution and SSM state pools directly.
 """
 
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from attn_gym.linear import (
+    causal_conv1d_decode,
+    l2norm,
+    paged_causal_conv1d,
+    paged_chunk_gdn,
+    recurrent_gdn,
+    recurrent_gdn_decode,
+)
 
-# Using the trainer's FLA kernels is required for batch-invariant parity.
-from fla.modules.convolution import (
-    causal_conv1d as _fla_causal_conv1d,
-    causal_conv1d_update as _fla_causal_conv1d_update,
-)
-from fla.ops.gated_delta_rule import (
-    chunk_gated_delta_rule as _fla_chunk_gated_delta_rule,
-    fused_recurrent_gated_delta_rule as _fla_fused_recurrent_gated_delta_rule,
-)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.protocols.module import Module
 
 # The recurrence mutates paged state and must run eager at a breakable cudagraph
 # split point. This decorator is inert when breakable capture is disabled.
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -60,7 +54,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
     """Paged-cache inner GDN implementation.
 
     The enclosing ``qwen3_5.gdn.GatedDeltaNet`` owns all parameters. This
-    module owns only vLLM cache plumbing and the FLA kernels.
+    module owns only vLLM cache plumbing and kernel dispatch.
 
     The enclosing module and vLLM cache are both head-sharded under tensor
     parallelism. Speculative decoding is not supported.
@@ -86,6 +80,10 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         self.num_speculative_tokens = (
             speculative_config.num_speculative_tokens if speculative_config else 0
         )
+        # vLLM speculative decoding retains one state per draft position and
+        # commits the accepted state; Attention Gym currently mutates one slot.
+        if self.num_speculative_tokens != 0:
+            raise ValueError("Attention Gym GDN does not support speculative decoding.")
 
         self.num_k_heads = config.num_k_heads
         self.num_v_heads = config.num_v_heads
@@ -108,11 +106,20 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         self.local_num_v_heads = self.num_v_heads // self.tensor_parallel_size
         self.local_key_dim = self.local_num_k_heads * self.head_k_dim
 
-        if is_in_batch_invariant_mode():
-            # The recurrent state accumulates in float32 inside FLA, so preserving
-            # it across scheduler calls avoids per-token bfloat16 rounding. The
-            # convolution cache only stores model-dtype input columns verbatim.
-            self.cache_config.mamba_ssm_cache_dtype = "float32"
+        if is_conv_state_dim_first():
+            raise ValueError(
+                "Attention Gym GDN requires VLLM_SSM_CONV_STATE_LAYOUT=SD so "
+                "the paged convolution history has contiguous channels."
+            )
+
+        # Attention Gym's paged kernels mutate the SSM state pool directly and
+        # require FP32 state in both regular and batch-invariant execution.
+        if self.cache_config.mamba_ssm_cache_dtype not in {"auto", "float32"}:
+            raise ValueError(
+                "Attention Gym GDN requires mamba_ssm_cache_dtype='float32', "
+                f"got {self.cache_config.mamba_ssm_cache_dtype!r}."
+            )
+        self.cache_config.mamba_ssm_cache_dtype = "float32"
 
         # vLLM populates this via the KV-cache allocator: (conv_state, ssm_state).
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
@@ -158,7 +165,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
     def _split_qkv(
         self, mixed_qkv: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split local fused channels and add FLA's singleton batch dim."""
+        """Split local fused channels and add a singleton batch dim."""
         num_tokens = mixed_qkv.shape[0]
         local_key_dim = self.local_key_dim
         query = (
@@ -177,58 +184,6 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             .view(1, num_tokens, self.local_num_v_heads, self.head_v_dim)
         )
         return query, key, value
-
-    def _run_recurrence(
-        self,
-        conv_output: torch.Tensor,
-        a: torch.Tensor,
-        b: torch.Tensor,
-        negative_exp_A: torch.Tensor,
-        dt_bias: torch.Tensor,
-        initial_state: torch.Tensor,
-        ssm_state: torch.Tensor,
-        slot_indices: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        use_chunk: bool,
-    ) -> torch.Tensor:
-        """Run FLA's gated-delta rule and update the selected paged SSM slots.
-
-        ``use_chunk`` selects the parallel chunk kernel over the sequential
-        recurrent kernel; the caller sets it for non-batch-invariant prefill.
-        """
-        query, key, value = self._split_qkv(conv_output)
-        # Grouped-value heads: expand q/k to match the value head count.
-        if query.shape[2] != value.shape[2]:
-            num_repeats = value.shape[2] // query.shape[2]
-            query = query.repeat_interleave(num_repeats, dim=2)
-            key = key.repeat_interleave(num_repeats, dim=2)
-
-        decay = (negative_exp_A * F.softplus(a.float() + dt_bias)).unsqueeze(0)
-        update_gate = torch.sigmoid(b).unsqueeze(0)
-
-        # Non-batch-invariant prefill/mixed batches use the parallel chunk kernel
-        # (far faster than the O(seqlen) sequential recurrence). Batch-invariant
-        # mode keeps the recurrent kernel so the generator matches the trainer's
-        # recurrent forward bitwise; pure decode is a single token, where chunking
-        # gains nothing and the recurrent kernel stays cudagraph-capturable.
-        gated_delta_rule = (
-            _fla_chunk_gated_delta_rule
-            if use_chunk
-            else _fla_fused_recurrent_gated_delta_rule
-        )
-        output, final_state = gated_delta_rule(
-            query,
-            key,
-            value,
-            decay,
-            beta=update_gate,
-            initial_state=initial_state,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            use_qk_l2norm_in_kernel=True,
-        )
-        ssm_state[slot_indices] = final_state.transpose(-1, -2).to(ssm_state.dtype)
-        return output
 
     # The decorator makes this an eager graph-split point during breakable capture.
     # The caller-owned output has a stable address across graph replays.
@@ -269,14 +224,8 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         state_indices = gdn_metadata.non_spec_state_indices_tensor
         assert state_indices is not None
         ssm_state = self.kv_cache[1]
-        # vLLM's default conv-state layout keeps channels innermost (.., W-1, C);
-        # FLA needs channels first (.., C, W-1), so transpose that case.
-        conv_state = (
-            self.kv_cache[0]
-            if is_conv_state_dim_first()
-            else self.kv_cache[0].transpose(-1, -2)
-        )
-        negative_exp_A = -torch.exp(A_log.float())
+        conv_state = self.kv_cache[0]
+        assert conv_bias is None
         dt_bias = dt_bias.float()
         num_decodes = gdn_metadata.num_decodes
         num_prefills = gdn_metadata.num_prefills
@@ -284,30 +233,20 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         num_sequences = num_decodes + num_prefills
 
         # Convolution is split by request type and writes one contiguous
-        # conv_output for the single recurrence below. Decode is FULL-captured in
-        # a CUDA graph, so it must use the single-token update kernel: the varlen
-        # causal_conv1d prepares chunk indices with host syncs, which capture
-        # forbids. Prefill (eager at the graph break) uses the varlen kernel.
-        # vLLM orders tokens decode-first, then prefill.
+        # conv_output for the single recurrence below. Decode uses the specialized
+        # single-token state update, while prefill uses the packed multi-token
+        # operation. vLLM orders tokens decode-first, then prefill.
         conv_output = mixed_qkv.new_empty(num_actual_tokens, mixed_qkv.shape[1])
 
         decode_slots = state_indices[:num_decodes]
         if num_decodes > 0:  # pure decode, or mixed prefill decode
-            decode_conv_state = conv_state[decode_slots]
-            # vLLM stores the trailing W - 1 inputs. FLA expects W entries but
-            # ignores the first, so prepend a zero column and drop it on write.
-            zero_padding = decode_conv_state.new_zeros(
-                decode_conv_state.shape[0], decode_conv_state.shape[1], 1
-            )
-            conv_cache = torch.cat([zero_padding, decode_conv_state], dim=-1)
-            decode_conv_output, conv_cache = _fla_causal_conv1d_update(
-                mixed_qkv[:num_decode_tokens],
-                conv_cache,
-                weight=conv_weight,
-                bias=conv_bias,
+            decode_conv_output = causal_conv1d_decode(
+                mixed_qkv[:num_decode_tokens].contiguous(),
+                conv_weight,
+                conv_state,
                 activation="silu",
+                state_indices=decode_slots,
             )
-            conv_state[decode_slots] = conv_cache[..., 1:].to(conv_state.dtype)
             conv_output[:num_decode_tokens] = decode_conv_output
 
         prefill_slots = None
@@ -316,6 +255,9 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             assert gdn_metadata.prefill_state_indices is not None
             prefill_slots = gdn_metadata.prefill_state_indices
             prefill_has_initial_state = gdn_metadata.prefill_has_initial_state
+            assert (
+                prefill_has_initial_state is not None
+            ), "prefill_has_initial_state is required when num_prefills > 0"
             prefill_start = num_decode_tokens if num_decodes > 0 else 0
             # cu_seqlens must be 0-based within the prefill slice that the conv
             # kernel receives (mixed_qkv[prefill_start:]).
@@ -324,102 +266,92 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 # 0-based for the prefill slice.
                 prefill_cu_seqlens = gdn_metadata.non_spec_query_start_loc
             else:
-                # Mixed batch: prefill_query_start_loc holds absolute offsets that
-                # start at num_decode_tokens, because decode tokens occupy the front
-                # of the batch. Subtract the first offset (which equals
-                # num_decode_tokens) to rebase the prefill slice's cu_seqlens to 0.
+                # Mixed-batch prefill metadata is already rebased to the prefill slice.
                 assert gdn_metadata.prefill_query_start_loc is not None
-                prefill_cu_seqlens = (
-                    gdn_metadata.prefill_query_start_loc
-                    - gdn_metadata.prefill_query_start_loc[0]
-                )
-            num_prefill_sequences = int(prefill_cu_seqlens.numel()) - 1
-            # This implementation runs eager at the graph break, so checking
-            # whether any prefix state must be restored does not enter a captured graph.
-            has_continuations = prefill_has_initial_state is not None and bool(
-                prefill_has_initial_state.any()
-            )
-            conv_initial_state = mixed_qkv.new_zeros(
-                num_prefill_sequences, mixed_qkv.shape[1], self.conv_kernel_size
-            )
-            # Fresh prefills keep zero state; prefix-cache continuations restore
-            # only the sequence slots identified by vLLM metadata.
-            if has_continuations:
-                resumed_slots = prefill_slots[prefill_has_initial_state]
-                conv_initial_state[prefill_has_initial_state, :, 1:] = conv_state[
-                    resumed_slots
-                ]
-            prefill_conv_output, conv_final_state = _fla_causal_conv1d(
+                prefill_cu_seqlens = gdn_metadata.prefill_query_start_loc
+            prefill_conv_output = paged_causal_conv1d(
                 mixed_qkv[prefill_start:num_actual_tokens].unsqueeze(0),
-                weight=conv_weight,
-                bias=conv_bias,
+                conv_weight,
+                conv_state,
+                prefill_slots,
                 activation="silu",
                 cu_seqlens=prefill_cu_seqlens,
-                initial_state=conv_initial_state,
-                output_final_state=True,
+                has_initial_state=prefill_has_initial_state,
             )
-            conv_state[prefill_slots] = conv_final_state[..., 1:].to(conv_state.dtype)
             conv_output[prefill_start:num_actual_tokens] = prefill_conv_output.squeeze(
                 0
             )
 
-        # Recurrence over the whole batch in one call. Decode (T=1) and prefill
-        # (T>1) sequences run together, delimited by cu_seqlens; each gets a
-        # materialized fp32 initial state. The kernel processes each sequence
-        # independently from its cu_seqlens entry and initial-state row, so a
-        # single call covers the whole batch (chunk or recurrent, chosen below).
+        # Recurrence over the whole batch in one call. The batch-invariant path
+        # addresses the paged SSM pool directly.
         cu_seqlens = gdn_metadata.non_spec_query_start_loc[: num_sequences + 1]
         if num_prefills == 0:
-            # Pure decode is captured in a CUDA graph, which forbids host syncs and
-            # data-dependent (boolean-mask) indexing. Every decode sequence resumes,
-            # so gather its paged SSM state directly with the integer slot indices.
             all_slots = decode_slots
-            initial_state = (
-                ssm_state[all_slots].transpose(-1, -2).to(torch.float32).contiguous()
-            )
+            has_initial_state = None
         else:
-            # Prefill / mixed runs eager at the graph break, so boolean-mask gather
-            # and the host sync it implies are allowed. A sequence resumes from
-            # paged state iff it is a decode (always) or a prefill prefix-cache
-            # continuation; fresh prefills keep a zero initial state.
             all_slots = (
                 torch.cat([decode_slots, prefill_slots])
                 if num_decodes > 0
                 else prefill_slots
             )
-            resumes_from_cache = torch.zeros(
+            has_initial_state = torch.ones(
                 num_sequences, dtype=torch.bool, device=mixed_qkv.device
             )
-            resumes_from_cache[:num_decodes] = True
-            if prefill_has_initial_state is not None:
-                resumes_from_cache[num_decodes:] = prefill_has_initial_state
-            initial_state = conv_output.new_zeros(
-                num_sequences,
-                self.local_num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-                dtype=torch.float32,
+            has_initial_state[num_decodes:] = prefill_has_initial_state
+
+        batch_invariant = is_in_batch_invariant_mode()
+        if num_prefills == 0 and not batch_invariant:
+            # Pure decode fuses QKV splitting, gate activation, normalization,
+            # and the recurrent update into one kernel.
+            recurrent_gdn_decode(
+                conv_output[:num_decode_tokens],
+                a[:num_decode_tokens].unsqueeze(0),
+                b[:num_decode_tokens].unsqueeze(0),
+                A_log.float(),
+                dt_bias,
+                ssm_state,
+                all_slots,
+                scale=self.head_k_dim**-0.5,
+                out=output[:num_decode_tokens].unsqueeze(0),
             )
-            initial_state[resumes_from_cache] = (
-                ssm_state[all_slots[resumes_from_cache]]
-                .transpose(-1, -2)
-                .to(torch.float32)
-            )
-        # Non-batch-invariant prefill/mixed batches take the parallel chunk kernel;
-        # batch-invariant mode and pure decode take the recurrent kernel.
-        use_chunk = num_prefills > 0 and not is_in_batch_invariant_mode()
-        recurrent_output = self._run_recurrence(
-            conv_output,
-            a,
-            b,
-            negative_exp_A,
-            dt_bias,
-            initial_state,
-            ssm_state,
-            all_slots,
-            cu_seqlens,
-            use_chunk,
+            return
+
+        query, key, value = self._split_qkv(conv_output)
+        decay = (-torch.exp(A_log.float()) * F.softplus(a.float() + dt_bias)).unsqueeze(
+            0
         )
+        update_gate = torch.sigmoid(b).unsqueeze(0)
+        query = l2norm(query, cu_seqlens=cu_seqlens)
+        key = l2norm(key, cu_seqlens=cu_seqlens)
+
+        if batch_invariant:
+            recurrent_output, _ = recurrent_gdn(
+                query,
+                key,
+                value,
+                decay,
+                update_gate,
+                ssm_state,
+                cu_seqlens=cu_seqlens,
+                scale=self.head_k_dim**-0.5,
+                state_indices=all_slots,
+                has_initial_state=has_initial_state,
+                # Triton autotuning breaks batch invariance.
+                autotune=False,
+            )
+        else:
+            recurrent_output = paged_chunk_gdn(
+                query,
+                key,
+                value,
+                decay,
+                update_gate,
+                ssm_state,
+                all_slots,
+                cu_seqlens=cu_seqlens,
+                has_initial_state=has_initial_state,
+                scale=self.head_k_dim**-0.5,
+            )
         output[:num_actual_tokens] = recurrent_output[0, :num_actual_tokens].to(
             output.dtype
         )
@@ -429,22 +361,20 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         query_TC: torch.Tensor,
         key_TC: torch.Tensor,
         value_TC: torch.Tensor,
-        a_TN: torch.Tensor,
-        b_TN: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
         conv_k_weight_C1W: torch.Tensor,
         conv_v_weight_C1W: torch.Tensor,
-        A_log_N: torch.Tensor,
-        dt_bias_N: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
         key_head_dim: int,
         value_head_dim: int,
-        cu_seqlens_host: tuple[int, ...] | None = None,
+        use_varlen_kernels: bool = False,
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors."""
-        del cu_seqlens, cu_seqlens_host
-
         assert key_head_dim == self.head_k_dim
         assert value_head_dim == self.head_v_dim
         mixed_qkv_TC = torch.cat([query_TC, key_TC, value_TC], dim=-1)
@@ -456,17 +386,17 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
 
         num_tokens = mixed_qkv_TC.shape[0]
         # Padded rows must remain defined across vLLM graph replays.
-        output_TNV = mixed_qkv_TC.new_zeros(
+        output_THV = mixed_qkv_TC.new_zeros(
             num_tokens, self.local_num_v_heads, self.head_v_dim
         )
         self._forward(
             mixed_qkv_TC,
-            a_TN,
-            b_TN,
+            a_TH,
+            b_TH,
             conv_weight_CW,
             None,
-            A_log_N,
-            dt_bias_N,
-            output_TNV,
+            A_log_H,
+            dt_bias_H,
+            output_THV,
         )
-        return output_TNV
+        return output_THV

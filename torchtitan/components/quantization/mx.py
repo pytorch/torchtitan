@@ -131,13 +131,16 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
             recipe = MXFP8TrainingRecipe(config.recipe_name)
             self._mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
 
-        def _grouped_mm(self, *, A, B_t, offs):
+        def _grouped_mm(self, *, A, weight_EOI, offs):
             from torchao.prototype.moe_training.utils import (
                 _quantize_then_scaled_grouped_mm,
             )
 
             return _quantize_then_scaled_grouped_mm(
-                A, B_t, config=self._mxfp8_op_config, offs=offs
+                A,
+                weight_EOI.bfloat16().transpose(-2, -1),
+                config=self._mxfp8_op_config,
+                offs=offs,
             )
 
     MXFP8GroupedExperts.__name__ = f"MXFP8{parent_cls.__name__}"
