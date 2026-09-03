@@ -35,6 +35,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
+from torchtitan.config import Function
 
 
 class FakeOptimizersContainer:
@@ -185,6 +186,25 @@ class TestCheckpointManager(unittest.TestCase):
         checkpoint = Trainer.Config().checkpoint
         self.assertIsInstance(checkpoint, CheckpointManager.Config)
         self.assertFalse(checkpoint.enable)
+
+    def test_purge_exempt_is_built_from_config(self):
+        self.trainer_config.checkpoint.purge_exempt = Function.Config(
+            fn=lambda step: step % 2 == 0
+        )
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        self.assertTrue(manager._is_purge_exempt(2))
+        self.assertFalse(manager._is_purge_exempt(3))
+        manager.close()
 
     def test_legacy_import_path(self):
         from torchtitan.components.checkpointer import (
@@ -1254,6 +1274,84 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self.manager.purge_queue.put.assert_called_once_with(
             os.path.join(self.root, "step-1")
         )
+
+
+class TestSharedDiscoveryAndRetention(unittest.TestCase):
+    """_find_load_step and _purge_stale_checkpoints live on the base; each
+    manager supplies only _is_valid_checkpoint."""
+
+    def _manager(self, *, keep_latest_k: int, entries: list[str]):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager.keep_latest_k = keep_latest_k
+        manager.folder = "/checkpoint"
+        manager.purge_queue = queue_lib.Queue()
+        manager.purge_thread = object()
+        manager._storage = mock.Mock(spec=CheckpointStorage)
+        manager._storage.isdir.return_value = True
+        manager._storage.listdir.return_value = entries
+        manager._storage.isfile.return_value = True
+        return manager
+
+    def _purged(self, manager) -> set[str]:
+        purged = set()
+        while not manager.purge_queue.empty():
+            purged.add(manager.purge_queue.get_nowait())
+        return purged
+
+    def test_bodies_are_defined_on_the_base(self):
+        for name in ("_find_load_step", "_parse_step", "_purge_stale_checkpoints"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, vars(CheckpointManager))
+                self.assertIn(name, vars(BaseCheckpointManager))
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_purge_keeps_k_because_dcp_purges_after_saving(self, _rank):
+        # This manager purges once its checkpoint is already on disk, so it
+        # reserves nothing and keeps the full k.
+        manager = self._manager(keep_latest_k=2, entries=["step-1", "step-2", "step-3"])
+
+        manager._purge_stale_checkpoints()
+
+        self.assertEqual({"/checkpoint/step-1"}, self._purged(manager))
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    def test_purge_keeps_exempt_checkpoints_outside_latest_k(self, _rank):
+        manager = self._manager(
+            keep_latest_k=2,
+            entries=["step-1", "step-2", "step-3", "step-4", "step-5"],
+        )
+        manager.purge_exempt = Function.Config(fn=lambda step: step % 2 == 0).build()
+
+        manager._purge_stale_checkpoints()
+
+        self.assertEqual(
+            {"/checkpoint/step-1", "/checkpoint/step-3"},
+            self._purged(manager),
+        )
+
+    def test_parse_step_accepts_only_canonical_names(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+
+        self.assertEqual(0, manager._parse_step("step-0"))
+        self.assertEqual(7, manager._parse_step("step-7"))
+        for name in ("logs", "foo-step-9", "step-9.partial", "step-09"):
+            with self.subTest(name=name):
+                self.assertIsNone(manager._parse_step(name))
+
+    def test_valid_checkpoint_accepts_dcp_or_hf_markers(self):
+        manager = CheckpointManager.__new__(CheckpointManager)
+        manager._storage = mock.Mock(spec=CheckpointStorage)
+
+        for marker in (".metadata", "model.safetensors.index.json"):
+            with self.subTest(marker=marker):
+                manager._storage.isfile.side_effect = (
+                    lambda path, marker=marker: path.endswith(marker)
+                )
+                self.assertTrue(manager._is_valid_checkpoint("/checkpoint/step-1"))
+
+        manager._storage.isfile.side_effect = None
+        manager._storage.isfile.return_value = False
+        self.assertFalse(manager._is_valid_checkpoint("/checkpoint/step-1"))
 
 
 class TestPurgeThread(unittest.TestCase):

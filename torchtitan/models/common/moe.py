@@ -92,32 +92,30 @@ class GroupedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         h_RF = F.silu(
-            self._grouped_mm(
-                A=x_RD.bfloat16(),
-                B_t=w1_EFD.bfloat16().transpose(-2, -1),
-                offs=offsets_E,
-            )
+            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
         )
         h_RF = h_RF * self._grouped_mm(
-            A=x_RD.bfloat16(),
-            B_t=w3_EFD.bfloat16().transpose(-2, -1),
-            offs=offsets_E,
+            A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
         )
-        return self._grouped_mm(
-            A=h_RF, B_t=w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_RD)
+        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
 
     def _grouped_mm(
-        self, *, A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
+        self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
     ) -> torch.Tensor:
-        """Grouped matmul of ``A @ B_t`` with per-expert token offsets.
+        """Grouped matmul of ``A @ weight_EOI.transpose(-2, -1)``.
 
-        Overridable seam for low-precision variants (e.g. the MXFP8 converter
-        swaps this for a dynamically-quantized scaled grouped GEMM). Keeping the
-        op here -- rather than behind a tensor-subclass ``__torch_function__`` --
-        means it is captured by FX tracers such as graph_trainer's make_fx path.
+        ``weight_EOI`` is the grouped expert weight in its stored
+        ``(experts, out_features, in_features)`` orientation; the transpose to
+        the grouped-GEMM right operand happens here. Overridable seam for
+        low-precision variants (e.g. the MXFP8 converter swaps this for a
+        scaled grouped GEMM). Variants receive the weight rather than its
+        transpose because a quantized representation may be owned by the
+        weight's FSDP unshard lifetime and is keyed off the stored orientation.
+        Keeping the op here -- rather than behind a tensor-subclass
+        ``__torch_function__`` -- means it is captured by FX tracers such as
+        graph_trainer's make_fx path.
         """
-        return torch._grouped_mm(A, B_t, offs=offs)
+        return torch._grouped_mm(A, weight_EOI.bfloat16().transpose(-2, -1), offs=offs)
 
 
 class RoutedExperts(Module):
@@ -196,7 +194,7 @@ class TokenChoiceTopKRouter(Module):
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
-        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
         _debug_force_load_balance: bool = False
@@ -274,8 +272,28 @@ class TokenChoiceTopKRouter(Module):
 
         return scores_for_choice_TE
 
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        scores_for_choice_TE = (
+            scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
+        )
+        if self.num_expert_groups is not None:
+            scores_for_choice_TE = self._get_node_limited_routing_scores(
+                scores_for_choice_TE
+            )
+        return torch.topk(
+            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        ).indices
+
     def forward(
-        self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None
+        self,
+        x_TD: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -297,19 +315,13 @@ class TokenChoiceTopKRouter(Module):
             scores_TE = torch.sigmoid(scores_TE)
         elif self.score_func == "softmax":
             scores_TE = F.softmax(scores_TE, dim=-1)
+        elif self.score_func == "sqrtsoftplus":
+            scores_TE = F.softplus(scores_TE).sqrt()
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice_TE = (
-            scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
-        )
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
-        _, topk_expert_ids_TK = torch.topk(
-            scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
+        topk_expert_ids_TK = self._select_experts(
+            scores_TE, expert_bias_E, **router_kwargs
         )
 
         # NOTE: The expert_bias is only used for routing. The gating value
@@ -393,7 +405,7 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
@@ -415,7 +427,7 @@ class MoE(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E)
+        ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
 
         # Build a one-hot routing map (T, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on

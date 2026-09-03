@@ -803,13 +803,13 @@ def _complex_eligible(
 
 if _HELION_IMPORT_ERROR is None:
 
-    def _helion_cossin_rope_fwd_tnh(xq, xk, cache, pos):
+    def _helion_cossin_rope_fwd_thk(xq, xk, cache, pos):
         xq_out, xk_out = _helion_cossin_rope_fwd(
             xq.unsqueeze(0), xk.unsqueeze(0), cache, pos.unsqueeze(0)
         )
         return xq_out.squeeze(0), xk_out.squeeze(0)
 
-    def _helion_complex_rope_fwd_tnh(xq, xk, cache, pos):
+    def _helion_complex_rope_fwd_thk(xq, xk, cache, pos):
         xq_out, xk_out = _helion_complex_rope_fwd(
             xq.unsqueeze(0), xk.unsqueeze(0), cache, pos.unsqueeze(0)
         )
@@ -860,11 +860,11 @@ if _HELION_IMPORT_ERROR is None:
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xq_TNH
+                ),  # xq_THK
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xk_TNH
+                ),  # xk_THK
                 {"dp": spmd.R, "cp": spmd.R, "tp": spmd.R},  # rope_cache_MD
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
@@ -875,13 +875,13 @@ if _HELION_IMPORT_ERROR is None:
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xq_out_TNH
+                ),  # xq_out_THK
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xk_out_TNH
+                ),  # xk_out_THK
             ),
-        )(_helion_cossin_rope_fwd_tnh)(xq, xk, cache, pos)
+        )(_helion_cossin_rope_fwd_thk)(xq, xk, cache, pos)
         return _from_local(xq_out, query), _from_local(xk_out, key)
 
     def _apply_helion_complex_rope(
@@ -920,11 +920,11 @@ if _HELION_IMPORT_ERROR is None:
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xq_TNH
+                ),  # xq_THK
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xk_TNH
+                ),  # xk_THK
                 {"dp": spmd.R, "cp": spmd.R, "tp": spmd.R},  # rope_cache_real
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
@@ -935,13 +935,13 @@ if _HELION_IMPORT_ERROR is None:
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xq_out_TNH
+                ),  # xq_out_THK
                 (
                     {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                ),  # xk_out_TNH
+                ),  # xk_out_THK
             ),
-        )(_helion_complex_rope_fwd_tnh)(xq, xk, cache_real, pos)
+        )(_helion_complex_rope_fwd_thk)(xq, xk, cache_real, pos)
         return _from_local(xq_out, query), _from_local(xk_out, key)
 
 else:
@@ -985,12 +985,16 @@ class HelionCosSinRoPE(CosSinRoPE):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if key is None or inverse:
+            return super().forward(query, key, positions, inverse=inverse)
         out = _apply_helion_cossin_rope(query, key, self.cache, positions)
         if out is None:
-            return super().forward(query, key, positions)
+            return super().forward(query, key, positions, inverse=inverse)
         return out
 
 
@@ -1016,12 +1020,16 @@ class HelionComplexRoPE(ComplexRoPE):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if key is None or inverse:
+            return super().forward(query, key, positions, inverse=inverse)
         out = _apply_helion_complex_rope(query, key, self.cache, positions)
         if out is None:
-            return super().forward(query, key, positions)
+            return super().forward(query, key, positions, inverse=inverse)
         return out
 
 

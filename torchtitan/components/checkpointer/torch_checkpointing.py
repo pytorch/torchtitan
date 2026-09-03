@@ -19,6 +19,9 @@ from torch_checkpointing.checkpoint_manager import (
 from torch_checkpointing.checkpoint_writer import CheckpointWriterConfig
 from torch_checkpointing.config import AsyncCheckpointSaverConfig
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.distributed_metadata import (
+    METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage
@@ -176,6 +179,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.last_save_in_hf = config.last_save_in_hf
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.keep_latest_k = config.keep_latest_k
+        self.purge_exempt = (
+            config.purge_exempt.build() if config.purge_exempt is not None else None
+        )
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
@@ -209,14 +215,14 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             "TorchCheckpointingManager does not implement saving yet."
         )
 
+    def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
+        return self._storage.isfile(
+            filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
+        )
+
     def _maybe_wait_for_staging(self) -> None:
         raise NotImplementedError(
             "TorchCheckpointingManager does not implement maybe_wait_for_staging() yet."
-        )
-
-    def _parse_step(self, checkpoint_name: str) -> int | None:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement checkpoint discovery yet."
         )
 
     def _close(self) -> None:

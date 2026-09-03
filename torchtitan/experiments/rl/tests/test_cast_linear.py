@@ -19,7 +19,8 @@ from torchtitan.models.qwen3 import qwen3_configs
 
 def _qwen3_config():
     """A real decoder config tree to exercise the converter's traversal."""
-    return qwen3_configs["0.6B"](attn_backend="flex")
+    build_config, max_context_length = qwen3_configs["0.6B"]
+    return build_config(attn_backend="flex", seq_len=max_context_length)
 
 
 def test_converter_swaps_only_lm_head():

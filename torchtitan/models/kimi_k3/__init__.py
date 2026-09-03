@@ -541,8 +541,8 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 
 kimi_k3_configs = {
-    "debugmodel": _debugmodel,
-    "Kimi-K3": _kimi_k3,
+    "debugmodel": (_debugmodel, 16384),
+    "Kimi-K3": (_kimi_k3, 262144),
 }
 
 
@@ -551,10 +551,19 @@ def model_registry(
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
     moe_comm_backend: str = "standard",
+    *,
+    seq_len: int | None = None,
 ) -> ModelSpec:
-    config = kimi_k3_configs[flavor](
-        attn_backend=attn_backend, moe_comm_backend=moe_comm_backend
-    )
+    # The KDA / MLA layers build their own RoPE, so seq_len is not a builder
+    # argument here -- it only reports the context length on the ModelSpec.
+    get_config, max_context_len = kimi_k3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(attn_backend=attn_backend, moe_comm_backend=moe_comm_backend)
     if converters is not None:
         validate_converter_order(converters)
         for converter in converters:
@@ -563,6 +572,7 @@ def model_registry(
         name="kimi_k3",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k3,
         pipelining_fn=None,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

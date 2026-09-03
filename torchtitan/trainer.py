@@ -21,8 +21,9 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
+from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, IGNORE_INDEX
+from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
@@ -821,9 +822,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return torch.sum(torch.stack(losses)).to(self.device)
         return torch.tensor([-1.0], device=self.device)
 
-    def train_step(
-        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ):
+    def train_step(self, data_iterator: Iterator[TrainerBatch]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
@@ -833,27 +832,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
         # All groups form one optimizer step; each group feeds one fwd-bwd call.
-        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
-        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
+        microbatch_groups: list[list[TrainerBatch]] = []
+        local_valid_tokens = 0
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
                     input_dict, labels = next(data_iterator)
-                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                # Popped so the batch reaching the model holds only its kwargs.
+                local_valid_tokens += input_dict.pop("num_valid_tokens")
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
-        sl.log_trace_scalar({"local_valid_tokens": int(local_valid_tokens)})
+        sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
+        local_valid_tokens_tensor = torch.tensor(
+            local_valid_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
         if parallel_dims.dp_enabled:
             dp_mesh = parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum_tensor(
-                local_valid_tokens.to(self.device), dp_mesh
+                local_valid_tokens_tensor, dp_mesh
             )
         else:
-            global_valid_tokens = local_valid_tokens.to(self.device)
+            global_valid_tokens = local_valid_tokens_tensor
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
@@ -865,9 +870,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for input_dict, labels in microbatches:
                 for key, value in input_dict.items():
                     if isinstance(value, torch.Tensor):
-                        input_dict[key] = value.to(self.device)
+                        input_dict[key] = value.to(self.device, non_blocking=True)
                 input_dict_mbs.append(input_dict)
-                label_mbs.append(labels.to(self.device))
+                label_mbs.append(labels.to(self.device, non_blocking=True))
 
             if parallel_dims.pp_enabled:
                 fwd_bwd_input_dict = input_dict_mbs
