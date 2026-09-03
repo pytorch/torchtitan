@@ -179,6 +179,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.last_save_in_hf = config.last_save_in_hf
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.keep_latest_k = config.keep_latest_k
+        self.purge_exempt = (
+            config.purge_exempt.build() if config.purge_exempt is not None else None
+        )
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
