@@ -32,6 +32,7 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 
 __all__ = [
     "annotate_input_spmd_types",
+    "annotate_replicated_parameters",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
@@ -226,6 +227,22 @@ def annotate_input_spmd_types(
             "or annotate nested/container tensors at their construction site."
         )
     return input_dict
+
+
+def annotate_replicated_parameters(
+    module: torch.nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Annotate parameters not distributed by ``Module.parallelize``.
+
+    FSDP needs SPMD annotations to translate plain parameters to DTensor
+    storage on the full mesh. This helper is for FSDP-only models whose
+    parameters have no model-parallel ``ShardingConfig`` and are therefore
+    replicated on every dense mesh axis.
+    """
+    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+        for param in module.parameters():
+            spmd.assert_type(param, spmd.R)
 
 
 def _per_axis_types(
