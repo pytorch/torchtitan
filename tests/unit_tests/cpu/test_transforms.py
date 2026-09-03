@@ -108,6 +108,15 @@ class TestRetypeNode(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must inherit"):
             retype_node(existing, FlexAttention)
 
+    def test_sets_fields_defined_by_the_replacement(self):
+        swapped = retype_node(
+            FlexAttention.Config(),
+            AllGatherCPFlexAttention,
+            reduce_dtype="float32",
+        )
+
+        self.assertEqual(swapped.reduce_dtype, "float32")
+
 
 class TestOrdering(unittest.TestCase):
     def setUp(self):
@@ -195,6 +204,21 @@ class TestTransformModel(unittest.TestCase):
 
 
 class TestContextParallelTransform(unittest.TestCase):
+    def test_sets_cp_kernel_config_fields(self):
+        config = _llama3_cp_ready()
+        result = apply_transforms(
+            config,
+            [
+                ContextParallelTransform.Config(
+                    kernel=AllGatherCPFlexAttention,
+                    kernel_config_overrides={"reduce_dtype": "float32"},
+                )
+            ],
+        )
+
+        swapped = result.model_spec.model.layers[0].attention.inner_attention
+        self.assertEqual(swapped.reduce_dtype, "float32")
+
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
         tuned = config.model_spec.model.layers[0].attention.inner_attention
