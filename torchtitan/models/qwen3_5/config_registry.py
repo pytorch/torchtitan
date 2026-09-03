@@ -39,8 +39,8 @@ def _multimodal_collator_config(
     )
 
 
-def qwen35_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def qwen35_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -64,8 +64,8 @@ def qwen35_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 512,
-            max_context_length=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -76,15 +76,19 @@ def qwen35_debugmodel() -> Trainer.Config:
     )
 
 
-def qwen35_debugmodel_varlen_attn() -> Trainer.Config:
-    config = qwen35_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+def qwen35_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
+    config = qwen35_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
     config.training.disable_cuda_graphs = True
     return config
 
 
-def qwen35_debugmodel_moe() -> Trainer.Config:
-    model_spec = model_registry("debugmodel_moe", moe_comm_backend="standard")
+def qwen35_debugmodel_moe(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry(
+        "debugmodel_moe", seq_len=seq_len, moe_comm_backend="standard"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -103,8 +107,8 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 512,
-            max_context_length=512,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -123,8 +127,8 @@ def qwen35_debugmodel_moe() -> Trainer.Config:
     )
 
 
-def qwen35_0_8b() -> Trainer.Config:
-    model_spec = model_registry("0.8B")
+def qwen35_0_8b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("0.8B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -142,8 +146,8 @@ def qwen35_0_8b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -157,8 +161,8 @@ def qwen35_0_8b() -> Trainer.Config:
     )
 
 
-def qwen35_2b() -> Trainer.Config:
-    model_spec = model_registry("2B")
+def qwen35_2b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("2B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -176,8 +180,8 @@ def qwen35_2b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -191,8 +195,8 @@ def qwen35_2b() -> Trainer.Config:
     )
 
 
-def qwen35_4b() -> Trainer.Config:
-    model_spec = model_registry("4B")
+def qwen35_4b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("4B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -210,8 +214,8 @@ def qwen35_4b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -224,8 +228,8 @@ def qwen35_4b() -> Trainer.Config:
     )
 
 
-def qwen35_9b() -> Trainer.Config:
-    model_spec = model_registry("9B")
+def qwen35_9b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("9B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -243,8 +247,8 @@ def qwen35_9b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -259,8 +263,8 @@ def qwen35_9b() -> Trainer.Config:
     )
 
 
-def qwen35_27b() -> Trainer.Config:
-    model_spec = model_registry("27B")
+def qwen35_27b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("27B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -278,8 +282,8 @@ def qwen35_27b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -294,8 +298,8 @@ def qwen35_27b() -> Trainer.Config:
     )
 
 
-def qwen35_35b_a3b() -> Trainer.Config:
-    model_spec = model_registry("35B-A3B", moe_comm_backend="standard")
+def qwen35_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("35B-A3B", seq_len=seq_len, moe_comm_backend="standard")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -313,8 +317,8 @@ def qwen35_35b_a3b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -331,8 +335,10 @@ def qwen35_35b_a3b() -> Trainer.Config:
     )
 
 
-def qwen35_122b_a10b() -> Trainer.Config:
-    model_spec = model_registry("122B-A10B", moe_comm_backend="standard")
+def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry(
+        "122B-A10B", seq_len=seq_len, moe_comm_backend="standard"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -350,8 +356,8 @@ def qwen35_122b_a10b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -368,8 +374,10 @@ def qwen35_122b_a10b() -> Trainer.Config:
     )
 
 
-def qwen35_397b_a17b() -> Trainer.Config:
-    model_spec = model_registry("397B-A17B", moe_comm_backend="standard")
+def qwen35_397b_a17b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry(
+        "397B-A17B", seq_len=seq_len, moe_comm_backend="standard"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -387,8 +395,8 @@ def qwen35_397b_a17b() -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),

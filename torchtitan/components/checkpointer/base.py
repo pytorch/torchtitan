@@ -14,15 +14,16 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import tyro
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Configurable
+from torchtitan.config import Configurable, Function
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
 
@@ -200,6 +201,7 @@ class BaseCheckpointManager(Configurable, ABC):
     save_future: Future | None
     folder: str
     keep_latest_k: int
+    purge_exempt: Callable[[int], bool] | None = None
     purge_thread: threading.Thread | None
     purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
@@ -280,6 +282,10 @@ class BaseCheckpointManager(Configurable, ABC):
             and self._storage.isdir(self.folder)
         )
 
+    def _is_purge_exempt(self, step: int) -> bool:
+        """Whether the configured exemption protects ``step`` from deletion."""
+        return self.purge_exempt is not None and self.purge_exempt(step)
+
     def _parse_step(self, dirname: str) -> int | None:
         """Parse a canonical ``step-N`` checkpoint directory name."""
         match = re.fullmatch(self._STEP_DIR_PATTERN, dirname)
@@ -337,7 +343,14 @@ class BaseCheckpointManager(Configurable, ABC):
                 discovered.append((step, checkpoint_id))
 
         discovered.sort()
-        for _, path in discovered[: -self.keep_latest_k]:
+        for step, path in discovered[: -self.keep_latest_k]:
+            if self._is_purge_exempt(step):
+                logger.info(
+                    "Checkpointer is preserving checkpoint %s outside "
+                    "keep_latest_k.",
+                    path,
+                )
+                continue
             assert self.purge_thread is not None
             self.purge_queue.put(path)
 
@@ -377,6 +390,9 @@ class BaseCheckpointManager(Configurable, ABC):
 
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
+
+        purge_exempt: Annotated[Function.Config | None, tyro.conf.Suppress] = None
+        """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1
         """Load the checkpoint at the specified step. If -1, load the latest

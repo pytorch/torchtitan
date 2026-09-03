@@ -16,6 +16,17 @@ from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
 
+def _batch() -> tuple[dict[str, object], torch.Tensor]:
+    """One dataloader batch.
+
+    Built fresh per call because ``train_step`` pops ``num_valid_tokens`` out of
+    the dict it is handed.
+    """
+    return {"input": torch.ones(1), "num_valid_tokens": 1}, torch.ones(
+        1, dtype=torch.long
+    )
+
+
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     trainer = cast(
         Trainer,
@@ -172,9 +183,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             ntokens_seen=3,
         ),
     )
-    data_iterator = iter(
-        [({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))] * 3
-    )
+    data_iterator = iter([_batch() for _ in range(3)])
 
     with patch(
         "torchtitan.trainer.dist_utils.clip_grad_norm_",
@@ -198,9 +207,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     ):
         Trainer.train_step(
             trainer,
-            data_iterator=iter(
-                [({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))] * 3
-            ),
+            data_iterator=iter([_batch() for _ in range(3)]),
         )
 
     metrics_processor.log.assert_not_called()
@@ -245,7 +252,7 @@ def test_train_step_replay_checks_only_first_forward_backward():
     ):
         Trainer.train_step(
             trainer,
-            iter([({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))] * 2),
+            iter([_batch() for _ in range(2)]),
         )
 
     replayer.run_fwd_bwd.assert_called_once()
@@ -293,7 +300,7 @@ def test_replay_failure_happens_before_optimizer():
     with pytest.raises(SDCReplayMismatch):
         Trainer.train_step(
             trainer,
-            iter([({"input": torch.ones(1)}, torch.ones(1, dtype=torch.long))]),
+            iter([_batch()]),
         )
 
     optimizers.step.assert_not_called()

@@ -52,9 +52,12 @@ class TestInvalidLoss(unittest.TestCase):
 
     def _data_iterator(self):
         labels = torch.tensor([1, 2, IGNORE_INDEX])
-        input_dict = {"input": torch.tensor([1, 2, 3])}
         while True:
-            yield input_dict, labels
+            # A fresh dict per batch: the trainer pops num_valid_tokens.
+            yield {
+                "input": torch.tensor([1, 2, 3]),
+                "num_valid_tokens": 2,
+            }, labels
 
     def _run_step(self, loss_value: float, should_log: bool) -> None:
         trainer = self._make_trainer(loss_value, should_log)
