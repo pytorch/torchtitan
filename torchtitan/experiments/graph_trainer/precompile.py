@@ -227,6 +227,12 @@ class PrecompiledFxTraceArtifact:
         (e.g. the embedding vocab offset from
         _runtime_compute_coordinate_on_dim).
         """
+        if traced_result.graph_state.mappings:
+            raise ValueError(
+                "Precompiled FX artifacts do not yet support trainer-owned "
+                "gradient state"
+            )
+
         from torch.fx._graph_pickler import GraphPickler, Options
 
         from torchtitan.experiments.graph_trainer.inductor_passes import (

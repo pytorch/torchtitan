@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cudagraph import cudagraph_teardown
+from torchtitan.distributed.cudagraph import cudagraph_teardown, CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -23,6 +23,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
+)
+from torchtitan.experiments.graph_trainer.gradient_accumulation import (
+    GraphGradientState,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -35,6 +38,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
+    construct_mandatory_graph_passes,
 )
 from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
@@ -42,9 +46,6 @@ from torchtitan.experiments.graph_trainer.registry import (
     PRE_TRAIN_STEP_HOOKS,
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
-)
-from torchtitan.experiments.graph_trainer.remove_noop_passes import (
-    remove_parameter_gradient_markers_pass,
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
@@ -77,7 +78,7 @@ def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
     logger.info("NUMA binding applied for GPU %d", device_index)
 
 
-def make_fwd_bwd_step(model, loss_fn):
+def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
     """Return a plain function that traces the entire fwd+loss+bwd step.
 
     ``model`` and ``loss_fn`` are captured in the closure so neither shows up
@@ -85,7 +86,7 @@ def make_fwd_bwd_step(model, loss_fn):
     to thread its parameters/buffers as static graph inputs.
     """
 
-    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+    def compute_step(inputs, labels, global_valid_tokens, extra_kwargs):
         pred = model(inputs, **extra_kwargs)
         # The loss function is not a submodule of the model, so
         # annotate_module_fqns won't tag it. Annotate it here so that
@@ -103,7 +104,27 @@ def make_fwd_bwd_step(model, loss_fn):
             if parameter.requires_grad
         ]
         grads = compute_parameter_gradients(loss, named_params)
-        return [loss] + list(grads)
+        return loss, named_params, grads
+
+    if not accumulate_gradients:
+
+        def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+            loss, _named_params, grads = compute_step(
+                inputs, labels, global_valid_tokens, extra_kwargs
+            )
+            return [loss, *grads]
+
+        return fwd_bwd_step
+
+    def fwd_bwd_step(
+        gradient_buffers, inputs, labels, global_valid_tokens, extra_kwargs
+    ):
+        loss, named_params, grads = compute_step(
+            inputs, labels, global_valid_tokens, extra_kwargs
+        )
+        for (fqn, _parameter), grad in zip(named_params, grads, strict=True):
+            gradient_buffers[fqn].add_(grad)
+        return [loss]
 
     return fwd_bwd_step
 
@@ -124,6 +145,10 @@ class GraphTrainer(Trainer):
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+        self._graph_gradient_state: GraphGradientState | None = None
+        self._validate_inplace_graph_gradient_accumulation_config()
+        if self.config.compile.enable_inplace_graph_gradient_accumulation:
+            self._ensure_graph_gradient_state(self.model_parts[0])
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
@@ -236,6 +261,9 @@ class GraphTrainer(Trainer):
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         maybe_register_blockmask_pytree_node()
+        gradient_state = self._graph_gradient_state
+        if gradient_state is not None:
+            gradient_state.prepare_for_backward()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(
@@ -243,7 +271,11 @@ class GraphTrainer(Trainer):
                     (inputs, labels, global_valid_tokens, extra_kwargs),
                 )
             else:
-                fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
+                fwd_bwd_fn = make_fwd_bwd_step(
+                    model,
+                    self.loss_fn,
+                    accumulate_gradients=gradient_state is not None,
+                )
                 trace_context = dist_utils.get_spmd_context(
                     parallel_dims=self.parallel_dims,
                     spmd_typechecking=False,
@@ -252,6 +284,11 @@ class GraphTrainer(Trainer):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
+                        graph_state=(
+                            gradient_state.graph_state
+                            if gradient_state is not None
+                            else None
+                        ),
                         prepare_inputs=self._prepare_trace_inputs,
                         prepare_call_inputs=self._prepare_trace_call_inputs,
                     )(
@@ -270,17 +307,15 @@ class GraphTrainer(Trainer):
                     self.config,
                     parallel_dims=self.parallel_dims,
                 )
-
-                self._traced_step.gm = apply_graph_passes(
-                    self._traced_step.gm,
-                    self._traced_step.example_inputs,
-                    passes,
-                    compile_config=self.config.compile,
-                )
             else:
-                self._traced_step.gm = remove_parameter_gradient_markers_pass(
-                    self._traced_step.gm, self._traced_step.example_inputs
-                )
+                passes = construct_mandatory_graph_passes()
+            self._traced_step.gm = apply_graph_passes(
+                self._traced_step.gm,
+                self._traced_step.example_inputs,
+                passes,
+                compile_config=self.config.compile,
+                respect_disable_passes=self.config.compile.enable_passes,
+            )
         with self.train_context():
             precompile_meshes = None
             if (
@@ -296,17 +331,72 @@ class GraphTrainer(Trainer):
                 self._traced_step,
                 module=model,
                 precompile_meshes=precompile_meshes,
+                graph_state=(
+                    gradient_state.graph_state if gradient_state is not None else None
+                ),
             )(
                 inputs,
                 labels,
                 global_valid_tokens,
                 extra_kwargs,
             )
-        loss = outputs[0]
-        grads = outputs[1:]
+        if gradient_state is None:
+            loss = outputs[0]
+            grads = outputs[1:]
+            accumulate_param_grads_(
+                params,
+                grads,
+                clone_grads_to_initialize_param_grad=isinstance(
+                    self._traced_step.gm.forward, CUDAGraphWrapper
+                ),
+            )
+            return loss
 
-        accumulate_param_grads_(params, grads)
-        return loss
+        if len(outputs) != 1:
+            raise RuntimeError(
+                "GraphTrainer directly traced gradient accumulation expected a "
+                f"loss-only output, got {len(outputs)} outputs"
+            )
+        return outputs[0]
+
+    def _ensure_graph_gradient_state(
+        self,
+        model: nn.Module,
+    ) -> GraphGradientState:
+        if self._graph_gradient_state is None:
+            self._graph_gradient_state = GraphGradientState.create(
+                model,
+                self.optimizers,
+            )
+        return self._graph_gradient_state
+
+    def _validate_inplace_graph_gradient_accumulation_config(self) -> None:
+        if not self.config.compile.enable_inplace_graph_gradient_accumulation:
+            return
+        if self.config.compile.mode != "aot_fx_trace":
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation requires "
+                "compile.mode='aot_fx_trace'"
+            )
+        if self.parallel_dims.pp_enabled:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation does not yet "
+                "support pipeline parallelism"
+            )
+        if len(self.model_parts) != 1:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation requires one model"
+            )
+        if self.config.compile.precompile_artifact_dir:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation does not yet "
+                "support precompiled artifacts"
+            )
+        if self.config.compile.pass_pipeline in PASS_PIPELINE_REGISTRY:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation does not yet "
+                "support custom pass pipelines"
+            )
 
     def _prepare_trace_inputs(
         self,
@@ -335,6 +425,8 @@ class GraphTrainer(Trainer):
         PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
             self
         )
+        if self._graph_gradient_state is not None:
+            self._graph_gradient_state.validate_grad_bindings()
         super().train_step(data_iterator)
 
     def close(self) -> None:
