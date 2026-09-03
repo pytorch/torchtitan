@@ -163,7 +163,11 @@ class GraphTrainer(Trainer):
                 parallel_dims=self.parallel_dims,
                 parallelism=self.config.parallelism,
             )
-            self.ntokens_seen += labels.numel()
+            # MTP returns one labels tensor per prediction; index 0 contains
+            # the complete main-model labels used for token accounting.
+            self.ntokens_seen += (
+                labels[0].numel() if isinstance(labels, tuple) else labels.numel()
+            )
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [
@@ -228,8 +232,8 @@ class GraphTrainer(Trainer):
     def _make_fx_forward_backward_step(
         self,
         model: nn.Module,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor,
         params: list[torch.Tensor],
         extra_kwargs: dict[str, Any],
