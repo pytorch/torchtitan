@@ -148,10 +148,13 @@ passed to `MetricsProcessor.Config.build(...)`. `WANDB_PROJECT` defaults to
 ## vLLM engine metrics
 
 `VllmOtelStatLogger` exports engine-level rollout metrics through
-[OpenTelemetry](https://opentelemetry.io/). The logger is registered by default,
-but stays inactive unless `OTEL_METRICS_EXPORTER` is explicitly set to `jsonl`
-or `otlp`. Only TP rank 0 in each DP replica creates the logger because all TP
-ranks see the same engine-aggregate statistics.
+[OpenTelemetry](https://opentelemetry.io/). The logger is disabled by default
+and is only registered when `generator.vllm_stat_logger` contains a
+`VllmOtelStatLogger.Config`. Once enabled, `OTEL_METRICS_EXPORTER` must select
+`jsonl` or `otlp`. This explicit gate prevents inherited OpenTelemetry
+environment variables from activating the logger accidentally. Only TP rank 0
+in each DP replica creates the logger because all TP ranks see the same
+engine-aggregate statistics.
 
 The exported metrics are grouped by OpenTelemetry instrument type:
 
