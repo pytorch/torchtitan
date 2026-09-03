@@ -935,8 +935,7 @@ class VLLMGenerator(Actor, Configurable):
             logger.info("Initializing LLMEngine from EngineArgs...")
             stat_loggers = None
             if self._tp_rank == 0:
-                vllm_stat_logger_config = config.vllm_stat_logger
-                if vllm_stat_logger_config is None:
+                if config.vllm_stat_logger is None:
                     logger.info(
                         "VllmOtelStatLogger inactive because "
                         "vllm_stat_logger=None. To record vLLM metrics, set it "
@@ -944,6 +943,7 @@ class VLLMGenerator(Actor, Configurable):
                         "OTEL_METRICS_EXPORTER=jsonl or otlp"
                     )
                 else:
+                    vllm_stat_logger_config = config.vllm_stat_logger
                     logger_context = StatLoggerContext(
                         rank=self._rank,
                         tp_rank=self._tp_rank,
