@@ -291,6 +291,14 @@ class KimiK3Model(Decoder):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        # Ship only the blocks a receiver does not already hold on each
+        # pipeline hop, instead of the whole stack. On by default: under
+        # pipeline parallelism this is the transport, and the naive one is
+        # the fallback, not the other way round. It changes the order the
+        # block gradients are summed, so it is not bitwise against that
+        # fallback. Engages only on Interleaved1F1B with an even split;
+        # anything else warns and passes through.
+        attn_res_cache: bool = True
 
         def update_from_config(self, *, config, **kwargs) -> None:
             set_kimi_k3_sharding_config(
@@ -457,6 +465,7 @@ class KimiK3Model(Decoder):
     def forward(  # pyrefly: ignore [bad-override]
         self,
         tokens: torch.Tensor,
+        block_residual_TND: torch.Tensor | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
@@ -468,6 +477,11 @@ class KimiK3Model(Decoder):
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
+        # Under pipeline parallel a middle stage receives its predecessor's
+        # two outputs, the hidden states and the accumulated block residual;
+        # see the return below for why the residual has to travel.
+        block_residual_in = block_residual_TND
+
         if self.tok_embeddings is not None:
             with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
@@ -482,7 +496,11 @@ class KimiK3Model(Decoder):
         if spmd.is_type_checking():
             spmd.assert_type(h_TD, {MeshAxisName.DP: spmd.S(0)})
 
-        block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        block_residual_TND = (
+            block_residual_in
+            if block_residual_in is not None
+            else h_TD.unsqueeze(1)[:, :0]
+        )
         for layer in self.layers.values():
             h_TD, block_residual_TND = layer(
                 h_TD,
@@ -491,6 +509,12 @@ class KimiK3Model(Decoder):
                 positions,
             )
 
+        # The final aggregation belongs to the head-owning stage; other stages
+        # have these None, like norm and lm_head. The accumulated block residual
+        # must travel on: a block residual is defined over the whole stack, and
+        # a stage that dropped it would train against a different model.
+        if self.output_res_proj is None:
+            return h_TD, block_residual_TND
         h_TD = _apply_attention_residual(
             h_TD,
             block_residual_TND,

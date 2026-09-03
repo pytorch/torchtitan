@@ -41,7 +41,6 @@ def parallelize_kimi_k3(
         name
         for name, enabled in (
             ("tensor parallel", parallel_dims.tp_enabled),
-            ("pipeline parallel", parallel_dims.pp_enabled),
             ("context parallel", parallel_dims.cp_enabled),
         )
         if enabled
@@ -108,7 +107,7 @@ def parallelize_kimi_k3(
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            pp_enabled=False,
+            pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             dp_mesh_dims=dp_mesh_dims,
         )
@@ -118,7 +117,7 @@ def parallelize_kimi_k3(
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        pp_enabled=False,
+        pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
