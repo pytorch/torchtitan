@@ -29,7 +29,6 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import LocalMapConfig
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -76,9 +75,9 @@ try:
     )
 
     # The NVFP4 GEMM is a raw autograd Function that runs on local shards inside
-    # the spmd.local_map region. Mark it local-safe so SPMD type checking
-    # propagates through it; the local_map boundary declares the real
-    # colwise/rowwise output and input-gradient types.
+    # the local SPMD region. Mark it local-safe so SPMD type checking
+    # propagates through it; the region boundary declares the real
+    # colwise/rowwise output type.
     spmd.register_local_autograd_function(nvfp4_mm_triton)
 
     class NVFP4Linear(TorchAONVFP4Linear, Module):
@@ -114,7 +113,7 @@ try:
                 # sharding_config (the stock colwise/rowwise weight placement) is
                 # attached by update_from_config after this Config is built, so it
                 # is available here but not in __post_init__. Fold it into the
-                # local_map region for the opaque nvfp4_linear op now, so base
+                # local SPMD region for the opaque nvfp4_linear op now, so base
                 # Module.parallelize consumes it directly.
                 # slots=True breaks zero-arg super(), so call the parent explicitly.
                 instance = Linear.Config.build(self, **kwargs)
@@ -126,12 +125,8 @@ try:
                         in_layout = dense_activation_placement(
                             tp=spmd.S(-1), cp=spmd.S(0)
                         )
-                        in_grad = dense_activation_placement(
-                            tp=spmd.S(-1), cp=spmd.S(0)
-                        )
                     else:
                         in_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-                        in_grad = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
                     instance._sharding_config = replace(
                         sc,
                         state_shardings={
@@ -152,7 +147,7 @@ try:
                             **(sc.in_dst_shardings or {}),
                             "x": in_layout,
                         },
-                        local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
+                        local_spmd=True,
                     )
                 return instance
 

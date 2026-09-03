@@ -16,7 +16,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 DP = MeshAxisName.DP
@@ -203,7 +203,7 @@ def _routed_experts_sharding_configs(
     enable_sp: bool,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> tuple[ShardingConfig, ShardingConfig]:
-    """Configs for RoutedExperts local_map and inner expert weight state."""
+    """Configs for RoutedExperts local SPMD and inner expert weight state."""
     if enable_ep:
         pre_experts_input_layout = (
             dense_sequence_parallel_placement()
@@ -214,7 +214,6 @@ def _routed_experts_sharding_configs(
             name: expert_param_placement_sparse() for name in expert_param_layout
         }
         experts_input_layout = dense_sequence_parallel_placement()
-        experts_input_grad_layout = dense_sequence_parallel_placement()
     else:
         pre_experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         state_shardings = {
@@ -222,7 +221,6 @@ def _routed_experts_sharding_configs(
             for name, placement in expert_param_layout.items()
         }
         experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        experts_input_grad_layout = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
 
     tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
@@ -253,18 +251,7 @@ def _routed_experts_sharding_configs(
             },
             out_src_shardings=experts_output_layout,
             out_dst_shardings=desired_experts_output_layout,
-            local_map=LocalMapConfig(
-                in_grad_placements=(
-                    (
-                        experts_input_grad_layout,
-                        experts_input_grad_layout,
-                        experts_input_grad_layout,
-                        # num_local_tokens_per_expert_E is routing metadata, but it
-                        # still needs an input-gradient type at the local boundary.
-                        tokens_per_expert_layout,
-                    )
-                ),
-            ),
+            local_spmd=True,
         ),
         ShardingConfig(state_shardings=state_shardings),
     )
@@ -321,7 +308,7 @@ def set_moe_sharding_config(
       None``).
     - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
       ``state_shardings`` -- sparse ``{EP}`` / dense ``{TP}`` / none. The parent
-      ``routed_experts`` holds the activation in/out shardings + local_map.
+      ``routed_experts`` holds the activation shardings and local SPMD region.
 
     ``expert_param_layout`` maps each routed-expert parameter name to its
     dense in/out-dim placement (used on the EP-disabled + TP-enabled path):
@@ -367,7 +354,7 @@ def set_moe_sharding_config(
         shared.w2.sharding_config = w2_config
         shared.w3.sharding_config = w3_config
 
-    # RoutedExperts (local_map region): activation in/out + local_map, no params.
+    # RoutedExperts local SPMD region: activation in/out, no params.
     routed_experts_config, inner_experts_config = _routed_experts_sharding_configs(
         enable_ep=enable_ep,
         enable_sp=enable_sp,

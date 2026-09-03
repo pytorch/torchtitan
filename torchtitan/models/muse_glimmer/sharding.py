@@ -20,14 +20,14 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
     vision_invariant_linear_config,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel, MuseGlimmerTransformerBlock
@@ -153,7 +153,7 @@ def _set_muse_glimmer_layer_sharding(
     layer_cfg.post_ffn_norm.sharding_config = norm
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # QK norms: shard on head dim (dim=1), independent of SP. Scaleless, so no
     # weight state to distribute.
@@ -216,7 +216,7 @@ def set_muse_glimmer_vision_sharding_config(
     encoder_cfg.ln_post.sharding_config = invariant_norm_config(include_cp_axis=True)
 
     # Per-block TP via the shared helper (norms, q/k/v/proj, fc1/fc2, and the
-    # inner-attention local_map), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a
+    # inner-attention local SPMD region), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a
     # per-image vision activation, so it flows {DP: V, CP: R, TP: I}.
     set_vision_transformer_block_sharding_config(
         encoder_cfg.block,
@@ -225,22 +225,18 @@ def set_muse_glimmer_vision_sharding_config(
     )
 
     vision_invariant = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
-    vision_invariant_grad = SpmdType({DP: spmd.V, CP: spmd.P, TP: spmd.I})
     pos_param_invariant = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
-    pos_param_grad = SpmdType({DP: spmd.P, CP: spmd.P, TP: spmd.I})
     encoder_cfg.pos_embed.sharding_config = ShardingConfig(
         in_src_shardings={"pos_param": pos_param_invariant},
         in_dst_shardings={"pos_param": pos_param_invariant},
         out_src_shardings=vision_invariant,
-        local_map=LocalMapConfig(in_grad_placements=(pos_param_grad,)),
+        local_spmd=True,
     )
     encoder_cfg.token_permute.sharding_config = ShardingConfig(
         in_src_shardings={"x": vision_invariant, "index": vision_invariant},
         in_dst_shardings={"x": vision_invariant, "index": vision_invariant},
         out_src_shardings=vision_invariant,
-        local_map=LocalMapConfig(
-            in_grad_placements=(vision_invariant_grad, vision_invariant)
-        ),
+        local_spmd=True,
     )
 
     if adapter_cfg is not None:

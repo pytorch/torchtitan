@@ -138,7 +138,7 @@ def build_trainer_model(
 
     # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
     # parallelism-driven config mutations) on the model config BEFORE build,
-    # so each Module is constructed with its ShardingConfig / LocalMapConfig.
+    # so each Module is constructed with its ShardingConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
     model_spec.model.update_from_config(

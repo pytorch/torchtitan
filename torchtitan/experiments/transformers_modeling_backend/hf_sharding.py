@@ -10,8 +10,8 @@ Sets ``_sharding_config`` on every HF sub-module so that a single
 ``model.parallelize(parallel_dims)`` call handles all TP distribution
 and forward wrapping via the Module protocol.
 
-The flex-attention kernel uses ``local_map`` (via ``_attach_flex_kernel``) to
-declare the q/k/v layouts around the flex HOP, mirroring Titan's own attention.
+The flex-attention kernel uses a local SPMD region (via ``_attach_flex_kernel``)
+to declare the q/k/v layouts around the flex HOP, mirroring Titan's attention.
 Other HF internals operate on plain tensors carrying local SPMD annotations.
 
 MoE layers are already Titan Module instances with ShardingConfig and
@@ -30,7 +30,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
 DP = MeshAxisName.DP
@@ -126,7 +126,7 @@ def set_hf_sharding_configs(
             in_dst_shardings={"input": _hf_activation_placement(tp=spmd.R)},
             out_src_shardings=_hf_activation_placement(tp=spmd.P),
             out_dst_shardings=_sp_activation(enable_sp=enable_sp),
-            local_map=LocalMapConfig(in_grad_placements=None),
+            local_spmd=True,
         )
 
     if model.norm is not None and not isinstance(model.norm, nn.Identity):
@@ -188,19 +188,19 @@ def set_hf_sharding_configs(
 
 
 def _attach_flex_kernel(attn: nn.Module) -> None:
-    """Attach the flex-attention kernel Module carrying the attention local_map.
+    """Attach the flex-attention kernel Module carrying its local SPMD region.
 
     q/k/v reach the HF attention function as ``(b, heads, seq, dim)`` with heads
     on tensor dim 1 and seq on tensor dim 2; the flex output is
     ``(b, seq, heads, dim)`` with seq on dim 1 and heads on dim 2. Declare those
-    as the local_map input/output placements so the Module protocol maps q/k/v
-    to local tensors around the flex HOP (see ``HFFlexKernel``).
+    as the local-region input/output placements around the flex HOP (see
+    ``HFFlexKernel``).
 
-    Under CP, q/k/v arrive seq-sharded on the CP axis. The local_map treats
+    Under CP, q/k/v arrive seq-sharded on the CP axis. The local region treats
     them as seq-sharded (``S(2)`` on the input); the actual k/v all-gather across
     the CP axis is done explicitly with a funcol collective inside the kernel
     forward (see ``_wrap_flex_kernel_cp`` in parallelize.py), because the kernel
-    runs nested inside the attention module's local_map region where the CP mesh
+    runs nested inside the attention module's local SPMD region where the CP mesh
     dim is no longer visible to a declarative redistribute. The output is
     seq-sharded on the CP axis (``S(1)`` -- seq is dim 1 after flex transposes).
     When CP is not enabled the (tp,)-only mesh ignores the CP placement, so this
@@ -227,9 +227,7 @@ def _attach_flex_kernel(attn: nn.Module) -> None:
                 "value": heads_in,
             },
             out_src_shardings=heads_out,
-            local_map=LocalMapConfig(
-                in_grad_placements=(heads_in, heads_in, heads_in),
-            ),
+            local_spmd=True,
         )
     ).build()
 
@@ -240,7 +238,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     Covers norms, attention projections, and (for non-MoE layers) dense MLP.
     MoE layers have their own ShardingConfig from the Titan MoE swap. Also
     attaches the flex-attention kernel Module that carries the attention
-    local_map (see ``_attach_flex_kernel``).
+    local SPMD region (see ``_attach_flex_kernel``).
     """
     # --- Norms ---
     if hasattr(layer, "input_layernorm"):
@@ -272,7 +270,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
     )
 
     # Flex attention: attach the kernel Module that carries the attention
-    # local_map so q/k/v are computed on local (head-sharded) tensors.
+    # local SPMD region so q/k/v are computed on local head-sharded tensors.
     _attach_flex_kernel(attn)
 
     # Query projection. Detected independently of the KV path: a model may

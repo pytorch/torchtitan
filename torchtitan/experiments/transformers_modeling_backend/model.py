@@ -44,7 +44,7 @@ class HFFlexKernel(Module):
     hf_sharding.py): q/k/v are plain local tensors carrying head-sharded SPMD
     annotations, and the output receives the corresponding head-sharded
     annotation. Expressing the sharding declaratively
-    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with Titan's own
+    ``ShardingConfig`` keeps it consistent with Titan's own
     attention instead of requiring a hand-rolled ``local_map`` call.
 
     The HF attention module and the BlockMask ride as passthrough keyword args

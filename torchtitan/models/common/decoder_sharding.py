@@ -14,7 +14,7 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -272,8 +272,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     attention_cfg.wo.sharding_config = wo_config
 
 
-def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
-    """Install a ``LocalMapConfig`` on an inner-attention config.
+def set_gqa_inner_attention_local_spmd(inner_attention_cfg) -> None:
+    """Mark an inner-attention config as a local SPMD region.
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
     shards H.
@@ -292,8 +292,6 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
     q_placements = attention_activation_placement()
     kv_src_placements = attention_activation_placement()
     kv_dst_placements = attention_activation_placement(cp=spmd.R)
-    kv_grad_placements = attention_activation_placement(cp=spmd.P)
-
     out_src: SpmdType = q_placements
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
@@ -307,9 +305,7 @@ def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
             "v_THV": kv_dst_placements,
         },
         out_src_shardings=out_src,
-        local_map=LocalMapConfig(
-            in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
-        ),
+        local_spmd=True,
     )
 
 
@@ -374,7 +370,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
         in_dst_shardings={"input": embed_input},
         out_src_shardings=embed_out_src,
         out_dst_shardings=activation_layout,
-        local_map=LocalMapConfig(in_grad_placements=None),
+        local_spmd=True,
     )
     config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 

@@ -218,7 +218,7 @@ class Module(nn.Module, Configurable):
 
         1. Shard states (parameters and buffers).
         2. Wrap the forward with:
-            ``reshard inputs -> [optional local_map] forward -> reshard outputs``.
+            ``reshard inputs -> [optional local SPMD] forward -> reshard outputs``.
 
         ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
 
@@ -385,7 +385,7 @@ class Module(nn.Module, Configurable):
         fn: Callable,
         parallel_dims: ParallelDims,
     ) -> Callable:
-        """Wrap ``fn`` with a local-tensor region if local_map config is set.
+        """Wrap ``fn`` with a local-tensor region if configured.
 
         Input layouts come from ``in_dst_shardings`` (the same dict
         ``_redistribute_inputs`` uses to pre-align inputs); output layouts
@@ -393,7 +393,7 @@ class Module(nn.Module, Configurable):
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
-        if sharding_config.local_map is None:
+        if not sharding_config.local_spmd:
             return fn
 
         in_dst = (
@@ -403,20 +403,20 @@ class Module(nn.Module, Configurable):
         out_src = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
         if out_src is None:
             raise AssertionError(
-                f"{type(self).__name__}: local_map is set but "
+                f"{type(self).__name__}: local_spmd is set but "
                 "out_src_shardings is None."
             )
         missing_in = [name for name in pos_args if name not in in_dst]
         if missing_in:
             raise AssertionError(
-                f"{type(self).__name__}: local_map is set but in_dst_shardings "
+                f"{type(self).__name__}: local_spmd is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
         in_named: list[SpmdType] = [in_dst[name] for name in pos_args]
 
-        return self._spmd_apply_local_map(fn, in_named, out_src)
+        return self._spmd_apply_local_region(fn, in_named, out_src)
 
-    def _spmd_apply_local_map(
+    def _spmd_apply_local_region(
         self,
         fn: Callable,
         in_named: list[SpmdType],

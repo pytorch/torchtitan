@@ -24,36 +24,9 @@ from torchtitan.distributed.spmd_types import _per_axis_types, spmd_axes
 
 
 __all__ = [
-    "LocalMapConfig",
     "ShardingConfig",
     "resolve_placements",
 ]
-
-
-@dataclass(kw_only=True, slots=True)
-class LocalMapConfig:
-    """Spec for modules computing on local tensors.
-
-    Wraps forward with ``spmd.local_map()`` so the body runs in a local SPMD
-    region with declared input, output, and input-gradient types.
-
-    Input placements come from ``ShardingConfig.in_dst_shardings``
-    (already aligned by ``_redistribute_inputs``); output placements from
-    ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
-    ``in_grad_placements`` since there's no equivalent slot on
-    ``ShardingConfig`` today. Set it to ``None`` to omit the local_map
-    argument when input gradients are irrelevant.
-
-    Attributes:
-        in_grad_placements: Per-input-gradient SPMD types (positional,
-            ordered by ``forward`` args). Use ``None`` to omit
-            input-gradient placements or for non-tensor args.
-    """
-
-    in_grad_placements: tuple[SpmdType | None, ...] | None
-
-    def to_dict(self) -> dict:
-        return {"repr": repr(self)}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -94,10 +67,9 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward with ``spmd.local_map()``. Input and
-            output placements come from ``in_dst_shardings`` and
-            ``out_src_shardings``; ``LocalMapConfig`` only carries
-            ``in_grad_placements``.
+        local_spmd: If true, wraps forward with ``spmd.no_typecheck()`` using
+            input types from ``in_dst_shardings`` and output types from
+            ``out_src_shardings``.
     """
 
     state_shardings: dict[str, SpmdType] = field(default_factory=dict)
@@ -105,7 +77,7 @@ class ShardingConfig:
     in_dst_shardings: dict[str, SpmdType] | None = None
     out_src_shardings: SpmdType | tuple[SpmdType, ...] | None = None
     out_dst_shardings: SpmdType | None = None
-    local_map: LocalMapConfig | None = None
+    local_spmd: bool = False
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""

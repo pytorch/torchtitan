@@ -102,7 +102,7 @@ class GroupedExperts(Module):
 
 
 class RoutedExperts(Module):
-    """Routed-expert ``local_map`` region: composes token_dispatcher + inner_experts
+    """Local SPMD region composing token_dispatcher and inner_experts
     as sibling nodes so each can be overridden independently."""
 
     @dataclass(kw_only=True, slots=True)
@@ -124,7 +124,7 @@ class RoutedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        When parallelized, ``local_map`` (from ``sharding_config``) establishes
+        When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
         """
         (

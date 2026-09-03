@@ -193,20 +193,17 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
 
 
 @pytest.mark.parametrize(
-    "sharding_config_factory, input_tp, input_grad_tp",
+    "sharding_config_factory, input_tp",
     [
-        pytest.param(lambda: colwise_config(), spmd.R, spmd.P, id="colwise"),
+        pytest.param(lambda: colwise_config(), spmd.R, id="colwise"),
         pytest.param(
             lambda: rowwise_config(output_sp=True),
-            spmd.S(-1),
             spmd.S(-1),
             id="rowwise",
         ),
     ],
 )
-def test_nvfp4_build_configures_local_spmd_sharding(
-    sharding_config_factory, input_tp, input_grad_tp
-):
+def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, input_tp):
     # Config.build() folds the stock colwise/rowwise sharding into the local
     # SPMD region for the opaque NVFP4 GEMM.
     NVFP4Linear = _nvfp4_linear_cls()
@@ -219,13 +216,10 @@ def test_nvfp4_build_configures_local_spmd_sharding(
         sharding_config=sharding_config_factory(),
     ).build()
     sc = module._sharding_config
-    assert sc.local_map is not None
+    assert sc.local_spmd
     input_layout = dense_activation_placement(tp=input_tp, cp=spmd.S(0))
     assert sc.in_src_shardings == {"x": input_layout}
     assert sc.in_dst_shardings == {"x": input_layout}
-    assert sc.local_map.in_grad_placements == (
-        dense_activation_placement(tp=input_grad_tp, cp=spmd.S(0)),
-    )
     assert "weight" in sc.state_shardings
     assert sc.state_shardings["_sr_seed"] == SpmdType(
         {
