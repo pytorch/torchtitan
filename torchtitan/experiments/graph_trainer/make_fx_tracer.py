@@ -299,6 +299,8 @@ class TracedResult:
         output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
         output_spec: Original output pytree spec used during reconstruction.
         state_fqns: Trace-time module parameter/buffer FQNs.
+        graph_state_fqns: Names of trainer-owned tensor state flattened directly
+            after module state and treated as static graph inputs.
     """
 
     gm: torch.fx.GraphModule
@@ -317,6 +319,7 @@ class TracedResult:
 
     # state related
     state_fqns: list[str]
+    graph_state_fqns: tuple[str, ...] = ()
 
     @property
     def num_static_inputs(self) -> int:
@@ -331,7 +334,7 @@ class TracedResult:
         should be included since their addresses are also stable across steps,
         avoiding cudagraph re-copying them every step.
         """
-        num_state = len(self.state_fqns)
+        num_state = len(self.state_fqns) + len(self.graph_state_fqns)
         return sum(
             self.input_subclass_layouts[i].num_tensors
             if i in self.input_subclass_layouts
@@ -346,6 +349,7 @@ def minimal_fx_tracer(
     optimizer: "torch.optim.Optimizer | None" = None,
     *,
     precompile_meshes: list[DeviceMesh] | None = None,
+    graph_state: dict[str, torch.Tensor] | None = None,
     prepare_inputs: Callable[[tuple[Any, ...], dict[str, Any]], None] | None = None,
     prepare_call_inputs: Callable[
         [tuple[Any, ...], dict[str, Any]],
@@ -374,6 +378,10 @@ def minimal_fx_tracer(
     ``fn`` should reference ``module`` and ``optimizer`` from its enclosing
     closure — passing them explicitly through ``args``/``kwargs`` is invalid
     because ``nn.Module`` and ``Optimizer`` instances are not pytree-able.
+    ``graph_state`` supplies additional named tensors as explicit, stable graph
+    inputs immediately after module state. The traced function does not receive
+    them directly; graph passes may consume their placeholders to add stateful
+    operations.
 
     The trace-time ``args`` and ``kwargs`` must satisfy these constraints:
 
@@ -403,12 +411,21 @@ def minimal_fx_tracer(
 
         model_state, optim_state = extract_train_state(module, optimizer)
         state_fqns = list(model_state.keys())
+        graph_state_t = graph_state or {}
+        graph_state_fqns = tuple(graph_state_t)
         trace_meshes = precompile_meshes or []
 
-        state_tree = {"model": model_state, "optim": optim_state}
+        state_tree = {
+            "model": model_state,
+            "graph": graph_state_t,
+            "optim": optim_state,
+        }
         state_flat, state_spec = pytree.tree_flatten(state_tree)
         num_state_inputs = len(state_flat)
         num_mesh_inputs = len(trace_meshes)
+
+        if any(not isinstance(value, torch.Tensor) for value in graph_state_t.values()):
+            raise ValueError("minimal_fx_tracer graph_state values must be tensors")
 
         user_inputs_flat, user_inputs_spec = pytree.tree_flatten((args, kwargs))
 
@@ -538,6 +555,7 @@ def minimal_fx_tracer(
             output_subclass_layouts=output_layouts,
             output_spec=output_spec,
             state_fqns=state_fqns,
+            graph_state_fqns=graph_state_fqns,
         )
 
     return _trace_with_args
@@ -549,6 +567,7 @@ def run_traced(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     precompile_meshes: list[DeviceMesh] | None = None,
+    graph_state: dict[str, torch.Tensor] | None = None,
     _validate_runtime: bool = False,
     interpreter_cls: type | None = None,
 ) -> Callable[..., Any]:
@@ -560,12 +579,12 @@ def run_traced(
         outputs = run_traced(traced, module=model, optimizer=opt)(*args, **kwargs)
 
     Mirrors :func:`minimal_fx_tracer`'s state extraction: parameters/buffers
-    are sampled from ``module`` and the optimizer state is sampled from
-    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the
-    graph already contains explicit backward ops (from ``torch.autograd.grad``
-    traced by make_fx). Without this, PyTorch would build a redundant autograd
-    graph on top, keeping all forward intermediates alive via ``grad_fn``
-    references.
+    are sampled from ``module``, ``graph_state`` supplies separately owned
+    persistent tensors, and optimizer state is sampled from
+    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the graph
+    already contains explicit backward ops (from ``torch.autograd.grad`` traced
+    by make_fx). Without this, PyTorch would build a redundant autograd graph on
+    top, keeping all forward intermediates alive via ``grad_fn`` references.
 
     With ``_validate_runtime=True``, runtime module parameter/buffer FQNs must match
     trace time and runtime ``(args, kwargs)`` must flatten to the same pytree
@@ -587,7 +606,18 @@ def run_traced(
                 f"  Got:    {list(model_state.keys())}"
             )
         runtime_meshes = precompile_meshes or []
-        state_tree = {"model": model_state, "optim": optim_state}
+        graph_state_t = graph_state or {}
+        if tuple(graph_state_t) != traced_result.graph_state_fqns:
+            raise ValueError(
+                "graph state has different names than during tracing.\n"
+                f"  Traced: {traced_result.graph_state_fqns}\n"
+                f"  Got:    {tuple(graph_state_t)}"
+            )
+        state_tree = {
+            "model": model_state,
+            "graph": graph_state_t,
+            "optim": optim_state,
+        }
         state_flat, _ = pytree.tree_flatten(state_tree)
 
         user_inputs_flat, runtime_spec = pytree.tree_flatten((args, kwargs))
