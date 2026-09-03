@@ -134,18 +134,27 @@ class KimiMLAAttention(BaseAttention):
 
 
 def _apply_attention_residual(
-    prefix_sum_TD: torch.Tensor,
+    partial_block_TD: torch.Tensor | None,
     block_residual_TND: torch.Tensor,
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32.
 
+    The values are the block representations, plus the running partial sum of
+    the current block when the layer is not the first of its block (the first
+    layer's stack already ends with the representation that closed the
+    previous block, so it attends over the stack alone).
+
     TODO: Add TP Support. The current implementation assumes that the input tensors are on a single device.
     """
     assert norm.eps is not None
 
-    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
+    values_TND = (
+        block_residual_TND
+        if partial_block_TD is None
+        else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
+    )
     values_float = values_TND.float()
     variance = values_float.pow(2).mean(dim=-1, keepdim=True)
     keys_TND = values_float * torch.rsqrt(variance + norm.eps)
@@ -219,35 +228,38 @@ class KimiK3TransformerBlock(Module):
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prefix_sum_TD = x_TD
+        # The first layer of a block closes the previous one: the incoming
+        # stream is that block's representation (the token embedding at layer
+        # 0) and joins the stack; every other layer carries it as the partial
+        # sum of the open block. Each sub-layer then attends over the stack,
+        # plus the partial sum when there is one, before its norm and body.
+        first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
+        if first_layer_in_block:
+            block_residual_TND = torch.cat(
+                (block_residual_TND, x_TD.unsqueeze(1)), dim=1
+            )
+            partial_block_TD = None
+        else:
+            partial_block_TD = x_TD
 
-        if block_residual_TND.shape[1] > 0:
-            assert self.attention_res_proj is not None
+        if self.attention_res_proj is None:
+            # Layer 0: the stack holds only the embedding, which is the input.
+            h_TD = x_TD
+        else:
             assert self.attention_res_norm is not None
-            x_TD = _apply_attention_residual(
-                prefix_sum_TD,
+            h_TD = _apply_attention_residual(
+                partial_block_TD,
                 block_residual_TND,
                 self.attention_res_proj,
                 self.attention_res_norm,
             )
-
-        first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
-        if first_layer_in_block:
-            block_residual_TND = torch.cat(
-                (
-                    block_residual_TND,
-                    prefix_sum_TD.unsqueeze(1),
-                ),
-                dim=1,
-            )
-
-        h_TD = self.attention_norm(x_TD)
+        h_TD = self.attention_norm(h_TD)
         if self.attention is not None:
             h_TD = self.attention(h_TD, attention_masks, positions)
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, None, positions)
-        prefix_sum_TD = h_TD if first_layer_in_block else prefix_sum_TD + h_TD
+        prefix_sum_TD = h_TD if first_layer_in_block else x_TD + h_TD
 
         h_TD = _apply_attention_residual(
             prefix_sum_TD,
