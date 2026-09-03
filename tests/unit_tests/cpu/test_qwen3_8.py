@@ -62,9 +62,11 @@ def test_qwen38_recipes_use_released_hugging_face_paths() -> None:
 
 
 def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
-    config = qwen3_8_configs["2.4T-A95B"](
+    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    config = build_config(
         attn_backend="flex",
         moe_comm_backend="standard",
+        seq_len=max_context_length,
     )
 
     assert config.dim == 8192
@@ -87,9 +89,11 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
 
 
 def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
-    config = qwen3_8_configs["2.4T-A95B"](
+    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    config = build_config(
         attn_backend="flex",
         moe_comm_backend="standard",
+        seq_len=max_context_length,
     )
 
     set_qwen35_sharding_config(config, enable_sp=True, enable_ep=True)
@@ -99,7 +103,8 @@ def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
 
 
 def test_shared_model_builds_without_vision_encoder() -> None:
-    config = qwen3_8_configs["debugmodel"](attn_backend="flex")
+    build_config, max_context_length = qwen3_8_configs["debugmodel"]
+    config = build_config(attn_backend="flex", seq_len=max_context_length)
     config = replace(
         config,
         vocab_size=128,
@@ -114,9 +119,11 @@ def test_shared_model_builds_without_vision_encoder() -> None:
 
 
 def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
-    config = qwen3_8_configs["2.4T-A95B"](
+    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    config = build_config(
         attn_backend="flex",
         moe_comm_backend="standard",
+        seq_len=max_context_length,
     )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
@@ -139,7 +146,8 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
 
 
 def test_multimodal_checkpoint_adapter_keeps_language_model_prefix() -> None:
-    config = qwen3_8_configs["27B"](attn_backend="flex")
+    build_config, max_context_length = qwen3_8_configs["27B"]
+    config = build_config(attn_backend="flex", seq_len=max_context_length)
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
     lm_head = torch.randn(2, 3)
@@ -157,9 +165,11 @@ def test_multimodal_checkpoint_adapter_keeps_language_model_prefix() -> None:
 
 
 def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
-    config = qwen3_8_configs["2.4T-A95B"](
+    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    config = build_config(
         attn_backend="flex",
         moe_comm_backend="standard",
+        seq_len=max_context_length,
     )
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     delta_net = config.layers[0].delta_net

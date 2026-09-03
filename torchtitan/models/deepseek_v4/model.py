@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses as dc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -116,30 +115,6 @@ class DeepSeekV4Model(Decoder):
                 raise NotImplementedError(
                     "DeepSeek V4 MTP does not support pipeline parallelism yet."
                 )
-
-            if hasattr(config, "training"):
-                seq_len = config.training.max_context_length
-                for layer_cfg in self.layers:
-                    attention = layer_cfg.attention
-                    if attention.compressor is not None:
-                        attention.compressor.rope = dc.replace(
-                            attention.compressor.rope,
-                            max_context_length=seq_len,
-                        )
-                    if attention.compressor_128 is not None:
-                        attention.compressor_128.rope = dc.replace(
-                            attention.compressor_128.rope,
-                            max_context_length=seq_len,
-                        )
-                    if attention.indexer is not None:
-                        attention.indexer.rope = dc.replace(
-                            attention.indexer.rope,
-                            max_context_length=seq_len,
-                        )
-                        attention.indexer.compressor.rope = dc.replace(
-                            attention.indexer.compressor.rope,
-                            max_context_length=seq_len,
-                        )
 
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
