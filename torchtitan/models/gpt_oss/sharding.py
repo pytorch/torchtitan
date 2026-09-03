@@ -35,22 +35,15 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 }
 
 
-def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
+def scaled_bias_rowwise_config() -> ShardingConfig:
     input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    out_dst = (
-        dense_sequence_parallel_placement()
-        if output_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=out_dst,
+        in_shardings={"input": input_layout},
+        out_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         local_spmd=True,
     )
 
@@ -102,18 +95,14 @@ def _set_gpt_oss_layer_sharding(
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={
-            "x": attn_x_layout,
-        },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-        },
+        in_shardings={"x": attn_x_layout},
+        out_shardings=attn_x_layout,
     )
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
     set_qkv_linear_sharding(attention.qkv_linear)
-    attention.wo.sharding_config = scaled_bias_rowwise_config(output_sp=enable_sp)
+    attention.wo.sharding_config = scaled_bias_rowwise_config()
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 

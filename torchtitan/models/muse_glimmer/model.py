@@ -15,7 +15,11 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    sp_enabled,
+    spmd_mesh_group,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -117,6 +121,15 @@ class Attention(GQAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
         num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
 
@@ -130,6 +143,23 @@ class Attention(GQAttention):
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
         if self.use_rope:
             xq, xk = self.rope(xq, xk, positions)
+
+        cp_group = spmd_mesh_group("cp")
+        if cp_group is not None:
+            xk = spmd.all_gather(
+                xk,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": xk.dtype},
+            )
+            xv = spmd.all_gather(
+                xv,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": xv.dtype},
+            )
 
         # Select this layer's mask by its window ("global" key = full attention).
         # Only flex passes a window-keyed dict of BlockMasks to index into. Varlen
@@ -152,7 +182,16 @@ class Attention(GQAttention):
         if self.o_gate is not None:
             output = output * torch.sigmoid(self.o_gate(x_TD))
 
-        return self.wo(output)
+        output = self.wo(output)
+        if tp_group is not None:
+            output = spmd.redistribute(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        return output
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):
@@ -259,7 +298,17 @@ class EmbeddingWithNorm(Module):
         self.norm = config.norm.build()
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        return self.norm(self.embedding(tokens))
+        embeddings = self.embedding(tokens)
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            embeddings = spmd.redistribute(
+                embeddings,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": embeddings.dtype},
+            )
+        return self.norm(embeddings)
 
 
 class MuseGlimmerModel(Decoder):
@@ -491,6 +540,16 @@ class MuseGlimmerModel(Decoder):
         vision_bank_VD = self.perception_emb_norm(
             self.vision_projection(vision_features_VD)
         )
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None and sp_enabled():
+            vision_bank_VD = spmd.convert(
+                vision_bank_VD,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.R,
+                expert_mode=True,
+                backward_options={"op_dtype": vision_bank_VD.dtype},
+            )
         return gather_vision_embeds(
             h_TD,
             vision_bank_VD=vision_bank_VD,
@@ -532,6 +591,15 @@ class MuseGlimmerModel(Decoder):
             h_TD = layer(h_TD, attention_masks, positions)
 
         h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        tp_group = spmd_mesh_group("tp")
+        if self.norm is not None and tp_group is not None:
+            h_TD = spmd.redistribute(
+                h_TD,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": h_TD.dtype},
+            )
 
         # _skip_lm_head is an attribute (not a kwarg) because PP backward calls
         # .requires_grad on all stage inputs, which fails on bool kwargs.

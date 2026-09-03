@@ -88,11 +88,11 @@ class TestPackedVarlenAttention(unittest.TestCase):
         sharding = model_config.layers[0].attention.inner_attention.sharding_config
         assert sharding is not None
         self.assertEqual(
-            set(sharding.in_src_shardings or {}),
+            set(sharding.in_shardings or {}),
             {"q_THK", "k_THK", "v_THV"},
         )
-        q_layout = (sharding.in_src_shardings or {})["q_THK"]
-        k_dst_layout = (sharding.in_dst_shardings or {})["k_THK"]
+        q_layout = (sharding.in_shardings or {})["q_THK"]
+        k_dst_layout = (sharding.in_shardings or {})["k_THK"]
         axis_types = _per_axis_types(q_layout)
         self.assertEqual(axis_types[MeshAxisName.DP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.CP], spmd.S(0))

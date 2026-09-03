@@ -322,6 +322,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
             spmd_typechecking=config.debug.spmd_typechecking,
+            enable_sp=config.parallelism.enable_sequence_parallel,
         )
 
     def close(self) -> None:

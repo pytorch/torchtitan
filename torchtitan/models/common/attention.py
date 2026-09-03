@@ -41,6 +41,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -681,6 +682,8 @@ class BaseQKVLinear(Module):
         super().__init__()
         self.head_dim = config.head_dim
 
+    performs_tp_input_all_gather = False
+
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -933,6 +936,15 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None and not self.qkv_linear.performs_tp_input_all_gather:
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
         xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -944,6 +956,23 @@ class GQAttention(BaseAttention):
         # Apply rotary embeddings
         xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
+        cp_group = spmd_mesh_group("cp")
+        if cp_group is not None:
+            xk_THK = spmd.all_gather(
+                xk_THK,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": xk_THK.dtype},
+            )
+            xv_THV = spmd.all_gather(
+                xv_THV,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": xv_THV.dtype},
+            )
+
         out_THV = self.inner_attention(
             xq_THK,
             xk_THK,
@@ -953,4 +982,13 @@ class GQAttention(BaseAttention):
             enable_gqa=self.enable_gqa,
         ).contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        return self.wo(out_TD)
+        out_TD = self.wo(out_TD)
+        if tp_group is not None and not self.wo.performs_tp_output_reduce_scatter:
+            out_TD = spmd.redistribute(
+                out_TD,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": out_TD.dtype},
+            )
+        return out_TD

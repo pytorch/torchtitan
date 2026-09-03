@@ -125,6 +125,7 @@ def build_trainer_model(
     train_context = dist_utils.get_spmd_context(
         parallel_dims=parallel_dims,
         spmd_typechecking=False,
+        enable_sp=parallelism.enable_sequence_parallel,
     )
 
     dist_utils.set_determinism(

@@ -12,6 +12,8 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
+
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -100,6 +102,15 @@ class Attention(BaseAttention):
         attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
         num_tokens = x.shape[0]
 
         # Query projection
@@ -148,11 +159,37 @@ class Attention(BaseAttention):
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
+        cp_group = spmd_mesh_group("cp")
+        if cp_group is not None:
+            k = spmd.all_gather(
+                k,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": k.dtype},
+            )
+            v = spmd.all_gather(
+                v,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": v.dtype},
+            )
+
         output = self.inner_attention(
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
         ).contiguous()
         output = output.view(num_tokens, -1)
-        return self.wo(output)
+        output = self.wo(output)
+        if tp_group is not None:
+            output = spmd.redistribute(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        return output
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

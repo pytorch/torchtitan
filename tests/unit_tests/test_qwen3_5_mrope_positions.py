@@ -83,7 +83,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         ), patch(
             "torchtitan.models.qwen3_5.model.annotate_deltanet_cu_seqlens"
         ), patch.object(
-            parallel_dims, "spmd_dense_mesh", return_value=None
+            type(parallel_dims),
+            "spmd_dense_mesh",
+            return_value=None,
         ):
             inputs, _labels, batch = model.preprocess_inputs(
                 input_dict,

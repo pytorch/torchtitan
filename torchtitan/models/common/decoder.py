@@ -9,12 +9,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import spmd_types as spmd
+
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    sp_enabled,
+    spmd_mesh_group,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -290,11 +296,28 @@ class Decoder(BaseModel):
         # attention_masks slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        tp_group = spmd_mesh_group("tp")
+        if self.tok_embeddings is not None and tp_group is not None:
+            h = spmd.redistribute(
+                h,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": h.dtype},
+            )
 
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)
 
         h = self.norm(h) if self.norm is not None else h
+        if self.norm is not None and tp_group is not None:
+            h = spmd.redistribute(
+                h,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": h.dtype},
+            )
 
         # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
         # calls .requires_grad on all stage inputs, which fails on bool kwargs.

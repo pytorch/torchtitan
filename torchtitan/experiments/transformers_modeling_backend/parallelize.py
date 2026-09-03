@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -33,6 +35,7 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.tools.logging import logger
 
 
@@ -77,6 +80,98 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
             return cp_forward
 
         kernel.forward = _make_cp_forward(kernel.forward)
+
+
+def _tp_all_gather_sequence(x: torch.Tensor) -> torch.Tensor:
+    tp_group = spmd_mesh_group("tp")
+    if tp_group is None:
+        return x
+    return spmd.all_gather(
+        x,
+        tp_group,
+        src=spmd.S(1),
+        dst=spmd.R,
+        backward_options={"op_dtype": x.dtype},
+    )
+
+
+def _tp_reduce_scatter_sequence(x: torch.Tensor) -> torch.Tensor:
+    tp_group = spmd_mesh_group("tp")
+    if tp_group is None:
+        return x
+    return spmd.reduce_scatter(
+        x,
+        tp_group,
+        src=spmd.P,
+        dst=spmd.S(1),
+        backward_options={"op_dtype": x.dtype},
+    )
+
+
+def _tp_all_reduce(x: torch.Tensor) -> torch.Tensor:
+    tp_group = spmd_mesh_group("tp")
+    if tp_group is None:
+        return x
+    return spmd.all_reduce(
+        x,
+        tp_group,
+        src=spmd.P,
+        dst=spmd.R,
+        backward_options={"op_dtype": x.dtype},
+    )
+
+
+def _wrap_module_input(
+    module: nn.Module, transform: Callable[[torch.Tensor], torch.Tensor]
+) -> None:
+    original_forward = module.forward
+
+    def forward(input, *args, **kwargs):
+        input = transform(input)
+        return original_forward(input, *args, **kwargs)
+
+    module.forward = forward
+
+
+def _wrap_module_output(
+    module: nn.Module, transform: Callable[[torch.Tensor], torch.Tensor]
+) -> None:
+    original_forward = module.forward
+
+    def forward(*args, **kwargs):
+        output = original_forward(*args, **kwargs)
+        return transform(output)
+
+    module.forward = forward
+
+
+def _install_hf_tp_collectives(model: nn.Module, *, enable_sp: bool) -> None:
+    """Install TP activation collectives around third-party HF modules."""
+    gather_input = _tp_all_gather_sequence if enable_sp else None
+    reduce_output = _tp_reduce_scatter_sequence if enable_sp else _tp_all_reduce
+
+    if model.tok_embeddings is not None and not isinstance(
+        model.tok_embeddings, nn.Identity
+    ):
+        _wrap_module_output(model.tok_embeddings, reduce_output)
+
+    for layer in model.layers:
+        attention = layer.self_attn
+        if gather_input is not None:
+            _wrap_module_input(attention, gather_input)
+        output_projection = getattr(
+            attention, "o_proj" if hasattr(attention, "o_proj") else "dense"
+        )
+        _wrap_module_output(output_projection, reduce_output)
+
+        if not getattr(layer, "moe_enabled", False):
+            mlp = layer.mlp
+            if gather_input is not None:
+                _wrap_module_input(mlp, gather_input)
+            output_projection = getattr(
+                mlp, "down_proj" if hasattr(mlp, "down_proj") else "fc2"
+            )
+            _wrap_module_output(output_projection, reduce_output)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +253,11 @@ def parallelize_hf_transformers(
     # 3. Set sharding configs on all non-MoE modules
     set_hf_sharding_configs(
         model,
-        enable_sp=parallel_dims.tp_enabled,
+        enable_sp=parallelism.enable_sequence_parallel,
+    )
+    _install_hf_tp_collectives(
+        model,
+        enable_sp=parallelism.enable_sequence_parallel,
     )
 
     # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across

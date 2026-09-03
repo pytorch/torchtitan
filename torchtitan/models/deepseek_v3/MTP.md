@@ -146,9 +146,9 @@ The current implementation therefore:
 
 1. Constructs `mtp_input_tokens` at the token-id level.
 2. Reuses `tok_embeddings(mtp_input_tokens)` so the shifted embedding output follows the configured sharding strategy.
-3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
+3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; under SP, the block explicitly shards this replicated mask across TP before applying it.
 
-In other words, SP handling does not call `redistribute` explicitly in the forward code. The placement conversion for the mask input is described by the MTP layer sharding config.
+The forward code owns this redistribution because `ShardingConfig` only validates module-boundary contracts.
 
 ## 3. MTP Parallelization and Sharding
 
@@ -165,9 +165,9 @@ MTP TP/SP sharding is configured in `_set_deepseek_v3_mtp_sharding()`. The main 
 - MTP attention/feed-forward/MoE submodules reuse the normal DeepSeek-V3 layer sharding policy.
 - `enorm`, `hnorm`, and `mtp_norm` use norm sharding that matches the activation layout.
 - `eh_proj` input and output activations are aligned with the dense activation placement.
-- When SP is enabled, `mtp_input_valid_mask` is aligned from a replicated mask to the sequence-parallel activation layout through the block-level `ShardingConfig`.
+- When SP is enabled, `mtp_input_valid_mask` is explicitly aligned from a replicated mask to the sequence-parallel activation layout in `MTPTransformerBlock.forward`.
 
-This keeps the MTP block forward code independent from explicit redistribution details. Placement is described by sharding config instead.
+The sharding config records the resulting boundary contract and typechecking validates it.
 
 ### 3.3 EP
 

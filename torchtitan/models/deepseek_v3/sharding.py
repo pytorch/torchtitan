@@ -96,12 +96,8 @@ def _set_deepseek_v3_layer_sharding(
     # MLA attention input: x is gathered to Replicate. RoPE is read from the
     # attention layer's local cache.
     attention.sharding_config = ShardingConfig(
-        in_src_shardings={
-            "x": attn_x_layout,
-        },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-        },
+        in_shardings={"x": attn_x_layout},
+        out_shardings=attn_x_layout,
     )
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
@@ -115,7 +111,7 @@ def _set_deepseek_v3_layer_sharding(
     attention.kv_norm.sharding_config = replicate_weight
 
     attention.wkv_b.sharding_config = colwise_config()
-    attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    attention.wo.sharding_config = rowwise_config()
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
@@ -170,13 +166,10 @@ def _set_deepseek_v3_mtp_sharding(
         )
         if enable_sp:
             mtp_layer_cfg.sharding_config = ShardingConfig(
-                in_src_shardings={
+                in_shardings={
                     "mtp_input_valid_mask": dense_activation_placement(
                         tp=spmd.R, cp=spmd.S(0)
                     ),
-                },
-                in_dst_shardings={
-                    "mtp_input_valid_mask": activation,
                 },
             )
         mtp_layer_cfg.enorm.sharding_config = norm
@@ -188,6 +181,6 @@ def _set_deepseek_v3_mtp_sharding(
             state_shardings={
                 "weight": dense_param_placement(tp=spmd.R),
             },
-            in_src_shardings={"input": activation},
-            out_src_shardings=activation,
+            in_shardings={"input": activation},
+            out_shardings=activation,
         )
