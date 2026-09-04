@@ -365,6 +365,17 @@ def llama3_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_fsdp2_bf16_reduction() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    _use_spmd_types(config, typechecking=True)
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.disable_cuda_graphs = True
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.parallelism.data_parallel_shard_degree = 2
+    return config
+
+
 def llama3_debugmodel_ddp4() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)

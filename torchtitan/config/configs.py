@@ -102,7 +102,7 @@ class TrainingConfig:
     and no other parallelism is enabled, i.e. under DDP or single-device training.
     """
 
-    mixed_precision_reduce: Literal["float32"] = "float32"
+    mixed_precision_reduce: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype to use for reductions when applying mixed precision via FSDP.
     This feature only takes effect when data_parallel_shard_degree > 1
