@@ -56,7 +56,7 @@ def _reject_conflicts(transforms: list[ModelTransform]) -> None:
 
 
 def transform_model(
-    model: Module.Config, transforms: list[ModelTransform.Config]
+    model: Module.Config, transforms: list[ModelTransform]
 ) -> Module.Config:
     """Apply every transform to ``model`` and return the rewritten root.
 
@@ -64,15 +64,14 @@ def transform_model(
     where there is no ``Trainer.Config``, such as a bare ``ModelSpec``.
     Validation is the caller's job.
     """
-    built = [t.build() for t in transforms]
-    _reject_conflicts(built)
-    for transform in _ordered(built):
+    _reject_conflicts(transforms)
+    for transform in _ordered(transforms):
         model = transform.transform(model)
     return model
 
 
 def apply_transforms(
-    config: "Trainer.Config", transforms: list[ModelTransform.Config]
+    config: "Trainer.Config", transforms: list[ModelTransform]
 ) -> "Trainer.Config":
     """Apply every transform to a copy of ``config`` and return it.
 

@@ -60,9 +60,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
         if cp_kernel:
             # Apply the transform without its final validation.
-            ContextParallelTransform.Config(
-                kernel=AllGatherCPFlexAttention
-            ).build().transform(config.model_spec.model)
+            ContextParallelTransform(kernel=AllGatherCPFlexAttention).transform(
+                config.model_spec.model
+            )
         config.parallelism.spmd_backend = spmd_backend
         config.parallelism.context_parallel_degree = cp
         config.training.max_context_length = 512
@@ -134,9 +134,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
             attention.n_heads = n_heads
         if n_kv_heads is not None:
             attention.n_kv_heads = n_kv_heads
-        ContextParallelTransform.Config(
-            kernel=UlyssesCPFlexAttention
-        ).build().transform(config.model_spec.model)
+        ContextParallelTransform(kernel=UlyssesCPFlexAttention).transform(
+            config.model_spec.model
+        )
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = load_balancer
@@ -201,9 +201,7 @@ class TestHeadDivisibility(unittest.TestCase):
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
         if kernel is not None:
-            ContextParallelTransform.Config(kernel=kernel).build().transform(
-                config.model_spec.model
-            )
+            ContextParallelTransform(kernel=kernel).transform(config.model_spec.model)
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = None
