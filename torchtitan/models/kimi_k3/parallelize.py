@@ -17,7 +17,11 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
 )
+from torchtitan.tools.logging import logger
+
 from .model import KimiK3Model
 
 
@@ -31,14 +35,13 @@ def parallelize_kimi_k3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ) -> nn.Module:
-    """Apply FSDP2 to the Kimi K3 decoder and vision encoder."""
+    """Apply FSDP2 and context parallelism to the Kimi K3 decoder and vision encoder."""
 
     unsupported_parallelisms = [
         name
         for name, enabled in (
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
-            ("context parallel", parallel_dims.cp_enabled),
         )
         if enabled
     ]
@@ -47,30 +50,33 @@ def parallelize_kimi_k3(
             "Kimi K3 currently supports FSDP2 data parallelism "
             f"only; disable {', '.join(unsupported_parallelisms)}."
         )
-    if parallelism.spmd_backend != "partial_dtensor":
-        raise NotImplementedError(
-            "Kimi K3 FSDP2 currently supports the partial_dtensor SPMD backend "
-            "only; the config registry pins it."
-        )
     if compile_config.enable and "model" in compile_config.components:
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
-    dp_mesh_names = (
-        ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-    )
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-    # The routed experts shard on their own data-parallel mesh, which excludes
-    # the expert axis; the same shape deepseek_v3 resolves.
+    dp_mesh_dims = None
+    edp_mesh_dims = None
     edp_mesh = None
-    if parallel_dims.ep_enabled:
-        edp_mesh = parallel_dims.get_optional_mesh(
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
+    if parallelism.spmd_backend == "spmd_types":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        # The routed experts shard on their own data-parallel mesh, which excludes
+        # the expert axis; the same shape deepseek_v3 resolves.
+        if parallel_dims.ep_enabled:
+            edp_mesh = parallel_dims.get_optional_mesh(
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
 
     assert isinstance(model, KimiK3Model)
-    if parallel_dims.ep_enabled:
+    if parallel_dims.cp_enabled:
+        apply_cp_kimi_k3(model, parallel_dims)
+    if parallelism.spmd_backend == "spmd_types" or parallel_dims.ep_enabled:
         # model_registry's moe_comm_backend picks the dispatcher: standard
         # (default), deepep and minimal_async_ep run on this model; hybridep
         # needs GB200-class hardware.
@@ -94,6 +100,7 @@ def parallelize_kimi_k3(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=False,
+            dp_mesh_dims=dp_mesh_dims,
         )
 
     apply_fsdp_to_decoder(
@@ -106,7 +113,25 @@ def parallelize_kimi_k3(
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         ep_degree=parallel_dims.ep,
         edp_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
     return model
+
+
+def apply_cp_kimi_k3(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Hand the vision splice the context-parallel group.
+
+    The attention layers need nothing here: under CP their inner kernels are
+    ``ContextParallelKernel`` instances (Ulysses for MLA, KCP for KDA) that
+    take the group from the active SPMD mesh. The vision splice runs in the
+    model body, outside any kernel, so it is wired explicitly.
+    """
+    assert isinstance(model, KimiK3Model)
+    model._cp_group = parallel_dims.get_mesh("cp").get_group()
+    logger.info("Applied context parallel to the Kimi K3 vision splice.")
