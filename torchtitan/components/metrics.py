@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import resource
+import sys
 import time
 from collections import namedtuple
 from dataclasses import dataclass
@@ -19,6 +21,14 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
+
+
+# NOTE: GiB (gibibyte) is 1024, vs GB is 1000
+_GIB_IN_BYTES = 1024 * 1024 * 1024
+
+
+def _to_gib(memory_in_bytes: float) -> float:
+    return memory_in_bytes / _GIB_IN_BYTES
 
 
 # named tuple for passing device memory stats for logging
@@ -44,16 +54,10 @@ class DeviceMemoryMonitor:
         self.device_capacity = device_module.get_device_properties(
             self.device
         ).total_memory
-        self.device_capacity_gib = self._to_gib(self.device_capacity)
+        self.device_capacity_gib = _to_gib(self.device_capacity)
 
         device_module.reset_peak_memory_stats()
         device_module.empty_cache()
-
-    def _to_gib(self, memory_in_bytes):
-        # NOTE: GiB (gibibyte) is 1024, vs GB is 1000
-        _gib_in_bytes = 1024 * 1024 * 1024
-        memory_in_gib = memory_in_bytes / _gib_in_bytes
-        return memory_in_gib
 
     def _to_pct(self, memory):
         return 100 * memory / self.device_capacity
@@ -62,11 +66,11 @@ class DeviceMemoryMonitor:
         device_info = device_module.memory_stats(self.device)
 
         max_active = device_info.get("active_bytes.all.peak", -1)
-        max_active_gib = self._to_gib(max_active)
+        max_active_gib = _to_gib(max_active)
         max_active_pct = self._to_pct(max_active)
 
         max_reserved = device_info.get("reserved_bytes.all.peak", -1)
-        max_reserved_gib = self._to_gib(max_reserved)
+        max_reserved_gib = _to_gib(max_reserved)
         max_reserved_pct = self._to_pct(max_reserved)
 
         num_retries = device_info.get("num_alloc_retries", -1)
@@ -99,6 +103,88 @@ def build_device_memory_monitor():
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
     return device_memory_monitor
+
+
+# named tuple for passing host resource stats for logging
+HostStats = namedtuple(
+    "HostStats",
+    [
+        "rss_gib",
+        "max_rss_gib",
+        "cpu_utilization_pct",
+    ],
+)
+
+
+class HostMonitor:
+    """Tracks host resident memory and process CPU utilization.
+
+    Checkpoint staging copies device state into pinned host memory, and pinned
+    pages are resident by definition, so a save can move host RSS by tens of
+    GiB without moving any device metric. Everything here comes from the
+    standard library, so it adds no dependency.
+
+    ``max_rss_gib`` is a process-lifetime high-water mark that the kernel never
+    resets, unlike the device peaks which are reset after every log interval.
+    It is what catches a staging buffer that is allocated and freed entirely
+    between two log calls. It comes from different kernel accounting than
+    ``rss_gib``, so the two track each other without agreeing exactly, and the
+    peak can read marginally below the current value.
+    """
+
+    def __init__(self) -> None:
+        self.page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 0
+        self.host_capacity_gib = (
+            _to_gib(self.page_size * os.sysconf("SC_PHYS_PAGES"))
+            if self.page_size
+            else -1.0
+        )
+        # ru_maxrss is KiB on Linux and bytes on macOS.
+        self._max_rss_scale = 1 if sys.platform == "darwin" else 1024
+        self._cpu_seconds_last_log = self._cpu_seconds()
+        self._time_last_log = time.perf_counter()
+
+    def _cpu_seconds(self) -> float:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        return usage.ru_utime + usage.ru_stime
+
+    def _rss_bytes(self) -> float:
+        # /proc is Linux-only; report -1 elsewhere rather than failing a run.
+        if not self.page_size:
+            return -1
+        try:
+            with open("/proc/self/statm") as f:
+                resident_pages = int(f.read().split()[1])
+        except (OSError, IndexError, ValueError):
+            return -1
+        return resident_pages * self.page_size
+
+    def get_stats(self) -> HostStats:
+        now = time.perf_counter()
+        cpu_seconds = self._cpu_seconds()
+        time_delta = now - self._time_last_log
+        # Sums CPU time across every thread, so this exceeds 100% whenever the
+        # process has more than one runnable thread.
+        cpu_utilization_pct = (
+            100 * (cpu_seconds - self._cpu_seconds_last_log) / time_delta
+            if time_delta > 0
+            else 0.0
+        )
+        self._cpu_seconds_last_log = cpu_seconds
+        self._time_last_log = now
+
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return HostStats(
+            _to_gib(self._rss_bytes()),
+            _to_gib(max_rss * self._max_rss_scale),
+            cpu_utilization_pct,
+        )
+
+
+def build_host_monitor():
+    host_monitor = HostMonitor()
+    logger.info(f"Host capacity: {host_monitor.host_capacity_gib:.2f}GiB memory")
+    return host_monitor
 
 
 class BaseLogger:
@@ -307,6 +393,7 @@ class MetricsProcessor(Configurable):
     logger: BaseLogger
     parallel_dims: ParallelDims
     device_memory_monitor: DeviceMemoryMonitor
+    host_monitor: HostMonitor
     color: utils.NoColor | utils.Color
 
     gpu_peak_flops: float
@@ -346,6 +433,7 @@ class MetricsProcessor(Configurable):
         self.parallel_dims = parallel_dims
         self.config = config
         self.device_memory_monitor = build_device_memory_monitor()
+        self.host_monitor = build_host_monitor()
         # used for colorful printing
         self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
 
@@ -502,6 +590,7 @@ class MetricsProcessor(Configurable):
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
+        host_stats = self.host_monitor.get_stats()
 
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
@@ -518,6 +607,9 @@ class MetricsProcessor(Configurable):
             "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
+            "cpu/process_rss(GiB)": host_stats.rss_gib,
+            "cpu/process_peak_rss(GiB)": host_stats.max_rss_gib,
+            "cpu/process_utilization(%)": host_stats.cpu_utilization_pct,
         }
         if mfu is not None:
             metrics["mfu(%)"] = mfu
