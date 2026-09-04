@@ -27,6 +27,10 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
+from torchtitan.components.quantization._fsdp_tensor import (
+    _ShardedFSDPTensor,
+    _UnshardedFSDPTensor,
+)
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
@@ -222,6 +226,46 @@ def _register_parametrization(
     module.__class__ = module_cls
 
 
+class _BuildUnshardedTensorFunction(torch.autograd.Function):
+    """Own the gradient edge for an unsharded tensor built outside FSDP2.
+
+    FSDP2 creates this edge internally for its post-all-gather output.
+    GraphTrainer's SimpleFSDP reconstructs the unsharded weight itself and so
+    has no such edge, and this routes its logical tensor gradient straight
+    back through the high-precision gather.
+
+    Lives here, with its only user, rather than beside the FSDP2 edge it
+    mirrors. ``forward`` does the same two steps ``fsdp_post_all_gather`` does
+    on its first unshard -- quantize, then wrap.
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(ctx, weight: torch.Tensor, wrapper: _ShardedFSDPTensor):
+        del ctx
+        # Unreachable today, so this is an invariant rather than a fallback:
+        # replicate_compute returns a plain local tensor under spmd_types, only
+        # partial_dtensor composed with TP or EP re-wraps it on the
+        # non-data-parallel mesh, and MXFP8Linear.Config.build rejects that
+        # backend outright. The two guards sit in different files, so assert
+        # here: a future format subclassing _ShardedFSDPTensor without that
+        # rejection should fail loudly rather than silently quantize a
+        # DTensor's local shard.
+        assert not isinstance(weight, DTensor), (
+            "unsharded tensor received a DTensor, so a format on this "
+            "lifecycle reached the partial_dtensor backend without rejecting "
+            "it; see MXFP8Linear.Config.build"
+        )
+        with torch.no_grad():
+            return _UnshardedFSDPTensor(weight, wrapper._build_operands(weight))
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_weight: torch.Tensor):
+        del ctx
+        return grad_weight, None
+
+
 class ReplicateComputation(Module):
     def __init__(
         self,
@@ -328,8 +372,31 @@ class ReplicateComputation(Module):
         if not _active_parametrization:
             return x
 
-        output = self.replicate_compute(x)
-        return output
+        unsharded_weight = self.replicate_compute(x)
+        # Which operands to build is determined by the tensor subclass on the
+        # *sharded* parameter, and replicate_compute does not preserve it: its
+        # return value is a plain local tensor under spmd_types. Its input is
+        # not -- ``x`` is the sharded parameter, still a DTensor, because
+        # data_parallel translates parameters to full-mesh DTensors before
+        # this runs (replicate_compute reads ``x._spec`` on entry for the same
+        # reason). So take the subclass from ``x`` and the values from the
+        # return value. A parameter with no operands passes straight through,
+        # so this costs nothing when nothing is quantized.
+        #
+        # Read the local tensor directly rather than through ``to_local``:
+        # only the subclass type is wanted, so the autograd edge and the extra
+        # traced node that ``to_local`` adds would both be dead weight.
+        source = x._local_tensor
+        if isinstance(source, _UnshardedFSDPTensor):
+            raise RuntimeError(
+                "The data parallel parametrization received an already-"
+                "unsharded weight. FSDP2 builds the unsharded tensor in "
+                "fsdp_post_all_gather and owns its gradient edge, so building "
+                "one here as well would quantize the weight a second time."
+            )
+        if not isinstance(source, _ShardedFSDPTensor):
+            return unsharded_weight
+        return _BuildUnshardedTensorFunction.apply(unsharded_weight, source)
 
 
 def data_parallel(
@@ -343,6 +410,7 @@ def data_parallel(
     # TODO: Unify this with device_mesh as a global data- and model-parallel mesh.
     non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
+    """Shard ``model`` and install the data-parallel parametrization."""
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
         param_sharding = (Replicate(),)
