@@ -6,17 +6,16 @@
 
 """Base class and helpers for model transforms."""
 
-from abc import abstractmethod
-from dataclasses import dataclass, fields
+from abc import ABC, abstractmethod
+from dataclasses import fields
 from typing import ClassVar
 
-from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
 
 __all__ = ["ModelTransform", "retype_node"]
 
 
-class ModelTransform(Configurable):
+class ModelTransform(ABC):
     """A feature that rewrites a completed model config tree.
 
     ``run_after`` declares ordering. ``conflicts_with`` declares incompatible
@@ -25,13 +24,6 @@ class ModelTransform(Configurable):
 
     run_after: ClassVar[tuple[type["ModelTransform"], ...]] = ()
     conflicts_with: ClassVar[tuple[type["ModelTransform"], ...]] = ()
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        pass
-
-    def __init__(self, config: Config):
-        self.config = config
 
     @abstractmethod
     def transform(self, model: Module.Config) -> Module.Config:
