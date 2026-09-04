@@ -7,8 +7,8 @@ outside this directory do not import or require Verifiers.
 The package is organized into reusable integration code and independent
 experiments:
 
-- `components/` adapts Verifiers tasksets, environment servers, model clients,
-  and rollout traces to TitanRL interfaces.
+- [`components/`](./components) adapts Verifiers tasksets, environment servers,
+  model clients, and rollout traces to TitanRL interfaces.
 - [`dapo_math/`](./dapo_math) is a concrete single-turn math experiment.
 - Future integrations should use another experiment package, for example
   `swe_bench/`, rather than adding task-specific code to `components/`.

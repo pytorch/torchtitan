@@ -64,7 +64,18 @@ class VerifiersRewardFn(RewardFn):
 
 
 class VerifiersRollouter(Rollouter):
-    """Run rollout groups through a locally managed Verifiers EnvServer."""
+    """Adapt Verifiers episodes to TitanRL's ``Rollouter`` contract.
+
+    Verifiers owns environment execution, including its process pool and the
+    message/tool loop, so this path bypasses TitanRL's ``RolloutWorkerActor``,
+    ``RolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
+    preserved through ``GeneratorModelAdapter``, which forwards Verifiers model
+    requests to TitanRL's controller-provided ``GenerateFn``.
+
+    TitanRL still owns dataset and group scheduling, generator routing, policy
+    metadata, conversion to ``RolloutTurn``, reward and advantage assignment,
+    and the downstream training path.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):
