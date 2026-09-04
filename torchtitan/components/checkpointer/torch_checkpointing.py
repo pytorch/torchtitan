@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,7 @@ from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.distributed_metadata import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
+from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage, StorageConfig
@@ -39,6 +42,9 @@ from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.structured_logger.structured_logging import (
+    _get_structured_logger_subprocess_init_fn,
+)
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
@@ -57,6 +63,9 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+
+# Logger the backend emits its checkpoint events and metrics on.
+CHECKPOINTING_LOGGER_NAME = "torch_checkpointing"
 
 
 class _BackendCheckpointStorage:
@@ -92,6 +101,28 @@ class _BackendCheckpointStorage:
 
     def remove(self, path: str) -> None:
         self._storage.rmdir(Path(path))
+
+
+def _init_subprocess_logging(
+    structured_logger_init_fn: Callable[[], None],
+    init_fn: Callable[..., None] | None,
+    init_args: tuple[Any, ...],
+) -> None:
+    """Re-establish structured logging inside the async save subprocess.
+
+    The subprocess does not inherit the parent's logging handlers, so its
+    checkpoint records would otherwise be lost.
+    """
+    if init_fn is not None:
+        init_fn(*init_args)
+
+    structured_logger_init_fn()
+
+    backend_logger = logging.getLogger(CHECKPOINTING_LOGGER_NAME)
+    if backend_logger.level == logging.NOTSET and not backend_logger.isEnabledFor(
+        logging.INFO
+    ):
+        backend_logger.setLevel(logging.INFO)
 
 
 def _item_specs() -> dict[str, ItemSpec]:
@@ -145,12 +176,25 @@ def _default_backend_config(
     save_config: CheckpointSaverConfig,
     *,
     storage_config: StorageConfig | None = None,
+    subprocess_init_fn: Callable[..., None] | None = None,
+    subprocess_init_args: tuple[Any, ...] = (),
 ) -> BackendCheckpointManager.Config:
+    if isinstance(save_config, AsyncCheckpointSaverConfig):
+        structured_logger_init_fn = _get_structured_logger_subprocess_init_fn()
+        if structured_logger_init_fn is not None:
+            subprocess_init_args = (
+                structured_logger_init_fn,
+                subprocess_init_fn,
+                subprocess_init_args,
+            )
+            subprocess_init_fn = _init_subprocess_logging
     return BackendCheckpointManager.Config(
         items=_item_specs(),
         default=ItemSpec(requires_copy=False),
         save=save_config,
         storage_config=storage_config,
+        subprocess_init_fn=subprocess_init_fn,
+        subprocess_init_args=subprocess_init_args,
     )
 
 
@@ -293,6 +337,10 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             return False
 
         sl.add_step_tag("checkpoint_save")
+        # The backend stamps its own events from this context and carries it
+        # into the async save subprocess, so without it every forwarded backend
+        # metric reports step=None.
+        checkpoint_logging_context.update(step=curr_step)
         self.maybe_wait_for_saving()
         # Always preserve the current step's published and staging directories.
         self._purge_stale_checkpoints(
