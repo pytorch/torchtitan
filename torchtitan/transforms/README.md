@@ -15,7 +15,7 @@ config.parallelism.context_parallel_degree = 8
 
 config = apply_transforms(
     config,
-    [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+    [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
 )
 ```
 
@@ -29,7 +29,7 @@ not copy or validate the config.
 
 ```python
 spec = model_registry("0.6B", attn_backend="varlen")
-spec.model = transform_model(spec.model, [LMHeadCastTransform.Config()])
+spec.model = transform_model(spec.model, [LMHeadCastTransform()])
 ```
 
 ## What belongs here
@@ -55,17 +55,15 @@ belongs here.
 
 ## Writing a transform
 
-Subclass `ModelTransform`. Define its config and implement `transform`. Rewrite
-nodes in place and return the model root. Return a different config only when
-replacing the root.
+Subclass `ModelTransform`. Use a keyword-only dataclass for transform options.
+Implement `transform`, rewrite nodes in place, and return the model root. Return
+a different config only when replacing the root.
 
 ```python
+@dataclass(kw_only=True, slots=True)
 class MyTransform(ModelTransform):
     run_after = (QuantizationTransform,)
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelTransform.Config):
-        setting: int
+    setting: int
 
     def transform(self, model: Module.Config) -> Module.Config:
         ...
@@ -73,7 +71,7 @@ class MyTransform(ModelTransform):
 ```
 
 A transform sees only the model config. Pass any required training or
-parallelism value through the transform config.
+parallelism value to the transform.
 
 Use `retype_node` to change a node implementation. The replacement config must
 inherit from the current config type. This preserves fields and wrappers from

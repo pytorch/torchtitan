@@ -58,7 +58,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -106,7 +106,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -123,7 +123,7 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -172,7 +172,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -184,7 +184,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -204,7 +204,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
     config.override.imports = ["torchtitan.overrides.helion_rope.helion_cos_sin_rope"]
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -216,7 +216,7 @@ def qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -306,7 +306,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config.training.steps = 10
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -386,7 +386,7 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -420,5 +420,5 @@ def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
