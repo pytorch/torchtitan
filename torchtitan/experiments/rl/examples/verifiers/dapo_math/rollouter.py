@@ -70,6 +70,10 @@ class VerifiersMathRollouter(VerifiersRollouter):
                     ),
                 ),
                 serve=vf.ServeConfig(
+                    # One worker is sufficient for this lightweight single-turn
+                    # task. CPU-heavy or multi-turn environments should use
+                    # multiple workers, or an elastic pool, for process-level
+                    # parallelism instead of sharing one EnvServer GIL.
                     pool=vf.StaticPoolConfig(num_workers=1),
                     address="tcp://127.0.0.1:0",
                 ),
