@@ -724,6 +724,18 @@ class VLLMGenerator(Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
+        enable_cumem_allocator: bool = True
+        """Use vLLM's CuMem pool for tensors transferred over RDMA.
+
+        TorchTitan enables PyTorch's expandable-segments allocator to reduce
+        fragmentation. It can change the physical GPU memory behind an address,
+        invalidating NIXL's RDMA registration for that memory.
+
+        vLLM's CuMem pool disables expandable segments for its allocations,
+        keeping their memory mappings stable. This option puts model weights in
+        that pool.
+        """
+
         max_num_batched_tokens: int | None = None
         """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves
@@ -910,6 +922,7 @@ class VLLMGenerator(Configurable):
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
+            enable_cumem_allocator=config.enable_cumem_allocator,
         )
         engine_kwargs["max_model_len"] = model_spec.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
