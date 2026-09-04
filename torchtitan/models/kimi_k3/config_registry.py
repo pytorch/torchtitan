@@ -161,22 +161,6 @@ def kimi_k3_debugmodel_qlora_mxfp4_linear() -> Trainer.Config:
     return config
 
 
-def kimi_k3_debugmodel_mx_qat() -> Trainer.Config:
-    """The debug model under MXFP4-weight / MXFP8-activation fake-quant QAT.
-
-    K3's official quantization scope: the routed experts only, bf16 masters
-    training underneath (full-param QAT, no LoRA). Fake-quant is bf16
-    compute, so this runs on any GPU.
-    """
-    from torchtitan.components.quantization.mx_qat import MXFP4QATConverter
-
-    config = kimi_k3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel", converters=[MXFP4QATConverter.Config()]
-    )
-    return config
-
-
 def kimi_k3_debugmodel_qlora_mxfp4() -> Trainer.Config:
     """The LoRA debug model with MXFP4-packed bases (QLoRA, K3's native
     weight format).
