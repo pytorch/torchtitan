@@ -63,7 +63,7 @@ def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -83,7 +83,7 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
     config.activation_checkpoint = FullAC.Config()
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 

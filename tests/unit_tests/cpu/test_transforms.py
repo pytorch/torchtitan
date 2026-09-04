@@ -7,7 +7,6 @@
 """Model transform base class, ordering, and the context-parallel transform."""
 
 import unittest
-from dataclasses import dataclass
 
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
@@ -35,56 +34,32 @@ def _llama3_cp_ready():
 class _Record(ModelTransform):
     order: list[str] = []
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelTransform.Config):
-        pass
-
     def transform(self, model):
         _Record.order.append(type(self).__qualname__)
         return model
 
 
 class _First(_Record):
-    @dataclass(kw_only=True, slots=True)
-    class Config(_Record.Config):
-        pass
+    pass
 
 
 class _Second(_Record):
     run_after = (_First,)
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(_Record.Config):
-        pass
-
 
 class _Third(_Record):
     run_after = (_Second,)
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(_Record.Config):
-        pass
 
 
 class _Rival(_Record):
     conflicts_with = (_First,)
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(_Record.Config):
-        pass
-
 
 class _Loose(_Record):
-    @dataclass(kw_only=True, slots=True)
-    class Config(_Record.Config):
-        pass
+    pass
 
 
 class _Boom(ModelTransform):
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelTransform.Config):
-        pass
-
     def transform(self, model):
         model.layers[0].attention.inner_attention.block_size = (1, 1)
         raise ValueError("boom")
@@ -116,20 +91,20 @@ class TestOrdering(unittest.TestCase):
     def test_run_after_decides_the_order_not_the_list(self):
         config = _llama3_cp_ready()
         config.parallelism.context_parallel_degree = 1
-        apply_transforms(config, [_Third.Config(), _First.Config(), _Second.Config()])
+        apply_transforms(config, [_Third(), _First(), _Second()])
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
     def test_unrelated_transforms_keep_the_declared_order(self):
         config = _llama3_cp_ready()
         config.parallelism.context_parallel_degree = 1
-        apply_transforms(config, [_First.Config(), _Loose.Config()])
+        apply_transforms(config, [_First(), _Loose()])
         self.assertEqual(_Record.order, ["_First", "_Loose"])
 
     def test_rejects_a_declared_conflict(self):
         config = _llama3_cp_ready()
         config.parallelism.context_parallel_degree = 1
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            apply_transforms(config, [_First.Config(), _Rival.Config()])
+            apply_transforms(config, [_First(), _Rival()])
 
 
 class TestAtomicApplication(unittest.TestCase):
@@ -140,7 +115,7 @@ class TestAtomicApplication(unittest.TestCase):
         before = attention.inner_attention.block_size
 
         with self.assertRaisesRegex(ValueError, "boom"):
-            apply_transforms(config, [_Boom.Config()])
+            apply_transforms(config, [_Boom()])
 
         self.assertEqual(attention.inner_attention.block_size, before)
 
@@ -148,7 +123,7 @@ class TestAtomicApplication(unittest.TestCase):
         config = _llama3_cp_ready()
         result = apply_transforms(
             config,
-            [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
         )
         self.assertIsNot(result, config)
         original = config.model_spec.model.layers[0].attention.inner_attention
@@ -168,7 +143,7 @@ class TestTransformModel(unittest.TestCase):
         spec = self._spec()
         spec.model = transform_model(
             spec.model,
-            [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
         )
         inner = spec.model.layers[0].attention.inner_attention
         self.assertIsInstance(inner, AllGatherCPFlexAttention.Config)
@@ -182,14 +157,14 @@ class TestTransformModel(unittest.TestCase):
         spec = self._spec()
         transform_model(
             spec.model,
-            [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
         )
 
     def test_orders_transforms(self):
         _Record.order = []
         transform_model(
             self._spec().model,
-            [_Third.Config(), _First.Config(), _Second.Config()],
+            [_Third(), _First(), _Second()],
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
@@ -203,7 +178,7 @@ class TestContextParallelTransform(unittest.TestCase):
 
         result = apply_transforms(
             config,
-            [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
         )
 
         swapped = result.model_spec.model.layers[0].attention.inner_attention
@@ -212,11 +187,8 @@ class TestContextParallelTransform(unittest.TestCase):
         self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
-        config = _llama3_cp_ready()
         with self.assertRaisesRegex(ValueError, "must inherit ContextParallelKernel"):
-            apply_transforms(
-                config, [ContextParallelTransform.Config(kernel=FlexAttention)]
-            )
+            ContextParallelTransform(kernel=FlexAttention)
 
 
 if __name__ == "__main__":
