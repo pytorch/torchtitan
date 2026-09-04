@@ -17,6 +17,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
+from torch.distributed import config as dist_config, distributed_c10d
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
@@ -191,10 +192,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         self.parallelism.pipeline_parallel_schedule
                     )
                 )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
+                if (
+                    issubclass(pp_schedule_class, PipelineScheduleMulti)
+                    and not self.parallelism.pipeline_parallel_per_direction_p2p
+                    and not distributed_c10d._use_torchcomms_enabled()
+                ):
                     raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
+                        "CUDA graphs with looped pipeline schedules require "
+                        "directed P2P process groups. Set "
+                        "parallelism.pipeline_parallel_per_direction_p2p=True in "
+                        "the job configuration, enable TorchComms, or disable "
+                        "CUDA graphs."
                     )
 
             if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
@@ -723,6 +731,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
         config = self.config
+        dist_config.pipeline_per_direction_p2p = (
+            config.parallelism.pipeline_parallel_per_direction_p2p
+        )
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,

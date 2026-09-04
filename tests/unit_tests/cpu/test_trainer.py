@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch.distributed import config as dist_config
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
@@ -234,6 +235,54 @@ def test_cuda_graph_warmup_covers_two_optimizer_steps(
     trainer.gradient_accumulation_steps = gradient_accumulation_steps
 
     assert Trainer._num_cuda_graph_warmup_iterations(trainer) == expected
+
+
+@pytest.mark.parametrize("per_direction_p2p", [False, True])
+def test_init_distributed_configures_pipeline_process_groups(
+    per_direction_p2p: bool,
+) -> None:
+    parallelism = SimpleNamespace(pipeline_parallel_per_direction_p2p=per_direction_p2p)
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                comm="COMM",
+                training=SimpleNamespace(enable_cpu_offload=False),
+                parallelism=parallelism,
+                dump_folder="OUTPUT",
+            )
+        ),
+    )
+
+    def init_distributed(*args, **kwargs):
+        assert dist_config.pipeline_per_direction_p2p is per_direction_p2p
+        return 8
+
+    expected_dims = object()
+    with (
+        patch.object(
+            dist_config,
+            "pipeline_per_direction_p2p",
+            not per_direction_p2p,
+        ),
+        patch(
+            "torchtitan.trainer.dist_utils.init_distributed",
+            side_effect=init_distributed,
+        ) as init,
+        patch(
+            "torchtitan.trainer.ParallelDims.from_config",
+            return_value=expected_dims,
+        ) as from_config,
+    ):
+        result = Trainer.init_distributed(trainer)
+
+    assert result is expected_dims
+    init.assert_called_once_with(
+        "COMM",
+        enable_cpu_backend=False,
+        base_folder="OUTPUT",
+    )
+    from_config.assert_called_once_with(parallelism, 8)
 
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():

@@ -27,9 +27,10 @@ The command-line surface is frozen either way, so annotate a new field with
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
+import tyro
 
 
 @dataclass(kw_only=True, slots=True)
@@ -80,9 +81,9 @@ class TrainingConfig:
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
-    EP backends synchronize with the host during dispatch. Pipeline parallelism
-    is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
-    are independent of ``torch.compile(mode="reduce-overhead")``, which performs
+    EP backends synchronize with the host during dispatch. Looped pipeline
+    schedules require per-direction P2P process groups. CUDA graphs are
+    independent of ``torch.compile(mode="reduce-overhead")``, which performs
     its own CUDA graph capture.
     """
 
@@ -229,6 +230,19 @@ class ParallelismConfig:
     Specify the path to the pipeline parallel schedule csv file to use.
     The pipeline_parallel_schedule argument must be either
     PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
+    """
+
+    pipeline_parallel_defer_recv: Annotated[bool, tyro.conf.Suppress] = False
+    """
+    Defer each pipeline receive until immediately before the computation that
+    consumes it. This can avoid communication-induced compute bubbles on
+    platforms where a pending receive blocks unrelated work.
+    """
+
+    pipeline_parallel_per_direction_p2p: Annotated[bool, tyro.conf.Suppress] = False
+    """
+    Use separate process groups for each directed physical pipeline edge.
+    This is required when capturing a looped pipeline schedule in a CUDA graph.
     """
 
     num_pp_microbatches: int = 1
