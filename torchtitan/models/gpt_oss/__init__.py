@@ -18,6 +18,7 @@ from torchtitan.models.common import (
     Linear,
     RMSNorm,
     RoPE,
+    RouterGateLinear,
     TransformerBlock,
 )
 from torchtitan.models.common.attention import (
@@ -227,7 +228,7 @@ def _build_gptoss_layers(
                 num_experts=num_experts,
                 score_func="softmax",
                 route_norm=True,
-                gate=Linear.Config(
+                gate=RouterGateLinear.Config(
                     in_features=dim,
                     out_features=num_experts,
                     bias=True,

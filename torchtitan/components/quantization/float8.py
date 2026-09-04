@@ -12,7 +12,7 @@ from typing import Literal
 import torch
 import torch._inductor.config
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
@@ -155,6 +155,11 @@ class Float8LinearConverter(QuantizationConverter):
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
+                if isinstance(linear_config, RouterGateLinear.Config):
+                    raise ValueError(
+                        f"Float8 quantization does not support router gate {fqn!r}; "
+                        "exclude it with filter_fqns."
+                    )
                 new_config = Float8Linear.Config(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,

@@ -9,7 +9,7 @@ from importlib.util import find_spec
 from typing import Literal
 
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -102,6 +102,17 @@ class MXFP8LinearConverter(QuantizationConverter):
             for entry in model_config.traverse(Linear.Config)
             if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
         ]
+
+        quantized_router_fqns = [
+            fqn
+            for fqn, config, _parent, _attr in targets
+            if isinstance(config, RouterGateLinear.Config)
+        ]
+        if quantized_router_fqns:
+            raise ValueError(
+                "MXFP8 quantization does not support router gates; exclude "
+                f"{quantized_router_fqns} with fqns."
+            )
 
         selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
         target_fqns = [fqn for fqn, _config, _parent, _attr in targets]
