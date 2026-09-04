@@ -18,6 +18,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
     resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from .model import KimiK3Model
@@ -41,7 +42,6 @@ def parallelize_kimi_k3(
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
             ("context parallel", parallel_dims.cp_enabled),
-            ("expert parallel", parallel_dims.ep_enabled),
         )
         if enabled
     ]
@@ -53,10 +53,20 @@ def parallelize_kimi_k3(
     if compile_config.enable and "model" in compile_config.components:
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
-    annotate_replicated_parameters(model, parallel_dims)
-    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-
     assert isinstance(model, KimiK3Model)
+    # Kimi K3 only declares layouts for its MoE modules. Seed replicated
+    # layouts for the remaining decoder and vision parameters before the MoE
+    # declarations replace the expert parameters with sparse shards.
+    annotate_replicated_parameters(model, parallel_dims)
+
+    # model_registry's moe_comm_backend picks the dispatcher: standard
+    # (default), deepep and minimal_async_ep run on this model; hybridep
+    # needs GB200-class hardware.
+    model.parallelize(parallel_dims)
+
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
         ac_policy.apply(model)
@@ -86,8 +96,10 @@ def parallelize_kimi_k3(
         pp_enabled=False,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        ep_degree=1,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 
