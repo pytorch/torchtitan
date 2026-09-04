@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import weakref
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -100,6 +100,11 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
             config=SimpleNamespace(parallelism="PARA"),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            loss_fn=SimpleNamespace(
+                step_context=lambda **kwargs: nullcontext(),
+            ),
+            _pp_loss_step_context=lambda **kwargs: nullcontext(),
+            _pp_training_schedule_initialized=True,
         ),
     )
 
@@ -117,6 +122,133 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
     assert loss_containers == [[]]
     assert all(reference() is None for reference in loss_refs)
     assert all(reference() is None for reference in activation_refs)
+
+
+def test_pp_forward_backward_step_scopes_loss_calls() -> None:
+    context_active = False
+
+    @contextmanager
+    def step_context(*, num_loss_calls):
+        nonlocal context_active
+        assert num_loss_calls == 2
+        context_active = True
+        try:
+            yield
+        finally:
+            context_active = False
+
+    def schedule_step(**kwargs) -> None:
+        assert context_active
+        kwargs["losses"].extend((torch.tensor(1.0), torch.tensor(2.0)))
+
+    loss_fn = MagicMock()
+    loss_fn.step_context.side_effect = step_context
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            pp_schedule=SimpleNamespace(step=schedule_step),
+            train_context=nullcontext,
+            model_parts=[
+                SimpleNamespace(
+                    preprocess_inputs=lambda input_dict, **kw: (
+                        input_dict["input"],
+                        input_dict["labels"],
+                        {},
+                    )
+                )
+            ],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            device=torch.device("cpu"),
+            loss_fn=loss_fn,
+            _pp_loss_step_context=lambda **kwargs: loss_fn.step_context(**kwargs),
+            _pp_training_schedule_initialized=True,
+        ),
+    )
+
+    loss = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[{"input": torch.ones(1)}] * 2,
+        label_mbs=[torch.ones(1)] * 2,
+        global_valid_tokens=torch.tensor(2),
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(3.0))
+    loss_fn.step_context.assert_called_once_with(num_loss_calls=2)
+
+
+def test_first_pp_forward_backward_step_skips_loss_scope() -> None:
+    loss_fn = MagicMock()
+    schedule = MagicMock()
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            pp_schedule=schedule,
+            train_context=nullcontext,
+            model_parts=[
+                SimpleNamespace(
+                    preprocess_inputs=lambda input_dict, **kw: (
+                        input_dict["input"],
+                        input_dict["labels"],
+                        {},
+                    )
+                )
+            ],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            device=torch.device("cpu"),
+            loss_fn=loss_fn,
+            _pp_loss_step_context=lambda **kwargs: loss_fn.step_context(**kwargs),
+            _pp_training_schedule_initialized=False,
+        ),
+    )
+    schedule.step.side_effect = lambda **kwargs: kwargs["losses"].append(
+        torch.tensor(1.0)
+    )
+
+    loss = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[{"input": torch.ones(1)}],
+        label_mbs=[torch.ones(1)],
+        global_valid_tokens=torch.tensor(1),
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(1.0))
+    loss_fn.step_context.assert_not_called()
+    assert trainer._pp_training_schedule_initialized
+
+
+@pytest.mark.parametrize(
+    ("pp_enabled", "expected_initialized"),
+    ((True, False), (False, True)),
+)
+def test_run_validation_invalidates_pipeline_training_metadata(
+    pp_enabled: bool,
+    expected_initialized: bool,
+) -> None:
+    validator = MagicMock()
+    model_parts = [MagicMock()]
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            validator=validator,
+            model_parts=model_parts,
+            step=3,
+            parallel_dims=SimpleNamespace(pp_enabled=pp_enabled),
+            _pp_training_schedule_initialized=True,
+        ),
+    )
+
+    Trainer._run_validation(trainer)
+
+    validator.validate.assert_called_once_with(model_parts, 3)
+    assert trainer._pp_training_schedule_initialized is expected_initialized
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
