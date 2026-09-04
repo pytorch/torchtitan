@@ -31,8 +31,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
-from .parallelize import parallelize_kimi_k3
-from .pipeline import pipeline_kimi_k3
+from .parallelize import parallelize_kimi_k3, pipeline_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -468,23 +467,13 @@ def _kimi_k3_config(
 
 
 def kimi_k3_full_attention_layers(num_layers: int) -> set[int]:
-    """The MLA layers of a Kimi K3 stack: every fourth layer, and the last.
-
-    The stack repeats (3 KDA + 1 MLA); a remainder shorter than a full group
-    still ends on an MLA layer, which is how the 93-layer model closes
-    (``range(3, 92, 4) | {92}``).
-    """
+    """Every fourth layer and the last: the (3 KDA + 1 MLA) pattern."""
     return {i for i in range(num_layers) if i % 4 == 3} | {num_layers - 1}
 
 
 def _debugmodel(
     attn_backend: str, moe_comm_backend: str, *, num_layers: int
 ) -> KimiK3Model.Config:
-    """The debug model: the 93-layer model's layer pattern and block size at a
-    depth chosen to be irregular in the same ways. ``num_layers`` is not a
-    multiple of the block size, so the last block is partial as in the full
-    model, and not a multiple of 4, so the stack ends on the lone MLA layer.
-    """
     dim = 1024
     return _kimi_k3_config(
         dim=dim,
@@ -559,9 +548,7 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 
 kimi_k3_configs = {
-    # 30 layers: three blocks of 12 with the last one partial, and a lone MLA
-    # layer after seven (3 KDA + 1 MLA) groups; 32 units with the embedding
-    # and the head, which every pipeline shape up to 32 stages divides.
+    # 30 layers: partial last block, trailing lone MLA; 32 units divides every pp shape <= 32.
     "debugmodel": (partial(_debugmodel, num_layers=30), 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }

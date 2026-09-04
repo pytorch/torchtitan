@@ -141,11 +141,6 @@ def _apply_attention_residual(
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32.
 
-    The values are the block representations, plus the running partial sum of
-    the current block when the layer is not the first of its block (the first
-    layer's stack already ends with the representation that closed the
-    previous block, so it attends over the stack alone).
-
     TODO: Add TP Support. The current implementation assumes that the input tensors are on a single device.
     """
     assert norm.eps is not None
