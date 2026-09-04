@@ -21,7 +21,16 @@ _SESSION_ID_HEADER = "X-Session-ID"
 
 @dataclass(frozen=True, slots=True)
 class VerifiersGenerationMetadata:
-    """TorchTitan completion data that Verifiers does not retain in its trace."""
+    """TorchTitan completion data that Verifiers does not retain in its trace.
+
+    The adapter stores these entries in call order under the Verifiers session
+    ID. Trace conversion pairs that ordered list with successful trace calls,
+    then uses each call's node index to populate the corresponding rollout
+    turn. This assumes model calls within one session complete serially, as they
+    do for the current single-agent ``NullHarness`` configuration. A harness
+    that makes concurrent calls within one session must instead correlate this
+    metadata with a stable per-call request ID.
+    """
 
     min_policy_version: int
     """Oldest policy version used to generate the completion."""
