@@ -42,6 +42,8 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
+    *,
+    shard_attention_mask: bool = True,
 ) -> dict[str, Any]:
     """Shard named tensors and attention masks for Context Parallel.
 
@@ -68,6 +70,7 @@ def prepare_context_parallel_input(
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
             masks are a dict[str, BlockMask], selects which mask the
             PTRRLoadBalancer is built from. Ignored otherwise.
+        shard_attention_mask: Whether to shard each mask's query dimension.
 
     Returns:
         The same ``input_dict`` object, mutated in place with its sharded tensor
@@ -98,6 +101,7 @@ def prepare_context_parallel_input(
         load_balancer_type,
         input_seq_dims=seq_dims,
         ptrr_mask_key=ptrr_mask_key,
+        shard_attention_mask=shard_attention_mask,
     )
 
     for n, buf in zip(shard_names, sharded_buffers):
@@ -114,6 +118,8 @@ def cp_shard(
     load_balancer_type: str | None = "headtail",
     input_seq_dims: int | tuple[int, ...] = 0,
     ptrr_mask_key: str | None = None,
+    *,
+    shard_attention_mask: bool = True,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -142,6 +148,7 @@ def cp_shard(
             the dict the PTRRLoadBalancer is built from. The resulting balancer
             is used to shard every mask in the dict as well as the inputs.
             Required (must be a valid key) in that case; ignored otherwise.
+        shard_attention_mask: Whether to shard each mask's query dimension.
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -221,10 +228,9 @@ def cp_shard(
         ),
     )
 
-    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
-    # on the Q seq dimension, not KV.
+    # BlockMask has shape [B, H, Q, KV]. Only Q can be sequence-sharded.
     MASK_Q_SEQ_DIM = 2
-    if attention_masks is not None:
+    if attention_masks is not None and shard_attention_mask:
         assert isinstance(attention_masks, (BlockMask, dict))
         masks: list[BlockMask] = []
         for mask in (

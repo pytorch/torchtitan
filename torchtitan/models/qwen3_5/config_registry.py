@@ -357,7 +357,8 @@ def qwen35_122b_a10b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
+            # n_kv_heads is 2, so the TP degree cannot exceed 2.
+            tensor_parallel_degree=2,
             expert_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(
@@ -394,7 +395,8 @@ def qwen35_397b_a17b() -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=8,
+            # n_kv_heads is 2, so the TP degree cannot exceed 2.
+            tensor_parallel_degree=2,
             expert_parallel_degree=16,
         ),
         checkpoint=CheckpointManager.Config(
