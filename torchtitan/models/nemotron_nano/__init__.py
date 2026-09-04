@@ -137,7 +137,10 @@ def _build_nemotron_layers(
     return layers
 
 def _debugmodel(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Nemotron3NanoModel.Config:
     dim = 256
     n_heads = 16
@@ -164,7 +167,7 @@ def _debugmodel(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -179,7 +182,10 @@ def _debugmodel(
 
 
 def _31b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Nemotron3NanoModel.Config:
     dim = 4096
     n_heads = 32
@@ -215,7 +221,7 @@ def _31b(
             hidden_dim=1152,
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=1000000,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="llama",
             ),
@@ -252,7 +258,9 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
-        attn_backend=attn_backend, tp_gemm_backend=tp_gemm_backend
+        attn_backend=attn_backend,
+        tp_gemm_backend=tp_gemm_backend,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
