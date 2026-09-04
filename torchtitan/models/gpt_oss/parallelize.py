@@ -21,7 +21,7 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from torchtitan.models.common.cp_attention import UlyssesCPFlexAttention
+from torchtitan.models.common.cp_attention import UlyssesCPKernel
 from torchtitan.models.gpt_oss.model import GptOssModel
 
 
@@ -67,13 +67,16 @@ def parallelize_gptoss(
     skip_dp: bool = False,
 ):
     # TODO(fegin): shard the per-head sinks over CP to support Ulysses.
-    if parallel_dims.cp_enabled and isinstance(
-        model.config.first_full_attention_backend, UlyssesCPFlexAttention.Config
+    backend = model.config.first_full_attention_backend
+    kernel = backend._owner if backend is not None else None
+    if (
+        parallel_dims.cp_enabled
+        and kernel is not None
+        and issubclass(kernel, UlyssesCPKernel)
     ):
         raise NotImplementedError(
-            "GPT-OSS does not support Ulysses context parallel because its "
-            "per-head sinks are sharded over TP but not CP. Use "
-            "AllGatherCPFlexAttention instead."
+            "GPT-OSS does not support Ulysses CP. Its per-head sinks are "
+            "sharded over TP but not CP. Use an all-gather CP kernel instead."
         )
 
     model_compile_enabled = (

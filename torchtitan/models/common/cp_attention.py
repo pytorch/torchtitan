@@ -20,12 +20,14 @@ import torch.distributed as dist
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 
 __all__ = [
     "ContextParallelKernel",
     "AllGatherCPFlexAttention",
+    "UlyssesCPKernel",
     "UlyssesCPFlexAttention",
+    "UlyssesCPVarlenAttention",
 ]
 
 _SEQ_DIM = 0
@@ -85,13 +87,8 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
-    """Run FlexAttention with sequence-to-head all-to-all redistribution."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
-        shard_attention_mask: ClassVar[bool] = False
-        shard_attention_heads: ClassVar[bool] = True
+class UlyssesCPKernel(ContextParallelKernel):
+    """Move CP sharding between the token and head dimensions."""
 
     @staticmethod
     def _reshard(
@@ -118,6 +115,26 @@ class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
             self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)
             for x in (q_THK, k_THK, v_THV)
         )
+        # The concrete subclass provides the attention implementation.
+        # pyrefly: ignore [missing-attribute]
         out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
         return self._reshard(out_THV, cp_group, src=_HEAD_DIM, dst=_SEQ_DIM)
+
+
+class UlyssesCPFlexAttention(UlyssesCPKernel, FlexAttention):
+    """FlexAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexAttention.Config):
+        shard_attention_mask: ClassVar[bool] = False
+        shard_attention_heads: ClassVar[bool] = True
+
+
+class UlyssesCPVarlenAttention(UlyssesCPKernel, VarlenAttention):
+    """VarlenAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenAttention.Config):
+        shard_attention_mask: ClassVar[bool] = False
+        shard_attention_heads: ClassVar[bool] = True
