@@ -75,6 +75,7 @@ def pipeline_llm(
     model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
+    stage_class: type[PipelineStage] = PipelineStage,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
@@ -101,6 +102,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        stage_class=stage_class,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -576,6 +578,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    stage_class: type[PipelineStage] = PipelineStage,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -622,7 +625,7 @@ def _pipeline_module_split(
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
-        stage = PipelineStage(
+        stage = stage_class(
             model_chunk,
             stage_idx,
             num_stages,

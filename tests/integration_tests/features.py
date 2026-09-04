@@ -320,4 +320,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             timeout=30,
             use_real_pg=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_pp2],
+            test_descr="Kimi K3, pipeline parallel pp2",
+            test_name="kimi_k3_pp2",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
     ]
