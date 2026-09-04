@@ -18,17 +18,15 @@ Shape suffixes:
 """
 
 from dataclasses import dataclass, field
-from typing import cast
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import _maybe_wrap_positions, ComplexRoPE
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
@@ -119,7 +117,7 @@ def _compute_learned_pos_embeds(
                 pos[i] = frames.reshape(t * h * w, dim)
 
     packed_pos = torch.cat([pos[i] for i in range(len(grids))], dim=0)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         packed_pos = spmd.mutate_type(
             packed_pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
         )
@@ -168,8 +166,7 @@ def _compute_2d_rope_cache(
         # Raster order: position p -> (row = p // w, col = p % w). Gather each
         # axis's angles from the precomputed table (freq_table[pos] = pos*inv_freq).
         flat = torch.arange(h * w, device=device)
-        flat = cast(torch.Tensor, _maybe_wrap_positions(flat, freq_table))
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
         x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
         y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
@@ -181,7 +178,7 @@ def _compute_2d_rope_cache(
 
     # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
     packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         packed_angles = spmd.mutate_type(
             packed_angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
         )
@@ -278,8 +275,7 @@ class VisionRotaryEmbedding2D(Module):
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        seq = cast(torch.Tensor, _maybe_wrap_positions(seq, self.inv_freq))
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
         return torch.outer(seq, self.inv_freq)
 

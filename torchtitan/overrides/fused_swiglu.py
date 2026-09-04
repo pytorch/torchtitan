@@ -55,9 +55,6 @@ import torch
 import triton
 import triton.language as tl
 
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
-
 from torchtitan.config import derive, override
 from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
 
@@ -413,17 +410,6 @@ def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
 
 def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """``silu(gate) * up`` via the fused ``torchtitan::silu_and_mul`` op."""
-    if isinstance(gate, DTensor):
-        assert isinstance(up, DTensor)
-        placements = gate.placements
-        mapped = local_map(
-            _silu_and_mul_2d,
-            out_placements=(placements,),
-            in_placements=(placements, placements),
-            in_grad_placements=(placements, placements),
-            device_mesh=gate.device_mesh,
-        )
-        return mapped(gate, up)
     return _silu_and_mul_2d(gate, up)
 
 
@@ -544,9 +530,8 @@ class DistGEMMFusedSwiGLU(FusedSwiGLU):
         # The output columns carry that same alternation, so splitting the
         # trailing axis into (hidden/R, 2) recovers the halves. They come out as
         # strided views, which need no contiguous() here: the kernel is passed
-        # each input's strides. silu_and_mul_op is called directly rather than via
-        # _fused_silu_and_mul because these are already plain local 2D tensors --
-        # there is no DTensor to local_map over.
+        # each input's strides. silu_and_mul_op is called directly because these
+        # are already local 2D tensors and do not need SPMD layout handling.
         gate, up = h.unflatten(-1, (-1, 2)).unbind(-1)
         y_flat = LinearReduceScatter.apply(
             silu_and_mul_op(gate, up),
@@ -636,26 +621,20 @@ class FusedGroupedExperts(GroupedExperts):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w13, DTensor):
-            w13 = self.w13.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-        else:
-            w13 = self.w13
-            w2_EDF = self.w2_EDF
-
-        E, F, _, D = w13.shape
+        E, F, _, D = self.w13.shape
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
         # The fused parameter stores gate and up interleaved as (E, F, 2, D);
         # the grouped GEMM consumes them as one (E, 2F, D) expert weight.
-        w13_E_2F_D = w13.bfloat16().reshape(E, F * 2, D)
+        w13_E_2F_D = self.w13.bfloat16().reshape(E, F * 2, D)
         gate_up_R2F = self._grouped_mm(
             A=x_RD.bfloat16(), weight_EOI=w13_E_2F_D, offs=offsets_E
         )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
+        return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
+            x_RD
+        )
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
@@ -694,7 +673,7 @@ def _fuse_w13_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
 
     ``w13`` (E, F, 2, D) shards on the same axes as ``w1_EFD`` (E, F, D): EP on
     dim 0 (expert) and TP on dim 1 (hidden); the ``2`` axis (dim 2) stays
-    unsharded. Everything else (``w2_EDF``, local_map, in/out shardings) is kept.
+    unsharded. Everything else (``w2_EDF`` and in/out shardings) is kept.
     """
     state = dict(base.state_shardings)
     w1_layout = state.pop("w1_EFD")

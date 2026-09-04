@@ -18,7 +18,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
 
 from torchtitan.protocols.module import Module
 
@@ -43,11 +42,9 @@ class Linear(nn.Linear, Module):
 class ScaledBiasRowwiseLinear(Linear):
     """
     Rowwise linear whose local bias contribution is scaled by TP degree.
-    TODO(pianpwk): this should work in decomposition in spmd_types, or as Partial
-    init in DTensor. Today the local SPMD typecheck errors on the TP-axis
-    input:V, weight:V, bias:P case; decomposing to input @ weight -> P, then P + P should pass.
-    For DTensor, this errors because FSDP does not want to redistribute the incoming gradient
-    from Replicate -> storage-time Partial.
+    TODO(pianpwk): the local SPMD typechecker should support the TP-axis
+    input:V, weight:V, bias:P case. Decomposing to input @ weight -> P, then
+    P + P should pass.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -63,12 +60,8 @@ class ScaledBiasRowwiseLinear(Linear):
         super().parallelize(parallel_dims)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
-        bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-        bias = bias / self.tp_degree
-        return F.linear(input, weight, bias)
+        bias = self.bias / self.tp_degree
+        return F.linear(input, self.weight, bias)
 
 
 __all__ = [

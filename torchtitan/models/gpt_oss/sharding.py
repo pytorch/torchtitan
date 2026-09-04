@@ -14,12 +14,12 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
     set_qkv_linear_sharding,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
@@ -51,7 +51,7 @@ def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
         in_dst_shardings={"input": input_layout},
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=out_dst,
-        local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
+        local_spmd=True,
     )
 
 
@@ -115,7 +115,7 @@ def _set_gpt_oss_layer_sharding(
     set_qkv_linear_sharding(attention.qkv_linear)
     attention.wo.sharding_config = scaled_bias_rowwise_config(output_sp=enable_sp)
 
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:

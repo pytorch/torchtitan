@@ -10,7 +10,7 @@ block-diagonal FlexAttention mask helper and the pre-norm transformer block
 
 RoPE differs per model, so each encoder passes it through the block to the
 attention as two per-forward args: ``rope_cache`` (a tensor, so config-based
-sharding can DTensor-wrap it before it meets the head-sharded q/k) and
+sharding can annotate it before it meets the head-sharded q/k) and
 ``rope_apply`` (a pass-through callable ``(q, k, rope_cache) -> (q, k)``).
 
 Shape suffixes:

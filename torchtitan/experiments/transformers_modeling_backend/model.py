@@ -41,13 +41,11 @@ class HFFlexKernel(Module):
 
     Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this
     forward with ``local_map`` (driven by the ``ShardingConfig`` set in
-    hf_sharding.py): q/k/v arrive head-sharded as DTensors, are converted to
-    local tensors so the document ``mask_mod`` -- which closes over a plain
-    ``positions`` tensor -- sees plain tensors, and the output is wrapped back
-    head-sharded. Expressing the sharding declaratively
-    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with Titan's own
-    attention and lets it ride the ``spmd_types`` backend switch, instead of a
-    hand-rolled ``local_map`` call.
+    hf_sharding.py): q/k/v are plain local tensors carrying head-sharded SPMD
+    annotations, and the output receives the corresponding head-sharded
+    annotation. Expressing the sharding declaratively
+    ``ShardingConfig`` keeps it consistent with Titan's own
+    attention instead of requiring a hand-rolled ``local_map`` call.
 
     The HF attention module and the BlockMask ride as passthrough keyword args
     (non-tensors, so ``local_map`` leaves them untouched). CP is not handled
@@ -1195,19 +1193,18 @@ class HFTransformerModel(BaseModel):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        if parallelism.spmd_backend == "spmd_types":
-            from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-            from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
-            input_sharding = decoder_input_sharding()
-            # DSA attention masks are dense tensors but are not decoder inputs;
-            # preserve the old trainer behavior by annotating only declared names.
-            annotated = annotate_input_spmd_types(
-                parallel_dims,
-                {name: batch[name] for name in input_sharding if name in batch},
-                input_sharding,
-            )
-            batch.update(annotated)
+        input_sharding = decoder_input_sharding()
+        # DSA attention masks are dense tensors but are not decoder inputs;
+        # preserve the old trainer behavior by annotating only declared names.
+        annotated = annotate_input_spmd_types(
+            parallel_dims,
+            {name: batch[name] for name in input_sharding if name in batch},
+            input_sharding,
+        )
+        batch.update(annotated)
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch

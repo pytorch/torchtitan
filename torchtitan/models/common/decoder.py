@@ -143,7 +143,6 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -162,8 +161,6 @@ class Decoder(BaseModel):
                 )
 
             if parallelism.context_parallel_degree > 1:
-                # ShardingConfig-based CP requires the spmd_types backend.
-                validate_cp_backend(parallelism)
                 if any(self.traverse(ScaledDotProductAttention.Config)) or any(
                     self.traverse(VarlenAttention.Config)
                 ):
@@ -341,8 +338,7 @@ class Decoder(BaseModel):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        if parallelism.spmd_backend == "spmd_types":
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

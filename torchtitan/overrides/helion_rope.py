@@ -43,7 +43,6 @@ from typing import Any, TYPE_CHECKING
 import spmd_types as spmd
 
 import torch
-from torch.distributed.tensor import DTensor
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE, CosSinRoPE
@@ -709,25 +708,13 @@ if _HELION_IMPORT_ERROR is None:
     )
 
 
-def _to_local(tensor: torch.Tensor) -> torch.Tensor:
-    return tensor.to_local() if isinstance(tensor, DTensor) else tensor
-
-
-def _from_local(local: torch.Tensor, spec: torch.Tensor) -> torch.Tensor:
-    if isinstance(spec, DTensor):
-        return DTensor.from_local(
-            local, spec.device_mesh, spec.placements, run_check=False
-        )
-    return local
-
-
 def _resolve_positions(
     positions: torch.Tensor | None, query_local: torch.Tensor
 ) -> torch.Tensor:
     # ``positions=None`` means "0, 1, ..., T-1". The kernel gathers by index,
     # so make those IDs explicit.
     if positions is not None:
-        return _to_local(positions)
+        return positions
     return torch.arange(
         query_local.shape[0], device=query_local.device, dtype=torch.int32
     )
@@ -827,9 +814,9 @@ if _HELION_IMPORT_ERROR is None:
         reserved for inputs the kernel cannot safely handle; the caller uses the
         PyTorch path for those cases.
         """
-        xq = _to_local(query)
-        xk = _to_local(key)
-        cache = _to_local(rope_cache)
+        xq = query
+        xk = key
+        cache = rope_cache
         pos = _resolve_positions(positions, xq)
         xq = xq.contiguous()
         xk = xk.contiguous()
@@ -882,7 +869,7 @@ if _HELION_IMPORT_ERROR is None:
                 ),  # xk_out_THK
             ),
         )(_helion_cossin_rope_fwd_thk)(xq, xk, cache, pos)
-        return _from_local(xq_out, query), _from_local(xk_out, key)
+        return xq_out, xk_out
 
     def _apply_helion_complex_rope(
         query: torch.Tensor,
@@ -890,9 +877,9 @@ if _HELION_IMPORT_ERROR is None:
         rope_cache: torch.Tensor,
         positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        xq = _to_local(query)
-        xk = _to_local(key)
-        cache = _to_local(rope_cache)
+        xq = query
+        xk = key
+        cache = rope_cache
         pos = _resolve_positions(positions, xq)
         if not cache.is_complex():
             return None
@@ -942,7 +929,7 @@ if _HELION_IMPORT_ERROR is None:
                 ),  # xk_out_THK
             ),
         )(_helion_complex_rope_fwd_thk)(xq, xk, cache_real, pos)
-        return _from_local(xq_out, query), _from_local(xk_out, key)
+        return xq_out, xk_out
 
 else:
 

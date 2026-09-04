@@ -24,36 +24,9 @@ from torchtitan.distributed.spmd_types import _per_axis_types, spmd_axes
 
 
 __all__ = [
-    "LocalMapConfig",
     "ShardingConfig",
     "resolve_placements",
 ]
-
-
-@dataclass(kw_only=True, slots=True)
-class LocalMapConfig:
-    """Spec for modules computing on local tensors.
-
-    Wraps forward with ``local_map()``: DTensor -> local before forward,
-    local -> DTensor after forward.
-
-    Input placements come from ``ShardingConfig.in_dst_shardings``
-    (already aligned by ``_redistribute_inputs``); output placements from
-    ``ShardingConfig.out_src_shardings``. ``LocalMapConfig`` only carries
-    ``in_grad_placements`` since there's no equivalent slot on
-    ``ShardingConfig`` today. Set it to ``None`` to omit the local_map
-    argument when input gradients are irrelevant.
-
-    Attributes:
-        in_grad_placements: Per-input-gradient SPMD types (positional,
-            ordered by ``forward`` args). Use ``None`` to omit
-            input-gradient placements or for non-tensor args.
-    """
-
-    in_grad_placements: tuple[SpmdType | None, ...] | None
-
-    def to_dict(self) -> dict:
-        return {"repr": repr(self)}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -61,48 +34,42 @@ class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``SpmdType`` keyed by mesh axis names. At
-    ``parallelize()`` time, SPMD types are resolved to
-    ``tuple[Placement, ...]`` in mesh axis order.
+    ``parallelize()`` time, parameters and buffers are locally sharded and
+    annotated, while activation layouts drive explicit redistributions.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
     orthogonal.
 
     Redistribution is expressed as a (source, destination) pair: src declares
     what the tensor's placement is entering the boundary, dst declares the
-    desired placement after redistribution. For DTensor, the src is usually
-    implicit in the tensor's ``placements``; declaring it explicitly keeps
-    the contract uniform with future erased-type systems that require both
-    sides of every redistribute.
+    desired placement after redistribution. Both sides are explicit because
+    local SPMD types are erased at runtime.
 
     Attributes:
-        state_shardings: Parameter/buffer placements for ``distribute_tensor``.
-            Outer dict keys are param names.
+        state_shardings: Parameter/buffer SPMD layouts. Outer dict keys are
+            state names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
         in_src_shardings: Source placements of inputs, keyed by ``forward()``
-            arg name. Used to annotate plain tensors as DTensors via
-            ``DTensor.from_local`` when inputs arrive plain (e.g. from
-            dataloader or FSDP-only path). Also declares the src side of
-            the input redistribute pair.
+            arg name. Used to assert the input's local SPMD type and declare
+            the source side of the input redistribution pair.
             e.g. ``{"x": {TP: Shard(1)}}``.
         in_dst_shardings: Desired input placements after redistribution,
             keyed by ``forward()`` arg name.
             e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
             ``None`` means no input redistribution.
-        out_src_shardings: Source placement of the forward's output as a
-            DTensor. When ``local_map`` is set this also tells ``local_map``
-            what to wrap the local output back to. Accepts a single
+        out_src_shardings: Source SPMD type of the forward's output. When
+            ``local_map`` is set, this declares the local region's output
+            type. Accepts a single
             ``SpmdType`` (single-output case) or a tuple (multi-
             output case). ``None``
-            means "infer from the output" (it's already a DTensor at the
-            right placement, or there's no local_map to drive).
+            means "infer from the output" or that there is no local region.
             e.g. ``{TP: Partial()}`` for the MoE wrapper.
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_map: If set, wraps forward with ``local_map()``. Input and
-            output placements come from ``in_dst_shardings`` and
-            ``out_src_shardings``; ``LocalMapConfig`` only carries
-            ``in_grad_placements``.
+        local_spmd: If true, wraps forward with ``spmd.no_typecheck()`` using
+            input types from ``in_dst_shardings`` and output types from
+            ``out_src_shardings``.
     """
 
     state_shardings: dict[str, SpmdType] = field(default_factory=dict)
@@ -110,7 +77,7 @@ class ShardingConfig:
     in_dst_shardings: dict[str, SpmdType] | None = None
     out_src_shardings: SpmdType | tuple[SpmdType, ...] | None = None
     out_dst_shardings: SpmdType | None = None
-    local_map: LocalMapConfig | None = None
+    local_spmd: bool = False
 
     def to_dict(self) -> dict:
         """Serialize for JSON logging. Placements become repr strings."""

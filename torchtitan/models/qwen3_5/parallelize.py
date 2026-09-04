@@ -63,12 +63,7 @@ def parallelize_qwen3_5(
             "and multimodal CP needs vision scatter before CP sharding."
         )
 
-    if (
-        parallelism.spmd_backend == "spmd_types"
-        or parallel_dims.tp_enabled
-        or parallel_dims.ep_enabled
-    ):
-        model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
+    model.parallelize(parallel_dims)  # pyrefly: ignore [not-callable]
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
@@ -93,24 +88,8 @@ def parallelize_qwen3_5(
     if skip_dp:
         return model
 
-    if parallelism.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-        dp_mesh_dims = None
-        edp_mesh = None
-        edp_mesh_dims = None
-        if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
 
     if model.vision_encoder is not None:
         apply_fsdp_to_vision_encoder(

@@ -12,8 +12,8 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.decoder_sharding import set_gqa_inner_attention_local_map
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.models.common.decoder_sharding import set_gqa_inner_attention_local_spmd
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.common.vision_encoder import VisionTransformerBlock
@@ -140,11 +140,6 @@ def vision_scaled_bias_rowwise_config(
     input_layout = _vision_activation_placement(
         tp=spmd.S(1), include_cp_axis=include_cp_axis
     )
-    input_grad_layout = (
-        SpmdType({DP: spmd.V, CP: spmd.P, TP: spmd.S(1)})
-        if include_cp_axis
-        else input_layout
-    )
     return ShardingConfig(
         state_shardings={
             "weight": _vision_state_placement(
@@ -162,7 +157,7 @@ def vision_scaled_bias_rowwise_config(
             tp=spmd.P, include_cp_axis=include_cp_axis
         ),
         out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        local_map=LocalMapConfig(in_grad_placements=(input_grad_layout,)),
+        local_spmd=True,
     )
 
 
@@ -223,12 +218,10 @@ def set_vision_transformer_block_sharding_config(
                 "v_THV": attention_layout,
             },
             out_src_shardings=attention_layout,
-            local_map=LocalMapConfig(
-                in_grad_placements=(attention_grad_layout,) * 3,
-            ),
+            local_spmd=True,
         )
     else:
-        set_gqa_inner_attention_local_map(block.attn.inner_attention)
+        set_gqa_inner_attention_local_spmd(block.attn.inner_attention)
 
     block.mlp.fc1.sharding_config = vision_colwise_config(
         include_cp_axis=include_cp_axis

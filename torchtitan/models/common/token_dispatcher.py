@@ -21,7 +21,6 @@ from torchtitan.distributed.minimal_async_ep import (
     MinimalAsyncEPDispatchMetadata,
 )
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
 
@@ -255,9 +254,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         scheduling markers.
         """
         assert self.ep_mesh is not None
-        if (
-            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) or get_spmd_backend() != "spmd_types":
+        if torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing():
             return all_to_all_single(
                 num_local_tokens_per_expert_E.view(ep_size, -1),
                 None,
@@ -322,9 +319,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     ) -> torch.Tensor:
         """Launch the dispatch all-to-all that moves routed tokens to experts."""
         assert self.ep_mesh is not None
-        if (
-            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) or get_spmd_backend() != "spmd_types":
+        if torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing():
             return all_to_all_single(
                 routed_input_ND,
                 output_splits,
@@ -350,9 +345,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     ) -> torch.Tensor:
         """Launch the combine all-to-all that returns expert outputs to tokens."""
         assert self.ep_mesh is not None
-        if (
-            torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing()
-        ) or get_spmd_backend() != "spmd_types":
+        if torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing():
             return all_to_all_single(
                 routed_output_RD,
                 input_splits,
@@ -383,8 +376,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         When ep_mesh is None (EP=1), falls back to local dispatch — no
         all-to-all communication, just local token reordering with padding.
 
-        With SP, x_TD/topk_scores_TK/topk_expert_ids_TK are already
-        the local SP shard (from DTensor Shard to_local via LocalMapConfig).
+        With SP, x_TD/topk_scores_TK/topk_expert_ids_TK are already the local
+        SP shard provided by the surrounding local SPMD region.
 
         Args:
             x_TD: ``(T, D)`` local token shard
@@ -418,9 +411,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
-        if (
-            get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
-        ):  # sparse mesh reinterpret
+        if spmd.is_type_checking():  # sparse mesh reinterpret
             spmd.mutate_type(
                 num_local_tokens_per_expert_E,
                 src=spmd.P,
@@ -429,10 +420,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         # generate the input splits and output splits for all-to-all
         with maybe_set_sparse_mesh():
-            pg = (
-                "ep" if get_spmd_backend() == "spmd_types" else self.ep_mesh.get_group()
-            )
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            pg = "ep"
+            if spmd.is_type_checking():
                 num_local_tokens_per_expert_E = spmd.reinterpret_mesh(
                     num_local_tokens_per_expert_E, spmd.current_mesh()
                 )
@@ -579,9 +568,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
 
         with maybe_set_sparse_mesh():
-            pg = (
-                "ep" if get_spmd_backend() == "spmd_types" else self.ep_mesh.get_group()
-            )
+            pg = "ep"
             # Reverse expert-major reordering
             routed_output_RD = self._unpermute(
                 routed_output_RD, metadata.input_shape, metadata.permuted_indices
@@ -595,11 +582,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 metadata.output_splits,
             )
 
-        if get_spmd_backend() == "spmd_types":
-            if spmd.is_type_checking():  # dense mesh reinterpret
-                routed_output_RD = spmd.reinterpret_mesh(
-                    routed_output_RD, spmd.current_mesh()
-                )
+        if spmd.is_type_checking():  # dense mesh reinterpret
+            routed_output_RD = spmd.reinterpret_mesh(
+                routed_output_RD, spmd.current_mesh()
+            )
 
         out_TD = torch.zeros_like(x_TD)
 
