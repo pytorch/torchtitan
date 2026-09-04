@@ -24,7 +24,6 @@ from torchtitan.models.common.attention import (
     FlexAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
-    ScaledDotProductAttention,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -157,7 +156,6 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -174,34 +172,6 @@ class Decoder(BaseModel):
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
-
-            if parallelism.context_parallel_degree > 1:
-                # ShardingConfig-based CP requires the spmd_types backend.
-                validate_cp_backend(parallelism)
-                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
-                    self.traverse(VarlenAttention.Config)
-                ):
-                    raise NotImplementedError(
-                        "Context Parallel is not supported with "
-                        "ScaledDotProductAttention or VarlenAttention. "
-                        "Use FlexAttention or disable CP."
-                    )
-
-            tp = parallelism.tensor_parallel_degree
-            attention = self.first_attention
-            if tp > 1 and attention is not None:
-                n_heads = attention.n_heads
-                n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_kv_heads ({n_kv_heads})."
-                    )
 
             ep = parallelism.expert_parallel_degree
             for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
@@ -221,7 +191,7 @@ class Decoder(BaseModel):
             if isinstance(config, Trainer.Config):
                 debug = config.debug
                 seq_len = config.training.max_context_length
-                rope_cfg = getattr(attention, "rope", None)
+                rope_cfg = getattr(self.first_attention, "rope", None)
                 if rope_cfg is not None:
                     max_context_length = self.max_context_length
                     if seq_len > max_context_length:
@@ -363,9 +333,9 @@ class Decoder(BaseModel):
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        inner = self.config.first_full_attention_backend
         positions = batch.get("positions", None)
         if positions is not None:
-            inner = self.config.first_full_attention_backend
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
                 batch["attention_masks"] = self.get_attention_masks(positions=positions)
 
@@ -377,6 +347,8 @@ class Decoder(BaseModel):
                 parallel_dims.get_mesh("cp"),
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
+                # The kernel declares whether it needs a local or global mask.
+                shard_attention_mask=getattr(inner, "shard_attention_mask", True),
             )
         if parallelism.spmd_backend == "spmd_types":
             batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
