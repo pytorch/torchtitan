@@ -1121,7 +1121,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     Qwen3.6-27B uses the Qwen3.5-compatible dense Gated DeltaNet model flavor.
     The 8-GPU layout assigns TP2 x FSDP2 to training and TP4 to generation.
     """
-    seq_len = 2048
+    seq_len = 65536
     config = rl_grpo_qwen3_5_9b_varlen()
     config.model_spec = _qwen3_5_rl_model_registry(
         "27B", seq_len=seq_len, attn_backend="varlen"
