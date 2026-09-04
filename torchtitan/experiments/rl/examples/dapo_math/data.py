@@ -14,13 +14,12 @@ from datasets import concatenate_datasets, load_dataset
 
 from torchtitan.config import Configurable
 
-
-_AIME_PROMPT_TEMPLATE = (
+_MATH_PROMPT_TEMPLATE = (
     "Solve the following math problem step by step. The last line of your response "
-    "should be of the form Answer: $Answer (without quotes) where $Answer is the "
-    "answer to the problem.\n\n"
+    "should be of the form Answer: \\boxed{{$Answer}}, where $Answer is the answer "
+    "to the problem.\n\n"
     "{problem}\n\n"
-    'Remember to put your answer on its own line after "Answer:".'
+    'Remember to put your answer on its own line as "Answer: \\boxed{{...}}".'
 )
 
 
@@ -102,7 +101,8 @@ class DapoMathDataset(_CyclingDataset):
                 raise ValueError("DAPO-Math rows must contain exactly one user prompt")
             samples.append(
                 DapoMathSample(
-                    prompt=prompt_messages[0]["content"],
+                    # `prompt` is the raw question without answer-format instructions.
+                    prompt=_MATH_PROMPT_TEMPLATE.format(problem=row["prompt"]),
                     ground_truth=str(row["ground_truth"]),
                 )
             )
@@ -130,7 +130,7 @@ class AIME2025Dataset(_CyclingDataset):
         ).select(range(config.num_samples))
         samples = [
             DapoMathSample(
-                prompt=_AIME_PROMPT_TEMPLATE.format(problem=row["question"]),
+                prompt=_MATH_PROMPT_TEMPLATE.format(problem=row["question"]),
                 ground_truth=str(row["answer"]),
             )
             for row in dataset
