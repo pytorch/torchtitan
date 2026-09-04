@@ -27,20 +27,40 @@ from torchtitan.models.kimi_k3.layout import BlockLayoutTables
 
 
 class PPRankLocalCache:
-    """The blocks a rank holds per micro-batch, kept on device, and the gradient
-    deposits; one per rank, shared by its stages."""
+    """The blocks a rank holds per micro-batch, and the gradient deposits; one
+    per rank, shared by its stages.
 
-    def __init__(self) -> None:
+    With ``offload`` the stored blocks sit on pinned host memory between the
+    stage that commits them and the rank's later stages that read them; the
+    copies run on the current stream, so stream order serializes them. Every
+    stored block is detached (its gradient travels through the deposits), so
+    the round trip is value-identical.
+    """
+
+    def __init__(self, *, offload: bool = False) -> None:
         self._blocks: dict[int, dict[int, torch.Tensor]] = {}
         self._deposits: dict[tuple[int, int], torch.Tensor] = {}
         self._counts: dict[tuple[int, int], int] = {}
+        self._offload = offload
+        self._device: torch.device | None = None
 
     # blocks
     def put(self, mb: int, block_idx: int, block_TD: torch.Tensor) -> None:
+        if self._offload and block_TD.is_cuda:
+            self._device = block_TD.device
+            host_TD = torch.empty_like(block_TD, device="cpu", pin_memory=True)
+            host_TD.copy_(block_TD, non_blocking=True)
+            block_TD = host_TD
         self._blocks.setdefault(mb, {})[block_idx] = block_TD
 
     def blocks(self, mb: int) -> dict[int, torch.Tensor]:
-        return self._blocks.get(mb, {})
+        held = self._blocks.get(mb, {})
+        if self._device is None:
+            return held
+        return {
+            b: t.to(self._device, non_blocking=True) if t.device.type == "cpu" else t
+            for b, t in held.items()
+        }
 
     def release(self, mb: int) -> None:
         """Free the blocks of ``mb``; the deposits stay until collected."""

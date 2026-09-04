@@ -59,6 +59,25 @@ class TestCarrier(unittest.TestCase):
         self.assertTrue(torch.equal(grad_delta, torch.zeros(T, 1, D)))
         self.assertEqual(deposits, {})
 
+    def test_store_offload_parks_cuda_blocks_on_pinned_host_memory(self):
+        store = PPRankLocalCache(offload=True)
+        cpu_block = torch.ones(4, 2)
+        store.put(0, 0, cpu_block)
+        # A CPU tensor has nowhere to go; the store hands it back as it is.
+        self.assertIs(store.blocks(0)[0], cpu_block)
+        if not torch.cuda.is_available():
+            return
+        block = torch.randn(4, 2, device="cuda")
+        store.put(1, 3, block)
+        torch.cuda.synchronize()
+        parked = store._blocks[1][3]
+        self.assertEqual(parked.device.type, "cpu")
+        self.assertTrue(parked.is_pinned())
+        back = store.blocks(1)[3]
+        torch.cuda.synchronize()
+        self.assertTrue(back.is_cuda)
+        self.assertTrue(torch.equal(back, block))
+
     def test_store_accumulates_deposits_and_releases_blocks_separately(self):
         store = PPRankLocalCache()
         store.put(0, 0, torch.zeros(4, 2))

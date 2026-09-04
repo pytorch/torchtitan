@@ -275,12 +275,21 @@ def _swap_in_attn_res_stages(
     raise RuntimeError(f"Unexpected pipeline schedule class {type(schedule).__name__}.")
 
 
-def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
+def pipeline_kimi_k3(
+    model: nn.Module,
+    *,
+    attn_res_cache: bool = True,
+    attn_res_cache_offload: bool = False,
+    **kwargs,
+):
     """``pipelining_fn`` for Kimi K3: core's split and schedule, each stage rebuilt
     as an :class:`AttnResPipelineStage` and routed by tables built from that split.
 
     ``attn_res_cache=False`` sends the whole block stack on every hop instead of
     only the blocks the receiving rank lacks; every rank must pass the same value.
+    ``attn_res_cache_offload`` parks the cached blocks on pinned host memory
+    between the stage that commits them and the rank's later stages; the
+    blocks are detached, so the copies are exact.
     """
     # The vision tower goes with the embedding, the AttnRes aggregation with the head.
     parallelism = kwargs.pop("parallelism")
@@ -316,13 +325,16 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
         layer_to_stage=layer_to_stage,
         cache=attn_res_cache,
     )
-    store = PPRankLocalCache()
+    store = PPRankLocalCache(offload=attn_res_cache and attn_res_cache_offload)
     for stage in stages:
         stage.set_routing(layout, store)
     logger.info(
         "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s",
         len(stages),
         [s.stage_index for s in stages],
-        "delta with rank store" if attn_res_cache else "whole stack every hop",
+        "delta with rank store"
+        + (" on pinned host memory" if attn_res_cache_offload else "")
+        if attn_res_cache
+        else "whole stack every hop",
     )
     return pp_schedule, model_parts, has_first_stage, has_last_stage
