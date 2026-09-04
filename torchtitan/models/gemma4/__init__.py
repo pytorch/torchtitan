@@ -158,6 +158,124 @@ def _debugmodel(
     )
 
 
+def _e2b(
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
+) -> Gemma4Model.Config:
+    """Gemma-4 E2B configuration (Edge 2B).
+    
+    Specifications:
+    - Hidden dimension: 2048
+    - Attention heads: 16
+    - KV heads: 4 (4:1 grouped-query attention)
+    - Layers: 24
+    - Vocabulary size: 262144
+    - Context length: 128K tokens
+    - Sliding window: 4096 tokens
+    """
+    dim = 2048
+    n_heads = 16
+    n_kv_heads = 4
+    n_layers = 24
+    vocab_size = 262144
+
+    return Gemma4Model.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        sliding_window_size=4096,
+        enable_sliding_window=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_gemma4_layers(
+            fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_context_length=seq_len,
+                theta=500000,
+                scaling="none",
+            ),
+            attn_backend=attn_backend,
+            tp_gemm_backend=tp_gemm_backend,
+            sliding_window_size=4096,
+        ),
+    )
+
+
+def _e4b(
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
+) -> Gemma4Model.Config:
+    """Gemma-4 E4B configuration (Edge 4B).
+    
+    Specifications:
+    - Hidden dimension: 2560
+    - Attention heads: 20
+    - KV heads: 5 (4:1 grouped-query attention)
+    - Layers: 32
+    - Vocabulary size: 262144
+    - Context length: 128K tokens
+    - Sliding window: 4096 tokens
+    """
+    dim = 2560
+    n_heads = 20
+    n_kv_heads = 5
+    n_layers = 32
+    vocab_size = 262144
+
+    return Gemma4Model.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        sliding_window_size=4096,
+        enable_sliding_window=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_gemma4_layers(
+            fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_context_length=seq_len,
+                theta=500000,
+                scaling="none",
+            ),
+            attn_backend=attn_backend,
+            tp_gemm_backend=tp_gemm_backend,
+            sliding_window_size=4096,
+        ),
+    )
+
+
 def _12b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
@@ -173,6 +291,7 @@ def _12b(
     - Layers: 42
     - Vocabulary size: 262144
     - Context length: 256K tokens
+    - Sliding window: 4096 tokens
     """
     dim = 3584
     n_heads = 28
@@ -216,13 +335,73 @@ def _12b(
     )
 
 
+def _26b_a4b(
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
+) -> Gemma4Model.Config:
+    """Gemma-4 26B A4B (Mixture-of-Experts) configuration.
+    
+    Specifications:
+    - Total parameters: 26B (3.8B - 4B active)
+    - Hidden dimension: 2560
+    - Attention heads: 20
+    - KV heads: 5 (4:1 grouped-query attention)
+    - Layers: 36
+    - Vocabulary size: 262144
+    - Context length: 256K tokens
+    - Sliding window: 4096 tokens
+    """
+    dim = 2560
+    n_heads = 20
+    n_kv_heads = 5
+    n_layers = 36
+    vocab_size = 262144
+
+    return Gemma4Model.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        sliding_window_size=4096,
+        enable_sliding_window=True,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_gemma4_layers(
+            fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_context_length=seq_len,
+                theta=500000,
+                scaling="none",
+            ),
+            attn_backend=attn_backend,
+            tp_gemm_backend=tp_gemm_backend,
+            sliding_window_size=4096,
+        ),
+    )
+
+
 def _31b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Gemma4Model.Config:
-    """Gemma-4 31B configuration.
+    """Gemma-4 31B (Dense) configuration.
     
     Specifications:
     - Hidden dimension: 5120
@@ -277,8 +456,16 @@ def _31b(
 
 gemma4_configs = {
     "debugmodel": (_debugmodel, 256000),
+    "e2b": (_e2b, 128000),
+    "E2B": (_e2b, 128000),
+    "e4b": (_e4b, 128000),
+    "E4B": (_e4b, 128000),
     "12b": (_12b, 256000),
     "12B": (_12b, 256000),
+    "26b": (_26b_a4b, 256000),
+    "26B": (_26b_a4b, 256000),
+    "26b_a4b": (_26b_a4b, 256000),
+    "26B_A4B": (_26b_a4b, 256000),
     "31b": (_31b, 256000),
     "31B": (_31b, 256000),
 }
@@ -295,7 +482,7 @@ def model_registry(
     """Register Gemma-4 model with TorchTitan.
 
     Args:
-        flavor: Model size ("12b", "debugmodel")
+        flavor: Model size ("e2b", "e4b", "12b", "26b_a4b", "31b", "debugmodel")
         seq_len: Optional sequence length override
         attn_backend: Attention backend ("flex", "sdpa")
         tp_gemm_backend: Tensor parallel GEMM backend

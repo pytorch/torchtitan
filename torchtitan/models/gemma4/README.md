@@ -1,6 +1,6 @@
 # Gemma-4
 
-Gemma-4 is Google DeepMind's language model family featuring a hybrid attention architecture that combines sliding-window local attention with global attention on the final layer. Training recipes cover Gemma-4 12B, 31B, and a small debug model used for testing.
+Gemma-4 is Google DeepMind's open-weight model family featuring hybrid attention architectures across dense, mixture-of-experts, and edge models. Training recipes cover Gemma-4 E2B, E4B, 12B, 26B A4B (MoE), 31B (Dense), and a debug model used for testing.
 
 ## Download the tokenizer
 
@@ -8,7 +8,7 @@ Gemma-4 is Google DeepMind's language model family featuring a hybrid attention 
 python scripts/download_hf_assets.py --repo_id google/gemma-4-12b --assets tokenizer
 ```
 
-The 12B and 31B recipes expect tokenizer assets under `./assets/hf/gemma-4-12b` (and matching `./assets/hf/gemma-4-31b`).
+The recipes expect tokenizer assets under `./assets/hf/gemma-4-<flavor>` (e.g. `./assets/hf/gemma-4-12b`).
 
 ## Training
 
@@ -19,10 +19,19 @@ MODULE=gemma4 CONFIG=gemma4_debugmodel ./run_train.sh
 # Debug model with varlen attention
 MODULE=gemma4 CONFIG=gemma4_debugmodel_varlen_attn ./run_train.sh
 
-# Gemma-4 12B
+# Gemma-4 E2B (Edge 2B)
+MODULE=gemma4 CONFIG=gemma4_e2b ./run_train.sh
+
+# Gemma-4 E4B (Edge 4B)
+MODULE=gemma4 CONFIG=gemma4_e4b ./run_train.sh
+
+# Gemma-4 12B (Dense)
 MODULE=gemma4 CONFIG=gemma4_12b ./run_train.sh
 
-# Gemma-4 31B
+# Gemma-4 26B A4B (Mixture-of-Experts)
+MODULE=gemma4 CONFIG=gemma4_26b_a4b ./run_train.sh
+
+# Gemma-4 31B (Dense)
 MODULE=gemma4 CONFIG=gemma4_31b ./run_train.sh
 ```
 

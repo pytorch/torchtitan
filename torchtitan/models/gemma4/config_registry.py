@@ -77,6 +77,76 @@ def gemma4_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
+def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("e2b", seq_len=seq_len)
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/gemma-4-e2b",
+        profiler=Profiler.Config(
+            enable_profiling=True,
+            profile_freq=100,
+        ),
+        metrics=MetricsProcessor.Config(
+            enable_tensorboard=True,
+        ),
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=3e-4),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
+            steps=10000,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=SelectiveAC.Config(),
+        validator=Validator.Config(
+            freq=500,
+            steps=1200,
+        ),
+    )
+
+
+def gemma4_e4b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("e4b", seq_len=seq_len)
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/gemma-4-e4b",
+        profiler=Profiler.Config(
+            enable_profiling=True,
+            profile_freq=100,
+        ),
+        metrics=MetricsProcessor.Config(
+            enable_tensorboard=True,
+        ),
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=2e-4),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
+            steps=10000,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=SelectiveAC.Config(),
+        validator=Validator.Config(
+            freq=500,
+            steps=1200,
+        ),
+    )
+
+
 def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("12b", seq_len=seq_len)
     return Trainer.Config(
@@ -139,6 +209,41 @@ def gemma4_12b_long_context(seq_len: int | None = None) -> Trainer.Config:
         tensor_parallel_degree=2,
     )
     return config
+
+
+def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("26b_a4b", seq_len=seq_len)
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./assets/hf/gemma-4-26b-a4b",
+        profiler=Profiler.Config(
+            enable_profiling=True,
+            profile_freq=100,
+        ),
+        metrics=MetricsProcessor.Config(
+            enable_tensorboard=True,
+        ),
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=1e-4),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
+            max_context_length=8192,
+            steps=10000,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=SelectiveAC.Config(),
+        validator=Validator.Config(
+            freq=500,
+            steps=1200,
+        ),
+    )
 
 
 def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
