@@ -23,6 +23,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Configurable
+from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
 
@@ -214,19 +215,23 @@ class BaseCheckpointManager(Configurable, ABC):
     # that check once, on behalf of every implementation, and dispatch to the
     # ``_``-prefixed hooks only when enabled. Subclasses override the hooks, not
     # these methods: overriding a public method here would silently bypass the
-    # guard and run against uninitialized state.
+    # guard and run against uninitialized state. They also own lifecycle tracing
+    # so every implementation has the same timing boundary; disabled managers
+    # remain silent because their guards stay outside the spans.
 
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
         if not self.enable:
             return False
-        return self._load(step)
+        with sl.log_trace_span("checkpoint_load"):
+            return self._load(step)
 
     def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Persist state for ``curr_step``."""
         if not self.enable:
             return False
-        return self._save(curr_step, last_step)
+        with sl.log_trace_span("checkpoint_save"):
+            return self._save(curr_step, last_step)
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
