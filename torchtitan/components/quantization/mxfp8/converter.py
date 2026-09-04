@@ -11,40 +11,25 @@ from typing import Literal
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
-from .utils import swap_token_dispatcher
+from ..utils import swap_token_dispatcher
+
+_mxfp8_linear_import_error: ImportError | None = None
 
 try:
-    from torchao.prototype.moe_training.mxfp8_linear import (
-        MXFP8Linear as TorchAOMXFP8Linear,
-    )
+    # Nothing about the class itself can fail here. What raises is two levels
+    # down: linear.py and tensor.py import torchao's mxfp8 cast kernels at
+    # module scope, and triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale
+    # is newer than any torchao release. Catching it keeps
+    # ``import torchtitan.components.quantization`` working for float8 and
+    # nvfp4 users, and defers the error to whoever builds this converter.
+    from .linear import MXFP8Linear
 
-    class MXFP8Linear(TorchAOMXFP8Linear, Module):
-        """Inherits from Module (not Linear) to satisfy the Module protocol
-        (init_states, _param_init) while avoiding MRO conflicts with
-        Linear.__init__. Config still inherits from Linear.Config for
-        field compatibility.
-        """
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(Linear.Config):
-            """Drop-in replacement for Linear.Config that builds MXFP8Linear."""
-
-            pass
-
-        def __init__(self, config: Config):
-            TorchAOMXFP8Linear.__init__(
-                self,
-                config.in_features,
-                config.out_features,
-                bias=config.bias,
-            )
-
-except ImportError:
+except ImportError as import_error:
     MXFP8Linear = None
+    _mxfp8_linear_import_error = import_error
 
 
 class MXFP8LinearConverter(QuantizationConverter):
@@ -58,43 +43,107 @@ class MXFP8LinearConverter(QuantizationConverter):
         Only Linear.Config entries whose FQN contains a match are converted.
         If empty, all Linear modules are converted.
         """
+        linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(
+            default_factory=list
+        )
+        """FQN substrings selecting linears that save inputs in MXFP8 for backward.
+
+        A linear can save either its BF16 input or a columnwise MXFP8 input for
+        the backward pass.
+
+        Without activation checkpointing, if the preceding operation already
+        saves its BF16 output for backward, as flash attention does, that tensor
+        is also available as this linear's input. Saving another MXFP8
+        operands would increase memory usage, so this linear should save
+        BF16. If no other operation retains the BF16 input, saving MXFP8 reduces
+        activation memory and avoids columnwise quantization during backward.
+
+        With full activation checkpointing, saved tensors from the original
+        forward are discarded and reconstructed during backward. Today, a
+        linear selected here produces its columnwise MXFP8 input in both the
+        original forward and recomputation, even though the original result is
+        discarded. An ideal checkpoint-aware policy could produce it only
+        during recomputation, but distinguishing those executions would add
+        complexity to the linear and its autograd contract. We intentionally
+        apply the same policy to both.
+
+        More granular ``torch.remat`` policies add further save-versus-recompute
+        choices, so the optimal format depends on both model activation
+        ownership and the activation-checkpointing policy. BF16 is therefore
+        the conservative default, and users can opt selected modules into MXFP8
+        with this list.
+        """
+
+        def __post_init__(self) -> None:
+            if any(not fqn for fqn in self.linears_saving_inputs_for_backward_in_mxfp8):
+                raise ValueError(
+                    "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 cannot "
+                    "contain an empty FQN selector."
+                )
 
     def __init__(self, config: Config):
         self.config = config
 
         if MXFP8Linear is None:
             raise ImportError(
-                "torchao is not installed. Please install it to use MXFP8 linear layers."
-            )
+                "MXFP8 linear layers need torchao's 32x32 swizzled cast "
+                "kernels, added in pytorch/ao#4777 and not in any release up "
+                "to v0.18.0. Install a torchao that contains it."
+            ) from _mxfp8_linear_import_error
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
 
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of MXFP8 dynamic quantization."
-            )
-
     def convert(self, model_config):
         assert MXFP8Linear is not None
         fqns = self.config.fqns
-        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
-            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                new_config = MXFP8Linear.Config(
-                    in_features=config.in_features,
-                    out_features=config.out_features,
-                    bias=config.bias,
-                    param_init=config.param_init,
-                )
-                if parent is None:
-                    model_config = new_config
-                elif isinstance(parent, list):
-                    parent[attr] = new_config
-                else:
-                    setattr(parent, attr, new_config)
+        targets = [
+            entry
+            for entry in model_config.traverse(Linear.Config)
+            if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
+        ]
 
-        logger.info("Converted Linear layers to MXFP8Linear")
+        selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
+        target_fqns = [fqn for fqn, _config, _parent, _attr in targets]
+        unmatched_fqn_selectors = {
+            selector
+            for selector in selectors
+            if not any(selector in fqn for fqn in target_fqns)
+        }
+        if unmatched_fqn_selectors:
+            raise ValueError(
+                "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 selectors "
+                "did not match any converted Linear.Config: "
+                f"{sorted(unmatched_fqn_selectors)}."
+            )
+
+        mxfp8_fqns = {
+            fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
+        }
+        for fqn, config, parent, attr in targets:
+            new_config = MXFP8Linear.Config(
+                in_features=config.in_features,
+                out_features=config.out_features,
+                bias=config.bias,
+                param_init=config.param_init,
+                input_activation_format_for_backward=(
+                    "mxfp8" if fqn in mxfp8_fqns else "bf16"
+                ),
+            )
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
+        num_mxfp8 = len(mxfp8_fqns)
+        num_bf16 = len(targets) - num_mxfp8
+        logger.info(
+            "Converted Linear layers to MXFP8Linear with saved input activation "
+            f"formats: {num_bf16} bf16, {num_mxfp8} mxfp8"
+        )
+        logger.debug(f"Linears saving MXFP8 input activations: {sorted(mxfp8_fqns)}")
         return model_config
 
 

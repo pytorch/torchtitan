@@ -35,7 +35,10 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
-    # Blackwell (SM 10.0) and newer use FA4; Hopper (SM 9.0) uses FA3.
+
+    # FA4 advertises Hopper support, but as of writing it hangs under
+    # torch.compile there, so Hopper (sm90) stays on FA3.
+    # https://github.com/pytorch/torchtitan/pull/4413
     if has_cuda_capability(10, 0):
         return "FA4"
     if has_cuda_capability(9, 0):
