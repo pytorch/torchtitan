@@ -20,6 +20,7 @@ from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     AllGatherCPFlexAttention,
     ContextParallelKernel,
+    UlyssesCPFlexAttention,
 )
 
 
@@ -195,6 +196,45 @@ class TestAllGatherCollective(unittest.TestCase):
     def test_float32_kv_reach_the_reducing_backward(self):
         for _, grad in self._gather_and_backward(torch.float32):
             self.assertEqual(torch.float32, grad.dtype)
+
+
+class TestUlysses(unittest.TestCase):
+    def test_is_still_a_flex_kernel(self):
+        self.assertIsInstance(UlyssesCPFlexAttention.Config(), FlexAttention.Config)
+
+    def test_is_not_an_attention_backend(self):
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            get_attention_config("ulysses_cp_flex")
+
+    def test_keeps_its_mask_global(self):
+        self.assertFalse(UlyssesCPFlexAttention.Config().shard_attention_mask)
+
+    def test_shards_attention_heads(self):
+        self.assertTrue(UlyssesCPFlexAttention.Config().shard_attention_heads)
+
+    def test_reshards_sequence_to_heads_and_back(self):
+        q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
+        calls = []
+
+        def record(x, group, *, src, dst):
+            calls.append((x, group, src, dst))
+            return x
+
+        kernel = UlyssesCPFlexAttention(UlyssesCPFlexAttention.Config())
+        with _in_mesh(2), mock.patch.object(
+            spmd, "redistribute", record
+        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+            kernel.forward(q, k, v)
+
+        self.assertEqual(4, len(calls))
+        for _, group, src, dst in calls[:3]:
+            self.assertEqual(2, group.size())
+            self.assertEqual(spmd.S(0), src)
+            self.assertEqual(spmd.S(1), dst)
+        _, group, src, dst = calls[3]
+        self.assertEqual(2, group.size())
+        self.assertEqual(spmd.S(1), src)
+        self.assertEqual(spmd.S(0), dst)
 
 
 if __name__ == "__main__":
