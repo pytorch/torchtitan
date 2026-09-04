@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import weakref
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -59,6 +60,63 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     )
 
     torch.testing.assert_close(loss, torch.tensor([-1.0]))
+
+
+def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
+    activation_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+    loss_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+    loss_containers: list[list[torch.Tensor]] = []
+    gradients: list[torch.Tensor] = []
+
+    def schedule_step(**kwargs) -> None:
+        loss_containers.append(kwargs["losses"])
+        for value in (1.0, 2.0):
+            activation = torch.tensor(value, requires_grad=True)
+            loss = activation.square().view(())
+            loss.backward()
+            assert activation.grad is not None
+            gradients.append(activation.grad.detach().clone())
+            activation_refs.append(weakref.ref(activation))
+            loss_refs.append(weakref.ref(loss))
+            kwargs["losses"].append(loss)
+
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            pp_schedule=SimpleNamespace(step=schedule_step),
+            train_context=nullcontext,
+            model_parts=[
+                SimpleNamespace(
+                    preprocess_inputs=lambda input_dict, **kw: (
+                        input_dict["input"],
+                        input_dict["labels"],
+                        {},
+                    )
+                )
+            ],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            device=torch.device("cpu"),
+        ),
+    )
+
+    reporting_loss = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[{"input": torch.ones(1)}] * 2,
+        label_mbs=[torch.ones(1)] * 2,
+        global_valid_tokens=torch.tensor(2),
+    )
+
+    torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
+    torch.testing.assert_close(torch.stack(gradients), torch.tensor([2.0, 4.0]))
+    assert not reporting_loss.requires_grad
+    assert reporting_loss.grad_fn is None
+    assert loss_containers == [[]]
+    assert all(reference() is None for reference in loss_refs)
+    assert all(reference() is None for reference in activation_refs)
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
