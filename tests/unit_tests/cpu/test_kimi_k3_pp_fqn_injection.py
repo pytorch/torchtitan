@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import torch.nn as nn
 
-from torchtitan.models.kimi_k3.pipeline import kimi_k3_module_fqns_per_model_part
+from torchtitan.models.kimi_k3.parallelize import kimi_k3_module_fqns_per_model_part
 
 
 class _Model(nn.Module):

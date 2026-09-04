@@ -77,12 +77,6 @@ def pipeline_llm(
     loss_fn: LossFunction,
     stage_class: type[PipelineStage] = PipelineStage,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    """Split ``model`` into pipeline stages and build the schedule.
-
-    ``stage_class`` lets a model run its stages on a ``PipelineStage``
-    subclass, for a stage protocol the plain one does not cover (an
-    activation consumed by more than the next stage, say).
-    """
     pp_mesh = parallel_dims.get_mesh("pp")
 
     (
@@ -356,6 +350,7 @@ def _build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
+        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
