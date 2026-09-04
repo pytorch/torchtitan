@@ -22,10 +22,11 @@ from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
     VerifiersTaskSample,
 )
 from torchtitan.experiments.rl.examples.verifiers.components.env_server import (
+    REQUEST_IDS_BY_NODE_INFO_KEY,
     VerifiersEnvServer,
 )
 from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
-    GeneratorModelAdapter,
+    GenerationServer,
     VerifiersGenerationMetadata,
 )
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
@@ -69,7 +70,7 @@ class VerifiersRollouter(Rollouter):
     Verifiers owns environment execution, including its process pool and the
     message/tool loop, so this path bypasses TitanRL's ``RolloutWorkerActor``,
     ``RolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
-    preserved through ``GeneratorModelAdapter``, which forwards Verifiers model
+    preserved through ``GenerationServer``, which forwards Verifiers model
     requests to TitanRL's controller-provided ``GenerateFn``.
 
     TitanRL still owns dataset and group scheduling, generator routing, policy
@@ -94,7 +95,7 @@ class VerifiersRollouter(Rollouter):
         """Advantage estimator normally owned by the bypassed `RolloutWorker`."""
 
         model_adapter_bind_host: str = "127.0.0.1"
-        """Interface on which the local HTTP model adapter listens."""
+        """Interface on which the local HTTP generation server listens."""
 
         model_adapter_bind_port: int = 0
         """Adapter port; zero requests an ephemeral port."""
@@ -106,7 +107,7 @@ class VerifiersRollouter(Rollouter):
         """Maximum concurrent rollouts sharing one renderer instance."""
 
         max_model_len: int
-        """Context limit advertised by the local model adapter."""
+        """Context limit advertised by the local generation server."""
 
         connection_timeout_sec: float = 120.0
         """Maximum time to wait for the Verifiers server to become healthy."""
@@ -136,7 +137,7 @@ class VerifiersRollouter(Rollouter):
         self._rubric: Rubric = config.rubric.build()
         self._advantage_estimator: AdvantageEstimator = config.advantage.build()
         self._env_server = config.env_server.build()
-        self._adapter: GeneratorModelAdapter | None = None
+        self._generation_server: GenerationServer | None = None
         self._env_client: Any = None
         self._train_client_config: Any = None
 
@@ -150,23 +151,27 @@ class VerifiersRollouter(Rollouter):
         if self._env_client is not None:
             return
 
-        adapter = GeneratorModelAdapter(
+        # Verifiers generates through an HTTP endpoint, while TorchTitan exposes
+        # an in-process GenerateFn. This server bridges those interfaces; it
+        # uses torchtitan-model both as the /v1/models entry ID and the model field
+        # in Verifiers requests.
+        generation_server = GenerationServer(
             host=self._verifiers_config.model_adapter_bind_host,
             port=self._verifiers_config.model_adapter_bind_port,
-            model=hf_assets_path,
+            model_id="torchtitan-model",
             max_model_len=self._verifiers_config.max_model_len,
         )
         server_address = await self._env_server.start()
         env_client = None
         try:
-            await adapter.start()
+            await generation_server.start()
             env_client = EnvClient(server_address)
             await env_client.wait_for_server_startup(
                 timeout=self._verifiers_config.connection_timeout_sec
             )
             train_client_config = TrainClientConfig(
                 base_url=self._verifiers_config.model_adapter_base_url.format(
-                    port=adapter.port
+                    port=generation_server.port
                 ),
                 # No API key is needed. This intentionally unset variable makes
                 # Verifiers use "EMPTY" instead of forwarding PRIME_API_KEY.
@@ -179,16 +184,16 @@ class VerifiersRollouter(Rollouter):
             if env_client is not None:
                 await env_client.close()
             try:
-                await adapter.close()
+                await generation_server.close()
             finally:
                 await self._env_server.close()
             raise
-        self._adapter = adapter
+        self._generation_server = generation_server
         self._env_client = env_client
         self._train_client_config = train_client_config
 
     async def close(self) -> None:
-        """Close the Verifiers client, model adapter, and environment server."""
+        """Close the Verifiers client, generation server, and environment server."""
         try:
             if self._env_client is not None:
                 await self._env_client.close()
@@ -196,10 +201,10 @@ class VerifiersRollouter(Rollouter):
             self._env_client = None
             self._train_client_config = None
             try:
-                if self._adapter is not None:
-                    await self._adapter.close()
+                if self._generation_server is not None:
+                    await self._generation_server.close()
             finally:
-                self._adapter = None
+                self._generation_server = None
                 await self._env_server.close()
 
     async def run_group_rollouts(
@@ -253,19 +258,23 @@ class VerifiersRollouter(Rollouter):
         if not isinstance(sample, VerifiersTaskSample):
             raise TypeError("Verifiers requires a VerifiersTaskSample")
         if (
-            self._adapter is None
+            self._generation_server is None
             or self._env_client is None
             or self._train_client_config is None
         ):
             raise RuntimeError("Verifiers rollouter is not initialized")
 
-        # Route the adapter's HTTP generation requests through TorchTitan's
+        # Route the server's HTTP generation requests through TorchTitan's
         # controller-provided generator router.
-        self._adapter.set_generate_fn(generate_fn)
+        self._generation_server.set_generate_fn(generate_fn)
+
+        # One EnvClient.run executes a complete Verifiers episode. The harness
+        # owns the multi-turn model/tool loop and calls the generation server once per
+        # generation; run returns only after the episode stops.
         episode = await self._env_client.run(
             task_data=sample.task_data,
             client=self._train_client_config,
-            model=self._adapter.model,
+            model=self._generation_server.model_id,
             sampling=VerifiersSamplingConfig(
                 temperature=sampling.temperature,
                 top_p=sampling.top_p,
@@ -280,7 +289,7 @@ class VerifiersRollouter(Rollouter):
                 f"{len(traces)}"
             )
         trace = traces[0]
-        generation_metadata = self._adapter.pop_generation_metadata(trace.id)
+        generation_metadata = self._generation_server.pop_generation_metadata(trace.id)
         turns = self.trace_to_rollout_turns(
             trace=trace,
             generation_metadata=generation_metadata,
@@ -313,7 +322,7 @@ class VerifiersRollouter(Rollouter):
     def trace_to_rollout_turns(
         *,
         trace: Any,
-        generation_metadata: list[VerifiersGenerationMetadata],
+        generation_metadata: dict[str, VerifiersGenerationMetadata],
         group_id: int,
         rollout_id: int,
     ) -> list[RolloutTurn]:
@@ -332,18 +341,25 @@ class VerifiersRollouter(Rollouter):
         shared sampled node once, and attaches TorchTitan policy metadata from
         the matching model-generation call.
         """
-        successful_calls = [call for call in trace.calls if call.node is not None]
-        if len(successful_calls) != len(generation_metadata):
+        successful_nodes = [call.node for call in trace.calls if call.node is not None]
+        request_ids_by_node = trace.info.get(REQUEST_IDS_BY_NODE_INFO_KEY, {})
+        metadata_by_node = {}
+        for node in successful_nodes:
+            request_id = request_ids_by_node.get(str(node))
+            if request_id is None:
+                raise ValueError(f"Verifiers node {node} has no generation request ID")
+            call_metadata = generation_metadata.get(request_id)
+            if call_metadata is None:
+                raise ValueError(
+                    f"Verifiers request {request_id!r} has no generation metadata"
+                )
+            metadata_by_node[node] = call_metadata
+
+        if len(successful_nodes) != len(generation_metadata):
             raise ValueError(
-                "Verifiers trace/model-adapter call count mismatch: "
-                f"trace={len(successful_calls)}, adapter={len(generation_metadata)}"
+                "Verifiers trace/generation-server call count mismatch: "
+                f"trace={len(successful_nodes)}, server={len(generation_metadata)}"
             )
-        metadata_by_node = {
-            call.node: call_metadata
-            for call, call_metadata in zip(
-                successful_calls, generation_metadata, strict=True
-            )
-        }
         node_index = {id(node): index for index, node in enumerate(trace.nodes)}
         trained_nodes: set[int] = set()
         turns: list[RolloutTurn] = []

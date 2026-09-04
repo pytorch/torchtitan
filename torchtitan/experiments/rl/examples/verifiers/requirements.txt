@@ -1,2 +1,2 @@
-# The adapter targets the v1 API shipped in this validated release.
+# The integration targets the v1 API shipped in this validated release.
 verifiers==0.3.1

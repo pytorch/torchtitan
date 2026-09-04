@@ -23,13 +23,9 @@ _SESSION_ID_HEADER = "X-Session-ID"
 class VerifiersGenerationMetadata:
     """TorchTitan completion data that Verifiers does not retain in its trace.
 
-    The adapter stores these entries in call order under the Verifiers session
-    ID. Trace conversion pairs that ordered list with successful trace calls,
-    then uses each call's node index to populate the corresponding rollout
-    turn. This assumes model calls within one session complete serially, as they
-    do for the current single-agent ``NullHarness`` configuration. A harness
-    that makes concurrent calls within one session must instead correlate this
-    metadata with a stable per-call request ID.
+    ``GenerationServer`` stores these entries by request ID under the Verifiers
+    session ID. Trace conversion uses the request ID recorded for each Verifiers
+    node to attach this metadata to the corresponding rollout turn.
     """
 
     min_policy_version: int
@@ -42,12 +38,12 @@ class VerifiersGenerationMetadata:
     """Generator metrics attached to the corresponding rollout turn."""
 
 
-class GeneratorModelAdapter:
+class GenerationServer:
     """Expose a TorchTitan ``GenerateFn`` through Verifiers' model API.
 
     A Verifiers environment calls a named HTTP model endpoint, while TitanRL
     supplies an in-process ``GenerateFn`` backed by its generator router. This
-    adapter serves Verifiers' token-generation endpoint, forwards each request
+    server exposes Verifiers' token-generation endpoint, forwards each request
     to that function, and retains TorchTitan policy-version and metric metadata
     that the resulting Verifiers trace does not carry.
     """
@@ -57,23 +53,23 @@ class GeneratorModelAdapter:
         *,
         host: str,
         port: int,
-        model: str,
+        model_id: str,
         max_model_len: int,
     ) -> None:
         self.host = host
         self.requested_port = port
-        self.model = model
+        self.model_id = model_id
         self.max_model_len = max_model_len
         self.generate_fn: GenerateFn | None = None
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
-        self.turn_counts: dict[str, int] = {}
-        self.generation_metadata: dict[str, list[VerifiersGenerationMetadata]] = {}
+        self.request_counts: dict[str, int] = {}
+        self.generation_metadata: dict[str, dict[str, VerifiersGenerationMetadata]] = {}
 
     @property
     def port(self) -> int:
         if self.bound_port is None:
-            raise RuntimeError("GeneratorModelAdapter has not started")
+            raise RuntimeError("GenerationServer has not started")
         return self.bound_port
 
     def set_generate_fn(self, generate_fn: GenerateFn) -> None:
@@ -93,11 +89,11 @@ class GeneratorModelAdapter:
         sockets = getattr(site._server, "sockets", None)
         if not sockets:
             await runner.cleanup()
-            raise RuntimeError("model adapter did not bind a listening socket")
+            raise RuntimeError("generation server did not bind a listening socket")
         self.runner = runner
         self.bound_port = int(sockets[0].getsockname()[1])
         logger.info(
-            "Verifiers model adapter listening on http://%s:%d",
+            "Verifiers generation server listening on http://%s:%d",
             self.host,
             self.bound_port,
         )
@@ -108,15 +104,15 @@ class GeneratorModelAdapter:
             await runner.cleanup()
         self.runner = None
         self.bound_port = None
-        self.turn_counts.clear()
+        self.request_counts.clear()
         self.generation_metadata.clear()
 
     def pop_generation_metadata(
         self, session_id: str
-    ) -> list[VerifiersGenerationMetadata]:
+    ) -> dict[str, VerifiersGenerationMetadata]:
         """Detach one rollout's metadata for `trace_to_rollout_turns`."""
-        self.turn_counts.pop(session_id, None)
-        return self.generation_metadata.pop(session_id, [])
+        self.request_counts.pop(session_id, None)
+        return self.generation_metadata.pop(session_id, {})
 
     async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
@@ -129,7 +125,7 @@ class GeneratorModelAdapter:
                 "object": "list",
                 "data": [
                     {
-                        "id": self.model,
+                        "id": self.model_id,
                         "object": "model",
                         "owned_by": "torchtitan",
                         "max_model_len": self.max_model_len,
@@ -160,9 +156,9 @@ class GeneratorModelAdapter:
         except (TypeError, ValueError) as error:
             return web.json_response({"error": str(error)}, status=400)
 
-        turn_id = self.turn_counts.get(session_id, 0)
-        self.turn_counts[session_id] = turn_id + 1
-        request_id = f"{session_id}/turn={turn_id}"
+        request_index = self.request_counts.get(session_id, 0)
+        self.request_counts[session_id] = request_index + 1
+        request_id = f"{session_id}/request={request_index}"
         try:
             completion = await self.generate_fn(
                 prompt_token_ids,
@@ -195,12 +191,12 @@ class GeneratorModelAdapter:
                 status=502,
             )
 
-        self.generation_metadata.setdefault(session_id, []).append(
-            VerifiersGenerationMetadata(
-                min_policy_version=completion.min_policy_version,
-                max_policy_version=completion.max_policy_version,
-                metrics=list(completion.metrics),
-            )
+        self.generation_metadata.setdefault(session_id, {})[
+            completion.request_id
+        ] = VerifiersGenerationMetadata(
+            min_policy_version=completion.min_policy_version,
+            max_policy_version=completion.max_policy_version,
+            metrics=list(completion.metrics),
         )
         return web.json_response(
             {
