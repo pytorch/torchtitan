@@ -199,6 +199,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_bf16_reduction],
+            test_descr="FSDP BF16 Reduction Test",
+            test_name="fsdp_bf16_reduction",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_ddp4],
             test_descr="DDP",
             test_name="ddp",

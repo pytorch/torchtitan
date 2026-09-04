@@ -133,6 +133,20 @@ class TestConfigManager(unittest.TestCase):
         assert config.training.num_tokens_per_train_step == 8192
         assert config.training.max_context_length == 1024
 
+    def test_bfloat16_mixed_precision_reduction(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.mixed_precision_reduce",
+                "bfloat16",
+            ]
+        )
+
+        assert config.training.mixed_precision_reduce == "bfloat16"
+
     def test_num_tokens_per_microbatch_must_be_positive(self):
         config_manager = ConfigManager()
         with pytest.raises(SystemExit):
