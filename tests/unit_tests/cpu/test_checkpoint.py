@@ -14,6 +14,7 @@ import time
 import unittest
 import uuid
 from concurrent.futures import Future
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
@@ -36,6 +37,7 @@ from torchtitan.components.checkpointer.dcp import (
     CheckpointManager,
 )
 from torchtitan.config import Function
+from torchtitan.observability import structured_logger as sl
 
 
 class FakeOptimizersContainer:
@@ -1242,6 +1244,57 @@ class TestFilesystemCheckpointStorage(unittest.TestCase):
         self.assertTrue(self.storage.isdir(f"{root}/step-1"))
         self.assertTrue(self.storage.isfile(f"{root}/step-1/.metadata"))
         self.assertEqual(["step-1"], self.storage.listdir(root))
+
+
+class TestBaseCheckpointManagerTracing(unittest.TestCase):
+    def _manager(self, *, enable: bool = True):
+        manager = mock.Mock(spec=BaseCheckpointManager)
+        manager.enable = enable
+        manager._save.return_value = True
+        manager._load.return_value = True
+        return manager
+
+    def test_enabled_save_and_load_trace_backend_hooks(self):
+        events = []
+
+        @contextmanager
+        def trace_span(name):
+            events.append(f"{name}_start")
+            yield
+            events.append(f"{name}_end")
+
+        manager = self._manager()
+        manager._save.side_effect = lambda *_args: events.append("save") or True
+        manager._load.side_effect = lambda *_args: events.append("load") or True
+
+        with mock.patch.object(sl, "log_trace_span", side_effect=trace_span):
+            self.assertTrue(BaseCheckpointManager.save(manager, curr_step=10))
+            self.assertTrue(BaseCheckpointManager.load(manager, step=10))
+
+        self.assertEqual(
+            events,
+            [
+                "checkpoint_save_start",
+                "save",
+                "checkpoint_save_end",
+                "checkpoint_load_start",
+                "load",
+                "checkpoint_load_end",
+            ],
+        )
+        manager._save.assert_called_once_with(10, False)
+        manager._load.assert_called_once_with(10)
+
+    def test_disabled_save_and_load_do_not_trace_or_call_backend_hooks(self):
+        manager = self._manager(enable=False)
+
+        with mock.patch.object(sl, "log_trace_span") as log_trace_span:
+            self.assertFalse(BaseCheckpointManager.save(manager, curr_step=10))
+            self.assertFalse(BaseCheckpointManager.load(manager, step=10))
+
+        log_trace_span.assert_not_called()
+        manager._save.assert_not_called()
+        manager._load.assert_not_called()
 
 
 class TestShouldPurge(unittest.TestCase):
