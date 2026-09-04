@@ -6,8 +6,11 @@
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
+import dataclasses
+
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
@@ -35,11 +38,20 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 
     Takes the ``RoutedExperts.Config`` (which owns the ``token_dispatcher`` child) and
     swaps its dispatcher in place. Requires a dispatcher that handles padding
-    (TorchAOTokenDispatcher or DeepEP hybridep). Raises ValueError if the
-    dispatcher doesn't support it.
+    (TorchAOTokenDispatcher, HybridEPTokenDispatcher, or DeepEPTokenDispatcher).
+    Raises ValueError if the dispatcher doesn't support it.
     """
     dispatcher = routed_experts_config.token_dispatcher
-    if isinstance(dispatcher, AllToAllTokenDispatcher.Config) and not isinstance(
+    # DeepEP is checked before AllToAll: DeepEPTokenDispatcher is NOT an
+    # AllToAllTokenDispatcher.Config, but keep it explicit and first for clarity.
+    if isinstance(dispatcher, DeepEPTokenDispatcher.Config):
+        # DeepEP pads to pad_multiple itself: the expand (inference) path uses DeepEP's
+        # native expert_alignment, the compact (training) path pads in Python. Preserve
+        # cudagraphable / num_max_tokens_per_rank / hidden_dim; only set pad_multiple.
+        routed_experts_config.token_dispatcher = dataclasses.replace(
+            dispatcher, pad_multiple=pad_multiple
+        )
+    elif isinstance(dispatcher, AllToAllTokenDispatcher.Config) and not isinstance(
         dispatcher, TorchAOTokenDispatcher.Config
     ):
         routed_experts_config.token_dispatcher = TorchAOTokenDispatcher.Config(
@@ -58,9 +70,9 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
         )
     else:
         raise ValueError(
-            f"MoE quantization requires a token dispatcher that supports "
-            f"padding (TorchAOTokenDispatcher or HybridEPTokenDispatcher), "
-            f"got {type(dispatcher).__name__}."
+            f"MoE quantization requires a token dispatcher that supports padding "
+            f"(TorchAOTokenDispatcher, HybridEPTokenDispatcher, or "
+            f"DeepEPTokenDispatcher), got {type(dispatcher).__name__}."
         )
 
 

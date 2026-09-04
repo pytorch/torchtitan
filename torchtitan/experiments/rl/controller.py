@@ -572,8 +572,14 @@ class Controller(Configurable):
         # Ceiling (not target) for the generator's max_num_seqs: the per-generator
         # upper bound on concurrently scheduled sequences. vLLM may admit fewer if KV
         # is tight; this also sets CUDA-graph capture sizes.
+        # TODO(temporary, revert): raised 512 -> 8192 so the ceiling does not clip
+        # the derived value at larger rollout concurrency. 8192 is what P=128/G=32
+        # wants at 2 generator shards, the largest case under study. KV cache usage
+        # sat at ~2%, so this is not memory-bound. Revert once the measurement is
+        # done. This is a safety ceiling, not a tuning knob -- the operative value
+        # is the derived rollout_concurrency / num_generator_dp_shards.
         max_num_seqs = min(
-            math.ceil(rollout_concurrency / num_generator_dp_shards), 512
+            math.ceil(rollout_concurrency / num_generator_dp_shards), 8192
         )
 
         logger.info(

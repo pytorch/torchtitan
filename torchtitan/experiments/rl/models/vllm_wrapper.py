@@ -592,8 +592,8 @@ class VLLMModelWrapper(Module):
                 # layout is declared on the fused w13 parameter.
                 w13_layout = sharding_config.state_shardings.get("w13")
                 if w13_layout is not None:
-                    for proj_name in ("w1", "w3"):
-                        layouts[f"{module_prefix}{proj_name}.weight"] = w13_layout
+                    for split_name in ("w1.weight", "w3.weight", "w1_EFD", "w3_EFD"):
+                        layouts[f"{module_prefix}{split_name}"] = w13_layout
 
             if isinstance(module, FusedQKVLinear):
                 # FusedQKVLinear exposes split wq/wk/wv state-dict keys while

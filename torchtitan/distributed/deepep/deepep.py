@@ -90,9 +90,13 @@ _lib = torch.library.Library("deepep", "DEF")
 # recv_topk_idx is the per-received-token local-expert assignment, used by the compact
 # path to gather tokens into expert-major order (it is an empty placeholder in expand mode,
 # whose static layout is already expert-grouped).
+# expert_alignment pads each local expert's received-token count up to this multiple
+# (DeepEP's native alignment). Used only by the expand layout for quantized grouped GEMMs
+# (e.g. MXFP8 needs group offsets that are multiples of 32); pass 1 for no padding.
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
-    "int num_experts, int num_tokens_per_rank, bool cudagraphable) "
+    "int num_experts, int num_tokens_per_rank, int expert_alignment, "
+    "bool cudagraphable) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
 )
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
@@ -133,6 +137,7 @@ def _dispatch_op_impl(
     topk_weights: torch.Tensor,
     num_experts: int,
     num_tokens_per_rank: int,
+    expert_alignment: int,
     cudagraphable: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP v2 dispatch.
@@ -166,6 +171,7 @@ def _dispatch_op_impl(
         # (global token ID = rank * C + local token ID) and, in expand mode,
         # to size recv_x. MoE physically pads x so C is identical across ranks.
         num_max_tokens_per_rank=num_tokens_per_rank,
+        expert_alignment=expert_alignment,
         num_sms=num_sms,
         do_expand=cudagraphable,
         do_cpu_sync=not cudagraphable,
@@ -177,12 +183,27 @@ def _dispatch_op_impl(
     # Per-local-expert received-token counts for the grouped GEMM.
     if cudagraphable:
         # Expand mode: no host sync allowed. Recover per-expert counts from the
-        # device-side inclusive prefix sum (expert_alignment defaults to 1, so this is
-        # a plain prefix sum). GroupedExperts.forward cumsums these back into grouped-mm offs.
+        # device-side prefix sum. GroupedExperts.forward cumsums these back into
+        # grouped-mm offs.
+        #
+        # Padding: with expert_alignment > 1 DeepEP pads each expert's region, and psum
+        # is not a plain prefix sum -- ``psum[i] == align(psum[i-1], A) + count[i]``.
+        # The GEMM indexes the padded buffer, so it needs the diffs of the ALIGNED
+        # prefix sums; a plain diff gives the real counts, which describe a packed
+        # layout. Unpadded (A=1) is unchanged, since
+        #
+        #     torch.div(psum + 0, 1, rounding_mode="floor") * 1 == psum
+        #
         psum = handle.psum_num_recv_tokens_per_expert
-        num_recv_per_expert = torch.diff(psum, prepend=psum.new_zeros(1)).to(
-            torch.int32
+        aligned_psum = (
+            torch.div(
+                psum + (expert_alignment - 1), expert_alignment, rounding_mode="floor"
+            )
+            * expert_alignment
         )
+        num_recv_per_expert = torch.diff(
+            aligned_psum, prepend=aligned_psum.new_zeros(1)
+        ).to(torch.int32)
         # Expand layout is already expert-grouped; no gather needed -> empty placeholder
         # (a torch.library op must return a Tensor, not None).
         recv_topk_idx = recv_x.new_empty(0, dtype=torch.long)
@@ -236,10 +257,11 @@ def _dispatch_backward(
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
     )
     # Order matches op inputs: x, topk_idx, topk_weights, num_experts,
-    # num_tokens_per_rank, cudagraphable.
+    # num_tokens_per_rank, expert_alignment, cudagraphable.
     # Backward only runs on the compact (cudagraphable=False) path; the expand layout is
     # inference-only ("must not be backward").
-    return grad_x, None, grad_topk_weights, None, None, None
+    # expert_alignment is 1 there (compact pads in Python).
+    return grad_x, None, grad_topk_weights, None, None, None, None
 
 
 @torch.library.impl(_lib, "combine", "CUDA")
@@ -437,6 +459,50 @@ def _unpermute_tokens(
     return output_hidden_states
 
 
+def _pad_compact_expert_groups(
+    routed_input: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    pad_multiple: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pad each expert's token group (expert-sorted compact layout) to a multiple of
+    ``pad_multiple`` with zero rows, so a quantized grouped GEMM sees aligned group offsets.
+
+    The compact path re-permutes DeepEP's deduplicated output into expert-major order but does
+    not pad; the MXFP8 grouped GEMM needs each per-expert group to be a multiple of the block
+    size (32). We insert zero rows after each expert's real rows and return the aligned counts
+    (whose cumsum gives the padded grouped-GEMM offsets) plus a map from real rows to their
+    slot in the padded buffer, so ``combine`` can gather the real expert outputs back.
+
+    Args:
+        routed_input: ``[R, D]`` expert-sorted real tokens (R = sum(num_tokens_per_expert)).
+        num_tokens_per_expert: ``[E]`` actual per-expert token counts (device int).
+        pad_multiple: alignment multiple (e.g. 32 for MXFP8).
+
+    Returns:
+        padded_input: ``[R_pad, D]`` with zero pad rows between expert groups.
+        aligned_counts: ``[E]`` per-expert counts rounded up to pad_multiple.
+        real_dest: ``[R]`` destination row in padded_input for each real (expert-sorted) row.
+    """
+    device = routed_input.device
+    counts = num_tokens_per_expert.to(torch.int64)
+    aligned = ((counts + (pad_multiple - 1)) // pad_multiple) * pad_multiple
+    num_real = routed_input.shape[0]
+    # Per-expert start offsets in the real (src) and padded (dst) layouts.
+    src_starts = counts.cumsum(0) - counts
+    dst_starts = aligned.cumsum(0) - aligned
+    # Compact path is host-synced, so materializing the padded row count is fine (no cudagraph).
+    num_padded = int(aligned.sum().item())
+    # Map each real row -> its destination row: dst_start[e] + (row - src_start[e]).
+    expert_of_row = torch.repeat_interleave(
+        torch.arange(counts.shape[0], device=device), counts, output_size=num_real
+    )
+    rows = torch.arange(num_real, device=device)
+    real_dest = dst_starts[expert_of_row] + (rows - src_starts[expert_of_row])
+    padded_input = routed_input.new_zeros((num_padded, routed_input.shape[1]))
+    padded_input[real_dest] = routed_input
+    return padded_input, aligned.to(num_tokens_per_expert.dtype), real_dest
+
+
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine."""
@@ -447,6 +513,9 @@ class DispatchState:
     # Compact path (cudagraphable=False): gather/scatter mapping for the grouped GEMM.
     permuted_indices: torch.Tensor | None = None
     permuted_scores: torch.Tensor | None = None
+    # Compact path with quantized padding: maps real rows to their slot in the padded
+    # grouped-GEMM buffer, so combine gathers real expert outputs back (None = no padding).
+    real_dest: torch.Tensor | None = None
     # Expand path (cudagraphable=True): per-received-row routing scores.
     recv_scores: torch.Tensor | None = None
 
@@ -460,6 +529,7 @@ def dispatch_tokens(
     *,
     num_tokens_per_rank: int,
     cudagraphable: bool = False,
+    pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
 
@@ -485,6 +555,10 @@ def dispatch_tokens(
             cudagraph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
             layout with a host sync and full autograd (training).
+        pad_multiple: If set (> 1), pad each local expert's token group to this multiple so a
+            quantized grouped GEMM (e.g. MXFP8 block size 32) sees aligned group offsets. The
+            expand path pads natively via DeepEP's expert_alignment; the compact path pads in
+            Python (_pad_compact_expert_groups). None or 1 means no padding (bf16 path).
 
     Returns:
         (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts], state)
@@ -514,6 +588,12 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
+    # Expand path pads expert groups natively via DeepEP's expert_alignment. The compact
+    # path re-permutes deduplicated tokens in Python (_permute_tokens), so DeepEP's aligned
+    # counts would not match the gathered rows; it pads in Python instead (expert_alignment=1).
+    do_pad = pad_multiple is not None and pad_multiple > 1
+    expert_alignment = pad_multiple if (do_pad and cudagraphable) else 1
+
     (
         recv_x,
         recv_topk_idx,
@@ -526,6 +606,7 @@ def dispatch_tokens(
         top_scores,
         num_experts=num_experts,
         num_tokens_per_rank=num_tokens_per_rank,
+        expert_alignment=expert_alignment,
         cudagraphable=cudagraphable,
     )
 
@@ -547,12 +628,21 @@ def dispatch_tokens(
     routed_input, permuted_scores, permuted_indices = _permute_tokens(
         recv_x, recv_topk_idx, recv_scores
     )
+    # For a quantized grouped GEMM, pad each expert group to pad_multiple in Python (the
+    # deduplicated re-permute above ignores DeepEP's native expert_alignment). combine gathers
+    # the real rows back via real_dest before scoring + unpermute.
+    real_dest = None
+    if do_pad:
+        routed_input, num_tokens_per_expert, real_dest = _pad_compact_expert_groups(
+            routed_input, num_tokens_per_expert, pad_multiple
+        )
     state = DispatchState(
         handle_id=handle_id,
         num_recv_tokens=num_recv_tokens,
         cudagraphable=False,
         permuted_indices=permuted_indices,
         permuted_scores=permuted_scores,
+        real_dest=real_dest,
     )
     return routed_input, num_tokens_per_expert, state
 
@@ -585,6 +675,10 @@ def combine_tokens(
 
     if not state.cudagraphable:
         assert state.permuted_indices is not None
+        if state.real_dest is not None:
+            # Grouped GEMM ran on the zero-padded layout; gather the real expert-sorted rows
+            # back (dropping the pad rows) so scoring + unpermute see one row per assignment.
+            hidden_states = hidden_states[state.real_dest]
         if state.permuted_scores is not None:
             hidden_states = hidden_states * state.permuted_scores.to(
                 hidden_states.dtype

@@ -6,7 +6,8 @@
 
 import logging
 import os
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -86,6 +87,14 @@ class PolicyTrainer(Actor, Configurable):
         Separate from the generator's override so the two can differ."""
         dump_folder: str = ""
         """Folder for AC debug dumps when using memory_budget mode."""
+        transform_state_dict_fn: Callable[
+            [dict[str, Any]], dict[str, Any]
+        ] | None = None
+        """Rewrites the model state dict just before it is published.
+
+        Runs after the dtype cast, so it sees exactly what would go on the wire.
+        Whatever it returns must match the generator's parameter names and
+        shapes. Used to publish quantized expert weights."""
 
     def __init__(
         self,
@@ -502,6 +511,9 @@ class PolicyTrainer(Actor, Configurable):
                 )
                 for name, tensor in state_dict.items()
             }
+
+        if self.config.transform_state_dict_fn is not None:
+            state_dict = self.config.transform_state_dict_fn(state_dict)
 
         await ts.put_state_dict(
             state_dict,

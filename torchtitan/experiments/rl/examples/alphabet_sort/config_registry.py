@@ -12,10 +12,15 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+import math
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.quantization import MXFP8GroupedExpertsQATConverter
+from torchtitan.components.quantization.mxfp8.utils import (
+    _quantize_expert_state_dict_to_mxfp8,
+)
 from torchtitan.config import (
     CompileConfig,
     DebugConfig,
@@ -825,6 +830,120 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def _rl_grpo_qwen3_30b_a3b_varlen_tp1_perf(
+    num_prompts_per_train_step: int,
+    *,
+    mxfp8_experts: bool = False,
+    deepep: bool = False,
+) -> Controller.Config:
+    """
+    A variant of `rl_grpo_qwen3_30b_a3b_varlen` at TP=1 with an overridden
+    P = `num_prompts_per_train_step` and, optionally, MXFP8 QAT on the MoE
+    grouped experts only and/or the DeepEP comm backend with a
+    cudagraph-capturable generator.
+
+    Uses async RL with a fixed G=32 `num_samples_per_prompt`.
+    """
+    config = rl_grpo_qwen3_30b_a3b_varlen()
+    config.async_loop.num_prompts_per_train_step = num_prompts_per_train_step
+    config.async_loop.num_samples_per_prompt = 32
+
+    # TP=1 settings
+    train_par = config.trainer.parallelism
+    train_par.data_parallel_shard_degree = 4
+    train_par.data_parallel_replicate_degree = 1
+    train_par.tensor_parallel_degree = 1
+    train_par.expert_parallel_degree = 4
+    gen_par = config.generator.parallelism
+    gen_par.data_parallel_degree = 4
+    gen_par.tensor_parallel_degree = 1
+    gen_par.expert_parallel_degree = 4
+
+    # Perf overrides
+    # TODO: add torchtitan.overrides.fused_swiglu.fused_grouped_experts
+    # once we figure out how to set this for mxfp8 trainer
+    trainer_overrides = [
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
+    ]
+    generator_overrides = trainer_overrides.copy()
+
+    # Generator-only overrides. In the mxfp8 path, the trainer:
+    #   1. Runs mxfp8 fwd + bf16 bwd during forward (`MXFP8QATGroupedExperts`)
+    #   2. Pre-quantizes mxfp8 weights for the generator (`transform_state_dict_fn`)
+    #
+    # The generator then reads these pre-quantized weights and compute rollouts
+    # directly on them using the `mxfp8_inference_grouped_experts` override.
+    # Both bf16 and mxfp8 paths use fused w1/w3 experts through different overrides.
+    if mxfp8_experts:
+        # model_compile_enabled=False matches the inherited compile=False: the
+        # trainer's compact DeepEP / standard all-to-all path issues unpinned D2H
+        # copies that block torch.compile and CUDA graph capture.
+        converters = [
+            MXFP8GroupedExpertsQATConverter.Config(
+                pad_multiple=128, model_compile_enabled=False
+            )
+        ]
+        config.trainer.transform_state_dict_fn = _quantize_expert_state_dict_to_mxfp8
+        generator_overrides.append(
+            "torchtitan.overrides.mxfp8_inference_grouped_experts."
+            "mxfp8_inference_grouped_experts"
+        )
+    else:
+        converters = None
+        generator_overrides.append(
+            "torchtitan.overrides.fused_swiglu.fused_grouped_experts"
+        )
+
+    # If DeepEP, then set additional overrides, raise scheduler limits,
+    # and enable cudagraphs on the generator
+    if deepep:
+        # Generator-only override -> cudagraph-able DeepEP EXPAND dispatch
+        generator_overrides.append(
+            (
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                {"cudagraphable": True},
+            )
+        )
+        # Set `max_num_batched_tokens` based on the `max_num_seqs` determined by the
+        # Controller, plus 2048 to leave headroom for prefill. DeepEP's per-rank
+        # buffer capacity is derived from this limit.
+        gen_dp_shards = max(config.generator.parallelism.data_parallel_degree, 1)
+        max_num_seqs = min(
+            math.ceil(
+                config.async_loop.max_active_rollout_groups
+                * config.async_loop.num_samples_per_prompt
+                / gen_dp_shards
+            ),
+            8192,
+        )
+        config.generator.max_num_batched_tokens = max_num_seqs + 2048
+        config.generator.cudagraph = VLLMCudagraphConfig(
+            enable=True, mode="FULL_AND_PIECEWISE"
+        )
+
+    # Set the new moe_comm_backend, converters, and overrides
+    config.model_spec = model_registry(
+        "30B-A3B",
+        attn_backend="varlen",
+        moe_comm_backend="deepep" if deepep else None,
+        converters=converters,
+    )
+    config.trainer.override = OverrideConfig(imports=trainer_overrides)
+    config.generator.override = OverrideConfig(imports=generator_overrides)
+    return config
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p128_deepep_tp1_perf() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=128/G=32, TP=1, bf16."""
+    return _rl_grpo_qwen3_30b_a3b_varlen_tp1_perf(128, deepep=True)
+
+
+def rl_grpo_qwen3_30b_a3b_varlen_p128_deepep_mxfp8_tp1_perf() -> Controller.Config:
+    """DeepEP + cudagraph generator on 4 GPUs, P=128/G=32, TP=1, MXFP8 MoE grouped experts."""
+    return _rl_grpo_qwen3_30b_a3b_varlen_tp1_perf(128, deepep=True, mxfp8_experts=True)
 
 
 def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
