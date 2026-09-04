@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
     apply_overrides,
@@ -321,9 +321,7 @@ class VLLMModelWrapper(Module):
             pp=training_parallelism.pipeline_parallel_degree,
             ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
-            spmd_backend=training_parallelism.spmd_backend,
         )
-        dist_utils.set_spmd_backend(training_parallelism.spmd_backend)
         self.spmd_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,
@@ -490,44 +488,20 @@ class VLLMModelWrapper(Module):
         Compute logits from hidden states."""
 
         with self.spmd_context():
-            # When TP is applied, forward() returns the full tensor back to vLLM.
-            # The DTensor path wraps that plain tensor before lm_head; spmd_types
-            # keeps tensors local and uses the module sharding contracts directly.
-            if (
-                self.parallel_dims.tp_enabled
-                and self.parallel_dims.spmd_backend != "spmd_types"
-            ):
-                hidden_states = DTensor.from_local(
-                    hidden_states,
-                    device_mesh=self.parallel_dims.get_mesh("tp"),
-                    placements=[
-                        Replicate(),
-                    ],
-                )
-
             logits = self.model.lm_head(hidden_states)
 
             # lm_head returns vocab-sharded logits under TP; gather to the
             # full local logits tensor that vLLM expects.
             if self.parallel_dims.tp_enabled:
-                if self.parallel_dims.spmd_backend == "spmd_types":
-                    mesh = current_spmd_mesh()
-                    assert mesh is not None
-                    logits = spmd.redistribute(
-                        logits,
-                        mesh.get_group("tp"),
-                        src=spmd.S(-1),
-                        dst=spmd.R,
-                        backward_options={"op_dtype": logits.dtype},
-                    )
-                elif isinstance(logits, DTensor):
-                    placements = tuple(
-                        Replicate()
-                        if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
-                        else p
-                        for p in logits.placements
-                    )
-                    logits = logits.redistribute(placements=placements).to_local()
+                mesh = current_spmd_mesh()
+                assert mesh is not None
+                logits = spmd.redistribute(
+                    logits,
+                    mesh.get_group("tp"),
+                    src=spmd.S(-1),
+                    dst=spmd.R,
+                    backward_options={"op_dtype": logits.dtype},
+                )
 
         return logits
 
@@ -549,12 +523,11 @@ class VLLMModelWrapper(Module):
                 model_config=self.config,
                 hf_assets_path=cfg.initial_load_path,
             )
-            if self.parallel_dims.spmd_backend == "spmd_types":
-                sd_adapter = PlainToDTensorStateDictAdapter(
-                    sd_adapter,
-                    self.get_state_dict_layouts(),
-                    self.parallel_dims,
-                )
+            sd_adapter = PlainToDTensorStateDictAdapter(
+                sd_adapter,
+                self.get_state_dict_layouts(),
+                self.parallel_dims,
+            )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)
         # ensures only MODEL state is loaded, so None optimizer/lr_scheduler

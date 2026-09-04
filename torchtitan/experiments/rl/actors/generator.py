@@ -35,7 +35,7 @@ from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
-from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
+from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
     patch_bmm_for_batch_invariance,
@@ -1339,15 +1339,7 @@ class VLLMGenerator(Actor, Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = model.model.state_dict()
-        if get_spmd_backend() == "spmd_types":
-            await self._get_spmd_state_dict(model_sd, model=model)
-        else:
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=model_sd,
-                strict=False,
-                direct_rdma=False,
-            )
+        await self._get_spmd_state_dict(model_sd, model=model)
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.

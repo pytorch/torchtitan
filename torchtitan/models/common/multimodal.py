@@ -18,19 +18,18 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.spmd_types import spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
 
 
 def multimodal_context() -> contextlib.AbstractContextManager[None]:
     """Use a DP-local mesh while preparing multimodal inputs.
 
-    Under ``spmd_types`` the vision encoder and the vision->text scatter run
+    The vision encoder and the vision->text scatter run
     per-DP-rank on that rank's own images: the pixel tensors are DP-local
     (``V@DP``), so the region must execute with DP treated as a local axis.
     After the scatter the tensor is token-aligned again and global DP batch
-    sharding resumes. A no-op outside ``spmd_types`` (or when DP is size 1).
+    sharding resumes. This is a no-op when DP is size 1.
     """
-    if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
+    if spmd_mesh_size("dp") > 1:
         return spmd.set_current_mesh(local_axes=("dp",))
     return contextlib.nullcontext()
 
@@ -124,7 +123,7 @@ def gather_vision_embeds(
     # token layout at the fusion boundary.
     with spmd.local():
         fused_TD = torch.where(is_vision_T1, gathered_TD, inputs_TD)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         spmd.assert_type_like(fused_TD, inputs_TD)
     return fused_TD
 

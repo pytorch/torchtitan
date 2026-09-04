@@ -75,7 +75,6 @@ class FakeMoEModel(nn.Module):
 
 
 class FakeParallelDims:
-    spmd_backend = "none"
     ep_enabled = False
     tp = 1
 

@@ -37,8 +37,7 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    if parallelism.spmd_backend == "spmd_types" or parallel_dims.tp_enabled:
-        model.parallelize(parallel_dims)
+    model.parallelize(parallel_dims)
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -56,14 +55,7 @@ def parallelize_llama(
 
     # Always run apply_fsdp_to_decoder -- with shard_degree=1 it is a no-op for
     # the all-gather but still installs the MixedPrecisionPolicy.
-    if parallelism.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    else:
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(names)
-        dp_mesh_dims = None
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
     apply_fsdp_to_decoder(
         model,

@@ -20,7 +20,6 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -464,6 +463,15 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
+def get_simple_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
+    """Return the flattened DP-shard/CP mesh used by SimpleFSDP."""
+    fsdp_mesh = parallel_dims.get_optional_mesh(
+        ["dp_shard", "cp"], include_singleton_axes=True
+    )
+    assert fsdp_mesh is not None
+    return fsdp_mesh._flatten("fsdp")
+
+
 def apply_simple_fsdp(
     model: nn.Module,
     *,
@@ -476,31 +484,21 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
-    use_spmd_types = get_spmd_backend() == "spmd_types"
-    fsdp_mesh: DeviceMesh | None = None
-    if use_spmd_types:
-        fsdp_mesh = parallel_dims.get_optional_mesh(
-            ["dp_shard", "cp"], include_singleton_axes=True
-        )
-        assert fsdp_mesh is not None
-        fsdp_mesh = fsdp_mesh._flatten("fsdp")
+    fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
 
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            if use_spmd_types:
-                dp_replicate_mesh = parallel_dims.get_optional_mesh(
-                    "dp_replicate", include_singleton_axes=True
-                )
-                assert dp_replicate_mesh is not None
-                dp_mesh = DeviceMesh._concatenate([dp_replicate_mesh, fsdp_mesh])
-            else:
-                dp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            dp_replicate_mesh = parallel_dims.get_optional_mesh(
+                "dp_replicate", include_singleton_axes=True
+            )
+            assert dp_replicate_mesh is not None
+            dp_mesh = DeviceMesh._concatenate([dp_replicate_mesh, fsdp_mesh])
             dp_mode = "hybrid_shard"
         else:
             dp_mesh = parallel_dims.get_mesh("dp_replicate")
             dp_mode = "replicate"
     else:
-        dp_mesh = fsdp_mesh if use_spmd_types else parallel_dims.get_mesh("fsdp")
+        dp_mesh = fsdp_mesh
         dp_mode = "fully_shard"
 
     mp_policy = MixedPrecisionPolicy(
@@ -534,9 +532,7 @@ def apply_simple_fsdp(
                 dp_mode,
                 mp_policy=mp_policy,
                 shard_dim=experts_shard_dim,
-                non_dp_mesh=(
-                    parallel_dims.get_optional_mesh("ep") if use_spmd_types else None
-                ),
+                non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
             )
 
     model = data_parallel(
@@ -544,7 +540,7 @@ def apply_simple_fsdp(
         dp_mesh,
         dp_mode,
         mp_policy=mp_policy,
-        non_dp_mesh=(parallel_dims.get_optional_mesh("tp") if use_spmd_types else None),
+        non_dp_mesh=parallel_dims.get_optional_mesh("tp"),
     )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode

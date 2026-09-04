@@ -267,19 +267,26 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
         """Create a toy model and apply simple_fsdp data_parallel."""
         model = ToyModel(dim, n_layers).cuda()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         model = data_parallel(model, device_mesh=fsdp_mesh, mode="fully_shard")
         return model
 
     def _get_fsdp_pg_name(self):
         """Get the FSDP process group name from the mesh."""
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         return fsdp_mesh.get_group().group_name
 
     def _export_and_get_bw_graph(self, model, inputs):
@@ -1230,11 +1237,14 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
     def _get_fsdp_pg_name(self):
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         return fsdp_mesh.get_group().group_name
 
     def _count_all_ag_nodes(self, gm):
@@ -2115,7 +2125,6 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
         model_spec = llama3_model_registry("debugmodel")
@@ -2126,7 +2135,11 @@ class TestBucketingPrefetchOrder(FSDPTest):
             model = model_config.build()
 
         annotate_llama(model)
-        fsdp_mesh = parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
@@ -2146,6 +2159,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             GraphTrainer,
             tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+            parallel_dims=parallel_dims,
         )
 
         num_tokens = self.BATCH_SIZE * self.SEQ_LEN

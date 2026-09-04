@@ -45,11 +45,7 @@ class FluxTrainer(Trainer):
         # Flux samples diffusion noise and timesteps during each model step, so
         # data-parallel ranks need distinct model RNG streams. Dataset
         # transformations such as prompt dropout use Grain's separate RNG.
-        distinct_seed_mesh_dims = (
-            ["cp", "dp_shard", "dp_replicate"]
-            if config.parallelism.spmd_backend == "spmd_types"
-            else ["fsdp", "dp_replicate"]
-        )
+        distinct_seed_mesh_dims = ["cp", "dp_shard", "dp_replicate"]
         dist_utils.set_determinism(
             self.parallel_dims,
             self.device,

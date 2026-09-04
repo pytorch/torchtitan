@@ -16,9 +16,6 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 from spmd_types import SpmdType
-from torch.distributed.tensor import distribute_tensor, DTensor
-from torch.distributed.tensor.experimental import local_map
-from torch.distributed.tensor.placement_types import Placement
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
@@ -32,11 +29,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_redistribute_per_axis,
     spmd_validate_redistributions,
 )
-from torchtitan.distributed.utils import (
-    check_dtensor_placements_match,
-    get_spmd_backend,
-)
-from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class Module(nn.Module, Configurable):
@@ -98,27 +91,8 @@ class Module(nn.Module, Configurable):
 
         self._init_self_parameters()
 
-        # _init_self_buffers often re-assigns (e.g. ``self.cache = self._precompute()``),
-        # replacing any DTensor entry with a plain tensor. Restore DTensor-ness
-        # by re-distributing the freshly computed global tensor to the original
-        # placements. ``distribute_tensor`` supports Replicate / Shard / Partial.
-        dtensor_meta = {
-            name: (buf.device_mesh, buf.placements)
-            for name, buf in self._buffers.items()
-            if isinstance(buf, DTensor)
-        }
         with self._preserve_buffer_spmd_types():
             self._init_self_buffers(buffer_device=buffer_device)
-        for name, (mesh, placements) in dtensor_meta.items():
-            new_buf = self._buffers.get(name)
-            if new_buf is None or isinstance(new_buf, DTensor):
-                continue
-            persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(
-                name,
-                distribute_tensor(new_buf, mesh, list(placements)),
-                persistent=persistent,
-            )
 
     def _apply(self, fn, recurse=True):
         """Override to preserve annotations across model.to_empty() in trainer.py"""
@@ -134,10 +108,6 @@ class Module(nn.Module, Configurable):
         clobbering over SPMD annotations. Instead of attempting to typecheck over
         this, we save-restore annotations on their respective mesh axes.
         """
-        if get_spmd_backend() != "spmd_types":
-            yield
-            return
-
         saved = {
             fqn: SpmdType(
                 dict(spmd.get_local_type(buf)),
@@ -248,13 +218,12 @@ class Module(nn.Module, Configurable):
 
         1. Shard states (parameters and buffers).
         2. Wrap the forward with:
-            ``reshard inputs -> [optional local_map] forward -> reshard outputs``.
+            ``reshard inputs -> [optional local SPMD] forward -> reshard outputs``.
 
         ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
 
         Each ``ShardingConfig`` field resolves its mesh independently via
-        ``resolve_mesh()`` and resolves its placements independently via
-        ``resolve_placements()``.
+        ``resolve_mesh()``.
         """
         if self._parallelized:
             raise ValueError(
@@ -276,8 +245,7 @@ class Module(nn.Module, Configurable):
         if self._sharding_config is None:
             return
 
-        if parallel_dims.spmd_backend == "spmd_types":
-            spmd_validate_redistributions(self._sharding_config)
+        spmd_validate_redistributions(self._sharding_config)
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
@@ -367,9 +335,7 @@ class Module(nn.Module, Configurable):
         """Distribute params and buffers per ``state_shardings``.
 
         Each entry resolves its own mesh via ``resolve_mesh``, so different
-        params on the same Module may live on different meshes. An
-        already-DTensor param/buffer indicates it was distributed by a
-        sibling (e.g. weight tying); skip but verify placements agree.
+        params on the same Module may live on different meshes.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -381,42 +347,18 @@ class Module(nn.Module, Configurable):
                     f"{type(self).__name__}.{name} has no placement declared "
                     "in sharding_config.state_shardings."
                 )
-            if parallel_dims.spmd_backend == "spmd_types":
-                self._validate_even_model_parallel_param_sharding(
-                    name,
-                    param,
-                    spmd_layout,
-                    parallel_dims,
-                )
-                self._spmd_distribute_state(
-                    parallel_dims,
-                    name,
-                    param,
-                    spmd_layout,
-                    is_param=True,
-                )
-                continue
-            axes = spmd_axes(spmd_layout)
-            mesh = parallel_dims.resolve_mesh(axes)
-            if mesh is None:
-                continue
-            placements = resolve_placements(spmd_layout, mesh)
-            if isinstance(param, DTensor):
-                if tuple(param.placements) != tuple(placements):
-                    raise ValueError(
-                        f"{type(self).__name__}.{name} is already a DTensor with "
-                        f"placements {param.placements}, but its sharding_config "
-                        f"expects {placements}. This usually means a tied parameter "
-                        "is referenced by two modules with conflicting sharding "
-                        "configs."
-                    )
-                continue
-            self.register_parameter(
+            self._validate_even_model_parallel_param_sharding(
                 name,
-                nn.Parameter(
-                    distribute_tensor(param, mesh, list(placements)),
-                    requires_grad=param.requires_grad,
-                ),
+                param,
+                spmd_layout,
+                parallel_dims,
+            )
+            self._spmd_distribute_state(
+                parallel_dims,
+                name,
+                param,
+                spmd_layout,
+                is_param=True,
             )
 
         for name, buffer in self.named_buffers(recurse=False):
@@ -430,25 +372,12 @@ class Module(nn.Module, Configurable):
                 # ``register_buffer(name, None)`` reserves a slot to be filled
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
-            if parallel_dims.spmd_backend == "spmd_types":
-                self._spmd_distribute_state(
-                    parallel_dims,
-                    name,
-                    buffer,
-                    spmd_layout,
-                    is_param=False,
-                )
-                continue
-            axes = spmd_axes(spmd_layout)
-            mesh = parallel_dims.resolve_mesh(axes)
-            if mesh is None:
-                continue
-            placements = resolve_placements(spmd_layout, mesh)
-            persistent = name not in self._non_persistent_buffers_set
-            self.register_buffer(
+            self._spmd_distribute_state(
+                parallel_dims,
                 name,
-                distribute_tensor(buffer, mesh, list(placements)),
-                persistent=persistent,
+                buffer,
+                spmd_layout,
+                is_param=False,
             )
 
     def _maybe_wrap_with_local_region(
@@ -456,16 +385,15 @@ class Module(nn.Module, Configurable):
         fn: Callable,
         parallel_dims: ParallelDims,
     ) -> Callable:
-        """Wrap ``fn`` with a local-tensor region if local_map config is set.
+        """Wrap ``fn`` with a local-tensor region if configured.
 
-        Input placements come from ``in_dst_shardings`` (the same dict
-        ``_redistribute_inputs`` uses to pre-align inputs); output placements
-        from ``out_src_shardings``. DTensor uses ``local_map``; the spmd_types
-        backend uses the analogous local SPMD wrapper.
+        Input layouts come from ``in_dst_shardings`` (the same dict
+        ``_redistribute_inputs`` uses to pre-align inputs); output layouts
+        come from ``out_src_shardings``.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
-        if sharding_config.local_map is None:
+        if not sharding_config.local_spmd:
             return fn
 
         in_dst = (
@@ -475,68 +403,20 @@ class Module(nn.Module, Configurable):
         out_src = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
         if out_src is None:
             raise AssertionError(
-                f"{type(self).__name__}: local_map is set but "
+                f"{type(self).__name__}: local_spmd is set but "
                 "out_src_shardings is None."
             )
         missing_in = [name for name in pos_args if name not in in_dst]
         if missing_in:
             raise AssertionError(
-                f"{type(self).__name__}: local_map is set but in_dst_shardings "
+                f"{type(self).__name__}: local_spmd is set but in_dst_shardings "
                 f"is missing entries for: {missing_in}"
             )
         in_named: list[SpmdType] = [in_dst[name] for name in pos_args]
 
-        if parallel_dims.spmd_backend == "spmd_types":
-            return self._spmd_apply_local_map(fn, in_named, out_src)
-        return self._apply_local_map(fn, parallel_dims, in_named, out_src)
+        return self._spmd_apply_local_region(fn, in_named, out_src)
 
-    def _apply_local_map(
-        self,
-        fn: Callable,
-        parallel_dims: ParallelDims,
-        in_named: list[SpmdType],
-        out_src: SpmdType | tuple[SpmdType | None, ...],
-    ) -> Callable:
-        """Apply DTensor local_map for a local-tensor compute region."""
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        lm = sharding_config.local_map
-        assert lm is not None
-
-        if isinstance(out_src, tuple):
-            out_named: list[SpmdType] = [p for p in out_src if p is not None]
-        else:
-            out_named = [out_src]
-        # in_grad_placements may contain None for non-tensor args; filter
-        # them out for mesh resolution -- local_map passes None through.
-        grad_named = lm.in_grad_placements
-
-        resolved_mesh = parallel_dims.resolve_shared_mesh(
-            in_named + out_named + (list(grad_named) if grad_named else [])
-        )
-        if resolved_mesh is None:
-            return fn
-
-        out_placements: tuple[tuple[Placement, ...], ...] = tuple(
-            resolve_placements(p, resolved_mesh) for p in out_named
-        )
-        in_grad_placements = (
-            tuple(
-                resolve_placements(p, resolved_mesh) if p is not None else None
-                for p in grad_named
-            )
-            if grad_named is not None
-            else None
-        )
-        return local_map(
-            fn,
-            in_placements=tuple(resolve_placements(p, resolved_mesh) for p in in_named),
-            out_placements=out_placements,
-            in_grad_placements=in_grad_placements,
-            device_mesh=resolved_mesh,
-        )
-
-    def _spmd_apply_local_map(
+    def _spmd_apply_local_region(
         self,
         fn: Callable,
         in_named: list[SpmdType],
@@ -564,11 +444,8 @@ class Module(nn.Module, Configurable):
     ) -> tuple[tuple, dict]:
         """Redistribute inputs to desired placements.
 
-        Per input present in ``in_src_shardings`` / ``in_dst_shardings``:
-        resolve a mesh from that input's SpmdTypes, then:
-        1. If plain tensor and ``in_src_shardings`` declared, wrap as
-           DTensor via ``DTensor.from_local`` on that mesh.
-        2. If ``in_dst_shardings`` declared, redistribute on the same mesh.
+        Per input present in ``in_src_shardings`` / ``in_dst_shardings``,
+        assert the source SPMD layout and redistribute to the destination.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
@@ -594,64 +471,26 @@ class Module(nn.Module, Configurable):
             src_spmd_layout = in_src_shardings.get(name)
             dst_spmd_layout = in_dst_shardings.get(name)
 
-            if parallel_dims.spmd_backend == "spmd_types":
-                if src_spmd_layout is None:
-                    if dst_spmd_layout is not None:
-                        raise ValueError(
-                            f"{type(self).__name__}.{name}: SPMD input "
-                            "redistribution requires explicit in_src_shardings."
-                        )
-                    continue
+            if src_spmd_layout is None:
+                if dst_spmd_layout is not None:
+                    raise ValueError(
+                        f"{type(self).__name__}.{name}: SPMD input "
+                        "redistribution requires explicit in_src_shardings."
+                    )
+                continue
 
-                # SPMD source placements are part of the config contract: assert
-                # before redistributing so typechecking catches placement mismatch.
-                # Gate assertion so compile doesn't error.
-                if spmd.is_type_checking():
-                    spmd.assert_type(value, src_spmd_layout)
+            # SPMD source layouts are part of the config contract: assert before
+            # redistributing so typechecking catches layout mismatches.
+            if spmd.is_type_checking():
+                spmd.assert_type(value, src_spmd_layout)
 
-                if dst_spmd_layout is None:
-                    new_kwargs[name] = value
-                    continue
+            if dst_spmd_layout is not None:
                 value = spmd_redistribute_per_axis(
                     value,
                     current_spmd_mesh(),
                     src_spmd_layout,
                     dst_spmd_layout,
                 )
-                new_kwargs[name] = value
-                continue
-
-            mesh = parallel_dims.resolve_shared_mesh([src_spmd_layout, dst_spmd_layout])
-            if mesh is None:
-                continue
-
-            if not isinstance(value, DTensor) and src_spmd_layout is not None:
-                layout = resolve_placements(src_spmd_layout, mesh)
-                value = DTensor.from_local(
-                    value,
-                    mesh,
-                    layout,
-                    run_check=False,
-                )
-
-            if isinstance(value, DTensor) and src_spmd_layout is not None:
-                expected = resolve_placements(src_spmd_layout, mesh)
-                if not check_dtensor_placements_match(
-                    value.placements, expected, value.ndim
-                ):
-                    raise ValueError(
-                        f"{type(self).__name__}.{name}: input DTensor has "
-                        f"placements {value.placements}, but in_src_shardings "
-                        f"expects {expected}."
-                    )
-
-            if dst_spmd_layout is not None and isinstance(value, DTensor):
-                desired = resolve_placements(dst_spmd_layout, mesh)
-                if not check_dtensor_placements_match(
-                    value.placements, desired, value.ndim
-                ):
-                    value = value.redistribute(placements=desired, async_op=True)
-
             new_kwargs[name] = value
 
         new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
@@ -660,7 +499,7 @@ class Module(nn.Module, Configurable):
     def _redistribute_outputs(self, parallel_dims: ParallelDims, outputs: Any) -> Any:
         """Redistribute output to desired placement.
 
-        TODO: Currently only handles a single DTensor output. Extend to
+        TODO: Currently only handles a single tensor output. Extend to
         support nested outputs (tuples, dicts) when models with
         multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
         sharding. ``out_dst_shardings`` would also need to become a nested
@@ -671,63 +510,32 @@ class Module(nn.Module, Configurable):
 
         out_src = sharding_config.out_src_shardings
         out_dst = sharding_config.out_dst_shardings
-        if parallel_dims.spmd_backend == "spmd_types":
-            if not isinstance(outputs, torch.Tensor):
-                return outputs
+        if not isinstance(outputs, torch.Tensor):
+            return outputs
 
-            if out_src is None:
-                if out_dst is not None:
-                    raise ValueError(
-                        f"{type(self).__name__}: SPMD output redistribution "
-                        "requires explicit out_src_shardings."
-                    )
-                return outputs
-            if isinstance(out_src, tuple):
+        if out_src is None:
+            if out_dst is not None:
                 raise ValueError(
-                    f"{type(self).__name__}: SPMD output redistribution only "
-                    "supports a single tensor output."
+                    f"{type(self).__name__}: SPMD output redistribution "
+                    "requires explicit out_src_shardings."
                 )
-            # SPMD source placements are part of the config contract: assert
-            # before redistributing so typechecking catches placement mismatch.
-            # Gate assertion so compile doesn't error.
-            if spmd.is_type_checking():
-                spmd.assert_type(outputs, out_src)
-
-            if out_dst is None:
-                return outputs
-            return spmd_redistribute_per_axis(
-                outputs,
-                current_spmd_mesh(),
-                out_src,
-                out_dst,
-            )
-
+            return outputs
         if isinstance(out_src, tuple):
+            raise ValueError(
+                f"{type(self).__name__}: SPMD output redistribution only "
+                "supports a single tensor output."
+            )
+        if spmd.is_type_checking():
+            spmd.assert_type(outputs, out_src)
+
+        if out_dst is None:
             return outputs
-
-        mesh = parallel_dims.resolve_shared_mesh([out_src, out_dst])
-        if mesh is None:
-            return outputs
-
-        if isinstance(outputs, DTensor) and out_src is not None:
-            expected = resolve_placements(out_src, mesh)
-            if not check_dtensor_placements_match(
-                outputs.placements, expected, outputs.ndim
-            ):
-                raise ValueError(
-                    f"{type(self).__name__}: output DTensor has placements "
-                    f"{outputs.placements}, but out_src_shardings expects "
-                    f"{expected}."
-                )
-
-        if out_dst is not None:
-            desired = resolve_placements(out_dst, mesh)
-            if isinstance(outputs, DTensor) and not check_dtensor_placements_match(
-                outputs.placements, desired, outputs.ndim
-            ):
-                outputs = outputs.redistribute(placements=desired, async_op=True)
-
-        return outputs
+        return spmd_redistribute_per_axis(
+            outputs,
+            current_spmd_mesh(),
+            out_src,
+            out_dst,
+        )
 
 
 class ModuleList(nn.ModuleList, Module):

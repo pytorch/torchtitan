@@ -18,7 +18,6 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
@@ -135,8 +134,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self._validate_cuda_graphs()
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
                 # TODO(sanketpurandare): Enable SPMD typechecking under PP.
@@ -147,8 +145,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
                 and self.model_spec is not None
                 and any(self.model_spec.model.traverse(FlexAttention.Config))
@@ -335,10 +332,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 "sequence/context parallelism."
             )
 
-        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
-        # backends share one runtime mesh/type mechanism.
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
-
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
@@ -420,7 +413,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
@@ -629,10 +622,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
-            spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd_types"
-                and config.debug.spmd_typechecking
-            ),
+            spmd_typechecking=config.debug.spmd_typechecking,
         )
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
@@ -899,12 +889,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 loss = fwd_bwd()
             detached_loss = loss.detach()
-            local_loss = (
-                detached_loss.to_local()
-                if isinstance(detached_loss, DTensor)
-                else detached_loss
-            )
-            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
+            loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
             if should_log:
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the

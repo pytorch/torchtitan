@@ -54,36 +54,18 @@ def parallelize_kimi_k3(
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
     assert isinstance(model, KimiK3Model)
-    if parallelism.spmd_backend == "spmd_types":
-        # Kimi K3 only declares layouts for its MoE modules. Seed replicated
-        # layouts for the remaining decoder and vision parameters before the
-        # MoE declarations replace the expert parameters with sparse shards.
-        annotate_replicated_parameters(model, parallel_dims)
+    # Kimi K3 only declares layouts for its MoE modules. Seed replicated
+    # layouts for the remaining decoder and vision parameters before the MoE
+    # declarations replace the expert parameters with sparse shards.
+    annotate_replicated_parameters(model, parallel_dims)
 
-    if parallelism.spmd_backend == "spmd_types" or parallel_dims.ep_enabled:
-        # model_registry's moe_comm_backend picks the dispatcher: standard
-        # (default), deepep and minimal_async_ep run on this model; hybridep
-        # needs GB200-class hardware.
-        model.parallelize(parallel_dims)
+    # model_registry's moe_comm_backend picks the dispatcher: standard
+    # (default), deepep and minimal_async_ep run on this model; hybridep
+    # needs GB200-class hardware.
+    model.parallelize(parallel_dims)
 
-    if parallelism.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-        dp_mesh_dims = None
-        edp_mesh = None
-        edp_mesh_dims = None
-        if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
 
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)

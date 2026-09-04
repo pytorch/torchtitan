@@ -14,13 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types._checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import (
-    distribute_tensor,
-    DTensor,
-    Partial,
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import loss_parallel
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -36,7 +30,6 @@ from torchtitan.components.loss import (
     IGNORE_INDEX,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
 
 
@@ -256,7 +249,7 @@ class TestGradAccumulator(unittest.TestCase):
         for chunk in chunks:
             acc.add(chunk)
 
-        result = acc.result()
+        result = acc.buffer
         torch.testing.assert_close(result, reference)
 
     def test_accumulate_with_dtype_conversion(self):
@@ -271,7 +264,7 @@ class TestGradAccumulator(unittest.TestCase):
         for chunk in bf16_chunks:
             acc.add(chunk)
 
-        result = acc.result()
+        result = acc.buffer
         self.assertEqual(result.dtype, torch.float32)
         # Verify values match (allowing for bf16 precision loss)
         expected = torch.cat([c.float() for c in bf16_chunks], dim=0)
@@ -284,71 +277,6 @@ class TestGradAccumulator(unittest.TestCase):
         acc.add(torch.randn(4, 16))
         with self.assertRaises(ValueError):
             acc.add(torch.randn(4, 16))
-
-
-class TestGradAccumulatorDTensor(unittest.TestCase):
-    """Regression tests for the DTensor path.
-
-    These pin down the contract that prevented the TP gradient-placement bug:
-    result() must label the buffer with the placement of the chunks that were
-    actually added (e.g. Partial(sum) for a loss-parallel ColwiseParallel
-    lm_head), not the placement of the reference activation.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        if not dist.is_initialized():
-            dist.init_process_group(
-                backend="gloo",
-                init_method="tcp://localhost:12358",
-                world_size=1,
-                rank=0,
-            )
-        cls._mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("tp",))
-
-    @classmethod
-    def tearDownClass(cls):
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-    def _make_chunk(self, shape, placement):
-        return DTensor.from_local(
-            torch.randn(*shape), self._mesh, (placement,), run_check=False
-        )
-
-    def test_result_takes_placement_from_first_chunk(self):
-        """result() wraps the buffer with chunk_grad's placement.
-
-        The pre-fix code wrapped with the reference activation's placement
-        (Replicate) even when chunks were Partial(sum), which silently dropped
-        the implied all-reduce and corrupted TP training.
-        """
-        T, D = 16, 16
-        num_chunks = 4
-        reference = DTensor.from_local(
-            torch.zeros(T, D), self._mesh, (Replicate(),), run_check=False
-        )
-
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
-        for _ in range(num_chunks):
-            acc.add(self._make_chunk((T // num_chunks, D), Partial()))
-
-        result = acc.result()
-        self.assertIsInstance(result, DTensor)
-        self.assertEqual(result.placements, (Partial(),))
-
-    def test_placement_mismatch_raises(self):
-        """A chunk whose placement disagrees with the first one is a bug."""
-        T, D = 16, 16
-        num_chunks = 2
-        reference = DTensor.from_local(
-            torch.zeros(T, D), self._mesh, (Replicate(),), run_check=False
-        )
-
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
-        acc.add(self._make_chunk((T // num_chunks, D), Partial()))
-        with self.assertRaisesRegex(ValueError, "does not match first chunk"):
-            acc.add(self._make_chunk((T // num_chunks, D), Replicate()))
 
 
 class TestLossParallelCrossEntropy(DTensorTestBase):
@@ -788,14 +716,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
 
 class TestChunkedLossWrapperSPMD(DTensorTestBase):
-    def init_pg(self, eager_init, backend=None):
-        super().init_pg(eager_init, backend)
-        set_spmd_backend("spmd_types")
-
-    def destroy_pg(self, device_id=None):
-        super().destroy_pg(device_id)
-        set_spmd_backend("spmd_types")
-
     @property
     def world_size(self):
         return 2

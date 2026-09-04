@@ -262,10 +262,7 @@ class GraphTrainer(Trainer):
                 )
         with self.train_context():
             precompile_meshes = None
-            if (
-                self.config.compile.precompile_artifact_dir
-                and self.config.parallelism.spmd_backend == "spmd_types"
-            ):
+            if self.config.compile.precompile_artifact_dir:
                 from torchtitan.experiments.graph_trainer.precompile import (
                     get_spmd_precompile_meshes,
                 )

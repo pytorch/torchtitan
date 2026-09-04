@@ -9,11 +9,11 @@
 Sets ``ShardingConfig`` on all sub-configs so that ``model.parallelize()``
 applies TP via the Module protocol. Same pattern as ``qwen3/sharding.py``.
 
-Full-attention layers: TP on wq/wk/wv/wo with local_map for inner attention;
+Full-attention layers: TP on wq/wk/wv/wo with local SPMD inner attention;
 each layer's MRoPE ``cache`` buffer is sharded Replicate.
 GatedDeltaNet layers: head-sharded TP on projections (ColwiseParallel) and
 out_proj (RowwiseParallel); the GDN kernel and depthwise Conv1d run on local
-tensors via local_map.
+tensors in a local SPMD region.
 """
 
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -44,7 +44,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_invariant_linear_config,
     vision_scaled_bias_rowwise_config,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -134,7 +134,7 @@ def set_qwen35_sharding_config(
             in_dst_shardings={"input": token_id_placement()},
             out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
             out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-            local_map=LocalMapConfig(in_grad_placements=None),
+            local_spmd=True,
         )
         _set_vision_encoder_sharding(config.vision_encoder)
         # The first layer restores the decoder layout after replicated vision scatter.
@@ -282,8 +282,7 @@ def _set_full_attention_sharding(
         in_src_shardings={"x_TD": attention_input_layout},
         in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
     )
-    # The per-layer rope ``cache`` buffer is a Replicate DTensor; MRoPE builds the
-    # position-resolved cache from it (``positions`` stays a plain input).
+    # The per-layer rope ``cache`` buffer is replicated on TP.
     attention_cfg.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
@@ -297,7 +296,7 @@ def _set_full_attention_sharding(
     attention_cfg.q_norm.sharding_config = _qk_norm_sharding()
     attention_cfg.k_norm.sharding_config = _qk_norm_sharding()
 
-    set_gqa_inner_attention_local_map(attention_cfg.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention_cfg.inner_attention)
 
 
 def _set_deltanet_sharding(
@@ -310,7 +309,7 @@ def _set_deltanet_sharding(
 
     Input projections are ColwiseParallel (head-sharded output) and out_proj is
     RowwiseParallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
-    recurrence runs on rank-local heads via a single local_map boundary.
+    recurrence runs on rank-local heads via a single local SPMD boundary.
     """
     for name in (
         "in_proj_q",
@@ -359,8 +358,9 @@ def _set_deltanet_sharding(
         out_dst_shardings=head_placement,
     )
 
-    # The inner GDN is the DTensor-to-local boundary for the head-parallel
-    # convolution and recurrence.
+    # The inner GDN is the local SPMD boundary for the head-parallel
+    # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
+    # and intentionally remains outside the local SPMD positional placements.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_src_shardings={
             "query_TC": projected_placement,
@@ -390,23 +390,7 @@ def _set_deltanet_sharding(
         },
         out_src_shardings=head_placement,
         out_dst_shardings=head_placement,
-        local_map=LocalMapConfig(
-            # cu_seqlens varies across DP ranks and is replicated across TP.
-            # It has no gradient, but local_map still requires its placement.
-            in_grad_placements=(
-                projected_placement,
-                projected_placement,
-                projected_placement,
-                projected_placement,
-                projected_placement,
-                parameter_placement,
-                parameter_placement,
-                parameter_placement,
-                parameter_placement,
-                parameter_placement,
-                cu_seqlens_placement,
-            ),
-        ),
+        local_spmd=True,
     )
 
     deltanet_cfg.sharding_config = ShardingConfig(

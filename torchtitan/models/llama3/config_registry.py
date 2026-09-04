@@ -117,15 +117,12 @@ def llama3_debugmodel_dist_gemm(seq_len: int | None = None) -> Trainer.Config:
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
     fall back to the stock projections, so this stays runnable on one rank.
 
-    ``spmd_backend`` is pinned to spmd_types: the fused modules take and return
-    plain local tensors, which is that backend's contract. The DTensor backends
-    are being deprecated and are not supported here.
+    The fused modules take and return plain local tensors.
     """
     config = llama3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel", seq_len=seq_len, tp_gemm_backend="dist_gemm"
     )
-    config.parallelism.spmd_backend = "spmd_types"
     return config
 
 
@@ -159,7 +156,6 @@ def llama3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
 
 def llama3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
-    config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
     )
@@ -183,7 +179,6 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     seq_len: int | None = None,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
-    config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -271,7 +266,6 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
 
 def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Config:
     config = llama3_8b(seq_len=seq_len)
-    config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
     config.compile = CompileConfig(enable=True, components=["model"])
