@@ -33,7 +33,11 @@ from .token_dispatcher import LocalTokenDispatcher
 #   e = num local experts (E / EP, used in token dispatcher for
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, N = routed tokens (T*K),
-#   R = routed tokens assigned to local experts
+#   R = routed tokens assigned to local experts,
+#   O = expert output features, I = expert input features
+#       (roles, not model dims: the _grouped_mm seam takes the expert
+#        weight in its stored (E, O, I) orientation, which is (E, F, D)
+#        for the up/gate projections and (E, D, F) for the down one)
 
 
 class GroupedExperts(Module):

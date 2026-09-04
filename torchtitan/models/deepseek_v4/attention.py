@@ -10,7 +10,7 @@ import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import BaseAttention, FlexAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -20,7 +20,7 @@ from .compressor import Compressor, Indexer
 
 
 def _assert_spmd_attention_type(tensor, *, tp):
-    if get_spmd_backend() == "spmd_types":
+    if spmd.is_type_checking():
         spmd.assert_type(
             tensor,
             {"dp": spmd.S(0), "cp": spmd.S(1), "tp": tp},
@@ -430,6 +430,15 @@ class Attention(BaseAttention):
 
     def forward(self, x, attention_masks=None, positions=None):
         """Apply one DeepSeek V4 attention layer over folded tokens."""
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
         num_tokens = x.size(0)
         rd = self.rope_head_dim
 
@@ -496,7 +505,7 @@ class Attention(BaseAttention):
             o = o.view(num_tokens, n_local_groups, -1)
             _assert_spmd_attention_type(o, tp=spmd.S(1))
             wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     wo_a,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.S(0)},
@@ -505,4 +514,13 @@ class Attention(BaseAttention):
         with spmd.local():
             o = o.reshape(num_tokens, -1)
             _assert_spmd_attention_type(o, tp=spmd.S(1))
-        return self.wo_b(o)
+        o = self.wo_b(o)
+        if tp_group is not None:
+            o = spmd.redistribute(
+                o,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": o.dtype},
+            )
+        return o

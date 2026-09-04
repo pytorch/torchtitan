@@ -39,7 +39,7 @@ The Guiding Principles when building `torchtitan`
 * Minimal changes to the model code when applying multi-dimensional parallelism.
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
-`torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes.
+`torchtitan` showcases PyTorch's latest distributed training features across multiple model families. Core models include Llama 3, Qwen3 / 3.5 / 3.8, DeepSeek V3 / V4, GPT-OSS, Kimi K2.7 / K3, Muse Glimmer, and Flux.
 
 ## Contributing
 
@@ -53,7 +53,7 @@ We look forward to your contributions!
 | Hardware | Integration Tests | Unit Tests |
 | --- | --- | --- |
 | CPU | - | [![CPU Unit Test](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu.yaml?query=branch%3Amain) |
-| NVIDIA GPU | [![Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml?query=branch%3Amain) [![H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml?query=branch%3Amain) | [![GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml?query=branch%3Amain) |
+| NVIDIA GPU | [![Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml?query=branch%3Amain) [![H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml?query=branch%3Amain) [![B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_b200.yaml?query=branch%3Amain) | [![GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml?query=branch%3Amain) |
 
 ## Llama 3.1 training
 
@@ -70,7 +70,7 @@ We look forward to your contributions!
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](torchtitan/components/quantization/float8.md))
-7. [MXFP8 training for dense and MoE models](torchtitan/components/quantization/mxfp8.md) on Blackwell GPUs.
+7. [MXFP8 training for dense and MoE models](torchtitan/components/quantization/mxfp8/README.md) on Blackwell GPUs.
 8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
@@ -84,10 +84,10 @@ We look forward to your contributions!
 17. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
 18. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
 19. [Helper scripts](scripts/) to
-    - download tokenizers from Hugging Face
-    - convert original Llama 3 checkpoints into the expected DCP format
-    - estimate FSDP/HSDP memory usage without materializing the model
-    - run distributed inference with Tensor Parallel
+    - download tokenizers and other Hugging Face assets (`scripts/download_hf_assets.py`)
+    - convert checkpoints between Hugging Face and DCP formats (`scripts/checkpoint_conversion/`)
+    - compare training losses across commits or configs (`scripts/loss_compare.py`)
+    - run vLLM inference with TorchTitan models (`torchtitan/experiments/rl/generate.py`)
 
 We report [performance](benchmarks/llama3_h100_202412_torchtitan.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
 

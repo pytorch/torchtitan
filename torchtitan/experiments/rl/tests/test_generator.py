@@ -32,6 +32,7 @@ from vllm.sampling_params import RequestOutputKind
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.experiments.rl.actors.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
@@ -313,6 +314,25 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
                 config.generator, reset_prefix_cache_on_weight_sync=False
             ),
         )
+
+
+def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
+    from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
+        rl_grpo_qwen3_6_27b_varlen_perf,
+    )
+
+    config = rl_grpo_qwen3_6_27b_varlen_perf()
+    override_import = "torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"
+
+    assert config.hf_assets_path.endswith("Qwen3.6-27B")
+    assert config.trainer.override.imports == [override_import]
+    assert config.generator.override.imports == [override_import]
+    assert config.trainer.parallelism.data_parallel_shard_degree == 2
+    assert config.trainer.parallelism.tensor_parallel_degree == 2
+    assert config.generator.parallelism.tensor_parallel_degree == 4
+    assert config.trainer.optimizer.implementation == "fused_opt_states_bf16"
+    assert isinstance(config.trainer.ac_config, FullAC.Config)
+    assert config.generator.cudagraph.enable
 
 
 # --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---

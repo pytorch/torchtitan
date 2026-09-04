@@ -23,6 +23,7 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMCudagraphConfig,
@@ -1110,5 +1111,41 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
     )
     config.generator = dataclasses.replace(
         config.generator, debug=_BATCH_INVARIANT_DEBUG
+    )
+    return config
+
+
+def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
+    """Qwen3.6-27B GRPO with fused OffsetRMSNorm on trainer and generator.
+
+    Qwen3.6-27B uses the Qwen3.5-compatible dense Gated DeltaNet model flavor.
+    The 8-GPU layout assigns TP2 x FSDP2 to training and TP4 to generation.
+    """
+    config = rl_grpo_qwen3_5_9b_varlen()
+    config.model_spec = _qwen3_5_rl_model_registry("27B", attn_backend="varlen")
+    config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3.6-27B"
+    perf_imports = ["torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"]
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        optimizer=dataclasses.replace(
+            config.trainer.optimizer,
+            implementation="fused_opt_states_bf16",
+        ),
+        ac_config=FullAC.Config(),
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+        ),
+        override=OverrideConfig(imports=list(perf_imports)),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        parallelism=dataclasses.replace(
+            config.generator.parallelism,
+            data_parallel_degree=1,
+            tensor_parallel_degree=4,
+        ),
+        override=OverrideConfig(imports=list(perf_imports)),
     )
     return config
