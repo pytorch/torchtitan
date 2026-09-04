@@ -39,7 +39,7 @@ The Guiding Principles when building `torchtitan`
 * Minimal changes to the model code when applying multi-dimensional parallelism.
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
-`torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes.
+`torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes. Core models now include Llama 3, Qwen3/3.5/3.8, DeepSeek V3/V4, GPT-OSS, Kimi, Muse Glimmer, and Flux.
 
 ## Contributing
 
@@ -84,10 +84,9 @@ We look forward to your contributions!
 17. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
 18. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
 19. [Helper scripts](scripts/) to
-    - download tokenizers from Hugging Face
-    - convert original Llama 3 checkpoints into the expected DCP format
-    - estimate FSDP/HSDP memory usage without materializing the model
-    - run distributed inference with Tensor Parallel
+    - download tokenizers and other Hugging Face assets (`scripts/download_hf_assets.py`)
+    - convert checkpoints between Hugging Face and DCP formats (`scripts/checkpoint_conversion/`)
+    - compare training losses across commits or configs (`scripts/loss_compare.py`)
 
 We report [performance](benchmarks/llama3_h100_202412_torchtitan.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
 
