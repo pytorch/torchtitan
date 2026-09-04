@@ -60,9 +60,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
         if cp_kernel:
             # Apply the transform without its final validation.
-            ContextParallelTransform.Config(
-                kernel=AllGatherCPFlexAttention
-            ).build().transform(config.model_spec.model)
+            ContextParallelTransform(kernel=AllGatherCPFlexAttention).transform(
+                config.model_spec.model
+            )
         config.parallelism.spmd_backend = spmd_backend
         config.parallelism.context_parallel_degree = cp
         config.training.max_context_length = 512
