@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import torch
 from torchtitan.config import Configurable
-from torchtitan.distributed.cudagraph import cudagraph_annotate_trace_post_processor
+from torchtitan.distributed.cudagraph import get_cudagraph_annotations
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
@@ -295,8 +295,12 @@ class Profiler(Configurable):
             begin = time.monotonic()
 
             output_file = os.path.join(curr_trace_dir, PROFILE_FILE.format(rank=rank))
-            prof.export_chrome_trace(output_file)
-            cudagraph_annotate_trace_post_processor(output_file)
+            cuda_graph_annotations = get_cudagraph_annotations()
+            prof.export_chrome_trace(
+                output_file,
+                cuda_graph_annotations=cuda_graph_annotations,
+                graph_lanes="all" if cuda_graph_annotations else "none",
+            )
 
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
