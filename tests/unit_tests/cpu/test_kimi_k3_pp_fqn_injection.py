@@ -43,22 +43,53 @@ class _MultimodalModel(_Model):
         self.vision_encoder = nn.Linear(4, 4)
 
 
-def _split(model, num_layers: int):
+def _split(
+    model,
+    num_layers: int,
+    *,
+    layers_per_stage: int | None = None,
+    schedule: str = "1F1B",
+    pp: int = 2,
+):
     parallelism = SimpleNamespace(
         module_fqns_per_model_part=None,
         pipeline_parallel_first_stage_less_layers=1,
         pipeline_parallel_last_stage_less_layers=1,
-        pipeline_parallel_layers_per_stage=None,
-        pipeline_parallel_schedule="1F1B",
+        pipeline_parallel_layers_per_stage=layers_per_stage,
+        pipeline_parallel_schedule=schedule,
     )
     # A Config-tree model carries the layers themselves rather than a count.
     model_config = SimpleNamespace(layers=[object()] * num_layers)
     return kimi_k3_module_fqns_per_model_part(
-        model, model_config=model_config, parallelism=parallelism, pp=2
+        model, model_config=model_config, parallelism=parallelism, pp=pp
     )
 
 
+def _layers_per_stage(fqns):
+    return [sum(1 for n in stage if n.startswith("layers.")) for stage in fqns]
+
+
 class TestKimiK3Split(unittest.TestCase):
+    def test_a_layer_count_no_shape_divides_still_splits(self):
+        """33 layers are 35 units with the embedding and the head: no pipeline
+        shape divides them, and the split still lands on pp x vp stages that
+        differ by a layer, where the ceiling rule would refuse the shape."""
+        fqns = _split(_Model(), 33, layers_per_stage=4, schedule="Interleaved1F1B")
+        assert fqns is not None
+        self.assertEqual(len(fqns), 8)
+        self.assertEqual(_layers_per_stage(fqns), [4, 5, 5, 4, 4, 4, 4, 3])
+        fqns = _split(
+            _Model(), 33, layers_per_stage=1, schedule="Interleaved1F1B", pp=8
+        )
+        assert fqns is not None
+        self.assertEqual(len(fqns), 32)
+        self.assertEqual(_layers_per_stage(fqns)[-1], 0)
+        self.assertIn("lm_head", fqns[-1])
+        # A single-stage schedule keeps one stage per rank whatever the knob says.
+        fqns = _split(_Model(), 33, layers_per_stage=4, schedule="1F1B")
+        assert fqns is not None
+        self.assertEqual(len(fqns), 2)
+
     def test_a_config_tree_model_gets_a_split(self):
         fqns = _split(_Model(), 8)
         self.assertIsNotNone(fqns, "the split returned early and said nothing")
