@@ -18,14 +18,13 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
     TorchFTManager,
 )
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
-from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
+from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -58,6 +57,10 @@ class FaultTolerantTrainer(Trainer):
 
         # init distributed and build meshes (FT override handles ft_manager creation)
         self.parallel_dims = parallel_dims = self.init_distributed()
+        if config.parallelism.fsdp_defer_gradient_reduction:
+            raise ValueError(
+                "fsdp_defer_gradient_reduction is not supported with TorchFT."
+            )
         dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
@@ -250,6 +253,8 @@ class FaultTolerantTrainer(Trainer):
 
             self.model_parts = [model]
 
+        self._fsdp_root = None
+
         # FT addition: set all reduce hook
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
@@ -295,15 +300,6 @@ class FaultTolerantTrainer(Trainer):
             self.sdc_replayer = config.sdc_replayer.build(
                 modules=self.model_parts,
                 device=self.device,
-                # ntokens_seen is the only trainer scalar the replayed
-                # forward/backward mutates; self.step is incremented outside
-                # the replay boundary and needs no capture.
-                scalar_state={
-                    "ntokens_seen": ScalarStateAccessor(
-                        get=lambda: self.ntokens_seen,
-                        set=lambda value: setattr(self, "ntokens_seen", value),
-                    )
-                },
             )
 
         # FT addition: pass ft_manager to CheckpointManager
@@ -329,22 +325,7 @@ class FaultTolerantTrainer(Trainer):
                 and config.debug.spmd_typechecking
             ),
         )
-        if parallel_dims.pp_enabled:
-            self.fwd_bwd_fn = self._pp_forward_backward_body
-            self._pp_loss_sentinel_on_non_last_stage = torch.full(
-                (1,), -1.0, device=self.device
-            )
-        else:
-            self.fwd_bwd_fn = self._forward_backward_body
-
-        if not config.training.disable_cuda_graphs:
-            sdc_config = config.sdc_replayer
-            self.fwd_bwd_fn = wrap_with_cuda_graph(
-                self.fwd_bwd_fn,
-                gradient_accumulation_steps=self.gradient_accumulation_steps,
-                sdc_num_steps=sdc_config.num_steps if sdc_config is not None else 0,
-                sdc_num_replays=sdc_config.num_replays if sdc_config is not None else 0,
-            )
+        self._init_gradient_accumulation()
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -424,8 +405,10 @@ class FaultTolerantTrainer(Trainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-        # All groups form one optimizer step; each group feeds one fwd-bwd call.
-        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
+        # Each accumulation step feeds one forward-backward call.
+        accumulation_step_batches: list[
+            list[tuple[dict[str, torch.Tensor], torch.Tensor]]
+        ] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
@@ -434,7 +417,7 @@ class FaultTolerantTrainer(Trainer):
                 # Popped so the batch reaching the model holds only its kwargs.
                 local_valid_tokens += input_dict.pop("num_valid_tokens")
                 microbatches.append((input_dict, labels))
-            microbatch_groups.append(microbatches)
+            accumulation_step_batches.append(microbatches)
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
@@ -445,49 +428,22 @@ class FaultTolerantTrainer(Trainer):
                 global_valid_tokens, batch_mesh
             )
 
-        accumulated_loss: torch.Tensor | None = None
-        for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
-            input_dict_mbs = []
-            label_mbs = []
-            for input_dict, labels in microbatches:
-                for key, value in input_dict.items():
-                    if isinstance(value, torch.Tensor):
-                        input_dict[key] = value.to(self.device)
-                input_dict_mbs.append(input_dict)
-                label_mbs.append(labels.to(self.device))
+        accumulation_step_inputs = [
+            self._preprocess_accumulation_step_inputs(microbatches)
+            for microbatches in accumulation_step_batches
+        ]
 
-            if parallel_dims.pp_enabled:
-                fwd_bwd_input_dict = input_dict_mbs
-                fwd_bwd_labels = label_mbs
-            else:
-                assert len(input_dict_mbs) == len(label_mbs) == 1
-                fwd_bwd_input_dict = input_dict_mbs[0]
-                fwd_bwd_labels = label_mbs[0]
+        def accumulated_fwd_bwd() -> torch.Tensor:
+            return self._run_gradient_accumulation(
+                accumulation_step_inputs, global_valid_tokens
+            )
 
-            def fwd_bwd() -> torch.Tensor:
-                return self.forward_backward_step(
-                    input_dict=fwd_bwd_input_dict,
-                    labels=fwd_bwd_labels,
-                    global_valid_tokens=global_valid_tokens,
-                )
-
-            if self.sdc_replayer is not None and fwd_bwd_index == 0:
-                # Only the step's first gradient-accumulation group is
-                # replay-checked; under PP one group is a complete pipeline
-                # schedule. Later groups exercise the same compute and
-                # communication paths, so checking them too would only add
-                # overhead.
-                loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
-            else:
-                loss = fwd_bwd()
-            if should_log:
-                loss = loss.detach()
-                if accumulated_loss is None:
-                    # Take ownership before the next replay overwrites the
-                    # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = loss.clone()
-                else:
-                    accumulated_loss.add_(loss)
+        if self.sdc_replayer is not None:
+            accumulated_loss = self.sdc_replayer.run_fwd_bwd(
+                accumulated_fwd_bwd, step=self.step
+            )
+        else:
+            accumulated_loss = accumulated_fwd_bwd()
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -503,8 +459,6 @@ class FaultTolerantTrainer(Trainer):
         # log metrics
         if not should_log:
             return
-
-        assert accumulated_loss is not None
 
         if parallel_dims.dp_cp_enabled:
             # FT addition: use ft_manager.loss_sync_pg for extra process group

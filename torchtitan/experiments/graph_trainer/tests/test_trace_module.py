@@ -2088,9 +2088,11 @@ class TestTraceContextParallel(FSDPTest):
                     )
                     % config.training.max_context_length
                 )
+                prepared_inputs = trainer._preprocess_accumulation_step_inputs(
+                    [({"input": tokens, "positions": positions}, labels)]
+                )
                 trainer.forward_backward_step(
-                    input_dict={"input": tokens, "positions": positions},
-                    labels=labels,
+                    prepared_inputs=prepared_inputs,
                     global_valid_tokens=torch.tensor(
                         labels.numel(), device=trainer.device
                     ),

@@ -6,7 +6,7 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -46,8 +46,6 @@ from torchtitan.experiments.graph_trainer.registry import (
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
-from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -109,6 +107,8 @@ def make_fwd_bwd_step(model, loss_fn):
 
 
 class GraphTrainer(Trainer):
+    _use_accumulation_cuda_graph = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
         compile: GraphTrainerCompileConfig = field(
@@ -141,29 +141,21 @@ class GraphTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
+        prepared_inputs: tuple[Any, ...],
         global_valid_tokens: torch.Tensor,
+        finalize_gradients: bool = True,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
-                input_dict=input_dict,
-                labels=labels,
+                prepared_inputs=prepared_inputs,
                 global_valid_tokens=global_valid_tokens,
+                finalize_gradients=finalize_gradients,
             )
 
-        assert isinstance(input_dict, dict)
-        assert isinstance(labels, torch.Tensor)
+        assert finalize_gradients or self._fsdp_root is not None
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
-
-        with sl.log_trace_span("preprocess_inputs"):
-            inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
-                {**input_dict, "labels": labels},
-                parallel_dims=self.parallel_dims,
-                parallelism=self.config.parallelism,
-            )
-            self.ntokens_seen += labels.numel()
+        inputs, labels, extra_kwargs = prepared_inputs
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [

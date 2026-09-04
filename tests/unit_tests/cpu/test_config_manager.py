@@ -237,6 +237,18 @@ class TestConfigManager(unittest.TestCase):
         )
         assert not config.training.disable_cuda_graphs
 
+    def test_deferred_gradient_reduction_rejects_forward_resharding(self):
+        for reshard_after_forward in ("always", "default"):
+            with self.subTest(reshard_after_forward=reshard_after_forward):
+                config = ConfigManager().parse_args(
+                    ["--module", "llama3", "--config", "llama3_debugmodel"]
+                )
+                config.parallelism.fsdp_defer_gradient_reduction = True
+                config.parallelism.fsdp_reshard_after_forward = reshard_after_forward
+
+                with pytest.raises(ValueError, match="fsdp_reshard_after_forward"):
+                    config.__post_init__()
+
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         config_manager = ConfigManager()
         with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:

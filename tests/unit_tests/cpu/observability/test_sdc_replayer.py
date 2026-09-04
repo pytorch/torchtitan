@@ -19,7 +19,6 @@ from torchtitan.observability.sdc_replayer import (
     _hash_tensor,
     _ReplaySignature,
     _ReplayStateProvider,
-    ScalarStateAccessor,
     SDCReplayer,
     SDCReplayMismatch,
 )
@@ -33,29 +32,10 @@ class _BufferModule(torch.nn.Module):
         self.register_buffer("optional", None, persistent=False)
 
 
-class _Counter:
-    __slots__ = ("value",)
-
-    def __init__(self, value: int = 0):
-        self.value = value
-
-
-def _scalar_state(counter: _Counter) -> dict[str, ScalarStateAccessor]:
-    return {
-        "ntokens_seen": ScalarStateAccessor(
-            get=lambda: counter.value,
-            set=lambda value: setattr(counter, "value", value),
-        )
-    }
-
-
-def test_state_provider_restores_rng_buffers_gradients_and_counter():
+def test_state_provider_restores_rng_buffers_and_gradients():
     module = _BufferModule()
     module.weight.grad = torch.zeros(1)
-    counter = _Counter(4)
-    provider = _ReplayStateProvider(
-        [module], torch.device("cpu"), _scalar_state(counter)
-    )
+    provider = _ReplayStateProvider([module], torch.device("cpu"))
 
     random.seed(7)
     torch.manual_seed(11)
@@ -66,7 +46,6 @@ def test_state_provider_restores_rng_buffers_gradients_and_counter():
     module.counter.add_(5)
     module.optional = torch.ones(1)
     module.weight.grad.add_(6)
-    counter.value = 99
     random.random()
     torch.rand(1)
 
@@ -75,19 +54,16 @@ def test_state_provider_restores_rng_buffers_gradients_and_counter():
     torch.testing.assert_close(module.counter, torch.zeros(1))
     assert module.optional is None
     torch.testing.assert_close(module.weight.grad, torch.zeros(1))
-    assert counter.value == 4
     assert random.random() == expected_python
     torch.testing.assert_close(torch.rand(1), expected_torch)
 
 
 def test_replay_commits_only_final_candidate():
     module = _BufferModule()
-    counter = _Counter(0)
     replayer = SDCReplayer(
         SDCReplayer.Config(num_replays=2),
         modules=[module],
         device=torch.device("cpu"),
-        scalar_state=_scalar_state(counter),
     )
     calls = 0
 
@@ -95,7 +71,6 @@ def test_replay_commits_only_final_candidate():
         nonlocal calls
         calls += 1
         module.counter.add_(1)
-        counter.value += 5
         loss = module.weight.square().sum()
         loss.backward()
         return loss
@@ -106,7 +81,6 @@ def test_replay_commits_only_final_candidate():
     torch.testing.assert_close(loss, torch.tensor(4.0))
     torch.testing.assert_close(module.counter, torch.ones(1))
     torch.testing.assert_close(module.weight.grad, torch.tensor([4.0]))
-    assert counter.value == 5
 
 
 def test_replay_wraps_compiled_forward_backward():
@@ -178,17 +152,14 @@ def test_replay_mismatch_is_fatal():
         ("buffer", "buffer:0:counter"),
         ("cpu_rng", "rng:cpu"),
         ("python_rng", "state:python_rng"),
-        ("counter", "state:ntokens_seen"),
     ),
 )
 def test_replay_detects_semantic_state_mismatch(corruption, expected):
     module = _BufferModule()
-    counter = _Counter(0)
     replayer = SDCReplayer(
         SDCReplayer.Config(),
         modules=[module],
         device=torch.device("cpu"),
-        scalar_state=_scalar_state(counter),
     )
     calls = 0
 
@@ -204,8 +175,6 @@ def test_replay_detects_semantic_state_mismatch(corruption, expected):
                 torch.rand(1)
             elif corruption == "python_rng":
                 random.random()
-            else:
-                counter.value += 1
         return loss
 
     with pytest.raises(SDCReplayMismatch, match=expected):
@@ -322,7 +291,7 @@ def test_state_provider_restores_dtensor_local_shards(tmp_path):
         )
         module.counter = distribute_tensor(module.counter, mesh, [Replicate()])
         module.weight.grad = distribute_tensor(torch.zeros(1), mesh, [Replicate()])
-        provider = _ReplayStateProvider([module], torch.device("cpu"), {})
+        provider = _ReplayStateProvider([module], torch.device("cpu"))
         state = provider.capture()
 
         module.counter.to_local().add_(5)

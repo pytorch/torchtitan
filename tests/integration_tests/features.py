@@ -120,6 +120,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction],
+            test_descr="FSDP+PP deferred gradient reduction with accumulation",
+            test_name="fsdp_pp_deferred_gradient_reduction",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
             test_descr="PP+TP GPipe 2D test",
             test_name="pp_tp_gpipe",
@@ -266,6 +274,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="Gradient accumulation",
             test_name="gradient_accumulation",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_deferred_gradient_reduction],
+            test_descr="FSDP deferred gradient reduction with accumulation",
+            test_name="fsdp_deferred_gradient_reduction",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_validation_tp2_cp2_pp2],

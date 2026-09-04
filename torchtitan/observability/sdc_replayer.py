@@ -6,18 +6,14 @@
 
 """Deterministic replay for silent data corruption (SDC) detection.
 
-The replayer checks one forward/backward execution per checked optimizer
-step: the step's first forward/backward call, i.e. one gradient accumulation
-group, which under pipeline parallelism is one complete pipeline schedule
-(all pipeline microbatches). Gradient accumulation composes with pipeline
-parallelism; when a step has multiple accumulation groups, only the first
-one is replay-checked. For each checked step it:
+The replayer checks the complete forward/backward execution for each checked
+optimizer step. This includes every gradient accumulation step and every
+pipeline microbatch. For each checked step it:
 
-1. snapshots the pre-execution state (Python, CPU, and accelerator RNG,
-   registered module buffers, caller-owned scalars) and records which
-   parameters entered without gradients;
+1. snapshots Python, CPU, and accelerator RNG state and registered module
+   buffers, and records which parameters entered without gradients;
 2. runs the forward/backward once and records a reference signature (loss,
-   gradients, buffers, RNG advancement, scalar state);
+   gradients, buffers, and RNG advancement);
 3. restores the snapshot and re-executes ``num_replays`` times, comparing
    each signature with the reference;
 4. raises ``SDCReplayMismatch`` on every rank on any divergence; otherwise
@@ -41,7 +37,7 @@ contract when each invocation overwrites it before reading it.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,17 +46,6 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Configurable
-
-
-@dataclass(frozen=True, slots=True)
-class ScalarStateAccessor:
-    """Read/write access to one caller-owned scalar mutated by the replayed
-    forward/backward (e.g. a token counter). The value is captured before the
-    reference execution, restored before every replay, and included in the
-    replay signature as ``state:<name>``."""
-
-    get: Callable[[], Any]
-    set: Callable[[Any], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,7 +151,6 @@ class _ReplayStateSnapshot:
     python_rng_state: tuple[Any, ...]
     cpu_rng_state: torch.Tensor
     accelerator_rng_states: list[torch.Tensor] | None
-    scalar_values: tuple[tuple[str, Any], ...]
     buffers: tuple[_BufferSnapshot, ...]
     gradients: tuple[_GradientSnapshot, ...]
 
@@ -178,12 +162,10 @@ class _ReplayStateProvider:
         self,
         modules: Iterable[torch.nn.Module],
         device: torch.device,
-        scalar_state: Mapping[str, ScalarStateAccessor],
     ) -> None:
         self._modules = tuple(dict.fromkeys(modules))
         # pyrefly: ignore [read-only]
         self._device = device
-        self._scalar_state = dict(scalar_state)
 
     def capture(self) -> _ReplayStateSnapshot:
         buffers: list[_BufferSnapshot] = []
@@ -210,14 +192,11 @@ class _ReplayStateProvider:
         # records each parameter's entry gradient (None marker or tensor
         # identity) and restore rebuilds the entry state from the contract:
         # None stays None, tensors are zeroed in place. Any other entry
-        # state is unrecoverable and surfaces as a false mismatch, e.g.:
-        # - routing a non-first gradient-accumulation group through
-        #   run_fwd_bwd: restore wipes the partial sums, so replays diverge
-        #   from the reference;
-        # - a requires_grad parameter left out of the optimizer: the
-        #   trainer's zero_grad never clears it, so it enters later checked
-        #   steps with accumulated gradients. Freeze such parameters with
-        #   requires_grad=False instead.
+        # state is unrecoverable and surfaces as a false mismatch, e.g. a
+        # requires_grad parameter left out of the optimizer: the trainer's
+        # zero_grad never clears it, so it enters later checked steps with
+        # accumulated gradients. Freeze such parameters with
+        # requires_grad=False instead.
         gradients = tuple(
             _GradientSnapshot(parameter=parameter, original=parameter.grad)
             for parameter in parameters
@@ -226,9 +205,6 @@ class _ReplayStateProvider:
             python_rng_state=random.getstate(),
             cpu_rng_state=torch.get_rng_state(),
             accelerator_rng_states=_accelerator_rng_states(self._device),
-            scalar_values=tuple(
-                (name, accessor.get()) for name, accessor in self._scalar_state.items()
-            ),
             buffers=tuple(buffers),
             gradients=gradients,
         )
@@ -247,9 +223,6 @@ class _ReplayStateProvider:
                         f"Cannot restore RNG state for accelerator {self._device.type}."
                     )
                 set_rng_state_all(state.accelerator_rng_states)
-        for name, value in state.scalar_values:
-            self._scalar_state[name].set(value)
-
         for snapshot in state.buffers:
             current = snapshot.module._buffers[snapshot.name]
             if snapshot.original is None:
@@ -316,7 +289,7 @@ def _find_signature_mismatch(
 
 
 class SDCReplayer(Configurable):
-    """Replay-checks each scheduled optimizer step's first forward/backward.
+    """Replay-checks the forward/backward work for scheduled optimizer steps.
 
     See the module docstring for the snapshot/execute/restore/compare
     lifecycle and the entry contract (``run_fwd_bwd`` must be entered with
@@ -332,10 +305,10 @@ class SDCReplayer(Configurable):
         num_steps: int = 1
         """How many optimizer steps to check, counted from trainer start and
         restarting after every checkpoint load. Each checked step re-executes
-        its first forward/backward ``num_replays`` extra times, so the default
+        its forward/backward work ``num_replays`` extra times, so the default
         checks only the first step after every (re)start, where corruption
         from a bad restore or initialization is most likely. -1 checks every
-        step (``1 + num_replays`` forward/backwards per step)."""
+        step (``1 + num_replays`` forward/backward calls per step)."""
 
         num_replays: int = 1
         """Number of times the checked forward/backward is re-executed and
@@ -355,18 +328,12 @@ class SDCReplayer(Configurable):
         *,
         modules: Iterable[torch.nn.Module],
         device: torch.device,
-        scalar_state: Mapping[str, ScalarStateAccessor] | None = None,
     ) -> None:
         self.config = config
         self._modules = tuple(dict.fromkeys(modules))
         # pyrefly: ignore [read-only]
         self._device = device
-        self._scalar_state = dict(scalar_state or {})
-        self._state_provider = _ReplayStateProvider(
-            self._modules,
-            device,
-            self._scalar_state,
-        )
+        self._state_provider = _ReplayStateProvider(self._modules, device)
         self._steps_since_reset = 0
         self._validate_hash_support(device)
 
@@ -395,14 +362,12 @@ class SDCReplayer(Configurable):
         *,
         step: int,
     ) -> torch.Tensor:
-        """Run one optimizer step's first forward/backward, replay-checking it
-        when scheduled.
+        """Run one optimizer step's forward/backward work and replay-check it.
 
-        Call exactly once per optimizer step, for the step's first
-        forward/backward, with no pending gradients (``None`` or zeros, the
-        post-``zero_grad`` state). Unchecked steps run ``execute`` once with
-        no snapshot or signature overhead. ``step`` is the global training
-        step, used only for error reporting.
+        Call exactly once per optimizer step with no pending gradients
+        (``None`` or zeros, the post-``zero_grad`` state). Unchecked steps run
+        ``execute`` once with no snapshot or signature overhead. ``step`` is
+        the global training step, used only for error reporting.
         """
         local_step = self._steps_since_reset
         if self.config.num_steps == -1 or local_step < self.config.num_steps:
@@ -413,7 +378,7 @@ class SDCReplayer(Configurable):
         return loss
 
     def _signature(self, loss: torch.Tensor) -> _ReplaySignature:
-        """Capture hashes and scalar state after one forward/backward execution.
+        """Capture hashes and Python RNG state after one forward/backward execution.
 
         Tensor digests remain on the loss device for batched comparison. Schema
         names identify the first differing loss, RNG state, buffer, or gradient
@@ -474,13 +439,7 @@ class SDCReplayer(Configurable):
                     continue
                 add_tensor(f"gradient:{module_index}:{name}", grad)
 
-        state = (
-            ("state:python_rng", random.getstate()),
-            *(
-                (f"state:{name}", accessor.get())
-                for name, accessor in self._scalar_state.items()
-            ),
-        )
+        state = (("state:python_rng", random.getstate()),)
         return _ReplaySignature(tuple(schema), tuple(digests), state)
 
     def _execute(self, execute: Callable[[], torch.Tensor]) -> _ReplayResult:

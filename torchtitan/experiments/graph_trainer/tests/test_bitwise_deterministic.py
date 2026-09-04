@@ -223,9 +223,16 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
+            prepared_inputs = trainer._preprocess_accumulation_step_inputs(
+                [
+                    (
+                        {"input": self.inputs, "positions": self.positions},
+                        self.labels,
+                    )
+                ]
+            )
             loss = trainer.forward_backward_step(
-                input_dict={"input": self.inputs, "positions": self.positions},
-                labels=self.labels,
+                prepared_inputs=prepared_inputs,
                 global_valid_tokens=global_valid_tokens,
             )
             optimizer.step()

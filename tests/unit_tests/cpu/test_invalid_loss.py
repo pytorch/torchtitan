@@ -25,9 +25,19 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.lr_schedulers = MagicMock()
         trainer.lr_schedulers.get_metrics.return_value = {}
         trainer.checkpointer = MagicMock()
-        trainer.model_parts = []
+        model = MagicMock()
+        model.preprocess_inputs.side_effect = lambda input_dict, **kwargs: (
+            input_dict["input"],
+            input_dict["labels"],
+            {},
+        )
+        model.parameters.return_value = []
+        trainer.model_parts = [model]
         trainer.config = MagicMock()
         trainer.config.training.max_norm = 1.0
+        trainer.config.training.max_context_length = 2048
+        trainer.config.parallelism.fsdp_defer_gradient_reduction = False
+        trainer.dataloader = MagicMock(max_num_documents=None)
         trainer.sdc_replayer = None
         trainer.device = torch.device("cpu")
         trainer.gradient_accumulation_steps = 1
@@ -40,6 +50,7 @@ class TestInvalidLoss(unittest.TestCase):
         parallel_dims.pp_enabled = False
         parallel_dims.dp_cp_enabled = False
         parallel_dims.ep_enabled = False
+        parallel_dims.dp_replicate_enabled = False
         parallel_dims.get_optional_mesh.return_value = None
         trainer.parallel_dims = parallel_dims
 
@@ -48,6 +59,8 @@ class TestInvalidLoss(unittest.TestCase):
 
         # Shadow the bound method so forward/backward returns a canned loss.
         trainer.forward_backward_step = MagicMock(return_value=torch.tensor(loss_value))
+        trainer._fsdp_root = None
+        trainer._run_gradient_accumulation = trainer._gradient_accumulation_body
         return trainer
 
     def _data_iterator(self):

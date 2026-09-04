@@ -146,7 +146,7 @@ class FluxTrainer(Trainer):
             )
             yield input_dict, labels
 
-    def forward_backward_step(
+    def _forward_backward_step(
         self,
         *,
         input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
@@ -161,7 +161,8 @@ class FluxTrainer(Trainer):
             labels: Target tensor containing the ground truth image data
             global_valid_tokens: Optional tensor tracking the total number of
                 valid tokens across all processes.
-                This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
+                This field is a placeholder because FLUX rescales the loss in
+                this method.
 
         Returns:
             torch.Tensor: The computed loss value for this training step
@@ -300,7 +301,7 @@ class FluxTrainer(Trainer):
         # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
+        loss = self._forward_backward_step(input_dict=input_dict, labels=labels)
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],

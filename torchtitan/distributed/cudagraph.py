@@ -358,7 +358,6 @@ class CUDAGraphWrapper:
 def wrap_with_cuda_graph(
     fn: Callable[..., torch.Tensor],
     *,
-    gradient_accumulation_steps: int,
     sdc_num_steps: int,
     sdc_num_replays: int,
     num_warmup_steps: int = 2,
@@ -375,7 +374,6 @@ def wrap_with_cuda_graph(
 
     Args:
         fn: Callable to capture.
-        gradient_accumulation_steps: Forward-backward calls per optimizer step.
         sdc_num_steps: Initial optimizer steps checked by SDC, or -1 for all.
         sdc_num_replays: Additional calls for each SDC-checked optimizer step.
         num_warmup_steps: Number of eager optimizer steps before capture.
@@ -392,15 +390,15 @@ def wrap_with_cuda_graph(
         )
         return fn
 
-    # SDC checks only the first accumulation group of each checked step.
-    num_checked_steps = (
+    # Warmup is measured in optimizer steps, but this wrapper counts calls.
+    # Include the extra forward-backward calls made by SDC replay.
+    num_checked_warmup_steps = (
         num_warmup_steps
         if sdc_num_steps == -1
         else min(num_warmup_steps, sdc_num_steps)
     )
     num_warmup_iterations = (
-        num_warmup_steps * gradient_accumulation_steps
-        + num_checked_steps * sdc_num_replays
+        num_warmup_steps + num_checked_warmup_steps * sdc_num_replays
     )
 
     # Every wrapper is registered to the manager in this module and persists

@@ -39,18 +39,11 @@ Replay requires `debug.deterministic=True`,
 
 ## What is replayed
 
-Only the first forward/backward call of a checked optimizer step is replayed:
-one gradient-accumulation group, which under pipeline parallelism is one
-complete pipeline schedule including all pipeline microbatches. Gradient
-accumulation composes with pipeline parallelism; when a step has multiple
-accumulation groups, the remaining groups run unchecked. This is a cost
-choice rather than an engine limitation: the replay engine checks any
-forward/backward callable, and the later groups of a step exercise the same
-compute and communication paths as the first, so checking them as well would
-multiply the checked-step overhead without covering new code paths. State is
-restored before every execution; the reference and intermediate executions
-are discarded, and only the final execution's gradients, registered buffers,
-RNG advancement, token counter, and loss are committed.
+The complete forward/backward work of a checked optimizer step is replayed.
+This includes every gradient accumulation step and every pipeline microbatch.
+State is restored before every execution. The reference and intermediate
+executions are discarded. Only the final execution's gradients, registered
+buffers, RNG advancement, and loss are committed.
 
 Gradient values are never snapshotted. The checked forward/backward must
 begin with no pending gradients (`None` or zeros, the post-`zero_grad`
@@ -82,10 +75,9 @@ corruptions can collide today.
 A mismatch raises `SDCReplayMismatch` on every rank before gradient clipping,
 the optimizer, the learning-rate scheduler, or checkpoint saving. The checked
 signature includes the loss, local parameter gradients, registered buffers,
-Python and torch RNG state, and the token counter. The exception identifies
-the optimizer step, the step's position in the current check schedule
-(`local_step`), the replay number, the originating rank, and the first
-differing signature entry.
+Python RNG state, and torch RNG state. The exception identifies the optimizer
+step, the step's position in the current check schedule (`local_step`), the
+replay number, the originating rank, and the first differing signature entry.
 
 The expected checked-step cost is `1 + num_replays` forward/backward
 executions. Unchecked steps do not compute replay signatures.

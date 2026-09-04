@@ -44,14 +44,14 @@ class SDCReplayMismatchTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
+        prepared_inputs: tuple[object, ...],
         global_valid_tokens: torch.Tensor,
+        finalize_gradients: bool = True,
     ) -> torch.Tensor:
         loss = super().forward_backward_step(
-            input_dict=input_dict,
-            labels=labels,
+            prepared_inputs=prepared_inputs,
             global_valid_tokens=global_valid_tokens,
+            finalize_gradients=finalize_gradients,
         )
         self._num_forward_backward_calls += 1
         if self._num_forward_backward_calls != 2 or dist.get_rank() != 0:
@@ -247,6 +247,14 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    return config
+
+
+def llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_pp2_1f1b()
+    config.parallelism.fsdp_defer_gradient_reduction = True
+    config.parallelism.fsdp_reshard_after_forward = "never"
+    config.training.num_tokens_per_train_step = 65536
     return config
 
 
@@ -446,6 +454,13 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     _use_spmd_types(config, typechecking=True)
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 65536
+    return config
+
+
+def llama3_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Config:
+    config = llama3_debugmodel_gradient_accumulation()
+    config.parallelism.fsdp_defer_gradient_reduction = True
+    config.parallelism.fsdp_reshard_after_forward = "never"
     return config
 
 
