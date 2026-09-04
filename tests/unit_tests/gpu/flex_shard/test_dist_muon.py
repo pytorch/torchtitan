@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 import torch
 import torch.distributed as dist
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -32,7 +32,6 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
-    _REPLICA_BROADCAST_BUFFER_SIZE_BYTES,
     _adjust_muon_learning_rate,
     DistMuon,
 )
@@ -406,7 +405,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
-class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
+class TestDistMuonHSDPOwnedCompute(DTensorTestBase):
     @property
     def world_size(self):
         return 4
@@ -416,42 +415,48 @@ class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_deduplicates_compute_and_preserves_momentum(self):
+    def test_multi_axis_owned_compute_uses_packed_redistribution(self):
         mesh = init_device_mesh(
             self.device_type,
             (2, 2),
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
         device = torch.device(self.device_type, self.rank)
+        shapes = ((4, 3), (1, 4, 3), (4, 3), (1, 4, 3))
         values = tuple(
             torch.arange(12, device=device)
-            .reshape(4, 3)
+            .reshape(shape)
             .float()
             .div_(10)
             .add_(parameter_index + 1)
-            for parameter_index in range(4)
+            for parameter_index, shape in enumerate(shapes)
         )
         gradients = tuple(
             torch.arange(1, 13, device=device)
-            .reshape(4, 3)
+            .reshape(shape)
             .float()
             .add_(parameter_index)
             .div_(17)
-            for parameter_index in range(4)
+            for parameter_index, shape in enumerate(shapes)
         )
         placements = (Replicate(), Shard(0))
         fqns = tuple(f"layers.{index}.weight" for index in range(4))
 
-        def run_steps(deduplicate_compute_mesh_axis):
+        def run_steps(*, deduplicate_replicas):
             parameters = tuple(
                 torch.nn.Parameter(distribute_tensor(value.clone(), mesh, placements))
                 for value in values
+            )
+            owned_mesh_axes = (
+                {"dp_replicate": Owned(), "dp_shard": Owned()}
+                if deduplicate_replicas
+                else {"dp_shard": Owned()}
             )
             optimizer = build_dist_muon(
                 [{"params": parameters, "param_names": fqns}],
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Owned()},
+                        shardings_by_mesh_axis=owned_mesh_axes,
                     )
                     for fqn in fqns
                 },
@@ -461,22 +466,21 @@ class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=2,
-                deduplicate_compute_mesh_axis=deduplicate_compute_mesh_axis,
             )
             num_local_compute_calls = 0
-            num_local_replica_broadcast_calls = 0
+            num_local_all_to_all_calls = 0
             compute_update = optimizer._compute_update
-            broadcast_coalesced = dist._broadcast_coalesced
+            all_to_all_single = dist.all_to_all_single
 
             def count_compute(compute_layout, compute):
                 nonlocal num_local_compute_calls
                 num_local_compute_calls += 1
                 compute_update(compute_layout, compute)
 
-            def count_replica_broadcast(process_group, tensors, buffer_size, src):
-                nonlocal num_local_replica_broadcast_calls
-                num_local_replica_broadcast_calls += 1
-                return broadcast_coalesced(process_group, tensors, buffer_size, src)
+            def count_all_to_all(*args, **kwargs):
+                nonlocal num_local_all_to_all_calls
+                num_local_all_to_all_calls += 1
+                return all_to_all_single(*args, **kwargs)
 
             with (
                 mock.patch.object(
@@ -486,14 +490,14 @@ class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
                 ),
                 mock.patch.object(
                     dist,
-                    "_broadcast_coalesced",
-                    side_effect=count_replica_broadcast,
+                    "all_to_all_single",
+                    side_effect=count_all_to_all,
                 ),
             ):
                 for reverse_rows in (False, True):
                     for parameter, gradient in zip(parameters, gradients, strict=True):
                         step_gradient = (
-                            gradient.flip(0).contiguous() if reverse_rows else gradient
+                            gradient.flip(-2).contiguous() if reverse_rows else gradient
                         )
                         parameter.grad = distribute_tensor(
                             step_gradient.clone(), mesh, placements
@@ -519,7 +523,8 @@ class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
                 ),
                 num_local_compute_calls,
                 int(num_global_compute_calls.item()),
-                num_local_replica_broadcast_calls,
+                num_local_all_to_all_calls,
+                optimizer,
             )
 
         (
@@ -527,25 +532,27 @@ class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
             baseline_momenta,
             _,
             baseline_compute_calls,
-            baseline_replica_broadcast_calls,
-        ) = run_steps(None)
+            _,
+            _,
+        ) = run_steps(deduplicate_replicas=False)
         (
             deduplicated_params,
             deduplicated_momenta,
             deduplicated_local_compute_calls,
             deduplicated_compute_calls,
-            deduplicated_replica_broadcast_calls,
-        ) = run_steps("dp_replicate")
+            deduplicated_all_to_all_calls,
+            deduplicated_optimizer,
+        ) = run_steps(deduplicate_replicas=True)
 
         self.assertEqual(baseline_compute_calls, 16)
-        self.assertEqual(baseline_replica_broadcast_calls, 0)
         self.assertEqual(deduplicated_compute_calls, 8)
-        # Replica and shard ownership are both load-balanced, so every rank
-        # computes one of the four equally sized parameters per step.
+        # Four equal-cost whole-matrix tasks are assigned one per rank.
         self.assertEqual(deduplicated_local_compute_calls, 2)
-        # The four parameters have two replica owners. Each owner group is
-        # coalesced into one broadcast per step on every rank.
-        self.assertEqual(deduplicated_replica_broadcast_calls, 4)
+        self.assertEqual(deduplicated_all_to_all_calls, 4)
+        bucket_plan = deduplicated_optimizer._bucket_plans[0]
+        self.assertEqual(len(bucket_plan.group.participants), self.world_size)
+        self.assertTrue(bucket_plan.storage_to_compute_schedule.has_remote_transfers)
+        self.assertTrue(bucket_plan.compute_to_storage_schedule.has_remote_transfers)
         for actual, expected in zip(deduplicated_params, baseline_params, strict=True):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         for actual, expected in zip(
@@ -554,161 +561,51 @@ class TestDistMuonHSDPReplicaDeduplication(DTensorTestBase):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     @with_comms
-    def test_balances_replica_owners_by_mesh_coordinate(self):
+    def test_balances_heterogeneous_whole_matrix_tasks(self):
         mesh = init_device_mesh(
             self.device_type,
             (2, 2),
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
         device = torch.device(self.device_type, self.rank)
+        shapes = ((9, 3), (1, 8, 3), (7, 3), (1, 6, 3), (5, 3), (4, 3))
+        placements = (Replicate(), Shard(0))
         parameters = tuple(
             torch.nn.Parameter(
-                distribute_tensor(
-                    torch.ones(4, 3, device=device),
-                    mesh,
-                    (Replicate(), Shard(0)),
-                )
+                distribute_tensor(torch.ones(shape, device=device), mesh, placements)
             )
-            for _ in range(4)
+            for shape in shapes
         )
-        fqns = tuple(f"layers.{index}.weight" for index in range(4))
-
-        with mock.patch.object(
-            DeviceMesh,
-            "get_local_rank",
-            side_effect=AssertionError(
-                "replica ownership must not depend on process-group rank order"
-            ),
-        ):
-            optimizer = build_dist_muon(
-                [{"params": parameters, "param_names": fqns}],
-                compute_sharding_by_fqn={
-                    fqn: ComputeLayout(
-                        shardings_by_mesh_axis={"dp_shard": Owned()},
-                    )
-                    for fqn in fqns
-                },
-                bucket_configs=[BucketConfig(patterns=("layers.*",))],
-                deduplicate_compute_mesh_axis="dp_replicate",
-            )
-
-        replica_deduplication = optimizer._replica_compute_deduplication
-        assert replica_deduplication is not None
-        mesh_coordinate = mesh.get_coordinate()
-        assert mesh_coordinate is not None
-        expected_owned_fqns = set(
-            fqns[mesh_coordinate[0] :: mesh["dp_replicate"].size()]
-        )
-        actual_owned_fqns = {
-            compute_layout.fqn
-            for compute_layout in optimizer._locally_owned_compute_layouts
-        }
-        self.assertEqual(actual_owned_fqns, expected_owned_fqns)
-        self.assertEqual(
-            len(replica_deduplication.parameter_broadcast_groups),
-            mesh["dp_replicate"].size(),
-        )
-        self.assertEqual(
-            [
-                len(broadcast_group.params)
-                for broadcast_group in (
-                    replica_deduplication.parameter_broadcast_groups
-                )
-            ],
-            [2, 2],
-        )
-        expected_source_ranks = set(mesh.mesh[:, mesh_coordinate[1]].tolist())
-        self.assertEqual(
-            {
-                broadcast_group.source_rank
-                for broadcast_group in (
-                    replica_deduplication.parameter_broadcast_groups
-                )
-            },
-            expected_source_ranks,
-        )
-
-    @with_comms
-    def test_coalesces_before_switching_replica_process_groups(self):
-        dense_mesh = init_device_mesh(
-            self.device_type,
-            (2, 2),
-            mesh_dim_names=("dp_replicate", "dp_shard"),
-        )
-        # Keep the same replica owners while forming distinct replica groups.
-        sparse_mesh = DeviceMesh(
-            self.device_type,
-            torch.tensor(((1, 0), (2, 3))),
-            mesh_dim_names=("dp_replicate", "efsdp"),
-        )
-        device = torch.device(self.device_type, self.rank)
-        placements = (Replicate(), Shard(0))
-        dense_parameter = torch.nn.Parameter(
-            distribute_tensor(
-                torch.ones(4, 3, device=device),
-                dense_mesh,
-                placements,
-            )
-        )
-        sparse_parameter = torch.nn.Parameter(
-            distribute_tensor(
-                torch.ones(4, 3, device=device),
-                sparse_mesh,
-                placements,
-            )
-        )
-        dense_fqn = "layers.0.attention.weight"
-        sparse_fqn = "layers.0.experts.weight"
+        fqns = tuple(f"layers.{index}.weight" for index in range(len(parameters)))
         optimizer = build_dist_muon(
-            [
-                {
-                    "params": [dense_parameter, sparse_parameter],
-                    "param_names": [dense_fqn, sparse_fqn],
-                }
-            ],
+            [{"params": parameters, "param_names": fqns}],
             compute_sharding_by_fqn={
-                dense_fqn: ComputeLayout(
-                    shardings_by_mesh_axis={"dp_shard": Owned()},
-                ),
-                sparse_fqn: ComputeLayout(
-                    shardings_by_mesh_axis={"efsdp": Owned()},
-                ),
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_replicate": Owned(),
+                        "dp_shard": Owned(),
+                    }
+                )
+                for fqn in fqns
             },
-            bucket_configs=[
-                BucketConfig(patterns=(dense_fqn,)),
-                BucketConfig(patterns=(sparse_fqn,)),
-            ],
-            deduplicate_compute_mesh_axis="dp_replicate",
+            bucket_configs=[BucketConfig(patterns=("layers.*",))],
         )
-        replica_deduplication = optimizer._replica_compute_deduplication
-        assert replica_deduplication is not None
-        broadcast_groups = replica_deduplication.parameter_broadcast_groups
-        self.assertEqual(len(broadcast_groups), 2)
+        bucket_plan = optimizer._bucket_plans[0]
+        owner_ranks = []
+        for redistribution_plan in bucket_plan.redistribution_plans:
+            owners = [
+                partition.participant
+                for partition in redistribution_plan.compute_partitions
+                if partition.tensor_shape != (0,)
+            ]
+            self.assertEqual(len(owners), 1)
+            owner_ranks.extend(owners)
 
-        events: list[tuple[int, int, int, int]] = []
-
-        def record_broadcast(process_group, tensors, buffer_size, src):
-            self.assertTrue(tensors)
-            self.assertTrue(all(tensor.numel() for tensor in tensors))
-            events.append((id(process_group), len(tensors), buffer_size, src))
-
-        with mock.patch.object(
-            dist,
-            "_broadcast_coalesced",
-            side_effect=record_broadcast,
-        ):
-            optimizer._broadcast_replica_parameters(replica_deduplication)
-
-        expected_events = [
-            (
-                id(broadcast_group.process_group),
-                len(broadcast_group.params),
-                _REPLICA_BROADCAST_BUFFER_SIZE_BYTES,
-                broadcast_group.source_group_rank,
-            )
-            for broadcast_group in broadcast_groups
-        ]
-        self.assertEqual(events, expected_events)
+        self.assertEqual(set(owner_ranks), set(bucket_plan.group.participants))
+        self.assertEqual(
+            sorted(owner_ranks.count(rank) for rank in bucket_plan.group.participants),
+            [1, 1, 2, 2],
+        )
 
 
 if __name__ == "__main__":

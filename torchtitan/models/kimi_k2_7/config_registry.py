@@ -457,27 +457,22 @@ def _dist_muon_optimizer(
             "DistMuon": {
                 "bucket_configs": bucket_configs,
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
-                "deduplicate_compute_mesh_axis": (
-                    MeshAxisName.DP_REPLICATE.value
-                    if parallelism.data_parallel_replicate_degree > 1
-                    else None
-                ),
             }
         },
     )
 
 
-def _align_dist_muon_configuration(
+def _align_dist_muon_expert_compute_layouts(
     optimizer_config: OptimizersContainer.Config,
     *,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    """Align DistMuon settings with the final parallelism config.
+    """Align routed-expert layouts with the final parallelism config.
 
     The registry builds compute layouts from the recipe's declared parallelism,
-    but the CLI can still override parallel degrees afterwards. Those overrides
-    decide both the routed-expert layout and whether HSDP replica compute is
-    deduplicated, so both settings have to be rebuilt here.
+    but the CLI can still override ``expert_parallel_degree`` afterwards. That
+    override decides whether routed experts use the 1D ``dp_shard`` layout or
+    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
     """
     # TODO: Remove this function once parallelism can no longer be overridden
     # from the CLI; the registry layouts are then already final.
@@ -503,17 +498,6 @@ def _align_dist_muon_configuration(
             changed = True
         else:
             aligned_shardings[fqn] = compute_layout
-    deduplicate_compute_mesh_axis = (
-        MeshAxisName.DP_REPLICATE.value
-        if parallelism.data_parallel_replicate_degree > 1
-        else None
-    )
-    current_deduplicate_axis = dist_muon_kwargs.get("deduplicate_compute_mesh_axis")
-    if current_deduplicate_axis != deduplicate_compute_mesh_axis:
-        dist_muon_kwargs[
-            "deduplicate_compute_mesh_axis"
-        ] = deduplicate_compute_mesh_axis
-        changed = True
     if not changed:
         return optimizer_config
 
@@ -528,7 +512,7 @@ def _align_dist_muon_configuration(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimizer = _align_dist_muon_configuration(
+        self.optimizer = _align_dist_muon_expert_compute_layouts(
             self.optimizer,
             parallelism=self.parallelism,
         )

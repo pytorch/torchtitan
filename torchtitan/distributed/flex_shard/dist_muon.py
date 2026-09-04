@@ -16,7 +16,6 @@ from functools import partial
 from typing import Any, cast, NoReturn, overload
 
 import torch
-import torch.distributed as dist
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -56,17 +55,11 @@ __all__ = [
 ]
 
 
-# Match DDP's buffer synchronization cap so temporary coalescing storage is
-# bounded independently of the total Muon parameter size.
-_REPLICA_BROADCAST_BUFFER_SIZE_BYTES = 250 * 1024 * 1024
-
-
 def build_dist_muon(
     params: Iterable[dict[str, Any]],
     *,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
-    deduplicate_compute_mesh_axis: str | None = None,
     **kwargs: Any,
 ) -> DistMuon:
     """Construct a DistMuon optimizer with FlexShard redistribution.
@@ -79,19 +72,15 @@ def build_dist_muon(
     batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
     complete matrices. A single 2D matrix without ``BlockShard`` uses
     whole-matrix compute such as ``Owned``.
-
-    ``deduplicate_compute_mesh_axis`` may name an active replicated storage
-    mesh axis. DistMuon balances parameters across that axis, runs each Muon
-    update in exactly one replica, and coalesces broadcasts of the updated local
-    parameter shards from their assigned replicas. Replica peers still update
-    their local momentum state so the optimizer state layout and checkpoint
-    contract do not change.
+    Declaring ``Owned`` on multiple mesh axes assigns the complete compute
+    tensor to one rank in their Cartesian group. The existing packed
+    redistribution gathers the input to that owner and restores the result to
+    every storage holder.
     """
     return DistMuon(
         _normalize_param_groups(params),
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
-        deduplicate_compute_mesh_axis=deduplicate_compute_mesh_axis,
         **kwargs,
     )
 
@@ -248,27 +237,11 @@ def _initialize_dist_muon(
         get_fqn=lambda layout: layout.fqn,
         get_storage_dtensor=lambda layout: layout.param,
         requires_redistribution=lambda layout: (not layout.storage_is_compute_ready),
-        get_redistribution_storage_mesh_axis=lambda layout: (
-            layout.redistribution_storage_mesh_axis
+        get_redistribution_storage_mesh_axes=lambda layout: (
+            layout.redistribution_storage_mesh_axes
         ),
     )
-    optimizer._replica_compute_deduplication = _resolve_replica_compute_deduplication(
-        compute_layouts,
-        mesh_axis_name=optimizer._deduplicate_compute_mesh_axis,
-        ns_steps_by_group=tuple(group["ns_steps"] for group in optimizer.param_groups),
-    )
-    optimizer._parameter_compute_layouts = tuple(compute_layouts)
-    replica_deduplication = optimizer._replica_compute_deduplication
-    optimizer._locally_owned_compute_layouts = (
-        optimizer._parameter_compute_layouts
-        if replica_deduplication is None
-        else tuple(
-            compute_layout
-            for compute_layout in optimizer._parameter_compute_layouts
-            if id(compute_layout.param) in replica_deduplication.owned_parameter_ids
-        )
-    )
-    optimizer._initialize_plan(optimizer._locally_owned_compute_layouts)
+    optimizer._initialize_plan(compute_layouts)
     optimizer._validate_plan_across_ranks()
     optimizer._redistribution_runtime = _BucketedRedistributionRuntime[
         _ParameterComputeLayout
@@ -297,9 +270,6 @@ class DistMuon(Optimizer):
     _prepared_compute_layouts: dict[str, _PreparedParameterComputeLayout]
     _specs: tuple[_BucketSpec, ...]
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
-    _replica_compute_deduplication: _ReplicaComputeDeduplication | None
-    _locally_owned_compute_layouts: tuple[_ParameterComputeLayout, ...]
-    _deduplicate_compute_mesh_axis: str | None
     _param_groups_frozen: bool
 
     def __init__(
@@ -316,15 +286,7 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
-        deduplicate_compute_mesh_axis: str | None = None,
     ) -> None:
-        if deduplicate_compute_mesh_axis is not None and (
-            not isinstance(deduplicate_compute_mesh_axis, str)
-            or not deduplicate_compute_mesh_axis
-        ):
-            raise ValueError(
-                "deduplicate_compute_mesh_axis must be a non-empty string or None"
-            )
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -337,7 +299,6 @@ class DistMuon(Optimizer):
         }
         self._first_step_validated = False
         self._param_groups_frozen = False
-        self._deduplicate_compute_mesh_axis = deduplicate_compute_mesh_axis
         super().__init__(params, defaults)
         self._validate_groups()
         self._param_groups_frozen = True
@@ -363,18 +324,13 @@ class DistMuon(Optimizer):
                 loss = closure()
 
         self._preflight_step()
-        replica_deduplication = self._replica_compute_deduplication
-        if replica_deduplication is None or self._bucket_plans:
-            self._redistribution_runtime.run(
-                self._bucket_plans,
-                local_tensor_spec=self._local_tensor_spec,
-                prepare=self._prepare_local,
-                compute=self._compute_update,
-                finalize=self._apply_update,
-            )
-        if replica_deduplication is not None:
-            self._update_unowned_momentum(replica_deduplication.owned_parameter_ids)
-            self._broadcast_replica_parameters(replica_deduplication)
+        self._redistribution_runtime.run(
+            self._bucket_plans,
+            local_tensor_spec=self._local_tensor_spec,
+            prepare=self._prepare_local,
+            compute=self._compute_update,
+            finalize=self._apply_update,
+        )
         return loss
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
@@ -459,8 +415,8 @@ class DistMuon(Optimizer):
                     resolved_compute_layout_signature=(
                         resolved_transition.resolved_compute_layout_signature
                     ),
-                    redistribution_storage_mesh_axis=(
-                        resolved_transition.redistribution_storage_mesh_axis
+                    redistribution_storage_mesh_axes=(
+                        resolved_transition.redistribution_storage_mesh_axes
                     ),
                 )
             )
@@ -483,7 +439,7 @@ class DistMuon(Optimizer):
             ),
         )
         self._bucket_plans = result.plans
-        self._locally_owned_compute_layouts = result.ordered_items
+        self._parameter_compute_layouts = result.ordered_items
 
     def _validate_plan_across_ranks(self) -> None:
         _validate_bucket_plans_across_ranks(
@@ -654,43 +610,6 @@ class DistMuon(Optimizer):
             out=out,
         )
         torch.autograd.graph.increment_version(momentum_state)
-
-    def _update_unowned_momentum(self, owned_parameter_ids: frozenset[int]) -> None:
-        for compute_layout in self._parameter_compute_layouts:
-            if id(compute_layout.param) in owned_parameter_ids:
-                continue
-            grad, momentum, momentum_state, group = self._local_gradient_and_momentum(
-                compute_layout
-            )
-            _update_muon_momentum(
-                grad,
-                momentum,
-                momentum=group["momentum"],
-            )
-            torch.autograd.graph.increment_version(momentum_state)
-
-    @staticmethod
-    def _broadcast_replica_parameters(
-        replica_deduplication: _ReplicaComputeDeduplication,
-    ) -> None:
-        # Backends require a globally consistent collective order when several
-        # process groups are active, so finish one group before starting another.
-        for broadcast_group in replica_deduplication.parameter_broadcast_groups:
-            local_parameters = []
-            for param in broadcast_group.params:
-                local_parameter = param.to_local().detach()
-                if local_parameter.numel():
-                    local_parameters.append(local_parameter)
-            if local_parameters:
-                dist._broadcast_coalesced(
-                    broadcast_group.process_group,
-                    local_parameters,
-                    _REPLICA_BROADCAST_BUFFER_SIZE_BYTES,
-                    broadcast_group.source_group_rank,
-                )
-
-        for param in replica_deduplication.received_parameters:
-            torch.autograd.graph.increment_version(param)
 
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
@@ -982,168 +901,13 @@ class _ParameterComputeLayout:
     compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    redistribution_storage_mesh_axis: int | None
+    redistribution_storage_mesh_axes: tuple[int, ...]
 
     @property
     def storage_is_compute_ready(self) -> bool:
         return isinstance(
             self.storage_to_compute_transition, _NoRedistributionTransition
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _ReplicaParameterBroadcastGroup:
-    process_group: dist.ProcessGroup
-    source_rank: int
-    source_group_rank: int
-    dtype: torch.dtype
-    params: tuple[DTensor, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _ReplicaComputeDeduplication:
-    owned_parameter_ids: frozenset[int]
-    received_parameters: tuple[DTensor, ...]
-    parameter_broadcast_groups: tuple[_ReplicaParameterBroadcastGroup, ...]
-
-
-def _resolve_replica_compute_deduplication(
-    compute_layouts: Sequence[_ParameterComputeLayout],
-    *,
-    mesh_axis_name: str | None,
-    ns_steps_by_group: Sequence[int],
-) -> _ReplicaComputeDeduplication | None:
-    if mesh_axis_name is None:
-        return None
-
-    layouts_by_process_group: dict[
-        dist.ProcessGroup,
-        list[tuple[_ParameterComputeLayout, int, tuple[int, ...]]],
-    ] = {}
-    process_group_order: list[dist.ProcessGroup] = []
-    for compute_layout in compute_layouts:
-        param = compute_layout.param
-        mesh_axis_names = param.device_mesh.mesh_dim_names
-        if mesh_axis_names is None or mesh_axis_name not in mesh_axis_names:
-            raise ValueError(
-                f"Muon parameter {compute_layout.fqn!r} cannot deduplicate compute "
-                f"on missing storage mesh axis {mesh_axis_name!r}"
-            )
-        storage_mesh_axis = mesh_axis_names.index(mesh_axis_name)
-        mesh_axis_size = param.device_mesh.size(storage_mesh_axis)
-        if mesh_axis_size <= 1:
-            raise ValueError(
-                f"Muon parameter {compute_layout.fqn!r} cannot deduplicate compute "
-                f"on size-{mesh_axis_size} storage mesh axis {mesh_axis_name!r}"
-            )
-        if type(param.placements[storage_mesh_axis]) is not Replicate:
-            raise ValueError(
-                f"Muon parameter {compute_layout.fqn!r} requires Replicate storage "
-                f"on compute-deduplication mesh axis {mesh_axis_name!r}; got "
-                f"{param.placements[storage_mesh_axis]!r}"
-            )
-
-        replica_mesh = param.device_mesh[mesh_axis_name]
-        process_group = replica_mesh.get_group()
-        if process_group not in layouts_by_process_group:
-            layouts_by_process_group[process_group] = []
-            process_group_order.append(process_group)
-        mesh_coordinate = param.device_mesh.get_coordinate()
-        assert mesh_coordinate is not None
-        layouts_by_process_group[process_group].append(
-            (
-                compute_layout,
-                mesh_coordinate[storage_mesh_axis],
-                _device_mesh_ranks(replica_mesh),
-            )
-        )
-
-    owner_coordinate_by_parameter_id: dict[int, int] = {}
-    source_rank_by_parameter_id: dict[int, int] = {}
-    local_coordinate_by_parameter_id: dict[int, int] = {}
-    for process_group in process_group_order:
-        group_layouts = layouts_by_process_group[process_group]
-        replica_ranks = group_layouts[0][2]
-        if any(
-            candidate_ranks != replica_ranks for _, _, candidate_ranks in group_layouts
-        ):
-            raise ValueError("replica process group has inconsistent mesh rank order")
-        assignments, _loads = _balance_loads_across_partitions(
-            tuple(
-                (
-                    _estimate_muon_compute_cost(
-                        compute_layout.global_compute_shape,
-                        ns_steps_by_group[compute_layout.group_index],
-                    ),
-                    compute_layout.param.numel() * compute_layout.param.element_size(),
-                    compute_layout.fqn,
-                )
-                for compute_layout, _local_coordinate, _replica_ranks in group_layouts
-            ),
-            initial_cumulative_primary_loads=(0,) * len(replica_ranks),
-        )
-        for (
-            compute_layout,
-            local_coordinate,
-            _replica_ranks,
-        ), owner_coordinate in zip(group_layouts, assignments, strict=True):
-            parameter_id = id(compute_layout.param)
-            owner_coordinate_by_parameter_id[parameter_id] = owner_coordinate
-            source_rank_by_parameter_id[parameter_id] = replica_ranks[owner_coordinate]
-            local_coordinate_by_parameter_id[parameter_id] = local_coordinate
-
-    owned_parameter_ids = frozenset(
-        parameter_id
-        for parameter_id, owner_coordinate in owner_coordinate_by_parameter_id.items()
-        if local_coordinate_by_parameter_id[parameter_id] == owner_coordinate
-    )
-    broadcast_process_groups: list[dist.ProcessGroup] = []
-    broadcast_source_ranks: list[int] = []
-    broadcast_dtypes: list[torch.dtype] = []
-    broadcast_params: list[list[DTensor]] = []
-    for compute_layout in compute_layouts:
-        param = compute_layout.param
-        replicate_mesh = param.device_mesh[mesh_axis_name]
-        process_group = replicate_mesh.get_group()
-        source_rank = source_rank_by_parameter_id[id(param)]
-        for group_index, existing_process_group in enumerate(broadcast_process_groups):
-            if (
-                existing_process_group is process_group
-                and broadcast_source_ranks[group_index] == source_rank
-                and broadcast_dtypes[group_index] == param.dtype
-            ):
-                broadcast_params[group_index].append(param)
-                break
-        else:
-            broadcast_process_groups.append(process_group)
-            broadcast_source_ranks.append(source_rank)
-            broadcast_dtypes.append(param.dtype)
-            broadcast_params.append([param])
-
-    return _ReplicaComputeDeduplication(
-        owned_parameter_ids=owned_parameter_ids,
-        received_parameters=tuple(
-            compute_layout.param
-            for compute_layout in compute_layouts
-            if id(compute_layout.param) not in owned_parameter_ids
-        ),
-        parameter_broadcast_groups=tuple(
-            _ReplicaParameterBroadcastGroup(
-                process_group=process_group,
-                source_rank=source_rank,
-                source_group_rank=dist.get_group_rank(process_group, source_rank),
-                dtype=dtype,
-                params=tuple(params),
-            )
-            for process_group, source_rank, dtype, params in zip(
-                broadcast_process_groups,
-                broadcast_source_ranks,
-                broadcast_dtypes,
-                broadcast_params,
-                strict=True,
-            )
-        ),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1188,7 +952,7 @@ class _ResolvedStorageToComputeTransition:
     compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    redistribution_storage_mesh_axis: int | None = None
+    redistribution_storage_mesh_axes: tuple[int, ...] = ()
 
 
 def _resolve_muon_redistribution_plans(
@@ -1346,7 +1110,7 @@ def _build_parameter_redistribution_plan(
     group_local_storage_shape, storage_regions = _dtensor_storage_regions(
         compute_layout.param,
         group.participants,
-        required_storage_mesh_axis=(compute_layout.redistribution_storage_mesh_axis),
+        required_storage_mesh_axes=compute_layout.redistribution_storage_mesh_axes,
     )
     compute_sharding = compute_layout.compute_sharding
     if type(compute_sharding) is Owned:
@@ -1699,7 +1463,8 @@ def _resolve_storage_to_compute_transition(
     if compute_view is not None:
         if applicable_owned_storage_mesh_axes:
             raise ValueError(
-                f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+                f"Muon parameter {fqn!r} cannot combine Owned with a "
+                "BlockShard matrix-batch view"
             )
         shard_axes = [
             mesh_axis_names[storage_mesh_axis]
@@ -1774,19 +1539,38 @@ def _resolve_storage_to_compute_transition(
     transport_mesh_axes = tuple(
         sorted(set(changed_storage_mesh_axes).union(active_owned_storage_mesh_axes))
     )
-    if len(transport_mesh_axes) > 1:
-        axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
-        raise NotImplementedError(
-            f"Muon parameter {fqn!r} requires compute redistribution or "
-            f"owned compute on multiple mesh axes {axis_names}; multi-axis "
-            "transport is not implemented"
-        )
-
     redistribution_storage_mesh_axis = (
-        transport_mesh_axes[0] if transport_mesh_axes else None
+        transport_mesh_axes[0] if len(transport_mesh_axes) == 1 else None
     )
     uses_supported_orthogonal_shard_redistribution = False
-    if redistribution_storage_mesh_axis is not None:
+    if len(transport_mesh_axes) > 1:
+        axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
+        if set(transport_mesh_axes) != set(active_owned_storage_mesh_axes):
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} mixes owned compute with tensor "
+                f"resharding across mesh axes {axis_names}; mixed multi-axis "
+                "compute layouts are not implemented"
+            )
+        transport_axis_set = set(transport_mesh_axes)
+        for storage_mesh_axis, placement in enumerate(param.placements):
+            if storage_mesh_axis in transport_axis_set:
+                if type(placement) not in (Replicate, Shard):
+                    raise NotImplementedError(
+                        f"Muon parameter {fqn!r} cannot redistribute "
+                        f"{type(placement).__name__} storage on mesh axis "
+                        f"{mesh_axis_names[storage_mesh_axis]!r}"
+                    )
+            elif (
+                param.device_mesh.size(storage_mesh_axis) > 1
+                and type(placement) is not Replicate
+            ):
+                raise NotImplementedError(
+                    f"Muon parameter {fqn!r} cannot use multi-axis owned "
+                    f"compute while storage mesh axis "
+                    f"{mesh_axis_names[storage_mesh_axis]!r} has "
+                    f"non-replicated placement {placement}"
+                )
+    elif redistribution_storage_mesh_axis is not None:
         redistribution_axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
         for storage_mesh_axis, placement in enumerate(param.placements):
             if storage_mesh_axis == redistribution_storage_mesh_axis:
@@ -1923,11 +1707,12 @@ def _resolve_storage_to_compute_transition(
 
     resolved_compute_layout_signature = tuple(resolved_target_signature)
     compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
-    if applicable_owned_storage_mesh_axes and (
-        len(global_compute_shape) != 2 or param.ndim != 2
-    ):
-        raise ValueError(
-            f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+    if active_owned_storage_mesh_axes and compute_shard_dims:
+        axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
+        raise NotImplementedError(
+            f"Muon parameter {fqn!r} mixes Owned with tensor sharding on "
+            f"mesh axes {axis_names}; mixed owned/sharded compute is not "
+            "implemented"
         )
     if active_owned_storage_mesh_axes:
         compute_sharding: _ResolvedComputeSharding = Owned()
@@ -1973,7 +1758,7 @@ def _resolve_storage_to_compute_transition(
                 f"{axis_name!r}"
             )
 
-    if redistribution_storage_mesh_axis is None:
+    if not transport_mesh_axes:
         return _ResolvedStorageToComputeTransition(
             compute_sharding=compute_sharding,
             storage_to_compute_transition=_NoRedistributionTransition(),
@@ -1984,7 +1769,7 @@ def _resolve_storage_to_compute_transition(
         compute_sharding=compute_sharding,
         storage_to_compute_transition=_RedistributionTransition(),
         resolved_compute_layout_signature=resolved_compute_layout_signature,
-        redistribution_storage_mesh_axis=redistribution_storage_mesh_axis,
+        redistribution_storage_mesh_axes=transport_mesh_axes,
     )
 
 
@@ -2080,11 +1865,7 @@ def _prepare_muon_input(
     out: Tensor,
 ) -> Tensor:
     """Update momentum and prepare the Tensor passed to Muon computation."""
-    _update_muon_momentum(
-        gradient,
-        momentum_buffer,
-        momentum=momentum,
-    )
+    momentum_buffer.lerp_(gradient, 1 - momentum)
     if nesterov:
         torch.lerp(
             gradient,
@@ -2095,15 +1876,6 @@ def _prepare_muon_input(
     else:
         out.copy_(momentum_buffer)
     return out
-
-
-def _update_muon_momentum(
-    gradient: Tensor,
-    momentum_buffer: Tensor,
-    *,
-    momentum: float,
-) -> None:
-    momentum_buffer.lerp_(gradient, 1 - momentum)
 
 
 def _compute_muon_direction(
@@ -2184,7 +1956,7 @@ def _after_load_state_dict(optimizer: Optimizer) -> None:
     # Optimizer.load_state_dict restores group values such as ns_steps after
     # construction, and those values affect compute planning and buffer sizes.
     muon._validate_groups()
-    muon._initialize_plan(muon._locally_owned_compute_layouts)
+    muon._initialize_plan(muon._parameter_compute_layouts)
     muon._validate_plan_across_ranks()
     muon._redistribution_runtime.reserve_buffers(
         muon._bucket_plans,

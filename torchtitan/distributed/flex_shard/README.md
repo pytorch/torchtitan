@@ -32,6 +32,13 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   builder validates named DTensor parameters and plans their storage-to-compute
   transitions.
 
+For HSDP storage such as `(Replicate(), Shard(0))`, declaring `Owned()` on both
+`dp_replicate` and `dp_shard` assigns each complete matrix parameter to one
+owner in the Cartesian group. Parameters are greedily balanced across owners,
+and the existing packed all-to-all path gathers compute inputs and restores
+updated storage shards. This is opt-in through `compute_sharding_by_fqn`; model
+recipes do not enable it automatically.
+
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
 most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
