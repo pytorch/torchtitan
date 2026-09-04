@@ -13,12 +13,12 @@ from datetime import timedelta
 from typing import cast
 
 import torch
+from torch.distributed import config as dist_config
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
@@ -309,9 +309,7 @@ class FaultTolerantTrainer(Trainer):
                 and config.debug.spmd_typechecking
             ),
         )
-        self.fwd_bwd_fn = self._forward_backward_body
-        if not config.training.disable_cuda_graphs:
-            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
+        self._init_forward_backward_functions()
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -354,6 +352,9 @@ class FaultTolerantTrainer(Trainer):
 
     def init_distributed(self) -> ParallelDims:
         config = self.config
+        dist_config.pipeline_per_direction_p2p = (
+            config.parallelism.pipeline_parallel_per_direction_p2p
+        )
 
         # determine the global ranks when fault tolerance is enabled
         global_ranks = []
