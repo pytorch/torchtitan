@@ -8,7 +8,7 @@ import dataclasses
 import json
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
@@ -18,6 +18,7 @@ import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
+from torch.distributed import config as dist_config, distributed_c10d
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.tensor import DTensor
 
@@ -175,10 +176,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if self.training.disable_cuda_graphs:
                 return
 
-            if self.parallelism.pipeline_parallel_degree > 1:
+            pp_enabled = self.parallelism.pipeline_parallel_degree > 1
+            if pp_enabled and self.validator.enable:
                 raise ValueError(
-                    "CUDA graphs do not support pipeline parallelism yet. "
-                    "Set --training.disable_cuda_graphs."
+                    "CUDA graphs with pipeline parallelism do not support "
+                    "validation because validation reinitializes the shared "
+                    "pipeline schedule. Disable validation or CUDA graphs."
+                )
+
+            if (
+                pp_enabled
+                and not self.parallelism.pipeline_parallel_per_direction_p2p
+                and not distributed_c10d._use_torchcomms_enabled()
+            ):
+                raise ValueError(
+                    "CUDA graphs with pipeline parallelism require directed "
+                    "P2P process groups. Set "
+                    "parallelism.pipeline_parallel_per_direction_p2p=True in "
+                    "the job configuration, or disable CUDA graphs."
                 )
 
             if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
@@ -291,6 +306,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
     fwd_bwd_fn: ForwardBackwardFn
+    pp_fwd_bwd_fn: Callable[
+        [
+            list[tuple[torch.Tensor, ...]] | None,
+            list[dict[str, Any]],
+            list[torch.Tensor] | None,
+            torch.Tensor,
+        ],
+        torch.Tensor,
+    ]
+    _pp_loss_sentinel: torch.Tensor
     _pp_training_schedule_initialized: bool
     gradient_accumulation_steps: int
     num_pp_microbatches: int
@@ -636,16 +661,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and config.debug.spmd_typechecking
             ),
         )
-        self.fwd_bwd_fn = self._forward_backward_body
-        if parallel_dims.pp_enabled:
-            self._pp_training_schedule_initialized = False
-        if not config.training.disable_cuda_graphs:
-            # Two optimizer steps initialize lazy optimizer state and establish
-            # the steady-state allocator behavior before the graph pool is fixed.
-            self.fwd_bwd_fn = wrap_with_cuda_graph(
-                self.fwd_bwd_fn,
-                num_warmup_iterations=self._num_cuda_graph_warmup_iterations(),
-            )
+        self._init_forward_backward_functions()
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -685,6 +701,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
 
+    def _init_forward_backward_functions(self) -> None:
+        config = self.config
+        parallel_dims = self.parallel_dims
+        self.fwd_bwd_fn = self._forward_backward_body
+        if parallel_dims.pp_enabled:
+            self.pp_fwd_bwd_fn = self._pp_forward_backward_body
+            self._pp_loss_sentinel = torch.full((1,), -1.0, device=self.device)
+            self._pp_training_schedule_initialized = False
+        if not config.training.disable_cuda_graphs:
+            # Two optimizer steps initialize lazy optimizer state and establish
+            # the steady-state allocator behavior before the graph pool is fixed.
+            num_warmup_iterations = self._num_cuda_graph_warmup_iterations()
+            if parallel_dims.pp_enabled:
+                self.pp_fwd_bwd_fn = wrap_with_cuda_graph(
+                    self.pp_fwd_bwd_fn,
+                    num_warmup_iterations=num_warmup_iterations,
+                )
+            else:
+                self.fwd_bwd_fn = wrap_with_cuda_graph(
+                    self.fwd_bwd_fn,
+                    num_warmup_iterations=num_warmup_iterations,
+                )
+
     def _num_cuda_graph_warmup_iterations(self) -> int:
         num_warmup_steps = 2
         num_iterations = num_warmup_steps * self.gradient_accumulation_steps
@@ -702,6 +741,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
         config = self.config
+        dist_config.pipeline_per_direction_p2p = (
+            config.parallelism.pipeline_parallel_per_direction_p2p
+        )
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
@@ -827,8 +869,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if target_mbs is not None:
                 target_mbs.append(labels)
 
+        return self.pp_fwd_bwd_fn(
+            arg_mbs if self.pp_has_first_stage else None,
+            kwarg_mbs,
+            target_mbs,
+            global_valid_tokens,
+        )
+
+    def _pp_forward_backward_body(
+        self,
+        arg_mbs: list[tuple[torch.Tensor, ...]] | None,
+        kwarg_mbs: list[dict[str, Any]],
+        target_mbs: list[torch.Tensor] | None,
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
         loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
+            # Dynamic stage initialization may invoke the loss once to infer
+            # backward metadata. Let that first schedule call finalize each
+            # loss independently; subsequent calls have exactly one loss per
+            # target microbatch and can safely share the step scope.
             loss_context = (
                 self._pp_loss_step_context(num_loss_calls=len(target_mbs))
                 if target_mbs is not None and self._pp_training_schedule_initialized
@@ -837,7 +897,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             with loss_context:
                 losses = [] if self.pp_has_last_stage else None
                 self.pp_schedule.step(
-                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                    arg_mbs=arg_mbs,
                     kwarg_mbs=kwarg_mbs,
                     target_mbs=target_mbs,
                     losses=losses,
@@ -854,7 +914,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
             return torch.sum(torch.stack(detached_losses)).to(self.device)
-        return torch.tensor([-1.0], device=self.device)
+        return self._pp_loss_sentinel
 
     def _pp_loss_step_context(
         self, *, num_loss_calls: int
