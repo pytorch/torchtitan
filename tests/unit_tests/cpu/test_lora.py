@@ -384,7 +384,7 @@ def test_qlora_nf4_pack_forward_merge():
     assert y.shape == (3, module.lora_b.weight.shape[0])
 
     merged = merge_lora_state_dict(model)
-    dequant = module.weight.get_original_weight()
+    dequant = module.weight.get_original_weight()  # pyrefly: ignore [missing-attribute]
     torch.testing.assert_close(merged[f"{name}.weight"], dequant, rtol=0, atol=0)
     # The NF4 param object is back in place after the export.
     assert isinstance(module.weight, NF4Tensor)

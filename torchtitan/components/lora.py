@@ -6,6 +6,7 @@
 
 import math
 from dataclasses import dataclass, fields
+from typing import Any
 
 import spmd_types as spmd
 
@@ -63,10 +64,29 @@ class LoRALinearBase:
     """Marker base of every dynamically created LoRA linear class.
 
     ``_get_lora_cls`` builds one subclass per parent linear class, so there is
-    no single concrete class to isinstance against; this empty base is baked
-    into each of them and is the stable way to find LoRA modules on a built
-    model (``merge_lora_state_dict`` walks it).
+    no single concrete class to isinstance against; this base is baked into
+    each of them and is the stable way to find LoRA modules on a built model
+    (``merge_lora_state_dict`` walks it). The declarations below only type the
+    members every built subclass defines; the parent class wins at runtime.
     """
+
+    weight: nn.Parameter
+    lora_a: Linear
+    lora_b: Linear
+    base_qdata: nn.Parameter
+    base_scale: nn.Parameter
+    _parameters: dict[str, nn.Parameter]
+    _lora_scaling: float
+    _quantize_base: str | None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        raise NotImplementedError
+
+    def _dequant_base_mxfp4(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def quantize_base_nf4(self) -> bool:
+        raise NotImplementedError
 
 
 _lora_class_cache: dict[type, type] = {}
@@ -181,6 +201,7 @@ def _get_lora_cls(parent_cls: type) -> type:
             )
             self._packed_tp_style = None
             if base_weight_sharding is not None:
+                assert sharding is not None
                 # The declarative system requires a placement for every param
                 # once a sharding_config exists. The packed pair mirrors the
                 # base weight's TP layout: colwise (S(0)) shards packed ROWS,
@@ -453,6 +474,11 @@ _mxfp4_experts_cls_cache: dict[type, type] = {}
 class MXFP4ExpertsBase:
     """Marker base of every packed-experts class (see LoRALinearBase)."""
 
+    _parameters: dict[str, nn.Parameter]
+    _mxfp4_shapes: dict[str, tuple[int, ...]]
+    _mx_scale_dtype: torch.dtype
+    _mx_ctx: Any
+
 
 def _get_mxfp4_experts_cls(parent_cls: type) -> type:
     """Get or create an MXFP4 split-storage subclass of a grouped-experts class.
@@ -558,6 +584,7 @@ def _get_mxfp4_experts_cls(parent_cls: type) -> type:
                     else None
                 )
                 if entry is not None:
+                    assert sharding is not None
                     # Translate the declared 3-D placement to the flattened
                     # packed pair. Replicate/invariant carries over; a shard
                     # on the EXPERT dim maps to row-shard (experts are
@@ -878,7 +905,7 @@ def merge_lora_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
             else:
                 base_w = module.weight
             if module._quantize_base == "nf4":
-                base_w = base_w.get_original_weight()
+                base_w = base_w.get_original_weight()  # pyrefly: ignore [missing-attribute]
             # fp32 delta for deployable precision, cast back to the base dtype.
             delta = module._lora_scaling * (
                 module.lora_b.weight.float() @ module.lora_a.weight.float()
@@ -891,12 +918,14 @@ def merge_lora_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
             for wname, shape in module._mxfp4_shapes.items():
                 # The property dequantizes; register the dense weight as a
                 # temporary param so state_dict emits the ORIGINAL key.
+                from torch.distributed.tensor import DTensor
+                from torchao.prototype.mx_formats.mx_tensor import MXTensor
+
                 qd = module._parameters[wname + "_qdata"]
                 sc = module._parameters[wname + "_scale"]
-                if hasattr(qd, "full_tensor"):
+                if isinstance(qd, DTensor) and isinstance(sc, DTensor):
                     qd = qd.full_tensor()
                     sc = sc.full_tensor()
-                from torchao.prototype.mx_formats.mx_tensor import MXTensor
 
                 dense = (
                     MXTensor.__tensor_unflatten__(
