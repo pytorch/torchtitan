@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Iterator
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -24,6 +25,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphPipelineRuntime
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -137,6 +139,15 @@ class GraphTrainer(Trainer):
 
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+
+    def _pp_loss_step_context(
+        self, *, num_loss_calls: int
+    ) -> AbstractContextManager[None]:
+        if isinstance(self.pp_schedule, GraphPipelineRuntime):
+            # GraphPP calls the Python loss while tracing, then replays the traced
+            # loss graph without entering the Python loss wrapper on later steps.
+            return nullcontext()
+        return super()._pp_loss_step_context(num_loss_calls=num_loss_calls)
 
     def forward_backward_step(
         self,

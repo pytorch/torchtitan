@@ -6,16 +6,13 @@
 
 """Lightweight CUDA graph wrapper for training steps."""
 
-import gzip
-import json
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
-from torch.cuda._annotate_cuda_graph_trace import annotate_trace
-from torch.cuda._graph_annotations import get_kernel_annotations
+from torch.cuda.graph_annotations import get_kernel_annotations
 from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
@@ -65,7 +62,7 @@ class CUDAGraphInputSpec:
         )
         if tree_spec != self._tree_spec or len(outer_leaves) != len(self._leaf_specs):
             raise ValueError(
-                "CUDA graph auxiliary input structure must remain constant across "
+                "CUDA graph input structure must remain constant across "
                 "training steps."
             )
 
@@ -74,7 +71,7 @@ class CUDAGraphInputSpec:
             if leaf_spec is None:
                 if isinstance(leaf, BlockMask):
                     raise ValueError(
-                        "CUDA graph auxiliary input structure must remain constant "
+                        "CUDA graph input structure must remain constant "
                         "across training steps."
                     )
                 flat_leaves.append(leaf)
@@ -82,7 +79,7 @@ class CUDAGraphInputSpec:
 
             if not isinstance(leaf, BlockMask):
                 raise ValueError(
-                    "CUDA graph auxiliary input structure must remain constant "
+                    "CUDA graph input structure must remain constant "
                     "across training steps."
                 )
             block_mask_leaves, context = leaf._flatten()
@@ -101,7 +98,7 @@ class CUDAGraphInputSpec:
     def unflatten(self, flat_leaves: Sequence[Any]) -> Any:
         if len(flat_leaves) != self._num_flat_leaves:
             raise ValueError(
-                f"CUDA graph expected {self._num_flat_leaves} auxiliary inputs, "
+                f"CUDA graph expected {self._num_flat_leaves} inputs, "
                 f"got {len(flat_leaves)}."
             )
 
@@ -193,23 +190,6 @@ def get_cudagraph_annotations() -> dict[int, list[Any]]:
     return _manager.all_annotations
 
 
-def cudagraph_annotate_trace_post_processor(trace_path: str) -> None:
-    """Post-process a profiler trace with captured CUDA graph annotations."""
-    annotations = get_cudagraph_annotations()
-    if not annotations:
-        return
-
-    open_trace = gzip.open if trace_path.endswith(".gz") else open
-    with open_trace(trace_path, "rt") as trace_file:
-        trace = json.load(trace_file)
-
-    count = annotate_trace(trace, annotations)
-    if count > 0:
-        with open_trace(trace_path, "wt") as trace_file:
-            json.dump(trace, trace_file)
-        logger.info(f"Annotated {count} CUDA graph kernel events in profiler trace")
-
-
 class CUDAGraphWrapper:
     """Wrap a callable with CUDA graph capture and replay.
 
@@ -223,6 +203,10 @@ class CUDAGraphWrapper:
             before each replay. This should only be enabled for debugging.
         tensor_input_indices: Indices of inputs that should be copied before
             replay. When omitted, these are inferred from ``example_inputs``.
+        num_warmup_iterations: Number of eager invocations before capture.
+
+    Raises:
+        ValueError: If ``num_warmup_iterations`` is negative.
     """
 
     def __init__(
@@ -232,7 +216,11 @@ class CUDAGraphWrapper:
         static_input_indices: Sequence[int] | None = None,
         should_check_address: bool = False,
         tensor_input_indices: Sequence[int] | None = None,
+        *,
+        num_warmup_iterations: int = 1,
     ):
+        if num_warmup_iterations < 0:
+            raise ValueError("num_warmup_iterations must be non-negative")
         self._fn = fn
         self._num_inputs = len(example_inputs)
         self._static_input_indices = set(static_input_indices or ())
@@ -266,7 +254,7 @@ class CUDAGraphWrapper:
             if not isinstance(inp, torch.Tensor)
         }
         self._graph: torch.cuda.CUDAGraph | None = None
-        self._warmup_remaining = 1
+        self._warmup_remaining = num_warmup_iterations
         self._args: tuple | None = None
         self._output: Any = None
         self._should_check_address = should_check_address
@@ -366,12 +354,25 @@ class CUDAGraphWrapper:
         self._non_tensor_inputs.clear()
 
 
-def wrap_with_cuda_graph(fwd_bwd_fn: ForwardBackwardFn) -> ForwardBackwardFn:
-    """Decorate a callable with CUDA graph capture/replay.
+def wrap_with_cuda_graph(
+    fn: Callable[..., torch.Tensor], *, num_warmup_iterations: int = 1
+) -> Callable[..., torch.Tensor]:
+    """Decorate a structured callable with CUDA graph capture and replay.
 
-    After capture, the returned loss aliases graph-owned storage that is
-    overwritten by the next replay. Callers must preserve it when needed.
+    The positional and keyword inputs must keep the same pytree structure and
+    tensor metadata across calls. After capture, tensor outputs alias
+    graph-owned storage that is overwritten by the next replay.
+
+    Args:
+        fn: Callable to capture.
+        num_warmup_iterations: Number of eager invocations before capture.
+
+    Raises:
+        ValueError: If ``num_warmup_iterations`` is negative.
     """
+
+    if num_warmup_iterations < 0:
+        raise ValueError("num_warmup_iterations must be non-negative")
 
     if not (
         utils.device_type == "cuda"
@@ -382,63 +383,34 @@ def wrap_with_cuda_graph(fwd_bwd_fn: ForwardBackwardFn) -> ForwardBackwardFn:
             "CUDA graph capture is only supported on NVIDIA CUDA; "
             "using eager execution."
         )
-        return fwd_bwd_fn
+        return fn
 
     # Every wrapper is registered to the manager in this module and persists
     # until cudagraph_teardown is called.
     graph_wrapper: CUDAGraphWrapper | None = None
-    # Input handling for dynamic custom type inputs like BlockMask.
-    extra_input_spec: CUDAGraphInputSpec | None = None
+    input_spec: CUDAGraphInputSpec | None = None
 
-    def run(
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
-        extra_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        nonlocal graph_wrapper, extra_input_spec
+    def run(*args: Any, **kwargs: Any) -> torch.Tensor:
+        nonlocal graph_wrapper, input_spec
 
         if graph_wrapper is None:
-            extra_input_spec = CUDAGraphInputSpec(extra_kwargs)
+            input_spec = CUDAGraphInputSpec((args, kwargs))
 
-            def flat_fwd_bwd(
-                step_inputs: torch.Tensor,
-                step_labels: torch.Tensor,
-                step_global_valid_tokens: torch.Tensor,
-                *flat_extra_inputs: Any,
-            ) -> torch.Tensor:
-                assert extra_input_spec is not None
-                step_extra_kwargs = cast(
-                    dict[str, Any],
-                    extra_input_spec.unflatten(flat_extra_inputs),
-                )
-                return fwd_bwd_fn(
-                    step_inputs,
-                    step_labels,
-                    step_global_valid_tokens,
-                    step_extra_kwargs,
-                )
+            def flat_fn(*flat_inputs: Any) -> torch.Tensor:
+                assert input_spec is not None
+                step_args, step_kwargs = input_spec.unflatten(flat_inputs)
+                return fn(*step_args, **step_kwargs)
 
-            extra_flat = extra_input_spec.flatten(extra_kwargs)
-            example_inputs = [
-                inputs,
-                labels,
-                global_valid_tokens,
-                *extra_flat,
-            ]
+            flat_inputs = input_spec.flatten((args, kwargs))
             graph_wrapper = CUDAGraphWrapper(
-                flat_fwd_bwd,
-                example_inputs,
+                flat_fn,
+                flat_inputs,
+                num_warmup_iterations=num_warmup_iterations,
             )
         else:
-            assert extra_input_spec is not None
-            extra_flat = extra_input_spec.flatten(extra_kwargs)
+            assert input_spec is not None
+            flat_inputs = input_spec.flatten((args, kwargs))
 
-        return graph_wrapper(
-            inputs,
-            labels,
-            global_valid_tokens,
-            *extra_flat,
-        )
+        return graph_wrapper(*flat_inputs)
 
     return run
