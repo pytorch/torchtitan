@@ -29,6 +29,14 @@ def _assert_spmd_attention_type(tensor, *, tp):
         )
 
 
+def dsv4_mask_key(compress_ratio: int) -> str | None:
+    if compress_ratio == 4:
+        return None
+    if compress_ratio > 1:
+        return f"hca_{compress_ratio}"
+    return "swa"
+
+
 class DSV4FlexAttention(FlexAttention):
     """DeepSeek sparse attention core for DeepSeek-V4 (sliding window and HCA).
 
@@ -131,6 +139,34 @@ class DSV4FlexAttention(FlexAttention):
         cmp_idx = torch.where(cmp_idx < causal_limit, seqlen + cmp_idx, -1)
         return cmp_idx.unsqueeze(0).expand(bsz, -1, -1)
 
+    def build_block_mask(
+        self,
+        *,
+        seqlen: int,
+        device,
+    ) -> BlockMask:
+        n_cmp = 0 if self.compress_ratio <= 1 else seqlen // self.compress_ratio
+        sink_idx = seqlen + n_cmp
+        kv_len = sink_idx + 1
+
+        with spmd.no_typecheck():
+            selected_indices = [
+                self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=device)
+            ]
+            if self.compress_ratio > 1:
+                selected_indices.append(
+                    self.get_compress_topk_idxs(
+                        bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=device
+                    )
+                )
+            sink_indices = torch.full(
+                (1, seqlen, 1), sink_idx, dtype=torch.int64, device=device
+            )
+            selected_indices.append(sink_indices)
+            selected_indices = torch.cat(selected_indices, dim=-1)
+
+            return self._build_block_mask(1, seqlen, kv_len, selected_indices, device)
+
     def _build_block_mask(
         self,
         bsz: int,
@@ -212,11 +248,6 @@ class DSV4FlexAttention(FlexAttention):
         (compress_ratio == 4) does not go through this path -- see
         ``CompressedSparseAttention``.
         """
-        if attention_masks is not None:
-            raise ValueError(
-                "DSV4FlexAttention does not accept attention_masks; "
-                "the DSA block mask is built internally."
-            )
         if attn_sink is None:
             raise ValueError("DSV4FlexAttention requires attn_sink")
 
@@ -231,29 +262,14 @@ class DSV4FlexAttention(FlexAttention):
         kv = torch.cat([kv, sink_kv], dim=0)
         kv = kv.expand(-1, q.size(1), -1)
 
+        block_mask = attention_masks
+        if block_mask is None:
+            block_mask = self.build_block_mask(seqlen=seqlen, device=q.device)
+
+        def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
+            return torch.where(kv_idx == sink_idx, attn_sink[h], score)
+
         with spmd.no_typecheck():
-            selected_indices = [
-                self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=q.device)
-            ]
-            if self.compress_ratio > 1:
-                selected_indices.append(
-                    self.get_compress_topk_idxs(
-                        bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=q.device
-                    )
-                )
-            sink_indices = torch.full(
-                (1, seqlen, 1), sink_idx, dtype=torch.int64, device=q.device
-            )
-            selected_indices.append(sink_indices)
-            selected_indices = torch.cat(selected_indices, dim=-1)
-
-            block_mask = self._build_block_mask(
-                1, seqlen, kv.size(0), selected_indices, q.device
-            )
-
-            def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
-                return torch.where(kv_idx == sink_idx, attn_sink[h], score)
-
             return super().forward(
                 q,
                 kv,
@@ -516,6 +532,13 @@ class Attention(BaseAttention):
         elif self.compress_ratio > 1:
             cmp_k = self.compressor_128(x, positions=positions)
 
+        mask_key = dsv4_mask_key(self.compress_ratio)
+        layer_mask = (
+            attention_masks.get(mask_key)
+            if isinstance(attention_masks, dict) and mask_key is not None
+            else None
+        )
+
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if self.compress_ratio == 4:
             o = self.inner_attention(
@@ -526,7 +549,7 @@ class Attention(BaseAttention):
                 idx_k,
                 idx_w,
                 attn_sink_param,
-                attention_masks=attention_masks,
+                attention_masks=None,
             )
         elif self.compress_ratio > 1:
             o = self.inner_attention(
@@ -534,14 +557,14 @@ class Attention(BaseAttention):
                 kv,
                 cmp_k,
                 attn_sink_param,
-                attention_masks=attention_masks,
+                attention_masks=layer_mask,
             )
         else:
             o = self.inner_attention(
                 q,
                 kv,
                 attn_sink_param,
-                attention_masks=attention_masks,
+                attention_masks=layer_mask,
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
