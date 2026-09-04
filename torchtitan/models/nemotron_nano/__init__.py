@@ -230,18 +230,28 @@ def _31b(
 
 
 nemotron_configs = {
-    "debugmodel": _debugmodel,
-    "31B": _31b,
+    "debugmodel": (_debugmodel, 131072),
+    "31B": (_31b, 1000000),
+    "31b": (_31b, 1000000),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = nemotron_configs[flavor](
+    get_config, max_context_len = nemotron_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
         attn_backend=attn_backend, tp_gemm_backend=tp_gemm_backend
     )
     if converters is not None:
@@ -252,6 +262,7 @@ def model_registry(
         name="nemotron_nano",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_nemotron,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
