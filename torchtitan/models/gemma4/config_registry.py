@@ -96,8 +96,8 @@ def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -131,8 +131,8 @@ def gemma4_e4b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=2e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -166,8 +166,8 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -230,8 +230,8 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -268,8 +268,8 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         dataloader=GrainDataLoader.Config(
