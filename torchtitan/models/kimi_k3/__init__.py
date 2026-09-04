@@ -12,10 +12,12 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear
-from torchtitan.models.common.config_utils import get_attention_config
+from torchtitan.models.common.config_utils import (
+    get_attention_config,
+    make_token_dispatcher_config,
+)
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
-from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -222,6 +224,7 @@ def _latent_moe_config(
     num_experts: int,
     top_k: int,
     num_shared_experts: int,
+    moe_comm_backend: str,
 ) -> KimiLatentMoE.Config:
     return KimiLatentMoE.Config(
         num_experts=num_experts,
@@ -247,9 +250,16 @@ def _latent_moe_config(
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
             ),
-            token_dispatcher=LocalTokenDispatcher.Config(
+            # core's dispatcher factory: standard / deepep / hybridep /
+            # minimal_async_ep per spec, as deepseek_v3; falls back to local
+            # dispatch when the ep mesh is None.
+            token_dispatcher=make_token_dispatcher_config(
                 num_experts=num_experts,
                 top_k=top_k,
+                comm_backend=moe_comm_backend,
+                # The routed experts consume the LATENT stream, so the
+                # dispatcher buffers size by latent_dim, not model dim.
+                hidden_dim=latent_dim,
             ),
         ),
         routed_norm=_norm(latent_dim),
@@ -369,6 +379,7 @@ def _kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config,
     attn_backend: str,
+    moe_comm_backend: str = "standard",
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
@@ -422,6 +433,7 @@ def _kimi_k3_config(
                         num_experts=num_experts,
                         top_k=top_k,
                         num_shared_experts=num_shared_experts,
+                        moe_comm_backend=moe_comm_backend,
                     )
                 ),
                 attention_norm=_norm(dim),
@@ -454,10 +466,11 @@ def _kimi_k3_config(
     )
 
 
-def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
+def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
         dim=dim,
+        moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=24,
         full_attention_layers={3, 7, 11, 15, 19, 23},
@@ -490,10 +503,11 @@ def _debugmodel(attn_backend: str) -> KimiK3Model.Config:
     )
 
 
-def _kimi_k3(attn_backend: str) -> KimiK3Model.Config:
+def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
         dim=dim,
+        moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
         full_attention_layers=set(range(3, 92, 4)) | {92},
@@ -536,6 +550,7 @@ def model_registry(
     flavor: str,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
+    moe_comm_backend: str = "standard",
     *,
     seq_len: int | None = None,
 ) -> ModelSpec:
@@ -548,7 +563,7 @@ def model_registry(
             f"Requested seq_len {context_len} exceeds max context length "
             f"{max_context_len} for flavor {flavor}"
         )
-    config = get_config(attn_backend=attn_backend)
+    config = get_config(attn_backend=attn_backend, moe_comm_backend=moe_comm_backend)
     if converters is not None:
         validate_converter_order(converters)
         for converter in converters:

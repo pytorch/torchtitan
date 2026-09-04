@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - ciflow/h100.8/*
+  schedule:
+    - cron: '0 0 * * *'
 
 concurrency:
   group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}

@@ -21,6 +21,15 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
+from torch._functorch.partitioners import (
+    choose_saved_values_set,
+    force_save_bw_mutation_src,
+    force_save_collectives,
+    force_save_effectful_ops,
+    get_default_op_list,
+    NodeInfo,
+)
+from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
@@ -50,6 +59,9 @@ from torchtitan.tools.logging import logger
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+
+
+_INF_DISTANCE = int(1e9)
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -389,6 +401,144 @@ def _eager_memory_policy_pass(
     return gm
 
 
+def _is_backward_side(node: torch.fx.Node, backward_side: set[torch.fx.Node]) -> bool:
+    return _is_backward_node(node) or any(
+        inp in backward_side for inp in node.all_input_nodes
+    )
+
+
+def _backward_side_nodes(
+    gm: torch.fx.GraphModule,
+) -> OrderedSet[torch.fx.Node]:
+    backward_side = OrderedSet()
+    for node in gm.graph.nodes:
+        if node.op != "output" and _is_backward_side(node, backward_side):
+            backward_side.add(node)
+    return backward_side
+
+
+def _node_info_for_graph_trainer(
+    gm: torch.fx.GraphModule,
+    backward_side: OrderedSet[torch.fx.Node],
+) -> NodeInfo | None:
+    nodes = list(gm.graph.nodes)
+    required_bw_nodes = OrderedSet(
+        node for node in nodes if node in backward_side and node.op != "output"
+    )
+    if not required_bw_nodes:
+        return None
+
+    required_fw_nodes = OrderedSet(
+        node for node in nodes if node not in required_bw_nodes and node.op != "output"
+    )
+    fw_order = {node: idx for idx, node in enumerate(required_fw_nodes)}
+    static_lifetime_input_nodes = OrderedSet(
+        node for node in required_fw_nodes if node.op in ("placeholder", "get_attr")
+    )
+
+    for node in reversed(nodes):
+        if node.op == "output":
+            node.dist_from_bw = _INF_DISTANCE
+        elif node in required_bw_nodes:
+            node.dist_from_bw = 0
+        elif node in required_fw_nodes:
+            user_distances = [
+                getattr(user, "dist_from_bw", _INF_DISTANCE) + 1 for user in node.users
+            ]
+            node.dist_from_bw = min(user_distances, default=_INF_DISTANCE)
+        else:
+            node.dist_from_bw = _INF_DISTANCE
+
+    return NodeInfo(
+        list(static_lifetime_input_nodes),
+        required_fw_nodes,
+        required_bw_nodes.copy(),
+        required_bw_nodes.copy(),
+        OrderedSet(),
+        fw_order,
+        static_lifetime_input_nodes,
+    )
+
+
+def tag_min_cut_saved_values(
+    gm: torch.fx.GraphModule,
+    backward_side: OrderedSet[torch.fx.Node],
+    saved_values: set[torch.fx.Node],
+) -> None:
+    required_fw_nodes = {
+        node
+        for node in gm.graph.nodes
+        if node not in backward_side and node.op != "output"
+    }
+    saved_boundaries = set(saved_values)
+    op_types = get_default_op_list()
+    pending = list(saved_boundaries)
+    while pending:
+        node = pending.pop()
+        if node not in saved_boundaries:
+            continue
+        if node not in required_fw_nodes or node.op != "call_function":
+            continue
+        if (
+            node.target == torch.ops.aten.detach.default or op_types.is_view(node)
+        ) and any(inp in required_fw_nodes for inp in node.all_input_nodes):
+            saved_boundaries.remove(node)
+            for inp in node.all_input_nodes:
+                if inp in required_fw_nodes and inp not in saved_boundaries:
+                    saved_boundaries.add(inp)
+                    pending.append(inp)
+
+    saved_boundaries.update(
+        node
+        for node in required_fw_nodes
+        if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE
+    )
+    for node in saved_boundaries:
+        if node in required_fw_nodes:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
+    seen = set()
+
+    def visit(node: torch.fx.Node) -> None:
+        if node in seen or node in saved_boundaries:
+            return
+        seen.add(node)
+        if node in backward_side:
+            for inp in node.all_input_nodes:
+                visit(inp)
+            return
+        if node not in required_fw_nodes or node.op in ("placeholder", "get_attr"):
+            return
+        if node.op == "call_function":
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+            for inp in node.all_input_nodes:
+                visit(inp)
+
+    for node in backward_side:
+        for inp in node.all_input_nodes:
+            visit(inp)
+
+
+@register_memory_policy("min_cut")
+def _min_cut_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Choose saved activations with the min-cut partitioner."""
+    backward_side = _backward_side_nodes(gm)
+    node_info = _node_info_for_graph_trainer(gm, backward_side)
+    if node_info is None:
+        return gm
+
+    force_save_collectives(gm)
+    force_save_effectful_ops(gm)
+    force_save_bw_mutation_src(gm)
+    saved_values = choose_saved_values_set(gm.graph, node_info)
+    tag_min_cut_saved_values(gm, backward_side, set(saved_values))
+    return gm
+
+
 @register_memory_policy("sac_and_offload")
 def _sac_and_offload_memory_policy_pass(
     gm: torch.fx.GraphModule,
@@ -416,10 +566,12 @@ def tag_with_memory_policy_pass(
         default: SAC with all compute-intensive ops saved.
         full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.
+        min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload within budget.
 
     Other memory policies combining SAC and CPU offload can be added
     via ``register_memory_policy`` without modifying this function.
+
     """
     memory_policy = config.compile.memory_policy
     if memory_policy not in MEMORY_POLICY_REGISTRY:
@@ -427,6 +579,7 @@ def tag_with_memory_policy_pass(
             f"Unknown memory_policy: {memory_policy!r}. "
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
+
     gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm

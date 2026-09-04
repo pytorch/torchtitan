@@ -4,22 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import gzip
 import json
 import os
 import tempfile
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import torch
-from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
-    annotate_trace,
-)
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.distributed.cudagraph import (
-    cudagraph_annotate_trace_post_processor,
     cudagraph_teardown,
     get_cudagraph_annotations,
 )
@@ -35,7 +31,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
 )
-from torchtitan.tools.profiler import Profiler
+from torchtitan.tools.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
@@ -48,6 +44,8 @@ class TestKernelAnnotationsE2E(TestCase):
         ``module_fqn`` fields on graphed kernel events."""
         if _is_tools_id_unavailable():
             self.skipTest("cudaGraphNodeGetToolsId not available")
+        if not _EXPORT_SUPPORTS_ANNOTATIONS:
+            self.skipTest("export_chrome_trace has no cuda_graph_annotations argument")
 
         # Simple model with annotated submodules.
         class FFN(torch.nn.Module):
@@ -124,13 +122,10 @@ class TestKernelAnnotationsE2E(TestCase):
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             trace_path = f.name
-        prof.export_chrome_trace(trace_path)
+        prof.export_chrome_trace(trace_path, cuda_graph_annotations=annotations)
 
         with open(trace_path) as f:
             trace = json.load(f)
-
-        count = annotate_trace(trace, annotations)
-        self.assertGreater(count, 0, "annotate_trace matched 0 events")
 
         # Verify module_fqn fields appear on graphed kernel events.
         # Since minimal_fx_tracer traces fwd+bwd into a single graph,
@@ -176,23 +171,34 @@ class TestKernelAnnotationsE2E(TestCase):
         cudagraph_teardown()
 
 
-class TestTracePostProcessor(TestCase):
-    """Verify CUDA graph annotations are applied to every profiler trace."""
+class TestTraceAnnotationExport(TestCase):
+    """Verify CUDA graph annotations reach every profiler trace the Profiler writes."""
 
-    def test_post_processor_called_with_trace_path(self):
-        """The CUDA graph post-processor receives the exported trace path."""
+    ANNOTATIONS = {42: [{_MODULE_FQN: "layers.0.attention.wq"}]}
 
-        calls: list[tuple[str, bool]] = []
+    def _run_profiler(self, supports_annotations: bool) -> list[tuple[str, Any]]:
+        """Drive one profile cycle, returning (path, cuda_graph_annotations) per export."""
+        calls: list[tuple[str, Any]] = []
 
-        def record_call(trace_path: str) -> None:
-            calls.append((trace_path, os.path.exists(trace_path)))
+        def record_export(self_prof, path, *args, **kwargs):
+            calls.append((path, kwargs.get("cuda_graph_annotations")))
 
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch("torch.distributed.get_rank", return_value=0),
             patch(
-                "torchtitan.tools.profiler.cudagraph_annotate_trace_post_processor",
-                side_effect=record_call,
+                "torchtitan.tools.profiler.get_cudagraph_annotations",
+                return_value=self.ANNOTATIONS,
+            ),
+            patch(
+                "torchtitan.tools.profiler._EXPORT_SUPPORTS_ANNOTATIONS",
+                supports_annotations,
+            ),
+            patch.object(
+                torch.profiler.profile,
+                "export_chrome_trace",
+                autospec=True,
+                side_effect=record_export,
             ),
         ):
             config = Profiler.Config(
@@ -208,53 +214,24 @@ class TestTracePostProcessor(TestCase):
                 for _ in range(4):
                     profiler.step()
 
-        self.assertEqual(len(calls), 1, f"Expected 1 call, got {calls}")
-        path, existed = calls[0]
-        # Profiler exports gzip-compressed traces (.json.gz) since #3483.
+        self.assertEqual(len(calls), 1, f"Expected 1 export, got {calls}")
+        return calls
+
+    def test_annotations_baked_into_export(self):
+        """The trace handler hands the captured annotations to the export rather than
+        joining them onto the written file afterwards."""
+        path, passed = self._run_profiler(supports_annotations=True)[0]
+        # Profiler exports gzip-compressed traces (.json.gz) since #3483; the exporter
+        # keys compression off that suffix and bakes the annotations in as it writes.
         self.assertTrue(path.endswith("rank0_trace.json.gz"))
-        self.assertTrue(existed, f"Trace file {path} did not exist when callback ran")
+        self.assertEqual(passed, self.ANNOTATIONS)
 
-    def test_annotate_post_processor_round_trips_gzip_trace(self):
-        """The cudagraph trace post-processor must read and write the
-        gzip-compressed (.json.gz) traces the Profiler produces since #3483.
-        A plain ``open``/``json.load`` would raise on the gzip bytes."""
-
-        graph_node_id = 42
-        trace = {
-            "traceEvents": [
-                {
-                    "name": "some_kernel",
-                    "tid": 1,
-                    "ts": 100,
-                    "args": {"graph node id": graph_node_id},
-                }
-            ]
-        }
-
-        # Seed annotations so the post-processor does real work instead of
-        # returning early on an empty annotation map.
-        annotations = get_cudagraph_annotations()
-        saved_annotations = annotations.copy()
-        annotations.clear()
-        annotations[graph_node_id] = [{_MODULE_FQN: "layers.0.attention.wq"}]
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                trace_path = os.path.join(tmp, "rank0_trace.json.gz")
-                with gzip.open(trace_path, "wt") as f:
-                    json.dump(trace, f)
-
-                # Must not raise on the gzip-compressed input.
-                cudagraph_annotate_trace_post_processor(trace_path)
-
-                # And the written-back trace must remain valid gzip JSON.
-                with gzip.open(trace_path, "rt") as f:
-                    annotated = json.load(f)
-        finally:
-            annotations.clear()
-            annotations.update(saved_annotations)
-
-        fqns = {e.get("args", {}).get(_MODULE_FQN) for e in annotated["traceEvents"]}
-        self.assertIn("layers.0.attention.wq", fqns)
+    def test_export_still_runs_without_annotation_support(self):
+        """On a torch whose export_chrome_trace predates cuda_graph_annotations the
+        trace is still written, just without them."""
+        path, passed = self._run_profiler(supports_annotations=False)[0]
+        self.assertTrue(path.endswith("rank0_trace.json.gz"))
+        self.assertIsNone(passed)
 
 
 if __name__ == "__main__":

@@ -15,3 +15,11 @@ def kimi_k3_debugmodel_mm_fsdp2() -> Trainer.Config:
     config = kimi_k3_debugmodel()
     config.parallelism.data_parallel_shard_degree = 2
     return config
+
+
+def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
+    from torchtitan.models.llama3.config_registry import llama3_debugmodel_mxfp8
+
+    config = llama3_debugmodel_mxfp8()
+    config.parallelism.data_parallel_shard_degree = 2
+    return config

@@ -2,15 +2,10 @@ name: B200 Integration
 
 on:
   push:
-    branches: [ main ]
     tags:
       - ciflow/b200/*
-    paths:
-      - 'torchtitan/models/kimi_k3/**'
-      - 'torchtitan_recipes/tests/b200.py'
-      - 'tests/integration_tests/b200.py'
-      - '.github/workflows/integration_test_b200.yaml'
-  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
 
 concurrency:
   group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
