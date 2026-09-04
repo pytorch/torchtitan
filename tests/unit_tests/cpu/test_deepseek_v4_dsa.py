@@ -115,9 +115,27 @@ class TestDSABlockMask(unittest.TestCase):
                 topk_idxs = (
                     torch.cat([win, compress], dim=-1) if compress.size(-1) else win
                 )
+                selected_indices = torch.cat(
+                    [
+                        topk_idxs,
+                        torch.full(
+                            (bsz, seqlen, 1),
+                            sink_idx,
+                            dtype=torch.int64,
+                            device=device,
+                        ),
+                    ],
+                    dim=-1,
+                )
 
                 dsa = build_dsa(ratio, window_size)
-                bm = dsa._build_block_mask(bsz, seqlen, n_cmp, topk_sel, device)
+                bm = dsa._build_block_mask(
+                    bsz,
+                    seqlen,
+                    sink_idx + 1,
+                    selected_indices,
+                    device,
+                )
                 self.assertIsInstance(bm, BlockMask)
                 expected = old_attended(topk_idxs, sink_idx)
                 actual = new_attended(bm, seqlen, n_cmp)
@@ -126,21 +144,21 @@ class TestDSABlockMask(unittest.TestCase):
     def test_indexer_select_matches_old_topk(self):
         torch.manual_seed(0)
         device = torch.device("cpu")
-        bsz, seqlen, ratio, topk = 2, 512, 4, 16
+        seqlen, ratio, topk = 512, 4, 16
         n_cmp = seqlen // ratio
         g = torch.Generator(device).manual_seed(11)
-        idx_q = torch.randn(bsz, seqlen, 8, 32, generator=g, device=device)
-        idx_k = torch.randn(bsz, n_cmp, 32, generator=g, device=device)
-        idx_w = torch.randn(bsz, seqlen, 8, generator=g, device=device)
+        idx_q = torch.randn(seqlen, 8, 32, generator=g, device=device)
+        idx_k = torch.randn(n_cmp, 32, generator=g, device=device)
+        idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
         selected = Indexer.select(
             idx_q, idx_k, idx_w, seqlen=seqlen, ratio=ratio, topk=topk
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
-        scores = torch.einsum("bshd,btd->bsht", idx_q, idx_k)
+        scores = torch.einsum("shd,td->sht", idx_q, idx_k)
         scores = scores.relu_() * idx_w.unsqueeze(-1)
-        scores = scores.sum(dim=2)
+        scores = scores.sum(dim=1)
         causal_limit = torch.arange(1, seqlen + 1, device=device).unsqueeze(1) // ratio
         mask = torch.arange(n_cmp, device=device).repeat(seqlen, 1) >= causal_limit
         scores = scores + torch.where(mask, torch.finfo(idx_q.dtype).min, 0)
@@ -149,7 +167,7 @@ class TestDSABlockMask(unittest.TestCase):
 
         # Valid (non-masked) entries must agree exactly; the new formulation
         # keeps raw indices and gates causality in the mask instead of -1.
-        self.assertEqual(selected.shape, (bsz, seqlen, topk))
+        self.assertEqual(selected.shape, (seqlen, topk))
         self.assertTrue((selected >= 0).all())
         self.assertTrue(torch.equal(selected.masked_fill(old < 0, -1), old))
 
