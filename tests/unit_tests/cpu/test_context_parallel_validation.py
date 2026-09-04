@@ -224,6 +224,43 @@ class TestHeadDivisibility(unittest.TestCase):
         config.__post_init__()
 
 
+class TestGptOssRejectsUlysses(unittest.TestCase):
+    @staticmethod
+    def _parallelize(config_factory, kernel) -> None:
+        from types import SimpleNamespace
+
+        from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
+
+        config = config_factory()
+        ContextParallelTransform.Config(kernel=kernel).build().transform(
+            config.model_spec.model
+        )
+        # The guard runs before these placeholders are used.
+        parallelize_gptoss(
+            SimpleNamespace(config=config.model_spec.model),
+            parallel_dims=SimpleNamespace(cp_enabled=True),
+            training=None,
+            parallelism=None,
+            compile_config=None,
+            ac_config=None,
+            dump_folder="",
+        )
+
+    def test_rejects_ulysses_flex(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+
+        with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
+            self._parallelize(gpt_oss_debugmodel_flex, UlyssesCPFlexAttention)
+
+    def test_rejects_ulysses_varlen(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPVarlenAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel
+
+        with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
+            self._parallelize(gpt_oss_debugmodel, UlyssesCPVarlenAttention)
+
+
 class TestShippedCpRecipes(unittest.TestCase):
     """Validate every shipped CP recipe after construction."""
 
