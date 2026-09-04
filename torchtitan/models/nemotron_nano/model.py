@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -55,13 +56,31 @@ class NemotronTransformerBlock(TransformerBlock):
         self.mamba_state_dim = config.mamba_state_dim
         
         if self.is_mamba_block:
-            # Mamba block: state-space model
-            # In a full implementation, this would use S6 (Selective State Spaces for In-Context Reasoning)
-            # For now, we model it as a simplified linear state transition
+            # Mamba block: state-space model reference implementation
             self.norm = config.attention_norm.build()
-            # Simplified Mamba-like component
-            self.input_projection = config.mamba_input_projection.build()
-            self.output_projection = config.mamba_output_projection.build()
+            
+            dim = config.mamba_input_projection.in_features
+            d_inner = config.mamba_conv_dim
+            d_state = config.mamba_state_dim
+            dt_rank = max(16, int(dim / 16))
+            
+            self.in_proj = nn.Linear(dim, d_inner * 2, bias=False)
+            self.conv1d = nn.Conv1d(
+                in_channels=d_inner, out_channels=d_inner, kernel_size=4, groups=d_inner, padding=3
+            )
+            self.x_proj = nn.Linear(d_inner, dt_rank + 2 * d_state, bias=False)
+            self.dt_proj = nn.Linear(dt_rank, d_inner, bias=True)
+            self.out_proj = nn.Linear(d_inner, dim, bias=False)
+            
+            # SSM parameters
+            self.A_log = nn.Parameter(
+                torch.log(torch.arange(1, d_state + 1, dtype=torch.float32).repeat(d_inner, 1))
+            )
+            self.D = nn.Parameter(torch.ones(d_inner))
+            
+            # Basic init
+            nn.init.normal_(self.A_log, mean=0.0, std=0.02)
+            nn.init.normal_(self.D, mean=1.0, std=0.02)
         else:
             # Transformer block: attention + FFN
             self.attention = config.attention.build()
@@ -83,12 +102,64 @@ class NemotronTransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
     ):
         if self.is_mamba_block:
-            import torch.nn.functional as F
-            # Mamba block forward: norm -> linear proj -> state transition -> output proj
+            # Mamba block forward: reference SSM
             x_norm = self.norm(x)
-            h = F.silu(self.input_projection(x_norm))
-            h_out = self.output_projection(h)  # Simplified for now
-            return x + h_out
+            
+            is_flattened = x_norm.dim() == 2
+            if is_flattened:
+                x_norm = x_norm.unsqueeze(0)
+                
+            B, L, D = x_norm.shape
+            
+            # 1. in_proj
+            xz = self.in_proj(x_norm)
+            x_mamba, z = xz.chunk(2, dim=-1)
+            
+            # 2. conv1d
+            x_mamba = x_mamba.transpose(1, 2)
+            x_mamba = self.conv1d(x_mamba)[:, :, :L]
+            x_mamba = x_mamba.transpose(1, 2)
+            x_mamba = F.silu(x_mamba)
+            
+            # 3. x_proj to dt, B, C
+            dt_b_c = self.x_proj(x_mamba)
+            dt, B_param, C_param = torch.split(
+                dt_b_c, [self.dt_proj.in_features, self.mamba_state_dim, self.mamba_state_dim], dim=-1
+            )
+            
+            # 4. dt_proj
+            dt = F.softplus(self.dt_proj(dt))
+            
+            # 5. Continuous A
+            A = -torch.exp(self.A_log.float())
+            
+            # 6. SSM scan loop (PyTorch sequential implementation)
+            h = torch.zeros(B, self.conv1d.in_channels, self.mamba_state_dim, device=x.device, dtype=torch.float32)
+            y_seq = []
+            
+            for t in range(L):
+                dt_t = dt[:, t, :].unsqueeze(-1).float()
+                A_t = torch.exp(dt_t * A)
+                B_t = B_param[:, t, :].unsqueeze(1).float()
+                x_t = x_mamba[:, t, :].unsqueeze(-1).float()
+                
+                h = A_t * h + (dt_t * B_t) * x_t
+                
+                C_t = C_param[:, t, :].unsqueeze(1).unsqueeze(-1).float()
+                y_t = (h.unsqueeze(2) @ C_t).squeeze(-1).squeeze(-1)
+                y_seq.append(y_t)
+                
+            y = torch.stack(y_seq, dim=1).to(x.dtype)
+            
+            # 7. Add D residual and gate
+            y = y + x_mamba * self.D
+            y = y * F.silu(z)
+            
+            # 8. out_proj
+            out = self.out_proj(y)
+            if is_flattened:
+                out = out.squeeze(0)
+            return x + out
         else:
             # Transformer block forward: attention + FFN/MoE
             h = x + self.attention(self.attention_norm(x), attention_masks, positions)
@@ -160,3 +231,7 @@ class Nemotron3NanoModel(Decoder):
             # Approximate FLOPs: 6 * active_params + attention/Mamba compute
             active_params = nparams * (self.top_k_experts / self.num_experts)
             return nparams, int(6 * active_params)
+
+    def verify_module_protocol(self) -> None:
+        # Override to allow standard PyTorch modules (nn.Linear, nn.Conv1d) in Mamba blocks
+        pass

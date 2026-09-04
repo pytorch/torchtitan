@@ -99,7 +99,7 @@ def _build_nemotron_layers(
                 attention_norm=RMSNorm.Config(
                     normalized_shape=dim, param_init=_NORM_INIT
                 ),
-                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT) if not is_mamba else None,
                 attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
@@ -110,7 +110,7 @@ def _build_nemotron_layers(
                     fuse_qkv=fuse_qkv,
                     rope=rope,
                     tp_gemm_backend=tp_gemm_backend,
-                ),
+                ) if not is_mamba else None,
                 moe=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
@@ -131,7 +131,7 @@ def _build_nemotron_layers(
                         },
                         comm_backend="standard",
                     ),
-                ),
+                ) if not is_mamba else None,
             )
         )
     return layers
