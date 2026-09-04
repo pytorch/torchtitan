@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from torch._decomp import get_decompositions
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
@@ -19,6 +20,7 @@ from torch._inductor.fx_passes.bucketing import (
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.traceback import preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
@@ -43,6 +45,9 @@ from torchtitan.experiments.graph_trainer.cudagraph import (
     insert_kernel_annotations_pass,
     is_cudagraphable,
     is_full_cudagraphable,
+)
+from torchtitan.experiments.graph_trainer.decompositions import (
+    apply_decompositions_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
     _chunk_copied_meta,
@@ -88,9 +93,11 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
+    _backward_side_nodes,
     _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
+    tag_min_cut_saved_values,
     tag_sac_policy,
     tag_with_memory_policy_pass,
     validate_memory_policy_config,
@@ -109,6 +116,11 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_view_pass,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.subgraph_regions import (
+    apply_subgraph_region_annotations_pass,
+    SUBGRAPH_REGION,
+    SUBGRAPH_REGION_ROLE,
+)
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
     TestCpuOffloadPass,
 )
@@ -1827,6 +1839,207 @@ class TestFullMemoryPolicy(TestCase):
                 CheckpointPolicy.MUST_RECOMPUTE,
                 f"node {node.name} in single layer should be MUST_RECOMPUTE",
             )
+
+
+class TestMinCutMemoryPolicy(TestCase):
+    @staticmethod
+    def _config():
+        return SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="min_cut")
+        )
+
+    @staticmethod
+    def _fake_prop(gm, *inputs):
+        with torch._subclasses.FakeTensorMode() as fake_mode:
+            fake_inputs = [
+                torch.empty(shape, device="cuda", dtype=dtype)
+                for shape, dtype in inputs
+            ]
+            FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(
+                *fake_inputs
+            )
+
+    @staticmethod
+    def _recomputed_nodes(gm):
+        return [node for node in gm.graph.nodes if node.name.endswith("_recomputed")]
+
+    @staticmethod
+    def _log_softmax_decomposition_table():
+        return get_decompositions([torch.ops.aten._log_softmax.default])
+
+    def test_view_cut_saves_its_base(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        weight = graph.placeholder("weight")
+        grad = graph.placeholder("grad")
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, weight))
+        view = graph.call_function(torch.ops.aten.view.default, args=(mm, [4, 4]))
+        bwd = graph.call_function(torch.ops.aten.mm.default, args=(view, grad))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_min_cut_saved_values(gm, _backward_side_nodes(gm), {view})
+
+        self.assertEqual(mm.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(view.meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+
+    def test_applies_to_whole_graph(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        a = graph.call_function(torch.ops.aten.sin.default, args=(x,))
+        b = graph.call_function(torch.ops.aten.cos.default, args=(a,))
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(b,))
+        bwd = graph.call_function(torch.ops.aten.neg.default, args=(b,))
+        bwd.meta["autograd_backward"] = True
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((64, 64), torch.float32))
+
+        tag_with_memory_policy_pass(gm, config=self._config())
+        self.assertTrue(
+            any(
+                node.meta.get("recompute") == CheckpointPolicy.MUST_RECOMPUTE
+                for node in gm.graph.nodes
+            )
+        )
+        self.assertEqual(len(self._recomputed_nodes(gm)), 0)
+        selective_activation_remat_pass(gm)
+
+        self.assertGreaterEqual(len(self._recomputed_nodes(gm)), 1)
+
+    def test_decomposition_is_a_standalone_pass_before_min_cut(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad = graph.placeholder("grad")
+        log_probs = graph.call_function(
+            torch.ops.aten._log_softmax.default, args=(x, -1, False)
+        )
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(log_probs,))
+        bwd = graph.call_function(
+            torch.ops.aten._log_softmax_backward_data.default,
+            args=(grad, log_probs, -1, torch.float32),
+        )
+        bwd.meta["autograd_backward"] = True
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((128, 1024), torch.float32), ((128, 1024), torch.float32))
+
+        apply_decompositions_pass(
+            gm,
+            decomposition_table=self._log_softmax_decomposition_table(),
+        )
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._log_softmax.default
+                for node in gm.graph.nodes
+            )
+        )
+        self.assertEqual(len(self._recomputed_nodes(gm)), 0)
+
+        tag_with_memory_policy_pass(gm, config=self._config())
+        bwd = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertEqual(bwd.args[1].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        selective_activation_remat_pass(gm)
+
+        bwd = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertFalse(bwd.args[1].name.endswith("_recomputed"))
+
+    def test_min_cut_policy_respects_existing_checkpoint_policy(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        saved = graph.call_function(torch.ops.aten.sin.default, args=(x,))
+        recompute = graph.call_function(torch.ops.aten.cos.default, args=(saved,))
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(recompute,))
+        bwd = graph.call_function(torch.ops.aten.neg.default, args=(recompute,))
+        bwd.meta["autograd_backward"] = True
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((64, 64), torch.float32))
+        saved.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        recompute.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+
+        tag_with_memory_policy_pass(gm, config=self._config())
+
+        self.assertEqual(saved.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertIn(
+            recompute.meta["recompute"],
+            (CheckpointPolicy.PREFER_RECOMPUTE, CheckpointPolicy.MUST_RECOMPUTE),
+        )
+        selective_activation_remat_pass(gm)
+        recomputed_targets = {node.target for node in self._recomputed_nodes(gm)}
+        self.assertIn(torch.ops.aten.cos.default, recomputed_targets)
+        self.assertNotIn(torch.ops.aten.sin.default, recomputed_targets)
+
+    def test_explicit_subgraph_decomposition_and_min_cut_policy(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad = graph.placeholder("grad")
+        log_probs = graph.call_function(
+            torch.ops.aten._log_softmax.default, args=(x, -1, False)
+        )
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(log_probs,))
+        bwd = graph.call_function(
+            torch.ops.aten._log_softmax_backward_data.default,
+            args=(grad, log_probs, -1, torch.float32),
+        )
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((128, 1024), torch.float32), ((128, 1024), torch.float32))
+
+        for node in (log_probs, loss, bwd):
+            node.meta.setdefault("custom", {})
+            node.meta["custom"][SUBGRAPH_REGION] = "region"
+            node.meta["custom"][SUBGRAPH_REGION_ROLE] = "fw_bw_grad_accum"
+        bwd.meta["autograd_backward"] = True
+
+        apply_subgraph_region_annotations_pass(gm)
+        apply_decompositions_pass(
+            gm,
+            decomposition_table=self._log_softmax_decomposition_table(),
+            recurse=True,
+            apply_to_root=False,
+        )
+        submods = [
+            module
+            for module in gm.modules()
+            if isinstance(module, torch.fx.GraphModule) and module is not gm
+        ]
+        self.assertEqual(len(submods), 1)
+        submod = submods[0]
+        tag_with_memory_policy_pass(submod, config=self._config())
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._log_softmax.default
+                for node in submod.graph.nodes
+            )
+        )
+        bwd = next(
+            node
+            for node in submod.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertEqual(bwd.args[1].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+        selective_activation_remat_pass(submod)
+        bwd = next(
+            node
+            for node in submod.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertFalse(bwd.args[1].name.endswith("_recomputed"))
 
 
 class TestBucketingPrefetchOrder(FSDPTest):
