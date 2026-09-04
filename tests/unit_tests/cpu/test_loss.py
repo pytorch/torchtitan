@@ -623,6 +623,93 @@ class TestChunkedLossWrapper(unittest.TestCase):
         self.assertLess(events.index("unshard"), events.index("forward"))
         self.assertEqual(events[-1], "reshard")
 
+    def test_fsdp_finalization_spans_step_loss_calls(self):
+        events: list[str] = []
+
+        class RecordingFSDPLinear(nn.Linear):
+            def set_reshard_after_forward(self, enabled):
+                events.append(f"reshard_forward({enabled})")
+
+            def set_reshard_after_backward(self, enabled):
+                events.append(f"reshard_backward({enabled})")
+
+            def set_requires_gradient_sync(self, enabled, *, recurse):
+                events.append(f"gradient_sync({enabled})")
+
+            def unshard(self):
+                events.append("unshard")
+
+            def reshard(self):
+                events.append("reshard")
+
+            def forward(self, input):
+                events.append("forward")
+                return super().forward(input)
+
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(RecordingFSDPLinear(4, 8, bias=False))
+        labels = torch.randint(0, 8, (4,))
+
+        with patch(
+            "torch.distributed._composable.fsdp.FSDPModule",
+            RecordingFSDPLinear,
+        ):
+            with chunked_loss.step_context(num_loss_calls=2):
+                chunked_loss(torch.randn(4, 4, requires_grad=True), labels)
+                self.assertNotIn("gradient_sync(True)", events)
+                self.assertNotIn("reshard", events)
+                chunked_loss(torch.randn(4, 4, requires_grad=True), labels)
+
+        self.assertEqual(events.count("forward"), 4)
+        self.assertEqual(events.count("gradient_sync(True)"), 1)
+        self.assertEqual(events.count("reshard_forward(True)"), 1)
+        self.assertEqual(events.count("reshard_backward(True)"), 1)
+        self.assertEqual(events.count("reshard"), 1)
+
+    def test_fsdp_finalization_restores_state_after_failure(self):
+        events: list[str] = []
+
+        class FailingFSDPLinear(nn.Linear):
+            def set_reshard_after_forward(self, enabled):
+                events.append(f"reshard_forward({enabled})")
+
+            def set_reshard_after_backward(self, enabled):
+                events.append(f"reshard_backward({enabled})")
+
+            def set_requires_gradient_sync(self, enabled, *, recurse):
+                events.append(f"gradient_sync({enabled})")
+
+            def unshard(self):
+                events.append("unshard")
+
+            def reshard(self):
+                events.append("reshard")
+
+            def forward(self, input):
+                raise RuntimeError("lm-head failure")
+
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss.set_lm_head(FailingFSDPLinear(4, 8, bias=False))
+        labels = torch.randint(0, 8, (4,))
+
+        with patch(
+            "torch.distributed._composable.fsdp.FSDPModule",
+            FailingFSDPLinear,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "lm-head failure"):
+                with chunked_loss.step_context(num_loss_calls=2):
+                    chunked_loss(torch.randn(4, 4, requires_grad=True), labels)
+
+        self.assertEqual(
+            events[-4:],
+            [
+                "reshard_forward(True)",
+                "reshard_backward(True)",
+                "gradient_sync(True)",
+                "reshard",
+            ],
+        )
+
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)

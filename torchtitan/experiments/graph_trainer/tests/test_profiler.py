@@ -9,17 +9,12 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import torch
-from torch.cuda._annotate_cuda_graph_trace import (  # pyrefly: ignore[missing-import]
-    annotate_trace,
-)
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.distributed.cudagraph import (
-    cudagraph_annotate_trace_post_processor,
     cudagraph_teardown,
     get_cudagraph_annotations,
 )
@@ -35,7 +30,6 @@ from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
 )
-from torchtitan.tools.profiler import Profiler
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
@@ -122,15 +116,16 @@ class TestKernelAnnotationsE2E(TestCase):
             run_traced(traced, module=model)(x, labels)
             torch.cuda.synchronize()
 
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".json.gz", delete=False) as f:
             trace_path = f.name
-        prof.export_chrome_trace(trace_path)
+        prof.export_chrome_trace(
+            trace_path,
+            cuda_graph_annotations=annotations,
+            graph_lanes="all",
+        )
 
-        with open(trace_path) as f:
+        with gzip.open(trace_path, "rt") as f:
             trace = json.load(f)
-
-        count = annotate_trace(trace, annotations)
-        self.assertGreater(count, 0, "annotate_trace matched 0 events")
 
         # Verify module_fqn fields appear on graphed kernel events.
         # Since minimal_fx_tracer traces fwd+bwd into a single graph,
@@ -174,87 +169,6 @@ class TestKernelAnnotationsE2E(TestCase):
         # Cleanup.
         os.unlink(trace_path)
         cudagraph_teardown()
-
-
-class TestTracePostProcessor(TestCase):
-    """Verify CUDA graph annotations are applied to every profiler trace."""
-
-    def test_post_processor_called_with_trace_path(self):
-        """The CUDA graph post-processor receives the exported trace path."""
-
-        calls: list[tuple[str, bool]] = []
-
-        def record_call(trace_path: str) -> None:
-            calls.append((trace_path, os.path.exists(trace_path)))
-
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch("torch.distributed.get_rank", return_value=0),
-            patch(
-                "torchtitan.tools.profiler.cudagraph_annotate_trace_post_processor",
-                side_effect=record_call,
-            ),
-        ):
-            config = Profiler.Config(
-                enable_profiling=True,
-                save_traces_folder="traces",
-                profile_freq=4,
-                profiler_warmup=1,
-                profiler_active=1,
-            )
-            profiler = config.build(global_step=0, base_folder=tmp)
-
-            with profiler:
-                for _ in range(4):
-                    profiler.step()
-
-        self.assertEqual(len(calls), 1, f"Expected 1 call, got {calls}")
-        path, existed = calls[0]
-        # Profiler exports gzip-compressed traces (.json.gz) since #3483.
-        self.assertTrue(path.endswith("rank0_trace.json.gz"))
-        self.assertTrue(existed, f"Trace file {path} did not exist when callback ran")
-
-    def test_annotate_post_processor_round_trips_gzip_trace(self):
-        """The cudagraph trace post-processor must read and write the
-        gzip-compressed (.json.gz) traces the Profiler produces since #3483.
-        A plain ``open``/``json.load`` would raise on the gzip bytes."""
-
-        graph_node_id = 42
-        trace = {
-            "traceEvents": [
-                {
-                    "name": "some_kernel",
-                    "tid": 1,
-                    "ts": 100,
-                    "args": {"graph node id": graph_node_id},
-                }
-            ]
-        }
-
-        # Seed annotations so the post-processor does real work instead of
-        # returning early on an empty annotation map.
-        annotations = get_cudagraph_annotations()
-        saved_annotations = annotations.copy()
-        annotations.clear()
-        annotations[graph_node_id] = [{_MODULE_FQN: "layers.0.attention.wq"}]
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                trace_path = os.path.join(tmp, "rank0_trace.json.gz")
-                with gzip.open(trace_path, "wt") as f:
-                    json.dump(trace, f)
-
-                # Must not raise on the gzip-compressed input.
-                cudagraph_annotate_trace_post_processor(trace_path)
-
-                # And the written-back trace must remain valid gzip JSON.
-                with gzip.open(trace_path, "rt") as f:
-                    annotated = json.load(f)
-        finally:
-            annotations.clear()
-            annotations.update(saved_annotations)
-
-        fqns = {e.get("args", {}).get(_MODULE_FQN) for e in annotated["traceEvents"]}
-        self.assertIn("layers.0.attention.wq", fqns)
 
 
 if __name__ == "__main__":

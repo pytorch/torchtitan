@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias
 
@@ -251,6 +252,13 @@ class BaseLoss(ABC, Configurable):
         ):
             logger.info("Compiling the loss function with torch.compile")
             self.fn = torch.compile(self.fn, backend=compile_config.backend)
+
+    @contextmanager
+    def step_context(self, *, num_loss_calls: int) -> Iterator[None]:
+        """Manage resources shared by all loss calls in one training step."""
+        if num_loss_calls < 1:
+            raise ValueError(f"num_loss_calls must be positive, got {num_loss_calls}")
+        yield
 
     def __call__(
         self,
@@ -527,8 +535,9 @@ class ChunkedLossWrapper(BaseLoss):
     FSDP2 composability:
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
-        unsharded across all chunks (avoiding repeated all-gathers). Reduce-scatter
-        fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
+        unsharded across all chunks (avoiding repeated all-gathers). Gradient
+        synchronization runs only for the final chunk. An enclosing training
+        step may extend that ownership across a fixed number of loss calls.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -561,10 +570,55 @@ class ChunkedLossWrapper(BaseLoss):
         self.num_chunks = config.num_chunks
         self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
         self.lm_head: nn.Module | None = None
+        self._step_calls_remaining: int | None = None
+        self._step_fsdp_finalized = False
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
+
+    @contextmanager
+    def step_context(self, *, num_loss_calls: int) -> Iterator[None]:
+        """Keep the unsharded lm head across all loss calls in one step."""
+        if num_loss_calls < 1:
+            raise ValueError(f"num_loss_calls must be positive, got {num_loss_calls}")
+        if self._step_calls_remaining is not None:
+            raise RuntimeError("Chunked loss step contexts cannot be nested")
+
+        self._step_calls_remaining = num_loss_calls
+        self._step_fsdp_finalized = False
+        completed = False
+        try:
+            yield
+            completed = True
+        finally:
+            remaining = self._step_calls_remaining
+            try:
+                if not self._step_fsdp_finalized:
+                    self._finalize_fsdp()
+            finally:
+                self._step_calls_remaining = None
+                self._step_fsdp_finalized = False
+            if completed and remaining != 0:
+                assert remaining is not None
+                raise RuntimeError(
+                    "Chunked loss step expected "
+                    f"{num_loss_calls} loss calls but observed "
+                    f"{num_loss_calls - remaining}"
+                )
+
+    def _finalize_fsdp(self, *, restore_gradient_sync: bool = True) -> None:
+        """Restore the lm-head FSDP policy and reshard its weight."""
+        from torch.distributed._composable.fsdp import FSDPModule
+
+        lm_head = self.lm_head
+        if not isinstance(lm_head, FSDPModule):
+            return
+        lm_head.set_reshard_after_forward(True)
+        lm_head.set_reshard_after_backward(True)
+        if restore_gradient_sync:
+            lm_head.set_requires_gradient_sync(True, recurse=False)
+        lm_head.reshard()
 
     def __call__(
         self,
@@ -591,6 +645,15 @@ class ChunkedLossWrapper(BaseLoss):
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
         fsdp_enabled = isinstance(lm_head, FSDPModule)
+        step_calls_remaining = self._step_calls_remaining
+        finalize_fsdp = step_calls_remaining is None
+        if step_calls_remaining is not None:
+            if step_calls_remaining == 0:
+                raise RuntimeError(
+                    "Chunked loss step received more loss calls than declared"
+                )
+            finalize_fsdp = step_calls_remaining == 1
+            self._step_calls_remaining = step_calls_remaining - 1
 
         # Check if it's training model or validation mode
         requires_grad = hidden_states.requires_grad
@@ -674,11 +737,13 @@ class ChunkedLossWrapper(BaseLoss):
                     lm_head.unshard()
 
             last_idx = len(h_chunks) - 1
+            gradient_sync_restored = False
             for i, (h_chunk, label_chunk) in enumerate(zip(h_chunks, label_chunks)):
-                if fsdp_enabled and i == last_idx:
+                if fsdp_enabled and finalize_fsdp and i == last_idx:
                     lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
                         True, recurse=False
                     )
+                    gradient_sync_restored = True
 
                 logits = lm_head(h_chunk)
 
@@ -700,11 +765,10 @@ class ChunkedLossWrapper(BaseLoss):
                         grad_accumulator.add(h_chunk.grad)
                         h_chunk.grad = None
 
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
-                lm_head.set_requires_gradient_sync(True, recurse=False)
-                lm_head.reshard()
+            if fsdp_enabled and finalize_fsdp:
+                self._finalize_fsdp(restore_gradient_sync=not gradient_sync_restored)
+                if step_calls_remaining is not None:
+                    self._step_fsdp_finalized = True
             if not requires_grad:
                 return total_loss, metrics
 
