@@ -548,8 +548,10 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 
 kimi_k3_configs = {
-    # 30 layers: partial last block, trailing lone MLA; 32 units divides every pp shape <= 32.
-    "debugmodel": (partial(_debugmodel, num_layers=30), 16384),
+    # 33 layers: two blocks of 12 and the 93-layer model's partial block of 9
+    # (93 = 7 x 12 + 9); 35 units with the embedding and the head, which no
+    # pipeline shape divides, so every split is uneven the way the real one is.
+    "debugmodel": (partial(_debugmodel, num_layers=33), 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }
 
