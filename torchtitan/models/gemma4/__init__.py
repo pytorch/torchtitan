@@ -122,7 +122,10 @@ def _build_gemma4_layers(
 
 
 def _debugmodel(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Gemma4Model.Config:
     dim = 256
     n_heads = 16
@@ -145,7 +148,7 @@ def _debugmodel(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=256000,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="none",
             ),
@@ -156,7 +159,10 @@ def _debugmodel(
 
 
 def _12b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Gemma4Model.Config:
     """Gemma-4 12B configuration.
     
@@ -199,7 +205,7 @@ def _12b(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=256000,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="none",
             ),
@@ -211,7 +217,10 @@ def _12b(
 
 
 def _31b(
-    attn_backend: str, tp_gemm_backend: TpGemmBackend = "default"
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
 ) -> Gemma4Model.Config:
     """Gemma-4 31B configuration.
     
@@ -255,7 +264,7 @@ def _31b(
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
             rope=ComplexRoPE.Config(
                 dim=dim // n_heads,
-                max_context_length=256000,
+                max_context_length=seq_len,
                 theta=500000,
                 scaling="none",
             ),
@@ -303,7 +312,9 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
-        attn_backend=attn_backend, tp_gemm_backend=tp_gemm_backend
+        attn_backend=attn_backend,
+        tp_gemm_backend=tp_gemm_backend,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
