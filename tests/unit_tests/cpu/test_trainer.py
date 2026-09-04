@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
+from torchtitan.distributed.pipeline_parallel import PipelineRuntime
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
@@ -28,6 +29,8 @@ def _batch() -> tuple[dict[str, object], torch.Tensor]:
 
 
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
+    pipeline_runtime = MagicMock(spec=PipelineRuntime)
+    pipeline_runtime.prepare_microbatch.side_effect = lambda inputs, kwargs: kwargs
     trainer = cast(
         Trainer,
         SimpleNamespace(
@@ -48,6 +51,7 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             config=SimpleNamespace(parallelism="PARA"),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            pipeline_runtime=pipeline_runtime,
         ),
     )
 
@@ -59,6 +63,7 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     )
 
     torch.testing.assert_close(loss, torch.tensor([-1.0]))
+    pipeline_runtime.prepare_microbatch.assert_called_once()
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
@@ -150,6 +155,10 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         should_log=MagicMock(return_value=True),
         log=MagicMock(),
     )
+    pipeline_runtime = MagicMock(spec=PipelineRuntime)
+    pipeline_runtime.parameters_for_grad_norm.side_effect = lambda parameters: tuple(
+        parameters
+    )
     trainer = cast(
         Trainer,
         SimpleNamespace(
@@ -177,6 +186,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             forward_backward_step=forward_backward_step,
             sdc_replayer=None,
             model_parts=[],
+            pipeline_runtime=pipeline_runtime,
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             step=1,
@@ -198,6 +208,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         4.0,
         extra_metrics={"n_tokens_seen": 3},
     )
+    assert pipeline_runtime.finalize_gradients.call_count == 1
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
@@ -239,6 +250,7 @@ def test_train_step_replay_checks_only_first_forward_backward():
             forward_backward_step=forward_backward_step,
             sdc_replayer=replayer,
             model_parts=[],
+            pipeline_runtime=PipelineRuntime(),
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,
@@ -290,6 +302,7 @@ def test_replay_failure_happens_before_optimizer():
             forward_backward_step=MagicMock(),
             sdc_replayer=SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch)),
             model_parts=[],
+            pipeline_runtime=PipelineRuntime(),
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,

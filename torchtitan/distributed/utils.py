@@ -576,6 +576,7 @@ def clip_grad_norm_(
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
     ep_enabled: bool = False,
+    norm_parameters: Iterable[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -598,13 +599,25 @@ def clip_grad_norm_(
             fall back to the slow implementation for other device types.
             Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
-        ep_dense_params_mesh_ndim: Mesh ndim of the dense params when EP is used. If EP is not used,
-            set it to ``None``.
+        ep_enabled: Whether parameters span separate expert and dense meshes.
+        norm_parameters: Optional logical parameter subset used to compute the
+            norm. The resulting clipping coefficient is still applied to every
+            entry in ``parameters``.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    else:
+        # prevent generators from being exhausted
+        parameters = list(parameters)
+    if norm_parameters is None:
+        norm_parameters = parameters
+    else:
+        norm_parameters = list(norm_parameters)
+
     if ep_enabled:
         return _clip_grad_norm_with_ep(
             parameters,
@@ -613,14 +626,10 @@ def clip_grad_norm_(
             error_if_nonfinite,
             foreach,
             pp_mesh,
+            norm_parameters,
         )
 
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
-    else:
-        # prevent generators from being exhausted
-        parameters = list(parameters)
-    grads = [p.grad for p in parameters if p.grad is not None]
+    grads = [p.grad for p in norm_parameters if p.grad is not None]
     total_norm = torch.nn.utils.get_total_norm(
         grads, norm_type, error_if_nonfinite, foreach
     )
@@ -656,6 +665,7 @@ def _clip_grad_norm_with_ep(
     error_if_nonfinite: bool,
     foreach: bool | None,
     pp_mesh: DeviceMesh | None,
+    norm_parameters: Iterable[torch.Tensor],
 ) -> torch.Tensor:
     ep_params = []
     non_ep_params = []
@@ -670,9 +680,18 @@ def _clip_grad_norm_with_ep(
         assert mesh_dim_names is not None
         if "ep" in mesh_dim_names:
             ep_params.append(p)
-            ep_grads.append(p.grad)
         else:
             non_ep_params.append(p)
+
+    for p in norm_parameters:
+        if p.grad is None:
+            continue
+        assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
+        mesh_dim_names = p.device_mesh.mesh_dim_names
+        assert mesh_dim_names is not None
+        if "ep" in mesh_dim_names:
+            ep_grads.append(p.grad)
+        else:
             non_ep_grads.append(p.grad)
 
     # Either list can be empty depending on the parallelization strategy:

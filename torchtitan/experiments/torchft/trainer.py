@@ -19,6 +19,7 @@ from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
+from torchtitan.distributed.pipeline_parallel import PipelineRuntime
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
@@ -185,6 +186,7 @@ class FaultTolerantTrainer(Trainer):
         )
 
         # apply parallelisms and initialization
+        self.pipeline_runtime = PipelineRuntime()
         if parallel_dims.pp_enabled:
             from torchtitan.components.metrics import ensure_pp_loss_visible
 
@@ -195,12 +197,7 @@ class FaultTolerantTrainer(Trainer):
                 )
 
             # apply both PT-D Pipeline Parallel and SPMD-style PT-D techniques
-            (
-                self.pp_schedule,
-                self.model_parts,
-                self.pp_has_first_stage,
-                self.pp_has_last_stage,
-            ) = model_spec.pipelining_fn(
+            pipeline = model_spec.pipelining_fn(
                 model,
                 parallel_dims=parallel_dims,
                 training=config.training,
@@ -213,6 +210,14 @@ class FaultTolerantTrainer(Trainer):
                 parallelize_fn=model_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
             )
+            if type(pipeline.runtime) is not PipelineRuntime:
+                raise NotImplementedError(
+                    "TorchFT does not support model-owned pipeline runtime hooks."
+                )
+            self.pp_schedule = pipeline.schedule
+            self.model_parts = pipeline.model_parts
+            self.pp_has_first_stage = pipeline.has_first_stage
+            self.pp_has_last_stage = pipeline.has_last_stage
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
             del model

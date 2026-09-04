@@ -11,19 +11,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeAlias
 
 import torch.nn as nn
-from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
 if TYPE_CHECKING:
     from torchtitan.config import Configurable
+    from torchtitan.distributed.pipeline_parallel import PipelineResult
 
 # Type aliases for ModelSpec callables
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
-PipeliningFunction: TypeAlias = Callable[
-    ..., tuple[_PipelineSchedule, list[nn.Module], bool, bool]
-]
+PipeliningFunction: TypeAlias = Callable[..., "PipelineResult"]
 FragmentFunction: TypeAlias = Callable[..., list[nn.Module]]
 PostOptimizerBuildFn: TypeAlias = Callable[..., None]
 
