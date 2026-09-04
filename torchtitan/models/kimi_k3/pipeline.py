@@ -66,6 +66,7 @@ def kimi_k3_module_fqns_per_model_part(
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
+    # The stage count core's _get_pipeline_metadata derives from the same fields.
     if layers_per_stage is not None:
         num_virtual_stages = math.ceil(
             (num_layers + input_weight + output_weight) / layers_per_stage

@@ -228,11 +228,8 @@ class KimiK3TransformerBlock(Module):
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # The first layer of a block closes the previous one: the incoming
-        # stream is that block's representation (the token embedding at layer
-        # 0) and joins the stack; every other layer carries it as the partial
-        # sum of the open block. Each sub-layer then attends over the stack,
-        # plus the partial sum when there is one, before its norm and body.
+        # A block's first layer closes the previous block: the incoming stream
+        # joins the stack; every other layer carries it as the open block's sum.
         first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
         if first_layer_in_block:
             block_residual_TND = torch.cat(
@@ -388,9 +385,8 @@ class KimiK3Model(Decoder):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
-        # Under pipeline parallel a middle stage receives its predecessor's
-        # two outputs, the hidden states and the accumulated block residual;
-        # see the return below for why the residual has to travel.
+        # Under pipeline parallel a later stage receives the hidden states and
+        # the block stack its predecessor returned.
         block_residual_in = block_residual_TND
 
         if self.tok_embeddings is not None:
@@ -417,10 +413,8 @@ class KimiK3Model(Decoder):
                 positions,
             )
 
-        # The final aggregation belongs to the head-owning stage; other stages
-        # have these None, like norm and lm_head. The accumulated block residual
-        # must travel on: a block residual is defined over the whole stack, and
-        # a stage that dropped it would train against a different model.
+        # The aggregation belongs to the head-owning stage; every other stage
+        # hands the stack on, since a block residual spans the whole stack.
         if self.output_res_proj is None:
             return h_TD, block_residual_TND
         h_TD = _apply_attention_residual(
