@@ -386,7 +386,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 4
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -399,7 +399,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=UlyssesCPFlexAttention)],
+        [ContextParallelTransform(kernel=UlyssesCPFlexAttention)],
     )
 
 
@@ -413,7 +413,7 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=UlyssesCPVarlenAttention)],
+        [ContextParallelTransform(kernel=UlyssesCPVarlenAttention)],
     )
 
 
@@ -430,7 +430,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -442,7 +442,7 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -451,7 +451,7 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 
@@ -509,7 +509,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
     )
 
 

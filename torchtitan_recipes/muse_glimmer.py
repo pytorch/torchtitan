@@ -27,7 +27,7 @@ def _muse_glimmer_30b_cp(
     config = muse_glimmer_30b()
     config.parallelism.context_parallel_degree = cp_degree
     config.parallelism.context_parallel_load_balancer = load_balancer
-    return apply_transforms(config, [ContextParallelTransform.Config(kernel=kernel)])
+    return apply_transforms(config, [ContextParallelTransform(kernel=kernel)])
 
 
 def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
@@ -59,5 +59,5 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform.Config(kernel=UlyssesCPVarlenAttention)],
+        [ContextParallelTransform(kernel=UlyssesCPVarlenAttention)],
     )
