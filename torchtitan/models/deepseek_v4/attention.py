@@ -4,10 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from attn_gym.sparse.selected_attention import selected_attention
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
@@ -28,7 +30,7 @@ def _assert_spmd_attention_type(tensor, *, tp):
 
 
 class DSV4FlexAttention(FlexAttention):
-    """DeepSeek sparse attention core for DeepSeek-V4.
+    """DeepSeek sparse attention core for DeepSeek-V4 (sliding window and HCA).
 
     The core attends over the concatenated KV sequence ``[0, L + n_cmp + 1)``,
     where the first ``L`` positions are the uncompressed sliding-window KV
@@ -38,10 +40,13 @@ class DSV4FlexAttention(FlexAttention):
     - sliding window: fixed pattern over ``swa_k``, expressed as a
       ``mask_mod`` predicate (no indices);
     - compressed blocks: for HCA (``compress_ratio=128``) all causal blocks
-      are attendable, also a fixed ``mask_mod`` pattern; for CSA
-      (``compress_ratio=4``) each query attends only its top-k selected
-      compressed positions, which is the only dynamic (index-based) part;
+      are attendable, also a fixed ``mask_mod`` pattern;
     - attention sink: always attendable via ``score_mod``.
+
+    CSA (``compress_ratio=4``, per-query top-k selection over compressed
+    positions) does not use this core -- see ``CompressedSparseAttention``,
+    which overrides ``forward`` entirely to call Attention Gym's
+    ``selected_attention`` instead of building a ``BlockMask``.
 
     The ``mask_mod`` is evaluated at token granularity inside flex_attention;
     the per-query-block KV block listing (``BlockMask.from_kv_blocks``) only
@@ -197,12 +202,16 @@ class DSV4FlexAttention(FlexAttention):
         attn_sink,
         *,
         cmp_k=None,
-        idx_q=None,
-        idx_k=None,
-        idx_w=None,
         attention_masks=None,
     ) -> torch.Tensor:
-        """Run DSV4 sparse attention over a folded token stream."""
+        """Run DSV4 sparse attention (sliding window / HCA) over a folded token stream.
+
+        Used by ``SlidingWindowAttention`` (compress_ratio in (0, 1), no
+        compressed KV) and ``HeavilyCompressedAttention`` (compress_ratio > 1
+        and != 4, all causal compressed blocks attendable). CSA
+        (compress_ratio == 4) does not go through this path -- see
+        ``CompressedSparseAttention``.
+        """
         if attention_masks is not None:
             raise ValueError(
                 "DSV4FlexAttention does not accept attention_masks; "
@@ -226,29 +235,7 @@ class DSV4FlexAttention(FlexAttention):
             selected_indices = [
                 self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=q.device)
             ]
-            if self.compress_ratio == 4:
-                if idx_q is None or idx_k is None or idx_w is None:
-                    raise ValueError(
-                        "DSV4FlexAttention requires idx_q, idx_k, "
-                        "and idx_w when compress_ratio=4"
-                    )
-                cmp_topk = Indexer.select(
-                    idx_q,
-                    idx_k,
-                    idx_w,
-                    seqlen=seqlen,
-                    ratio=self.compress_ratio,
-                    topk=self.index_topk,
-                ).unsqueeze(0)
-                causal_limit = (
-                    torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
-                    // self.compress_ratio
-                )
-                cmp_topk = torch.where(
-                    cmp_topk < causal_limit.unsqueeze(0), seqlen + cmp_topk, -1
-                )
-                selected_indices.append(cmp_topk)
-            elif self.compress_ratio > 1:
+            if self.compress_ratio > 1:
                 selected_indices.append(
                     self.get_compress_topk_idxs(
                         bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=q.device
@@ -322,6 +309,20 @@ class HeavilyCompressedAttention(DSV4FlexAttention):
 
 
 class CompressedSparseAttention(DSV4FlexAttention):
+    """CSA core built on Attention Gym's ``selected_attention`` primitive.
+
+    Unlike the other DSV4FlexAttention subclasses, CSA does not concatenate
+    the sliding-window KV, compressed KV, and a sink column into one buffer
+    and build a FlexAttention ``BlockMask`` from the top-k indices (that is
+    ``DSV4FlexAttention._forward_impl`` / ``_build_block_mask``). Instead it
+    calls ``attn_gym.sparse.selected_attention.selected_attention`` directly:
+    that primitive fuses the sliding-window branch, the sparse-index branch,
+    and the attention-sink softmax denominator into one kernel, which is
+    exactly this pattern (local window + per-query top-k over a separate KV
+    pool + learned sink). ``block_size`` is inherited from the shared config
+    but unused here (it only matters for ``BlockMask`` construction).
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(DSV4FlexAttention.Config):
         pass
@@ -338,16 +339,73 @@ class CompressedSparseAttention(DSV4FlexAttention):
         *,
         attention_masks=None,
     ) -> torch.Tensor:
-        return self._forward_impl(
-            q,
-            swa_k,
-            attn_sink,
-            cmp_k=cmp_k,
-            idx_q=idx_q,
-            idx_k=idx_k,
-            idx_w=idx_w,
-            attention_masks=attention_masks,
-        )
+        if attention_masks is not None:
+            raise ValueError(
+                "CompressedSparseAttention does not accept attention_masks; "
+                "top-k selection is computed internally."
+            )
+        if attn_sink is None:
+            raise ValueError("CompressedSparseAttention requires attn_sink")
+        if idx_q is None or idx_k is None or idx_w is None:
+            raise ValueError(
+                "CompressedSparseAttention requires idx_q, idx_k, and idx_w"
+            )
+
+        head_dim = q.size(-1)
+        # selected_attention has no scale override -- it always divides by
+        # sqrt(head_dim) internally. DeepSeek V4 only ever constructs
+        # softmax_scale as head_dim**-0.5 (see torchtitan/models/deepseek_v4/
+        # __init__.py), so this should never fire; it exists to catch a
+        # silent numerics mismatch if that invariant is ever broken.
+        expected_scale = head_dim**-0.5
+        if not math.isclose(self.softmax_scale, expected_scale, rel_tol=1e-6):
+            raise ValueError(
+                "CompressedSparseAttention requires softmax_scale == "
+                f"head_dim**-0.5 ({expected_scale}), got {self.softmax_scale}; "
+                "selected_attention does not support a custom scale."
+            )
+
+        seqlen = q.size(0)
+
+        with spmd.no_typecheck():
+            cmp_topk = Indexer.select(
+                idx_q,
+                idx_k,
+                idx_w,
+                seqlen=seqlen,
+                ratio=self.compress_ratio,
+                topk=self.index_topk,
+            ).unsqueeze(0)
+            causal_limit = (
+                torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
+                // self.compress_ratio
+            )
+            # selected_attention indexes sparse_kv (cmp_k) directly, so
+            # unlike DSV4FlexAttention._forward_impl there is no "+ seqlen"
+            # offset into a concatenated KV space -- only the -1 sentinel for
+            # causally unselectable positions.
+            cmp_topk = torch.where(cmp_topk < causal_limit.unsqueeze(0), cmp_topk, -1)
+
+            # selected_attention wants [B, H, T, K]; local_kv/sparse_kv get a
+            # size-1 head dim (swa_k/cmp_k are shared across heads, shape
+            # [T, K] / [n_cmp, K]) so share_kv=True broadcasts them
+            # internally.
+            q_bhtk = q.transpose(0, 1).unsqueeze(0)
+            swa_k_b1tk = swa_k.unsqueeze(0).unsqueeze(0)
+            cmp_k_b1tk = cmp_k.unsqueeze(0).unsqueeze(0)
+
+            backend = "triton" if q.device.type == "cuda" else "eager"
+            out_bhtk = selected_attention(
+                q_bhtk,
+                swa_k_b1tk,
+                cmp_k_b1tk,
+                cmp_topk,
+                attention_sink=attn_sink,
+                doc_ids=None,
+                sliding_window_size=self.window_size,
+                backend=backend,
+            )
+            return out_bhtk.squeeze(0).transpose(0, 1)
 
 
 class Attention(BaseAttention):
