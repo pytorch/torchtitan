@@ -1,8 +1,8 @@
 # Nemotron-3 Nano
 
-Nemotron-3 Nano is a hybrid Mamba-Transformer Mixture-of-Experts (MoE) model. Architecture features include interleaved Mamba-2 SSM and Grouped-Query Attention (GQA) layers coupled with granular routed experts. Training recipes cover Nemotron-3 Nano 31B (31.6B total / 3.2B active) and a small debug model used for testing.
+Nemotron-3 Nano is a hybrid Mamba-Transformer Mixture-of-Experts (MoE) model combining Mamba-2 SSM and Grouped-Query Attention (GQA) layers with granular routed experts.
 
-## Download the tokenizer
+## Download Tokenizer
 
 ```bash
 python scripts/download_hf_assets.py --repo_id nvidia/nemotron-3-nano --assets tokenizer
@@ -11,27 +11,15 @@ python scripts/download_hf_assets.py --repo_id nvidia/nemotron-3-nano --assets t
 ## Training
 
 ```bash
-# Debug model (used for functionality tests)
+# Debug model (used for CI and testing)
 MODULE=nemotron_nano CONFIG=nemotron_debugmodel ./run_train.sh
 
 # Nemotron-3 Nano 31B
 MODULE=nemotron_nano CONFIG=nemotron_31b ./run_train.sh
 ```
 
-See [`config_registry.py`](./config_registry.py) for full configuration options.
+See [`config_registry.py`](./config_registry.py) for available configuration options.
 
-## Supported Parallelisms
+## Checkpoint Conversion
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| FSDP / HSDP | Supported | Default data-parallel path |
-| Tensor Parallel (TP) | Supported | Dense projections & Attention/MLP TP |
-| Expert Parallel (EP) | Supported | MoE expert sharding across ranks |
-| Sequence Parallel (SP) | Supported | Sequence sharding for long context |
-| Pipeline Parallel (PP) | Supported | Uses `pipeline_llm` schedule |
-| Activation Checkpointing | Supported | Selective (`SelectiveAC`) and Full (`FullAC`) |
-| `torch.compile` | Supported | Compatible with model compile |
-
-## State Dict Adapter
-
-`NemotronStateDictAdapter` supports bidirectional checkpoint conversion between TorchTitan and Hugging Face format via `scripts/checkpoint_conversion/`.
+`NemotronStateDictAdapter` supports bidirectional checkpoint conversion between Hugging Face format and TorchTitan DCP via `scripts/checkpoint_conversion/`.
