@@ -86,6 +86,7 @@ def build_minimal_trainer(
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
             parallelism=SimpleNamespace(
+                enable_sequence_parallel=False,
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
             ),

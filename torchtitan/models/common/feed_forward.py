@@ -6,9 +6,12 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
+
 import torch
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
@@ -51,7 +54,25 @@ class FeedForward(Module):
         self.w3 = config.w3.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
+        out = self.w2(F.silu(self.w1(x)) * self.w3(x))
+        if tp_group is not None:
+            out = spmd.redistribute(
+                out,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": out.dtype},
+            )
+        return out
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -71,5 +92,5 @@ class SigmoidGatedFeedForward(FeedForward):
         self.gate = config.gate.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = super().forward(x)
+        out = self.w2(F.silu(self.w1(x)) * self.w3(x))
         return torch.sigmoid(self.gate(x)) * out

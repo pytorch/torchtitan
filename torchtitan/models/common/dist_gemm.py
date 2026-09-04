@@ -103,6 +103,8 @@ def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
 class AllGatherFusedQKVLinear(FusedQKVLinear):
     """Fused QKV projection whose forward all-gathers the TP sequence shard."""
 
+    performs_tp_input_all_gather = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(FusedQKVLinear.Config):
         """Same fields as the stock fused QKV. The subclass exists because it is
@@ -143,6 +145,8 @@ class RowParallelLinear(Linear):
     class itself is a plain rowwise linear and would work for any row-parallel
     projection; today it is only wired in as ``wo``.
     """
+
+    performs_tp_output_reduce_scatter = True
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):

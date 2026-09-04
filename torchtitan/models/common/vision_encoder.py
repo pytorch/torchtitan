@@ -23,8 +23,12 @@ Shape suffixes:
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
+
 import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
+
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexAttention, local_head_split
@@ -84,7 +88,26 @@ class VisionMLP(Module):
         self.act_fn = config.act_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.convert(
+                x,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.R,
+                expert_mode=True,
+                backward_options={"op_dtype": x.dtype},
+            )
+        out = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        if tp_group is not None:
+            out = spmd.all_reduce(
+                out,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.I,
+                backward_options={"op_dtype": out.dtype},
+            )
+        return out
 
 
 class VisionAttention(Module):
@@ -128,6 +151,24 @@ class VisionAttention(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.convert(
+                x,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.R,
+                expert_mode=True,
+                backward_options={"op_dtype": x.dtype},
+            )
+            rope_cache = spmd.convert(
+                rope_cache,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.R,
+                expert_mode=True,
+                backward_options={"op_dtype": rope_cache.dtype},
+            )
         num_tokens = x.shape[0]
 
         # -1 infers the head count locally (= num_heads / TP under tensor
@@ -142,7 +183,16 @@ class VisionAttention(Module):
             q_THDh, k_THDh, v_THDh, attention_masks=attention_mask
         )
         out_TD = out_THDh.reshape(num_tokens, -1)
-        return self.proj(out_TD)
+        out_TD = self.proj(out_TD)
+        if tp_group is not None:
+            out_TD = spmd.all_reduce(
+                out_TD,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.I,
+                backward_options={"op_dtype": out_TD.dtype},
+            )
+        return out_TD
 
 
 class VisionTransformerBlock(Module):

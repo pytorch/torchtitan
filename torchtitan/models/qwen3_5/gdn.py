@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
@@ -408,6 +409,15 @@ class GatedDeltaNet(Module):
         x_TD: torch.Tensor,
         attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
         num_tokens = x_TD.shape[0]
         if attention_masks is not None:
             cu_seqlens = attention_masks.cu_seq_q
@@ -445,4 +455,13 @@ class GatedDeltaNet(Module):
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)
-        return self.out_proj(out_TD)
+        out_TD = self.out_proj(out_TD)
+        if tp_group is not None:
+            out_TD = spmd.redistribute(
+                out_TD,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": out_TD.dtype},
+            )
+        return out_TD

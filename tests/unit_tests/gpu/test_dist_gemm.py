@@ -133,11 +133,9 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
     def test_sharding_setup_declares_the_fused_contracts(self):
         """set_gqa_attention_sharding declares different contracts for dist-GEMM.
 
-        Two differences from the stock block, both because the fused ops own the
-        collectives themselves: the block declares no attention-boundary
-        all-gather, and wo emits its final Shard(1) rather than a Partial for the
-        framework to reduce-scatter. Declaring the stock Partial here would make
-        the module fail its own out_src check at runtime.
+        The fused block has the same input/output contract as the stock block,
+        but its output projection emits its final Shard(1) rather than a
+        Partial. It therefore has no intermediate output contract on ``wo``.
         """
         from torchtitan.models.llama3 import model_registry
 
@@ -151,11 +149,10 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         set_gqa_attention_sharding(fused, enable_sp=True)
 
         self.assertIsNotNone(stock.sharding_config)
-        self.assertIsNone(fused.sharding_config)
+        self.assertEqual(fused.sharding_config, stock.sharding_config)
 
-        self.assertIsNotNone(stock.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(fused.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(fused.wo.sharding_config.out_dst_shardings)
+        self.assertIsNotNone(stock.wo.sharding_config.out_shardings)
+        self.assertIsNone(fused.wo.sharding_config.out_shardings)
         # the weight sharding still has to be declared, or wo is never sharded
         self.assertIn("weight", fused.wo.sharding_config.state_shardings)
 
@@ -209,9 +206,8 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         attn = attn_cfg.build().to(self.device_type)
         attn.parallelize(parallel_dims)
 
-        self.assertIsNone(attn._sharding_config)
-        self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
-        self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
+        self.assertIsNotNone(attn._sharding_config)
+        self.assertIsNone(attn.wo._sharding_config.out_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
 

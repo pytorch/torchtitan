@@ -19,12 +19,9 @@ from dataclasses import dataclass, replace
 import torch
 import triton
 import triton.language as tl
-from spmd_types import SpmdType
-from torch.distributed.tensor import DTensor
 
 from torchtitan.config import derive, override
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm
-from torchtitan.protocols.sharding import LocalMapConfig, resolve_placements
 
 
 __all__ = [
@@ -308,11 +305,7 @@ class TritonOffsetRMSNorm(OffsetRMSNorm):
 
     @dataclass(kw_only=True, slots=True)
     class Config(OffsetRMSNorm.Config):
-        weight_grad_sharding: SpmdType | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.weight_grad_sharding = config.weight_grad_sharding
+        pass
 
     def forward(  # pyrefly: ignore[bad-param-name-override]
         self, input: torch.Tensor
@@ -320,19 +313,7 @@ class TritonOffsetRMSNorm(OffsetRMSNorm):
         if not input.is_cuda or input.dtype not in _SUPPORTED_DTYPES:
             return super().forward(input)
 
-        weight = self.weight
-        if isinstance(weight, DTensor):
-            if self.weight_grad_sharding is None:
-                raise AssertionError(
-                    "DTensor weight requires a configured gradient sharding"
-                )
-            weight = weight.to_local(
-                grad_placements=resolve_placements(
-                    self.weight_grad_sharding,
-                    weight.device_mesh,
-                )
-            )
-        return triton_offset_rms_norm(input, weight, self.eps)
+        return triton_offset_rms_norm(input, self.weight, self.eps)
 
 
 @override(
@@ -344,15 +325,9 @@ def triton_offset_rmsnorm(
     cfg: OffsetRMSNorm.Config,
 ) -> TritonOffsetRMSNorm.Config:
     sharding_config = cfg.sharding_config
-    weight_grad_sharding = None
     if sharding_config is not None:
-        input_shardings = (
-            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
-        )
-        input_sharding = input_shardings.get("input")
-        output_sharding = (
-            sharding_config.out_src_shardings or sharding_config.out_dst_shardings
-        )
+        input_sharding = (sharding_config.in_shardings or {}).get("input")
+        output_sharding = sharding_config.out_shardings
         weight_sharding = sharding_config.state_shardings.get("weight")
         if input_sharding is None or output_sharding is None:
             raise ValueError(
@@ -361,20 +336,12 @@ def triton_offset_rmsnorm(
             )
         if weight_sharding is None:
             raise ValueError("Triton OffsetRMSNorm requires a weight sharding contract")
-        weight_grad_sharding = SpmdType(
-            {
-                axis: axis_type.backward_type()
-                for axis, axis_type in weight_sharding.local_type.items()
-            },
-            partition_spec=weight_sharding.partition_spec,
-        )
         sharding_config = replace(
             sharding_config,
-            local_map=LocalMapConfig(in_grad_placements=(input_sharding,)),
+            local_spmd=True,
         )
     return derive(
         cfg,
         TritonOffsetRMSNorm.Config,
         sharding_config=sharding_config,
-        weight_grad_sharding=weight_grad_sharding,
     )

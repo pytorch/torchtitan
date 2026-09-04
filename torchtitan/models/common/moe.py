@@ -13,7 +13,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import (
+    maybe_set_sparse_mesh,
+    sp_enabled,
+    spmd_mesh_group,
+    spmd_mesh_size,
+    spmd_sparse_mesh,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -399,20 +405,39 @@ class MoE(Module):
         Returns:
             Output ``(T, D)``.
 
-        Under TP, the MoE wrapper's ``sharding_config`` (set by
-        ``set_moe_sharding_config``) handles input/output redistribution:
-        input is redistributed from sp_layout to desired_input_layouts;
-        output is redistributed to sp_layout. GroupedExperts operates in a
-        local SPMD region. When EP internally
-        sequence-shards tokens across TP, the caller must provide a TP-divisible
-        token count.
+        Under TP, this module explicitly transitions between its boundary
+        layout and the layouts required by routing, shared experts, and the
+        final residual add. GroupedExperts operates in a local SPMD region.
+        When EP internally sequence-shards tokens across TP, the caller must
+        provide a TP-divisible token count.
         """
+        tp_group = spmd_mesh_group("tp")
+        ep_enabled = spmd_sparse_mesh() is not None
+        if tp_group is not None and not ep_enabled:
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
+        routed_input_TD = x_TD
+        if tp_group is not None and ep_enabled and not sp_enabled():
+            routed_input_TD = spmd.shard(
+                routed_input_TD,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": routed_input_TD.dtype},
+            )
+
         # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
         (
             topk_scores_TK,
             topk_expert_ids_TK,
             scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
+        ) = self.router(routed_input_TD, self.expert_bias_E, **router_kwargs)
 
         # Build a one-hot routing map (T, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are token-sharded;
@@ -434,18 +459,53 @@ class MoE(Module):
                 self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
         out_TD = self.routed_experts(
-            x_TD,
+            routed_input_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
 
-        shared_out_TD = (
-            self.shared_experts(x_TD) if self.shared_experts is not None else None
-        )
+        if tp_group is not None and ep_enabled and not sp_enabled():
+            out_TD = spmd.convert(
+                out_TD,
+                tp_group,
+                src=spmd.S(0),
+                dst=spmd.P,
+                expert_mode=True,
+                backward_options={"op_dtype": out_TD.dtype},
+            )
+
+        shared_out_TD = None
+        if self.shared_experts is not None:
+            shared_input_TD = x_TD
+            if tp_group is not None and ep_enabled:
+                shared_input_TD = spmd.redistribute(
+                    shared_input_TD,
+                    tp_group,
+                    src=spmd.S(0) if sp_enabled() else spmd.I,
+                    dst=spmd.R,
+                    backward_options={"op_dtype": shared_input_TD.dtype},
+                )
+            shared_out_TD = self.shared_experts(shared_input_TD)
+            if tp_group is not None and sp_enabled():
+                shared_out_TD = spmd.reduce_scatter(
+                    shared_out_TD,
+                    tp_group,
+                    src=spmd.P,
+                    dst=spmd.S(0),
+                    backward_options={"op_dtype": shared_out_TD.dtype},
+                )
 
         if shared_out_TD is not None:
             out_TD = out_TD + shared_out_TD
+        if tp_group is not None and not sp_enabled():
+            out_TD = spmd.all_reduce(
+                out_TD,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.I,
+                backward_options={"op_dtype": out_TD.dtype},
+            )
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

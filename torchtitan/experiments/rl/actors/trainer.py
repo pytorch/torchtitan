@@ -139,6 +139,7 @@ class PolicyTrainer(Actor, Configurable):
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,
+            enable_sp=config.parallelism.enable_sequence_parallel,
         )
 
         # Set determinism flags and seed via core torchtitan utility

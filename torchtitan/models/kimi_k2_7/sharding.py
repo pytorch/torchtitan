@@ -61,12 +61,13 @@ def set_kimi_k2_5_sharding_config(
         enable_ep=enable_ep,
     )
     if config.vision_encoder is not None:
-        if enable_sp:
-            _shard_decoder_after_embedding_scatter(config)
+        _shard_decoder_after_embedding_scatter(config, enable_sp=enable_sp)
         _set_vision_encoder_sharding(config.vision_encoder)
 
 
-def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> None:
+def _shard_decoder_after_embedding_scatter(
+    config: "KimiK25Model.Config", *, enable_sp: bool
+) -> None:
     """Keep ``tok_embeddings`` ``Replicate`` and resume SP at layer 0's output.
 
     The vision scatter writes features at arbitrary sequence positions, so it
@@ -78,18 +79,19 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
     """
     config.tok_embeddings.sharding_config = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=_REPLICATE_ACT,
+        in_shardings={"input": token_id_placement()},
+        out_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         local_spmd=True,
     )
 
     layer0 = config.layers[0]
+    layer_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+    )
     layer0.sharding_config = ShardingConfig(
-        in_src_shardings={"x": _REPLICATE_ACT},
-        in_dst_shardings={"x": dense_sequence_parallel_placement()},
-        out_src_shardings=dense_sequence_parallel_placement(),
+        in_shardings={"x": layer_layout}, out_shardings=layer_layout
     )
 
 
@@ -106,14 +108,13 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
         state_shardings={
             "pos_embed": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
-        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
+        out_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
         state_shardings={
             "inv_freq": SpmdType({DP: spmd.R, TP: spmd.I}),
         },
-        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
+        out_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()

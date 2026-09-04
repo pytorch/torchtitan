@@ -19,6 +19,8 @@ from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     set_current_spmd_mesh,
+    sp_enabled,
+    spmd_mesh_group,
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -140,6 +142,15 @@ class Qwen35Attention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
@@ -166,6 +177,23 @@ class Qwen35Attention(BaseAttention):
         xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
         xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
 
+        cp_group = spmd_mesh_group("cp")
+        if cp_group is not None:
+            xk_THK = spmd.all_gather(
+                xk_THK,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": xk_THK.dtype},
+            )
+            xv_THV = spmd.all_gather(
+                xv_THV,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": xv_THV.dtype},
+            )
+
         out_THV = self.inner_attention(
             xq_THK,
             xk_THK,
@@ -178,7 +206,16 @@ class Qwen35Attention(BaseAttention):
         # Output gating
         out_THV = out_THV * torch.sigmoid(gate_THV)
         out_TD = out_THV.view(num_tokens, -1)
-        return self.wo(out_TD)
+        out_TD = self.wo(out_TD)
+        if tp_group is not None:
+            out_TD = spmd.redistribute(
+                out_TD,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": out_TD.dtype},
+            )
+        return out_TD
 
 
 class Qwen35TransformerBlock(Module):
@@ -499,6 +536,16 @@ class Qwen35Model(Decoder):
             raise ValueError("Vision inputs were provided without a vision encoder.")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            vision_embeds = spmd.convert(
+                vision_embeds,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.R,
+                expert_mode=True,
+                backward_options={"op_dtype": vision_embeds.dtype},
+            )
 
         merge_unit = self.vision_encoder.spatial_merge_unit
         num_tokens_per_item = grid_thw.prod(-1) // merge_unit
@@ -531,6 +578,15 @@ class Qwen35Model(Decoder):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        tp_group = spmd_mesh_group("tp")
+        if self.tok_embeddings is not None and tp_group is not None:
+            inputs_embeds = spmd.all_reduce(
+                inputs_embeds,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.R,
+                backward_options={"op_dtype": inputs_embeds.dtype},
+            )
 
         if pixel_values is not None and grid_thw is not None:
             if special_tokens is None:
@@ -591,11 +647,14 @@ class Qwen35Model(Decoder):
             else:
                 x = tokens
 
-        if spmd.is_type_checking():
-            spmd.assert_type(
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.redistribute(
                 x,
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                spmd.PartitionSpec(("dp", "cp"), None),
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": x.dtype},
             )
 
         # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
@@ -605,6 +664,14 @@ class Qwen35Model(Decoder):
             x = layer(x, attention_masks, positions)
 
         x = self.norm(x) if self.norm is not None else x
+        if self.norm is not None and tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
         if self._skip_lm_head:
             return x
         return self.lm_head(x) if self.lm_head is not None else x

@@ -17,7 +17,11 @@ from torch import nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    sp_enabled,
+    spmd_mesh_group,
+)
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
@@ -157,6 +161,19 @@ class KimiK25Model(DeepSeekV3Model):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        tp_group = spmd_mesh_group("tp")
+        if (
+            self.tok_embeddings is not None
+            and self.vision_encoder is not None
+            and tp_group is not None
+        ):
+            inputs_embeds = spmd.all_reduce(
+                inputs_embeds,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.R,
+                backward_options={"op_dtype": inputs_embeds.dtype},
+            )
 
         modalities = []
         if pixel_values is not None and grid_thw is not None:
@@ -181,6 +198,15 @@ class KimiK25Model(DeepSeekV3Model):
         # Patches arrive float32; match the encoder's compute dtype for the matmul.
         pixels = pixels.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixels, grid_thw=grid)
+        if tp_group is not None:
+            vision_embeds = spmd.convert(
+                vision_embeds,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.R,
+                expert_mode=True,
+                backward_options={"op_dtype": vision_embeds.dtype},
+            )
         # MoonViT collapses time (temporal pooling) and merges 2x2 spatially, so
         # the token count is (h/kh)*(w/kw), independent of t.
         kh, kw = self.vision_encoder.merge_kernel_size
@@ -241,6 +267,16 @@ class KimiK25Model(DeepSeekV3Model):
             else:
                 x = tokens
 
+        tp_group = spmd_mesh_group("tp")
+        if self.tok_embeddings is not None and tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.R if self.vision_encoder is not None else spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": x.dtype},
+            )
+
         if spmd.is_type_checking():
             # The scatter restores a token-aligned tensor, so text-model DP
             # resumes as global batch sharding after the multimodal region.
@@ -250,6 +286,14 @@ class KimiK25Model(DeepSeekV3Model):
             x = layer(x, attention_masks, positions)
 
         x = self.norm(x) if self.norm is not None else x
+        if self.norm is not None and tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
         if self._skip_lm_head:
             return x
         return self.lm_head(x) if self.lm_head is not None else x

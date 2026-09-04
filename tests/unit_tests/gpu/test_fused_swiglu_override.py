@@ -98,7 +98,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
                 "w2_EDF": rowwise,
                 "w3_EFD": colwise,
             },
-            in_src_shardings={"x_RD": colwise},
+            in_shardings={"x_RD": colwise},
             local_spmd=True,
         )
         cfg = GroupedExperts.Config(
@@ -131,7 +131,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
         self.assertEqual(set(sc.state_shardings), {"w13", "w2_EDF"})
         self.assertIs(sc.state_shardings["w13"], colwise)
         self.assertIs(sc.state_shardings["w2_EDF"], rowwise)
-        self.assertIs(sc.in_src_shardings, base_sharding.in_src_shardings)
+        self.assertIs(sc.in_shardings, base_sharding.in_shardings)
         self.assertIs(sc.local_spmd, base_sharding.local_spmd)
 
 
