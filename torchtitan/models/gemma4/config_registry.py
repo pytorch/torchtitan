@@ -23,8 +23,8 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-def gemma4_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def gemma4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -42,8 +42,8 @@ def gemma4_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -68,15 +68,17 @@ def gemma4_debugmodel() -> Trainer.Config:
     )
 
 
-def gemma4_debugmodel_varlen_attn() -> Trainer.Config:
-    config = gemma4_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="varlen")
+def gemma4_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
     config.training.disable_cuda_graphs = True
     return config
 
 
-def gemma4_12b() -> Trainer.Config:
-    model_spec = model_registry("12b")
+def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("12b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -110,8 +112,8 @@ def gemma4_12b() -> Trainer.Config:
     )
 
 
-def gemma4_12b_1node_full() -> Trainer.Config:
-    config = gemma4_12b()
+def gemma4_12b_1node_full(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_12b(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
     config.parallelism = ParallelismConfig(
         tensor_parallel_degree=1,
@@ -119,8 +121,8 @@ def gemma4_12b_1node_full() -> Trainer.Config:
     return config
 
 
-def gemma4_12b_multinode() -> Trainer.Config:
-    config = gemma4_12b()
+def gemma4_12b_multinode(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_12b(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
     config.parallelism = ParallelismConfig(
         tensor_parallel_degree=2,
@@ -128,8 +130,8 @@ def gemma4_12b_multinode() -> Trainer.Config:
     return config
 
 
-def gemma4_12b_long_context() -> Trainer.Config:
-    config = gemma4_12b()
+def gemma4_12b_long_context(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_12b(seq_len=seq_len)
     config.training.max_context_length = 16384
     config.training.num_tokens_per_microbatch_per_dp_rank = 1 * 16384
     config.parallelism = ParallelismConfig(
@@ -139,8 +141,8 @@ def gemma4_12b_long_context() -> Trainer.Config:
     return config
 
 
-def gemma4_31b() -> Trainer.Config:
-    model_spec = model_registry("31b")
+def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("31b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -174,8 +176,8 @@ def gemma4_31b() -> Trainer.Config:
     )
 
 
-def gemma4_31b_1node_full() -> Trainer.Config:
-    config = gemma4_31b()
+def gemma4_31b_1node_full(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_31b(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
     config.parallelism = ParallelismConfig(
         tensor_parallel_degree=1,
@@ -183,8 +185,8 @@ def gemma4_31b_1node_full() -> Trainer.Config:
     return config
 
 
-def gemma4_31b_multinode() -> Trainer.Config:
-    config = gemma4_31b()
+def gemma4_31b_multinode(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_31b(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
     config.parallelism = ParallelismConfig(
         tensor_parallel_degree=2,
@@ -192,8 +194,8 @@ def gemma4_31b_multinode() -> Trainer.Config:
     return config
 
 
-def gemma4_31b_long_context() -> Trainer.Config:
-    config = gemma4_31b()
+def gemma4_31b_long_context(seq_len: int | None = None) -> Trainer.Config:
+    config = gemma4_31b(seq_len=seq_len)
     config.training.max_context_length = 16384
     config.training.num_tokens_per_microbatch_per_dp_rank = 1 * 16384
     config.parallelism = ParallelismConfig(
