@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import torch
+from torch.distributed.tensor import DTensor
 
 
 def topk_with_cutoff(
@@ -270,11 +271,13 @@ class QuantileBalancer:
             # activation-checkpoint recompute of it, and selective AC then dies
             # with "encountered during backward but not found in storage". With
             # the buffer pre-allocated the hook is one add_ every pass.
+            bias_E = moe.expert_bias_E
+            assert isinstance(bias_E, torch.Tensor)
             self._counts[key] = torch.zeros(
-                moe.expert_bias_E.numel(),
+                bias_E.numel(),
                 self.num_bins,
                 dtype=torch.int32,
-                device=moe.expert_bias_E.device,
+                device=bias_E.device,
             )
             self._handles.append(moe.router.register_forward_hook(self._make_hook(key)))
 
@@ -292,6 +295,7 @@ class QuantileBalancer:
             # Router returns (topk_scores_BLK, topk_expert_ids_BLK, scores_BLE).
             scores_BLE = output[2]
             bias_E = self._moes[key].expert_bias_E
+            assert isinstance(bias_E, torch.Tensor)
             with torch.no_grad():
                 # The router's gate is declared, so under TP its output is a
                 # DTensor while expert_bias_E is unwrapped just below -- the two
@@ -300,10 +304,10 @@ class QuantileBalancer:
                 # every token and to_local is exact here. That stops being true
                 # once EP shards the tokens, and the histogram would then have to
                 # reduce over the axis they are sharded on.
-                if hasattr(scores_BLE, "to_local"):
+                if isinstance(scores_BLE, DTensor):
                     scores_BLE = scores_BLE.to_local()
                 scores_TE = scores_BLE.detach().reshape(-1, scores_BLE.size(-1))
-                bias = bias_E.to_local() if hasattr(bias_E, "to_local") else bias_E
+                bias = bias_E.to_local() if isinstance(bias_E, DTensor) else bias_E
                 _, cutoff_T = topk_with_cutoff(
                     scores_TE, bias.detach(), self._top_k[key]
                 )
@@ -359,7 +363,8 @@ class QuantileBalancer:
                 counts.to(torch.int64), self._top_k[key], lo=self.lo, hi=self.hi
             )
             target = self._moes[key].expert_bias_E
-            if hasattr(target, "to_local"):
+            assert isinstance(target, torch.Tensor)
+            if isinstance(target, DTensor):
                 target.to_local().copy_(bias.to(target.dtype))
             else:
                 target.copy_(bias.to(target.dtype))

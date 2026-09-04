@@ -105,5 +105,6 @@ def kimi_k3_debugmodel_qb() -> Trainer.Config:
     from torchtitan.components.quantile_balance import register_quantile_balancing
 
     config = kimi_k3_debugmodel()
+    assert config.model_spec is not None
     config.model_spec.post_optimizer_build_fn = register_quantile_balancing
     return config
