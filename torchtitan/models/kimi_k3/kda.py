@@ -140,6 +140,7 @@ class InnerKDA(Module):
         conv_v_weight_C1W: torch.Tensor,
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
+        *,
         cu_seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         raw_gate_1THK = raw_gate_THK.unsqueeze(0)
@@ -256,10 +257,12 @@ class KDA(Module):
                 f"got {type(attention_masks).__name__}."
             )
         num_tokens = x_TD.shape[0]
+        # -1, not num_heads: under spmd_types the projections hand back the
+        # TP-local head slice (upstream's local_qkv_head_split does the same).
         raw_gate_THK = self.forget_b(self.forget_a(x_TD)).reshape(
-            num_tokens, self.num_heads, self.head_dim
+            num_tokens, -1, self.head_dim
         )
-        raw_beta_TH = self.beta(x_TD).reshape(num_tokens, self.num_heads)
+        raw_beta_TH = self.beta(x_TD).reshape(num_tokens, -1)
         out_THV = self.inner_kda(
             self.q_proj(x_TD),
             self.k_proj(x_TD),
@@ -271,7 +274,7 @@ class KDA(Module):
             self.v_conv.weight,
             self.A_log,
             self.dt_bias,
-            cu_seqlens,
+            cu_seqlens=cu_seqlens,
         )
 
         output_gate_THV = self.output_gate(x_TD).view_as(out_THV)
