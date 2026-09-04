@@ -357,7 +357,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         if hasattr(self, "_manager"):
             self.close()
 
-    @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def _load(self, step: int = -1) -> bool:
         has_checkpoint_folder = self._storage.isdir(self.folder)
@@ -421,7 +420,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         )
         return True
 
-    @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         should_save = self._should_save(curr_step, last_step)
