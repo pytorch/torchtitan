@@ -25,8 +25,8 @@ from torchtitan.experiments.rl.examples.verifiers.components.env_server import (
     VerifiersEnvServer,
 )
 from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
-    GenerationMetadata,
     GeneratorModelAdapter,
+    VerifiersGenerationMetadata,
 )
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
@@ -313,7 +313,7 @@ class VerifiersRollouter(Rollouter):
     def trace_to_rollout_turns(
         *,
         trace: Any,
-        generation_metadata: list[GenerationMetadata],
+        generation_metadata: list[VerifiersGenerationMetadata],
         group_id: int,
         rollout_id: int,
     ) -> list[RolloutTurn]:
