@@ -10,11 +10,14 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from dataclasses import dataclass
+from typing import Literal
+
+import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor.experimental._context_parallel import flex_cp_allgather
 
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 
 from torchtitan.models.common.attention import FlexAttention
@@ -50,7 +53,14 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FlexAttention.Config):
-        pass
+        reduce_dtype: Literal["float32", "bfloat16"] | None = None
+        """Dtype of the backward reduce-scatter. None keeps the input dtype."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = (
+            TORCH_DTYPE_MAP[config.reduce_dtype] if config.reduce_dtype else None
+        )
 
     def forward(
         self,
@@ -59,9 +69,15 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        # TODO(fegin): replace flex_cp_allgather with spmd_types.redistribute.
-        pg_name = dist._get_process_group_name(self.cp_group)
-        k_THK, v_THV = flex_cp_allgather(
-            k_THK.contiguous(), v_THV.contiguous(), _SEQ_DIM, pg_name
+        cp_group = self.cp_group
+        k_THK, v_THV = (
+            spmd.redistribute(
+                x,
+                cp_group,
+                src=spmd.S(_SEQ_DIM),
+                dst=spmd.R,
+                backward_options={"op_dtype": self.reduce_dtype or x.dtype},
+            )
+            for x in (k_THK, v_THV)
         )
         return super().forward(q_THK, k_THK, v_THV, **kwargs)

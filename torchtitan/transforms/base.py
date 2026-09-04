@@ -34,16 +34,21 @@ class ModelTransform(ABC):
         """
 
 
-def retype_node(existing: Module.Config, replacement: type[Module]) -> Module.Config:
+def retype_node(
+    existing: Module.Config,
+    replacement: type[Module],
+    **overrides: object,
+) -> Module.Config:
     """Build ``replacement``'s config from ``existing``, keeping its fields.
 
-    Requiring inheritance preserves wrappers added by earlier transforms.
+    Overrides set fields defined by the replacement config. Requiring
+    inheritance preserves wrappers added by earlier transforms.
     """
     if not issubclass(replacement.Config, type(existing)):
         raise ValueError(
             f"{replacement.__qualname__}.Config must inherit "
             f"{type(existing).__qualname__}."
         )
-    return replacement.Config(
-        **{f.name: getattr(existing, f.name) for f in fields(existing)}
-    )
+    values = {f.name: getattr(existing, f.name) for f in fields(existing)}
+    values.update(overrides)
+    return replacement.Config(**values)
