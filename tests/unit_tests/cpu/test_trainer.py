@@ -328,6 +328,38 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
 
 
+def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
+    class PassthroughCUDAGraphWrapper:
+        def __init__(self, fn, example_inputs):
+            self.fn = fn
+
+        def __call__(self, *args):
+            return self.fn(*args)
+
+    fn = MagicMock(side_effect=lambda batches, *, scale: batches[1]["x"] * scale)
+    with (
+        patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(torch.version, "hip", None),
+        patch(
+            "torchtitan.distributed.cudagraph.CUDAGraphWrapper",
+            PassthroughCUDAGraphWrapper,
+        ),
+    ):
+        run = wrap_with_cuda_graph(fn)
+        output = run(
+            [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
+            scale=torch.tensor(3.0),
+        )
+
+    torch.testing.assert_close(output, torch.tensor(6.0))
+    fn.assert_called_once()
+    batches = fn.call_args.args[0]
+    torch.testing.assert_close(batches[0]["x"], torch.tensor(1.0))
+    torch.testing.assert_close(batches[1]["x"], torch.tensor(2.0))
+    torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(3.0))
+
+
 def test_trainer_accumulates_reused_cuda_graph_losses():
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
