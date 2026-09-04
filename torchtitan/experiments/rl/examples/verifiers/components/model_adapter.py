@@ -20,7 +20,7 @@ _SESSION_ID_HEADER = "X-Session-ID"
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationMetadata:
+class VerifiersGenerationMetadata:
     """TorchTitan completion data that Verifiers does not retain in its trace."""
 
     min_policy_version: int
@@ -59,7 +59,7 @@ class GeneratorModelAdapter:
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
         self.turn_counts: dict[str, int] = {}
-        self.generation_metadata: dict[str, list[GenerationMetadata]] = {}
+        self.generation_metadata: dict[str, list[VerifiersGenerationMetadata]] = {}
 
     @property
     def port(self) -> int:
@@ -102,7 +102,9 @@ class GeneratorModelAdapter:
         self.turn_counts.clear()
         self.generation_metadata.clear()
 
-    def pop_generation_metadata(self, session_id: str) -> list[GenerationMetadata]:
+    def pop_generation_metadata(
+        self, session_id: str
+    ) -> list[VerifiersGenerationMetadata]:
         """Detach one rollout's metadata for `trace_to_rollout_turns`."""
         self.turn_counts.pop(session_id, None)
         return self.generation_metadata.pop(session_id, [])
@@ -185,7 +187,7 @@ class GeneratorModelAdapter:
             )
 
         self.generation_metadata.setdefault(session_id, []).append(
-            GenerationMetadata(
+            VerifiersGenerationMetadata(
                 min_policy_version=completion.min_policy_version,
                 max_policy_version=completion.max_policy_version,
                 metrics=list(completion.metrics),

@@ -14,8 +14,8 @@ from types import SimpleNamespace
 from aiohttp import ClientSession
 
 from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
-    GenerationMetadata,
     GeneratorModelAdapter,
+    VerifiersGenerationMetadata,
 )
 from torchtitan.experiments.rl.examples.verifiers.components.rollouter import (
     _trainable_token_spans,
@@ -54,7 +54,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     turns = VerifiersRollouter.trace_to_rollout_turns(
         trace=trace,
         generation_metadata=[
-            GenerationMetadata(
+            VerifiersGenerationMetadata(
                 min_policy_version=3,
                 max_policy_version=4,
                 metrics=[],
