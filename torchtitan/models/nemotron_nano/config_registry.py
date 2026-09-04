@@ -60,6 +60,34 @@ def nemotron_debugmodel() -> Trainer.Config:
         ),
     )
 
+def nemotron_4b() -> Trainer.Config:
+    model_spec = model_registry("4B")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=3e-4),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
+            max_context_length=2048,
+            steps=1000,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=SelectiveAC.Config(),
+        validator=Validator.Config(
+            freq=500,
+            steps=1200,
+        ),
+    )
+
+
 def nemotron_31b() -> Trainer.Config:
     model_spec = model_registry("31B")
     return Trainer.Config(
@@ -90,6 +118,78 @@ def nemotron_31b() -> Trainer.Config:
         parallelism=ParallelismConfig(
             tensor_parallel_degree=2,
             expert_parallel_degree=4,
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=FullAC.Config(),
+        validator=Validator.Config(
+            freq=500,
+            steps=1200,
+        ),
+    )
+
+
+def nemotron_120b() -> Trainer.Config:
+    model_spec = model_registry("120B")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(
+            enable_tensorboard=True,
+        ),
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=1.5e-4),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=1 * 128,
+            max_context_length=128,
+            steps=1000,
+            disable_cuda_graphs=True,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=4,
+            expert_parallel_degree=8,
+        ),
+        checkpoint=CheckpointManager.Config(interval=500),
+        activation_checkpoint=FullAC.Config(),
+        validator=Validator.Config(
+            freq=500,
+            steps=1200,
+        ),
+    )
+
+
+def nemotron_550b() -> Trainer.Config:
+    model_spec = model_registry("550B")
+    return Trainer.Config(
+        loss=ChunkedLossWrapper.Config(
+            loss_fn=CrossEntropyLoss.Config(
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(
+            enable_tensorboard=True,
+        ),
+        model_spec=model_spec,
+        optimizer=default_adamw(lr=1e-4),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=1 * 128,
+            max_context_length=128,
+            steps=1000,
+            disable_cuda_graphs=True,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+        ),
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=8,
+            expert_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=FullAC.Config(),

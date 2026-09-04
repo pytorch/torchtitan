@@ -181,6 +181,60 @@ def _debugmodel(
     )
 
 
+def _4b(
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
+) -> Nemotron3NanoModel.Config:
+    dim = 2048
+    n_heads = 16
+    n_kv_heads = 8
+    n_layers = 24
+    vocab_size = 262144
+    num_experts = 32
+    top_k_experts = 4
+    mamba_state_dim = 16
+    mamba_conv_dim = 2048
+    return Nemotron3NanoModel.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        num_experts=num_experts,
+        top_k_experts=top_k_experts,
+        mamba_state_dim=mamba_state_dim,
+        mamba_conv_dim=mamba_conv_dim,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_nemotron_layers(
+            fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=1024,
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_context_length=seq_len,
+                theta=500000,
+                scaling="llama",
+            ),
+            num_experts=num_experts,
+            top_k_experts=top_k_experts,
+            mamba_state_dim=mamba_state_dim,
+            mamba_conv_dim=mamba_conv_dim,
+            attn_backend=attn_backend,
+            tp_gemm_backend=tp_gemm_backend,
+        ),
+    )
+
+
 def _31b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
@@ -235,10 +289,124 @@ def _31b(
     )
 
 
+def _120b(
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
+) -> Nemotron3NanoModel.Config:
+    dim = 6144
+    n_heads = 48
+    n_kv_heads = 8
+    n_layers = 48
+    vocab_size = 262144
+    num_experts = 128
+    top_k_experts = 8
+    mamba_state_dim = 16
+    mamba_conv_dim = 6144
+    return Nemotron3NanoModel.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        num_experts=num_experts,
+        top_k_experts=top_k_experts,
+        mamba_state_dim=mamba_state_dim,
+        mamba_conv_dim=mamba_conv_dim,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_nemotron_layers(
+            fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=2048,
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_context_length=seq_len,
+                theta=500000,
+                scaling="llama",
+            ),
+            num_experts=num_experts,
+            top_k_experts=top_k_experts,
+            mamba_state_dim=mamba_state_dim,
+            mamba_conv_dim=mamba_conv_dim,
+            attn_backend=attn_backend,
+            tp_gemm_backend=tp_gemm_backend,
+        ),
+    )
+
+
+def _550b(
+    attn_backend: str,
+    tp_gemm_backend: TpGemmBackend = "default",
+    *,
+    seq_len: int,
+) -> Nemotron3NanoModel.Config:
+    dim = 8192
+    n_heads = 64
+    n_kv_heads = 8
+    n_layers = 64
+    vocab_size = 262144
+    num_experts = 256
+    top_k_experts = 8
+    mamba_state_dim = 16
+    mamba_conv_dim = 8192
+    return Nemotron3NanoModel.Config(
+        dim=dim,
+        vocab_size=vocab_size,
+        num_experts=num_experts,
+        top_k_experts=top_k_experts,
+        mamba_state_dim=mamba_state_dim,
+        mamba_conv_dim=mamba_conv_dim,
+        tok_embeddings=Embedding.Config(
+            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+        ),
+        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        lm_head=Linear.Config(
+            in_features=dim,
+            out_features=vocab_size,
+            param_init=_output_linear_init(dim),
+        ),
+        layers=_build_nemotron_layers(
+            fuse_qkv=True,
+            n_layers=n_layers,
+            dim=dim,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            hidden_dim=2048,
+            rope=ComplexRoPE.Config(
+                dim=dim // n_heads,
+                max_context_length=seq_len,
+                theta=500000,
+                scaling="llama",
+            ),
+            num_experts=num_experts,
+            top_k_experts=top_k_experts,
+            mamba_state_dim=mamba_state_dim,
+            mamba_conv_dim=mamba_conv_dim,
+            attn_backend=attn_backend,
+            tp_gemm_backend=tp_gemm_backend,
+        ),
+    )
+
+
 nemotron_configs = {
     "debugmodel": (_debugmodel, 131072),
+    "4B": (_4b, 1000000),
+    "4b": (_4b, 1000000),
     "31B": (_31b, 1000000),
     "31b": (_31b, 1000000),
+    "120B": (_120b, 1000000),
+    "120b": (_120b, 1000000),
+    "550B": (_550b, 1000000),
+    "550b": (_550b, 1000000),
 }
 
 
