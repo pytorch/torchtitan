@@ -475,6 +475,7 @@ class MXFP4ExpertsBase:
     """Marker base of every packed-experts class (see LoRALinearBase)."""
 
     _parameters: dict[str, nn.Parameter]
+    _sharding_config: ShardingConfig | None
     _mxfp4_shapes: dict[str, tuple[int, ...]]
     _mx_scale_dtype: torch.dtype
     _mx_ctx: Any
@@ -585,25 +586,12 @@ def _get_mxfp4_experts_cls(parent_cls: type) -> type:
                 )
                 if entry is not None:
                     assert sharding is not None
-                    # Translate the declared 3-D placement to the flattened
-                    # packed pair. Replicate/invariant carries over; a shard
-                    # on the EXPERT dim maps to row-shard (experts are
-                    # contiguous row blocks in the (E*A, B) flatten); a shard
-                    # on an inner dim does not survive the flatten and needs
-                    # the packed expert-TP unit.
-                    from torchtitan.distributed.parallel_dims import MeshAxisName
-
-                    tp_type = entry.axis_types.get(MeshAxisName.TP)
-                    if isinstance(tp_type, spmd.Shard) and tp_type.dim != 0:
-                        raise NotImplementedError(
-                            f"quantize_experts='mxfp4': {name} is declared "
-                            "TP-sharded on an inner dim, which the packed "
-                            "flatten cannot express yet. Run without "
-                            "expert-TP, or drop quantize_experts."
-                        )
-                    # Entries for axes absent from the mesh (e.g. the EP axis
-                    # in a TP-only run) are ignored at resolve time and pass
-                    # through; packed experts UNDER EP are not validated yet.
+                    # The declared 3-D entry carries over to the packed pair:
+                    # an expert-axis shard is a row shard of the (E*A, B)
+                    # flatten. The TP placements ride along unexercised (the
+                    # model refuses tensor parallel); an inner-dim shard does
+                    # not survive the flatten and is the packed expert-TP unit
+                    # still to come.
                     sharding.state_shardings[name + "_qdata"] = entry
                     sharding.state_shardings[name + "_scale"] = entry
 

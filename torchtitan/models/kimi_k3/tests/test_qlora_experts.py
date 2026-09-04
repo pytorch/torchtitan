@@ -64,3 +64,32 @@ def test_experts_merge_restores_original_keys():
         assert f"{name}.{wname}_qdata" not in merged
         # The packed layout is back in place after the export.
         assert wname not in m._parameters
+
+
+def test_experts_pack_under_the_declared_sharding():
+    """The trainer's path: the declarations go on before the build, and the
+    packed pair inherits the experts' entry (this is where main's SpmdType
+    broke the packing at the seed build)."""
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_qlora_mxfp4
+
+    config = kimi_k3_debugmodel_qlora_mxfp4()
+    assert config.model_spec is not None
+    model_config = config.model_spec.model
+    model_config.update_from_config(config=config)
+    with torch.device("meta"):
+        model = model_config.build()
+    packed = [m for _, m in model.named_modules() if isinstance(m, MXFP4ExpertsBase)]
+    assert packed
+    # The packing rewrites the declaration the module was built with: the
+    # packed pair inherits the experts' entry, the original key goes.
+    seen = 0
+    for m in packed:
+        sharding = m._sharding_config
+        if sharding is None or not sharding.state_shardings:
+            continue
+        seen += 1
+        for wname in m._mxfp4_shapes:
+            assert wname not in sharding.state_shardings
+            assert wname + "_qdata" in sharding.state_shardings
+            assert wname + "_scale" in sharding.state_shardings
+    assert seen, "no packed experts carried a sharding declaration"
