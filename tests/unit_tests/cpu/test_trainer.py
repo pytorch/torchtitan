@@ -4,13 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from contextlib import nullcontext
+import weakref
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torch.distributed import config as dist_config
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
@@ -27,7 +29,18 @@ def _batch() -> tuple[dict[str, object], torch.Tensor]:
     )
 
 
+def _bind_pp_forward_backward_body(trainer: Trainer) -> None:
+    trainer._pp_training_schedule_initialized = True
+    trainer._pp_loss_step_context = lambda **kwargs: trainer.loss_fn.step_context(  # pyrefly: ignore [bad-assignment]
+        **kwargs
+    )
+    trainer.pp_fwd_bwd_fn = lambda *args: Trainer._pp_forward_backward_body(
+        trainer, *args
+    )
+
+
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
+    sentinel = torch.full((1,), -1.0)
     trainer = cast(
         Trainer,
         SimpleNamespace(
@@ -48,8 +61,10 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             config=SimpleNamespace(parallelism="PARA"),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            _pp_loss_sentinel=sentinel,
         ),
     )
+    _bind_pp_forward_backward_body(trainer)
 
     loss = Trainer.pp_forward_backward_step(
         trainer,
@@ -58,7 +73,229 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
         global_valid_tokens=torch.tensor(1),
     )
 
-    torch.testing.assert_close(loss, torch.tensor([-1.0]))
+    assert loss is sentinel
+
+
+def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
+    activation_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+    loss_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+    loss_containers: list[list[torch.Tensor]] = []
+    gradients: list[torch.Tensor] = []
+
+    def schedule_step(**kwargs) -> None:
+        loss_containers.append(kwargs["losses"])
+        for value in (1.0, 2.0):
+            activation = torch.tensor(value, requires_grad=True)
+            loss = activation.square().view(())
+            loss.backward()
+            assert activation.grad is not None
+            gradients.append(activation.grad.detach().clone())
+            activation_refs.append(weakref.ref(activation))
+            loss_refs.append(weakref.ref(loss))
+            kwargs["losses"].append(loss)
+
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            pp_schedule=SimpleNamespace(step=schedule_step),
+            train_context=nullcontext,
+            model_parts=[
+                SimpleNamespace(
+                    preprocess_inputs=lambda input_dict, **kw: (
+                        input_dict["input"],
+                        input_dict["labels"],
+                        {},
+                    )
+                )
+            ],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            device=torch.device("cpu"),
+            loss_fn=SimpleNamespace(
+                step_context=lambda **kwargs: nullcontext(),
+            ),
+        ),
+    )
+    _bind_pp_forward_backward_body(trainer)
+
+    reporting_loss = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[{"input": torch.ones(1)}] * 2,
+        label_mbs=[torch.ones(1)] * 2,
+        global_valid_tokens=torch.tensor(2),
+    )
+
+    torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
+    torch.testing.assert_close(torch.stack(gradients), torch.tensor([2.0, 4.0]))
+    assert not reporting_loss.requires_grad
+    assert reporting_loss.grad_fn is None
+    assert loss_containers == [[]]
+    assert all(reference() is None for reference in loss_refs)
+    assert all(reference() is None for reference in activation_refs)
+
+
+def test_pp_forward_backward_step_scopes_loss_calls() -> None:
+    context_active = False
+
+    @contextmanager
+    def step_context(*, num_loss_calls):
+        nonlocal context_active
+        assert num_loss_calls == 2
+        context_active = True
+        try:
+            yield
+        finally:
+            context_active = False
+
+    def schedule_step(**kwargs) -> None:
+        assert context_active
+        kwargs["losses"].extend((torch.tensor(1.0), torch.tensor(2.0)))
+
+    loss_fn = MagicMock()
+    loss_fn.step_context.side_effect = step_context
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            pp_schedule=SimpleNamespace(step=schedule_step),
+            train_context=nullcontext,
+            model_parts=[
+                SimpleNamespace(
+                    preprocess_inputs=lambda input_dict, **kw: (
+                        input_dict["input"],
+                        input_dict["labels"],
+                        {},
+                    )
+                )
+            ],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            device=torch.device("cpu"),
+            loss_fn=loss_fn,
+        ),
+    )
+    _bind_pp_forward_backward_body(trainer)
+
+    loss = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[{"input": torch.ones(1)}] * 2,
+        label_mbs=[torch.ones(1)] * 2,
+        global_valid_tokens=torch.tensor(2),
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(3.0))
+    loss_fn.step_context.assert_called_once_with(num_loss_calls=2)
+
+
+def test_first_pp_forward_backward_step_skips_loss_scope() -> None:
+    loss_fn = MagicMock()
+    schedule = MagicMock()
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_last_stage=True,
+            pp_schedule=schedule,
+            train_context=nullcontext,
+            device=torch.device("cpu"),
+            loss_fn=loss_fn,
+            _pp_loss_step_context=lambda **kwargs: loss_fn.step_context(**kwargs),
+            _pp_training_schedule_initialized=False,
+        ),
+    )
+    schedule.step.side_effect = lambda **kwargs: kwargs["losses"].append(
+        torch.tensor(1.0)
+    )
+
+    loss = Trainer._pp_forward_backward_body(
+        trainer,
+        [(torch.ones(1),)],
+        [{}],
+        [torch.ones(1)],
+        torch.tensor(1),
+    )
+
+    torch.testing.assert_close(loss, torch.tensor(1.0))
+    loss_fn.step_context.assert_not_called()
+    assert trainer._pp_training_schedule_initialized
+
+
+@pytest.mark.parametrize(
+    ("pp_enabled", "expected_initialized"),
+    ((True, False), (False, True)),
+)
+def test_run_validation_invalidates_pipeline_training_metadata(
+    pp_enabled: bool,
+    expected_initialized: bool,
+) -> None:
+    validator = MagicMock()
+    model_parts = [MagicMock()]
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            validator=validator,
+            model_parts=model_parts,
+            step=3,
+            parallel_dims=SimpleNamespace(pp_enabled=pp_enabled),
+            _pp_training_schedule_initialized=True,
+        ),
+    )
+
+    Trainer._run_validation(trainer)
+
+    validator.validate.assert_called_once_with(model_parts, 3)
+    assert trainer._pp_training_schedule_initialized is expected_initialized
+
+
+def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
+    pp_fwd_bwd_fn = MagicMock(return_value=torch.tensor(0.0))
+
+    class _FakeModel:
+        def preprocess_inputs(self, input_dict, **kwargs):
+            return (
+                input_dict["input"] + 1,
+                input_dict["labels"] + 2,
+                {"positions": input_dict["positions"] + 3},
+            )
+
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            model_parts=[_FakeModel()],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            pp_fwd_bwd_fn=pp_fwd_bwd_fn,
+        ),
+    )
+    global_valid_tokens = torch.tensor(2)
+
+    result = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[
+            {"input": torch.tensor(1), "positions": torch.tensor(10)},
+            {"input": torch.tensor(2), "positions": torch.tensor(20)},
+        ],
+        label_mbs=[torch.tensor([3]), torch.tensor([4])],
+        global_valid_tokens=global_valid_tokens,
+    )
+
+    torch.testing.assert_close(result, torch.tensor(0.0))
+    arg_mbs, kwarg_mbs, target_mbs, passed_valid_tokens = pp_fwd_bwd_fn.call_args.args
+    torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
+    torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
+    torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
+    torch.testing.assert_close(kwarg_mbs[1]["positions"], torch.tensor(23))
+    torch.testing.assert_close(target_mbs[0], torch.tensor([5]))
+    torch.testing.assert_close(target_mbs[1], torch.tensor([6]))
+    assert passed_valid_tokens is global_valid_tokens
+    assert trainer.ntokens_seen == 2
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
@@ -99,10 +336,82 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     }
 
 
+@pytest.mark.parametrize(
+    ("gradient_accumulation_steps", "sdc_config", "expected"),
+    [
+        (1, None, 2),
+        (4, None, 8),
+        (1, SimpleNamespace(num_steps=1, num_replays=1), 3),
+        (4, SimpleNamespace(num_steps=2, num_replays=1), 10),
+        (4, SimpleNamespace(num_steps=-1, num_replays=1), 10),
+    ],
+)
+def test_cuda_graph_warmup_covers_two_optimizer_steps(
+    gradient_accumulation_steps: int,
+    sdc_config: SimpleNamespace | None,
+    expected: int,
+) -> None:
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
+        sdc_replayer=sdc_config
+    )
+    trainer.gradient_accumulation_steps = gradient_accumulation_steps
+
+    assert Trainer._num_cuda_graph_warmup_iterations(trainer) == expected
+
+
+@pytest.mark.parametrize("per_direction_p2p", [False, True])
+def test_init_distributed_configures_pipeline_process_groups(
+    per_direction_p2p: bool,
+) -> None:
+    parallelism = SimpleNamespace(pipeline_parallel_per_direction_p2p=per_direction_p2p)
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                comm="COMM",
+                training=SimpleNamespace(enable_cpu_offload=False),
+                parallelism=parallelism,
+                dump_folder="OUTPUT",
+            )
+        ),
+    )
+
+    def init_distributed(*args, **kwargs):
+        assert dist_config.pipeline_per_direction_p2p is per_direction_p2p
+        return 8
+
+    expected_dims = object()
+    with (
+        patch.object(
+            dist_config,
+            "pipeline_per_direction_p2p",
+            not per_direction_p2p,
+        ),
+        patch(
+            "torchtitan.trainer.dist_utils.init_distributed",
+            side_effect=init_distributed,
+        ) as init,
+        patch(
+            "torchtitan.trainer.ParallelDims.from_config",
+            return_value=expected_dims,
+        ) as from_config,
+    ):
+        result = Trainer.init_distributed(trainer)
+
+    assert result is expected_dims
+    init.assert_called_once_with(
+        "COMM",
+        enable_cpu_backend=False,
+        base_folder="OUTPUT",
+    )
+    from_config.assert_called_once_with(parallelism, 8)
+
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs):
+        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
             self.fn = fn
+            assert num_warmup_iterations == 2
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -119,7 +428,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             PassthroughCUDAGraphWrapper,
         ),
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd)
+        runner = wrap_with_cuda_graph(fwd_bwd, num_warmup_iterations=2)
         for value in (1.0, 2.0, 3.0):
             graph_loss.fill_(value)
             loss = runner(
@@ -136,6 +445,44 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
     torch.testing.assert_close(global_valid_tokens, torch.tensor(1))
     assert global_valid_tokens.dtype == torch.int64
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
+
+
+def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
+    class PassthroughCUDAGraphWrapper:
+        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
+            self.fn = fn
+            assert num_warmup_iterations == 2
+
+        def __call__(self, *args):
+            return self.fn(*args)
+
+    fn = MagicMock(side_effect=lambda batches, *, scale: batches[1]["x"] * scale)
+    with (
+        patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(torch.version, "hip", None),
+        patch(
+            "torchtitan.distributed.cudagraph.CUDAGraphWrapper",
+            PassthroughCUDAGraphWrapper,
+        ),
+    ):
+        run = wrap_with_cuda_graph(fn, num_warmup_iterations=2)
+        output = run(
+            [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
+            scale=torch.tensor(3.0),
+        )
+
+    torch.testing.assert_close(output, torch.tensor(6.0))
+    fn.assert_called_once()
+    batches = fn.call_args.args[0]
+    torch.testing.assert_close(batches[0]["x"], torch.tensor(1.0))
+    torch.testing.assert_close(batches[1]["x"], torch.tensor(2.0))
+    torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(3.0))
+
+
+def test_cuda_graph_wrapper_rejects_negative_warmup_iterations() -> None:
+    with pytest.raises(ValueError, match="must be non-negative"):
+        wrap_with_cuda_graph(MagicMock(), num_warmup_iterations=-1)
 
 
 def test_trainer_accumulates_reused_cuda_graph_losses():
