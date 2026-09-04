@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import multiprocessing
 import os
 from dataclasses import dataclass, field
-from functools import partial
 from queue import Empty
 from typing import Any
 
@@ -28,6 +28,59 @@ from torchtitan.config import Configurable
 from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
     register_local_taskset_alias,
 )
+
+
+REQUEST_IDS_BY_NODE_INFO_KEY = "torchtitan_request_ids_by_node"
+_REQUEST_ID_PATCH_MARKER = "_torchtitan_records_request_id"
+
+
+def _wrap_commit_to_retain_response_id(commit):
+    """Carry the key for TorchTitan generation metadata across processes.
+
+    ``GenerationServer`` and the Verifiers EnvServer run in different
+    processes and record different halves of a model call:
+
+    1. ``GenerationServer`` creates and returns ``request_id``, then stores a
+       ``VerifiersGenerationMetadata`` value in
+       ``generation_metadata[request_id]``.
+    2. Verifiers converts that same ``request_id`` field to ``Response.id`` and
+       commits the response as an assistant node. Verifiers 0.3.1 does not
+       retain ``Response.id`` in its trace, so this wrapper stores it as
+       ``trace.info[node] = response.id``.
+    3. ``VerifiersRollouter`` later receives the trace and must match each node
+       with its ``VerifiersGenerationMetadata`` value.
+
+    Matching the two lists by position is incorrect when concurrent requests
+    finish or commit in different orders. This wrapper runs synchronously around
+    the commit, when both values are known, and stores
+    ``trace.info[node] = response.id``. ``Trace.info`` crosses the EnvServer
+    process boundary, so ``VerifiersRollouter`` can use
+    ``node -> request_id -> metadata`` instead of relying on list order.
+    """
+
+    @functools.wraps(commit)
+    def commit_with_request_id(turn, response, tools=None):
+        node = commit(turn, response, tools)
+        if response.id:
+            request_ids = turn.trace.info.setdefault(REQUEST_IDS_BY_NODE_INFO_KEY, {})
+            request_ids[str(node)] = response.id
+        return node
+
+    setattr(commit_with_request_id, _REQUEST_ID_PATCH_MARKER, True)
+    return commit_with_request_id
+
+
+def _setup_env_server_process() -> None:
+    """Configure logging and install TorchTitan's Verifiers compatibility patch."""
+    setup_logging("INFO")
+
+    # Verifiers 0.3.1 carries the generation request ID on Response.id but drops
+    # it when committing the response to a Trace. Preserve it in Trace.info so
+    # policy-version metadata can be joined by identity instead of call order.
+    from verifiers.v1.graph import PendingTurn
+
+    if not getattr(PendingTurn.commit, _REQUEST_ID_PATCH_MARKER, False):
+        PendingTurn.commit = _wrap_commit_to_retain_response_id(PendingTurn.commit)
 
 
 def _run_env_server_process(
@@ -54,7 +107,7 @@ def _run_env_server_process(
         address=serve.address,
         address_queue=address_queue,
         death_pipe=death_pipe,
-        log_setup=partial(setup_logging, "INFO"),
+        log_setup=_setup_env_server_process,
         config_data=env_config_data(env_config),
         max_concurrent=serve.max_concurrent,
     )

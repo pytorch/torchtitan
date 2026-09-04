@@ -30,7 +30,7 @@ changing TitanRL's controller, generator, or training interfaces:
    `RLMHarnessConfig`, or `CodexHarnessConfig`, and optional rollout limits.
    `ServeConfig` selects a `StaticPoolConfig` or `ElasticPoolConfig` and the ZMQ
    bind address.
-3. `components/model_adapter.py` exposes TitanRL's generator callback through
+3. `components/model_adapter.py` runs a `GenerationServer` that exposes TitanRL's generator callback through
    the HTTP model protocol expected by Verifiers and retains TorchTitan-only
    policy metadata.
 4. `components/rollouter.py` sends samples to the environment service and
@@ -117,7 +117,7 @@ stronger security boundary.
 
 Use these objects as the dataset and `env_server` fields of a
 `VerifiersRollouter.Config` subclass, then reference that rollouter from the
-experiment's `Controller.Config` in `config_registry.py`. The current adapter
+experiment's `Controller.Config` in `config_registry.py`. The current integration
 manages one Verifiers taskset schema per rollouter, so its dataset and
 environment-server taskset IDs must agree. Define a local taskset beside the
 rollouter only when an experiment needs to combine datasets or customize task
