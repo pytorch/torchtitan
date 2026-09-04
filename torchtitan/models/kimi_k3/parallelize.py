@@ -40,6 +40,7 @@ from torchtitan.models.kimi_k3.pipeline_stage import (
     AttnResPipelineStage,
     PPRankLocalCache,
 )
+from torchtitan.models.kimi_k3.pp_balance import install_pp_balance, PPBalanceKnobs
 from torchtitan.tools.logging import logger
 from .model import KimiK3Model
 
@@ -275,12 +276,21 @@ def _swap_in_attn_res_stages(
     raise RuntimeError(f"Unexpected pipeline schedule class {type(schedule).__name__}.")
 
 
-def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
+def pipeline_kimi_k3(
+    model: nn.Module,
+    *,
+    attn_res_cache: bool = True,
+    pp_balance: PPBalanceKnobs | None = None,
+    **kwargs,
+):
     """``pipelining_fn`` for Kimi K3: core's split and schedule, each stage rebuilt
     as an :class:`AttnResPipelineStage` and routed by tables built from that split.
 
     ``attn_res_cache=False`` sends the whole block stack on every hop instead of
     only the blocks the receiving rank lacks; every rank must pass the same value.
+    ``pp_balance`` names the PP ranks that park the tensors autograd saves in a
+    pool on another rank's GPU through the Mooncake Transfer Engine
+    (``pp_balance.py``); a recipe sets it the same way.
     """
     # The vision tower goes with the embedding, the AttnRes aggregation with the head.
     parallelism = kwargs.pop("parallelism")
@@ -325,4 +335,11 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
         [s.stage_index for s in stages],
         "delta with rank store" if attn_res_cache else "whole stack every hop",
     )
+    if pp_balance is not None and pp_balance.pp_balance_source_ranks:
+        # The engine owns the registered pool and staging buffers; it lives as
+        # long as the schedule does.
+        # pyrefly: ignore[missing-attribute]
+        pp_schedule._pp_balance_engine = install_pp_balance(
+            pp_schedule, stages[0].group, pp_balance
+        )
     return pp_schedule, model_parts, has_first_stage, has_last_stage
