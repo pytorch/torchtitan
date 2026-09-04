@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
 from typing import cast
 
 import torch.nn as nn
@@ -164,15 +163,18 @@ def kimi_k3_module_fqns_per_model_part(
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-    # The stage count core's _get_pipeline_metadata derives from the same fields.
-    if layers_per_stage is not None:
-        num_virtual_stages = math.ceil(
-            (num_layers + input_weight + output_weight) / layers_per_stage
-        )
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
+    if issubclass(schedule_class, PipelineScheduleSingle):
+        stages_per_rank = 1
+    elif layers_per_stage is None:
+        stages_per_rank = 2
     else:
-        schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
-        stages_per_rank = 1 if issubclass(schedule_class, PipelineScheduleSingle) else 2
-        num_virtual_stages = pp * stages_per_rank
+        # The multiple of pp nearest to units / layers_per_stage: a layer count
+        # no shape divides (the 93-layer model's) still splits, with stages
+        # differing by a layer, where core's ceiling would refuse it.
+        units = num_layers + input_weight + output_weight
+        stages_per_rank = max(2, round(units / layers_per_stage / pp))
+    num_virtual_stages = pp * stages_per_rank
     fqns = _generate_llm_fqn_per_model_part(
         num_virtual_stages, num_layers, input_weight, output_weight
     )
@@ -233,8 +235,13 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
             pp=kwargs["parallel_dims"].pp,
         )
         if fqns is not None:
+            # Core validates layers_per_stage with a ceiling the unit count has
+            # to divide; the split above already honoured it, so core gets the
+            # split alone.
             kwargs["parallelism"] = dataclasses.replace(
-                parallelism, module_fqns_per_model_part=fqns
+                parallelism,
+                module_fqns_per_model_part=fqns,
+                pipeline_parallel_layers_per_stage=None,
             )
     pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
         model, stage_class=AttnResPipelineStage, **kwargs
