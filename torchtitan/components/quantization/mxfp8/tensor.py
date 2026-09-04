@@ -89,6 +89,32 @@ class _LinearShardedTensorWithMXFP8Compute(_ShardedFSDPTensor):
     holder is generic, so quantization is the only thing a format supplies.
     """
 
+    def fsdp_pre_all_gather(self, mesh, outer_size, outer_stride, module, mp_policy):
+        # The unshard hook is the only place the layer meets its own
+        # MixedPrecisionPolicy, so it is where a reduce dtype that would defeat
+        # in-place WGRAD accumulation has to be caught.
+        if module.inplace_wgrad_accum:
+            grad_dtype = mp_policy.param_dtype or self._tensor.dtype
+            if mp_policy.reduce_dtype not in (None, grad_dtype):
+                raise ValueError(
+                    "MXFP8Linear inplace_wgrad_accum requires FSDP's "
+                    f"reduce_dtype to match the weight gradient dtype "
+                    f"{grad_dtype} -- the parameter dtype, since nothing sets "
+                    f"grad_dtype -- but got {mp_policy.reduce_dtype}. When the "
+                    "two differ, FSDP moves "
+                    "the gradient off the parameter into its own reduce-dtype "
+                    "accumulator after every microbatch backward, so there is "
+                    "never a gradient left to accumulate into and the option "
+                    "would silently do nothing. Widening the gradient to the "
+                    "reduce dtype instead is not something this layer can do "
+                    "alone: reduce-scatter rejects a group whose gradients "
+                    "disagree, so every parameter under the same fully_shard "
+                    "call would have to be widened together."
+                )
+        return super().fsdp_pre_all_gather(
+            mesh, outer_size, outer_stride, module, mp_policy
+        )
+
     def _build_operands(
         self,
         logical_tensor: torch.Tensor,

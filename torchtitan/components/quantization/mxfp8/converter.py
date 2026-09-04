@@ -43,6 +43,17 @@ class MXFP8LinearConverter(QuantizationConverter):
         Only Linear.Config entries whose FQN contains a match are converted.
         If empty, all Linear modules are converted.
         """
+        inplace_wgrad_accum: bool = False
+        """Accumulate WGRAD into the existing weight gradient, in place.
+
+        Applies to every converted linear. See
+        ``MXFP8Linear.Config.inplace_wgrad_accum`` for what the option does and
+        the two conditions it requires: eager execution, and an FSDP
+        ``reduce_dtype`` equal to the parameter dtype. Both are enforced at
+        runtime rather than here, because neither is visible from the model
+        config tree.
+        """
+
         linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(
             default_factory=list
         )
@@ -129,6 +140,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                 input_activation_format_for_backward=(
                     "mxfp8" if fqn in mxfp8_fqns else "bf16"
                 ),
+                inplace_wgrad_accum=self.config.inplace_wgrad_accum,
             )
             if parent is None:
                 model_config = new_config
