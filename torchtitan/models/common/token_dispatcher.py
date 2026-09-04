@@ -1232,7 +1232,6 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
                 "parallelism (expert_parallel_degree > 1)."
             )
 
-        token_dispatcher_cfg.hidden_dim = model_config.dim
         configured_capacity = token_dispatcher_cfg.num_max_tokens_per_rank
         if configured_capacity is not None and configured_capacity <= 0:
             raise ValueError(
