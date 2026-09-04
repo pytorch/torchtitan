@@ -306,6 +306,13 @@ class CompileConfig:
     backend: str = "inductor"
 
     def __post_init__(self) -> None:
+        allowed = frozenset({"model", "loss"})
+        unknown = [c for c in self.components if c not in allowed]
+        if unknown:
+            raise ValueError(
+                f"Unknown compile.components entries {unknown}; "
+                f"allowed values are {sorted(allowed)}"
+            )
         if self.enable_async_tensor_parallel and not (
             self.enable and "model" in self.components
         ):
