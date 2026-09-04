@@ -16,7 +16,7 @@ from torchtitan.transforms import apply_transforms, ContextParallelTransform
 def _muse_glimmer_30b_cp(*, kernel: type[Module], cp_degree: int) -> Trainer.Config:
     config = muse_glimmer_30b()
     config.parallelism.context_parallel_degree = cp_degree
-    return apply_transforms(config, [ContextParallelTransform.Config(kernel=kernel)])
+    return apply_transforms(config, [ContextParallelTransform(kernel=kernel)])
 
 
 def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
