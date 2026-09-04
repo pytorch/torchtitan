@@ -63,6 +63,7 @@ from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -729,6 +730,9 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
+        enable_cumem_allocator: bool = False
+        """Use vLLM's CuMem allocator for RDMA: model and state-dict storage."""
+
         max_num_batched_tokens: int | None = None
         """vLLM chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves
@@ -871,6 +875,7 @@ class VLLMGenerator(Actor, Configurable):
 
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
+        self._enable_cumem_allocator = config.enable_cumem_allocator
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from torchtitan's ModelSpec via
@@ -907,6 +912,7 @@ class VLLMGenerator(Actor, Configurable):
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
+            enable_cumem_allocator=config.enable_cumem_allocator,
         )
         engine_kwargs["max_model_len"] = model_spec.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
@@ -1338,7 +1344,16 @@ class VLLMGenerator(Actor, Configurable):
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
-        model_sd = model.model.state_dict()
+        if self._enable_cumem_allocator:
+            # State-dict hooks can allocate temporary tensors (for example,
+            # split Q/K/V weights). Keep those allocations in the same CuMem
+            # pool as the model, since they also transfer over RDMA.
+            with get_mem_allocator_instance().use_memory_pool(
+                tag="generator_state_dict"
+            ):
+                model_sd = model.model.state_dict()
+        else:
+            model_sd = model.model.state_dict()
         if get_spmd_backend() == "spmd_types":
             await self._get_spmd_state_dict(model_sd, model=model)
         else:

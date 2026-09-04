@@ -6,6 +6,8 @@
 
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
+from contextlib import nullcontext
+
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -28,6 +30,12 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
 
 class TorchTitanGPUWorker(GPUWorker):
     """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
+
+    def _maybe_get_memory_pool_context(self, tag: str):
+        # Allocations transferred over RDMA (`weights`) need stable mappings.
+        if tag == "kv_cache":
+            return nullcontext()
+        return super()._maybe_get_memory_pool_context(tag)
 
     def init_device(self):
         if self.use_v2_model_runner:

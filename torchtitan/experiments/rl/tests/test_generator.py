@@ -46,7 +46,10 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
     register_to_vllm,
 )
-from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGPUModelRunner
+from torchtitan.experiments.rl.models.vllm_worker import (
+    TorchTitanGPUModelRunner,
+    TorchTitanGPUWorker,
+)
 from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
@@ -426,6 +429,20 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
         TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5)
         == expected_num_tokens
     )
+
+
+def test_kv_cache_uses_regular_cuda_allocator(monkeypatch):
+    base_worker_cls = TorchTitanGPUWorker.__mro__[1]
+    monkeypatch.setattr(
+        base_worker_cls,
+        "_maybe_get_memory_pool_context",
+        lambda self, tag: tag,
+    )
+    worker = object.__new__(TorchTitanGPUWorker)
+
+    with worker._maybe_get_memory_pool_context("kv_cache") as value:
+        assert value is None
+    assert worker._maybe_get_memory_pool_context("weights") == "weights"
 
 
 def test_cudagraph_default_mode_is_full_decode_only():
