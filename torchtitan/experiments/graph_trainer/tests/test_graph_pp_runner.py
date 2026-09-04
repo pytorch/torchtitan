@@ -509,6 +509,25 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         )
         apply_graph_passes.assert_called_once()
 
+    def test_graph_pp_none_inductor_keeps_interpreted_boxed_graph(self) -> None:
+        gm = torch.fx.symbolic_trace(lambda x: x + 1)
+        compile_config = GraphTrainerCompileConfig(
+            enable=True,
+            enable_passes=True,
+            inductor_compilation="none",
+        )
+
+        compiled = _compile_graph_pp_module(
+            gm,
+            compile_config=compile_config,
+            graph_name="test_graph",
+        )
+        args = [torch.tensor(1)]
+
+        self.assertIs(compiled, gm)
+        self.assertEqual(_execute_graph_module(compiled, args), (torch.tensor(2),))
+        self.assertEqual(args, [])
+
     def test_graph_pp_graph_execution_uses_mutable_boxed_args(self) -> None:
         gm = torch.fx.symbolic_trace(lambda x, y: x + y)
         ensure_boxed_graph_module(gm)

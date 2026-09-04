@@ -666,6 +666,8 @@ def _compile_graph_pp_module(
     """Compile one extracted GraphPP callable with GraphTrainer Inductor passes."""
     if not compile_config.enable or not compile_config.enable_passes:
         return ensure_boxed_graph_module(gm)
+    if compile_config.inductor_compilation == "none":
+        return ensure_boxed_graph_module(gm)
 
     example_inputs = example_inputs_from_placeholders(gm)
     gm = apply_graph_passes(

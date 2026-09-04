@@ -97,6 +97,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
+    final_inductor_compile_passes,
     selective_activation_remat_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -120,6 +121,12 @@ from torchtitan.experiments.graph_trainer.tests.test_performance_passes import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
+
+
+class TestInductorPassSelection(TestCase):
+    def test_none_keeps_transformed_fx_graph_interpreted(self):
+        config = GraphTrainerCompileConfig(inductor_compilation="none")
+        self.assertEqual(final_inductor_compile_passes(config), [])
 
 
 class TestDefaultTransformerBlockBuckets(TestCase):
@@ -1365,6 +1372,30 @@ class TestApplySACPass(TestCase):
     def _get_call_function_nodes(self, gm):
         """Return all call_function nodes from the graph."""
         return [n for n in gm.graph.nodes if n.op == "call_function"]
+
+    def test_none_policy_disables_activation_rematerialization(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="none")
+        )
+        tag_with_memory_policy_pass(gm, config=config)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(fwd.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertFalse(
+            any(
+                node.name.endswith("_recomputed")
+                for node in gm.graph.nodes
+                if node.op == "call_function"
+            )
+        )
 
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""

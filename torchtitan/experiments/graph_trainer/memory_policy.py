@@ -65,6 +65,15 @@ def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def _make_no_ac_memory_policy() -> Callable:
+    """Create a policy that saves every forward activation."""
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        return CheckpointPolicy.MUST_SAVE
+
+    return policy_fn
+
+
 def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node]:
     save_nodes: set[torch.fx.Node] = set()
     for node in gm.graph.find_nodes(op="placeholder"):
@@ -342,6 +351,17 @@ def tag_sac_policy(
     return gm
 
 
+@register_memory_policy("none")
+def _no_ac_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Save every forward activation without rematerialization."""
+    tag_sac_policy(gm, policy_fn=_make_no_ac_memory_policy())
+    return gm
+
+
 @register_memory_policy("default")
 def _default_memory_policy_pass(
     gm: torch.fx.GraphModule,
@@ -413,6 +433,7 @@ def tag_with_memory_policy_pass(
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
+        none: save every forward activation without rematerialization.
         default: SAC with all compute-intensive ops saved.
         full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.

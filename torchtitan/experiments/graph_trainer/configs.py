@@ -94,9 +94,12 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "full", "eager", "sac_and_offload"] = "default"
+    memory_policy: Literal[
+        "none", "default", "full", "eager", "sac_and_offload"
+    ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
+        none: save forward activations without rematerialization.
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         full: full recompute, saving layer outputs and operations selected by
             full_recompute_save_ops. With no selectors, this mirrors eager's
@@ -120,9 +123,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Pass pipeline selection. Controls which graph pass pipeline, post-init
     hooks, and pre-train-step hooks are activated."""
 
-    inductor_compilation: Literal["regional", "full"] = "regional"
+    inductor_compilation: Literal["none", "regional", "full"] = "regional"
     """
     Inductor compilation strategy. Mutually exclusive options:
+        none: keep the transformed train-step FX graph interpreted. This still
+            permits AOT tracing, distributed graph passes, and CUDA graphs.
         regional: compile tagged regions (e.g. FlexAttention HOPs) with
             regional_inductor while leaving the rest interpreted.
         full: compile the entire graph with inductor into optimized

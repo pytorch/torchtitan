@@ -365,10 +365,13 @@ def final_inductor_compile_passes(
     only depends on compile config; model- and parallelism-aware rewrites stay
     in ``compile_time_passes``.
     """
-    from torchtitan.models.common.attention import FlexAttention
-
     passes: list[Callable] = []
     inductor_compilation = compile_config.inductor_compilation
+    if inductor_compilation == "none":
+        return passes
+
+    from torchtitan.models.common.attention import FlexAttention
+
     if inductor_compilation == "full":
         # Compile the entire graph into optimized Triton kernels. Must be
         # terminal; the FX graph is no longer authoritative after this pass.
@@ -403,7 +406,7 @@ def final_inductor_compile_passes(
             passes.append(insert_kernel_annotations_pass)
     else:
         raise ValueError(
-            "--compile.inductor_compilation must be 'regional' or 'full', "
+            "--compile.inductor_compilation must be 'none', 'regional', or 'full', "
             f"got {inductor_compilation!r}"
         )
     return passes
