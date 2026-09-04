@@ -82,7 +82,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
         "float8",
-        "fsdp+tp+cp+compile+float8",
+        "fsdp+tp+pp+compile+float8",
         "fsdp_symm_mem",
         "hsdp+cp+compile+float8",
         "qwen3_fsdp+deepep",
