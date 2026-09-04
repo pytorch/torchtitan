@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import resource
+import sys
 import time
 from collections import namedtuple
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 import torch
+from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
@@ -19,6 +22,14 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
+
+
+# NOTE: GiB (gibibyte) is 1024, vs GB is 1000
+_GIB_IN_BYTES = 1024 * 1024 * 1024
+
+
+def _to_gib(memory_in_bytes: float) -> float:
+    return memory_in_bytes / _GIB_IN_BYTES
 
 
 # named tuple for passing device memory stats for logging
@@ -50,10 +61,7 @@ class DeviceMemoryMonitor:
         device_module.empty_cache()
 
     def _to_gib(self, memory_in_bytes):
-        # NOTE: GiB (gibibyte) is 1024, vs GB is 1000
-        _gib_in_bytes = 1024 * 1024 * 1024
-        memory_in_gib = memory_in_bytes / _gib_in_bytes
-        return memory_in_gib
+        return _to_gib(memory_in_bytes)
 
     def _to_pct(self, memory):
         return 100 * memory / self.device_capacity
@@ -99,6 +107,100 @@ def build_device_memory_monitor():
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
     return device_memory_monitor
+
+
+# named tuple for passing host resource stats for logging
+HostStats = namedtuple(
+    "HostStats",
+    [
+        "rss_gib",
+        "max_rss_gib",
+        "cpu_utilization_pct",
+    ],
+)
+
+
+class HostMonitor:
+    """Tracks host resident memory and process CPU utilization.
+
+    Checkpoint staging copies device state into pinned host memory, and pinned
+    pages are resident by definition, so a save can move host RSS by tens of
+    GiB without moving any device metric. Everything here comes from the
+    standard library, so it adds no dependency.
+
+    ``max_rss_gib`` is a process-lifetime high-water mark that the kernel never
+    resets, unlike the device peaks which are reset after every log interval.
+    It is what catches a staging buffer that is allocated and freed entirely
+    between two log calls. It comes from different kernel accounting than
+    ``rss_gib``, so the two track each other without agreeing exactly, and the
+    peak can read marginally below the current value.
+    """
+
+    def __init__(self) -> None:
+        self.page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 0
+        # ru_maxrss is KiB on Linux and bytes on macOS.
+        self._max_rss_scale = 1 if sys.platform == "darwin" else 1024
+        self._cpu_seconds_last_log = self._cpu_seconds()
+        self._time_last_log = time.perf_counter()
+
+    def _cpu_seconds(self) -> float:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        return usage.ru_utime + usage.ru_stime
+
+    def _rss_bytes(self) -> float:
+        # /proc is Linux-only; report -1 elsewhere rather than failing a run.
+        if not self.page_size:
+            return -1
+        try:
+            with open("/proc/self/statm") as f:
+                resident_pages = int(f.read().split()[1])
+        except (OSError, IndexError, ValueError):
+            return -1
+        return resident_pages * self.page_size
+
+    def get_stats(self) -> HostStats:
+        now = time.perf_counter()
+        cpu_seconds = self._cpu_seconds()
+        time_delta = now - self._time_last_log
+        # Sums CPU time across every thread, so this exceeds 100% whenever the
+        # process has more than one runnable thread.
+        cpu_utilization_pct = (
+            100 * (cpu_seconds - self._cpu_seconds_last_log) / time_delta
+            if time_delta > 0
+            else 0.0
+        )
+        self._cpu_seconds_last_log = cpu_seconds
+        self._time_last_log = now
+
+        max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return HostStats(
+            _to_gib(self._rss_bytes()),
+            _to_gib(max_rss * self._max_rss_scale),
+            cpu_utilization_pct,
+        )
+
+
+def _reduce_host_stats(
+    local_stats: HostStats, world_mesh: DeviceMesh
+) -> tuple[HostStats, HostStats]:
+    """Return the world-wide average and maximum for each host statistic."""
+    world_size = world_mesh.size()
+    if world_size == 1:
+        return local_stats, local_stats
+
+    average = torch.tensor(
+        local_stats, dtype=torch.float32, device=world_mesh.device_type
+    )
+    maximum = average.clone()
+    world_group = world_mesh.get_group()
+    torch.distributed.all_reduce(average, group=world_group)
+    average /= world_size
+    torch.distributed.all_reduce(
+        maximum,
+        op=torch.distributed.ReduceOp.MAX,
+        group=world_group,
+    )
+    return HostStats(*average.tolist()), HostStats(*maximum.tolist())
 
 
 class BaseLogger:
@@ -307,6 +409,7 @@ class MetricsProcessor(Configurable):
     logger: BaseLogger
     parallel_dims: ParallelDims
     device_memory_monitor: DeviceMemoryMonitor
+    host_monitor: HostMonitor
     color: utils.NoColor | utils.Color
 
     gpu_peak_flops: float
@@ -346,6 +449,7 @@ class MetricsProcessor(Configurable):
         self.parallel_dims = parallel_dims
         self.config = config
         self.device_memory_monitor = build_device_memory_monitor()
+        self.host_monitor = HostMonitor()
         # used for colorful printing
         self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
 
@@ -502,6 +606,10 @@ class MetricsProcessor(Configurable):
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
+        local_host_stats = self.host_monitor.get_stats()
+        average_host_stats, maximum_host_stats = _reduce_host_stats(
+            local_host_stats, self.parallel_dims.world_mesh
+        )
 
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
@@ -518,6 +626,11 @@ class MetricsProcessor(Configurable):
             "memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
+            "memory/host_rss_avg(GiB)": average_host_stats.rss_gib,
+            "memory/host_rss_max(GiB)": maximum_host_stats.rss_gib,
+            "memory/host_peak_rss_max(GiB)": maximum_host_stats.max_rss_gib,
+            "cpu/process_utilization_avg(%)": average_host_stats.cpu_utilization_pct,
+            "cpu/process_utilization_max(%)": maximum_host_stats.cpu_utilization_pct,
         }
         if mfu is not None:
             metrics["mfu(%)"] = mfu
@@ -535,6 +648,8 @@ class MetricsProcessor(Configurable):
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+            f"{color.yellow}host max: {maximum_host_stats.rss_gib:5.2f}GiB "
+            f"cpu max: {maximum_host_stats.cpu_utilization_pct:.0f}%  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu_str}{color.reset}"
