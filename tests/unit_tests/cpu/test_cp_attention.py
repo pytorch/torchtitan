@@ -15,12 +15,13 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     AllGatherCPFlexAttention,
     ContextParallelKernel,
     UlyssesCPFlexAttention,
+    UlyssesCPVarlenAttention,
 )
 
 
@@ -235,6 +236,17 @@ class TestUlysses(unittest.TestCase):
         self.assertEqual(2, group.size())
         self.assertEqual(spmd.S(1), src)
         self.assertEqual(spmd.S(0), dst)
+
+
+class TestUlyssesVarlen(unittest.TestCase):
+    def test_is_still_a_varlen_kernel(self):
+        self.assertIsInstance(UlyssesCPVarlenAttention.Config(), VarlenAttention.Config)
+
+    def test_keeps_its_mask_global(self):
+        self.assertFalse(UlyssesCPVarlenAttention.Config().shard_attention_mask)
+
+    def test_uses_shared_ulysses_forward(self):
+        self.assertIs(UlyssesCPVarlenAttention.forward, UlyssesCPFlexAttention.forward)
 
 
 if __name__ == "__main__":
