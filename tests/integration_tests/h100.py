@@ -37,7 +37,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile],
             test_descr="FSDP+async TP+PP+torch.compile+Float8",
-            test_name="fsdp+tp+cp+compile+float8",
+            test_name="fsdp+tp+pp+compile+float8",
             ngpu=8,
         ),
         OverrideDefinitions(
