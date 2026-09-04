@@ -20,6 +20,8 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
+from torchtitan.tools.logging import logger
+
 from .model import KimiK3Model
 
 
@@ -33,14 +35,13 @@ def parallelize_kimi_k3(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ) -> nn.Module:
-    """Apply FSDP2 to the Kimi K3 decoder and vision encoder."""
+    """Apply FSDP2 and context parallelism to the Kimi K3 decoder and vision encoder."""
 
     unsupported_parallelisms = [
         name
         for name, enabled in (
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
-            ("context parallel", parallel_dims.cp_enabled),
         )
         if enabled
     ]
@@ -73,6 +74,8 @@ def parallelize_kimi_k3(
             )
 
     assert isinstance(model, KimiK3Model)
+    if parallel_dims.cp_enabled:
+        apply_cp_kimi_k3(model, parallel_dims)
     if parallelism.spmd_backend == "spmd_types" or parallel_dims.ep_enabled:
         # model_registry's moe_comm_backend picks the dispatcher: standard
         # (default), deepep and minimal_async_ep run on this model; hybridep
@@ -116,3 +119,19 @@ def parallelize_kimi_k3(
     )
 
     return model
+
+
+def apply_cp_kimi_k3(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Hand the vision splice the context-parallel group.
+
+    The attention layers need nothing here: under CP their inner kernels are
+    ``ContextParallelKernel`` instances (Ulysses for MLA, KCP for KDA) that
+    take the group from the active SPMD mesh. The vision splice runs in the
+    model body, outside any kernel, so it is wired explicitly.
+    """
+    assert isinstance(model, KimiK3Model)
+    model._cp_group = parallel_dims.get_mesh("cp").get_group()
+    logger.info("Applied context parallel to the Kimi K3 vision splice.")

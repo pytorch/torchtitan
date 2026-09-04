@@ -34,9 +34,7 @@ from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
-    vision_colwise_config,
     vision_invariant_linear_config,
-    vision_scaled_bias_rowwise_config,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
@@ -138,6 +136,7 @@ def _set_mla_sharding(
         getattr(attention_cfg, name).sharding_config = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)}
         )
+    # An identity boundary on the cp axis: a CP kernel issues its own exchange.
     set_gqa_inner_attention_local_map(attention_cfg.inner_attention)
 
 
