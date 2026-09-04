@@ -640,7 +640,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if parallel_dims.pp_enabled:
             self._pp_training_schedule_initialized = False
         if not config.training.disable_cuda_graphs:
-            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
+            # Two optimizer steps initialize lazy optimizer state and establish
+            # the steady-state allocator behavior before the graph pool is fixed.
+            self.fwd_bwd_fn = wrap_with_cuda_graph(
+                self.fwd_bwd_fn,
+                num_warmup_iterations=self._num_cuda_graph_warmup_iterations(),
+            )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -679,6 +684,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
+
+    def _num_cuda_graph_warmup_iterations(self) -> int:
+        num_warmup_steps = 2
+        num_iterations = num_warmup_steps * self.gradient_accumulation_steps
+        sdc_config = self.config.sdc_replayer
+        if sdc_config is None:
+            return num_iterations
+
+        num_checked_steps = (
+            num_warmup_steps
+            if sdc_config.num_steps == -1
+            else min(num_warmup_steps, sdc_config.num_steps)
+        )
+        return num_iterations + num_checked_steps * sdc_config.num_replays
 
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:

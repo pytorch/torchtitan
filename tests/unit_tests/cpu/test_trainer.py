@@ -289,10 +289,34 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     }
 
 
+@pytest.mark.parametrize(
+    ("gradient_accumulation_steps", "sdc_config", "expected"),
+    [
+        (1, None, 2),
+        (4, None, 8),
+        (1, SimpleNamespace(num_steps=1, num_replays=1), 3),
+        (4, SimpleNamespace(num_steps=2, num_replays=1), 10),
+        (4, SimpleNamespace(num_steps=-1, num_replays=1), 10),
+    ],
+)
+def test_cuda_graph_warmup_covers_two_optimizer_steps(
+    gradient_accumulation_steps: int,
+    sdc_config: SimpleNamespace | None,
+    expected: int,
+) -> None:
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
+        sdc_replayer=sdc_config
+    )
+    trainer.gradient_accumulation_steps = gradient_accumulation_steps
+
+    assert Trainer._num_cuda_graph_warmup_iterations(trainer) == expected
+
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs):
+        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
             self.fn = fn
+            assert num_warmup_iterations == 2
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -309,7 +333,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             PassthroughCUDAGraphWrapper,
         ),
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd)
+        runner = wrap_with_cuda_graph(fwd_bwd, num_warmup_iterations=2)
         for value in (1.0, 2.0, 3.0):
             graph_loss.fill_(value)
             loss = runner(
@@ -330,8 +354,9 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
 
 def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs):
+        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
             self.fn = fn
+            assert num_warmup_iterations == 2
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -346,7 +371,7 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             PassthroughCUDAGraphWrapper,
         ),
     ):
-        run = wrap_with_cuda_graph(fn)
+        run = wrap_with_cuda_graph(fn, num_warmup_iterations=2)
         output = run(
             [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
             scale=torch.tensor(3.0),
@@ -358,6 +383,11 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
     torch.testing.assert_close(batches[0]["x"], torch.tensor(1.0))
     torch.testing.assert_close(batches[1]["x"], torch.tensor(2.0))
     torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(3.0))
+
+
+def test_cuda_graph_wrapper_rejects_negative_warmup_iterations() -> None:
+    with pytest.raises(ValueError, match="must be non-negative"):
+        wrap_with_cuda_graph(MagicMock(), num_warmup_iterations=-1)
 
 
 def test_trainer_accumulates_reused_cuda_graph_losses():
