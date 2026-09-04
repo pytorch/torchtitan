@@ -9,7 +9,9 @@
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from attn_gym.linear.context_parallel import ContextParallelPlan
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
@@ -83,6 +85,8 @@ class KDAKernel(Module):
         dt_bias_HK: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
+        cp_plan: ContextParallelPlan | None = None,
+        cp_group: dist.ProcessGroup | None = None,
     ) -> torch.Tensor:
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
@@ -102,6 +106,23 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
+        if cp_plan is not None:
+            # KCP: the sequence stays sharded; attn-gym exchanges per-fragment
+            # affine state summaries so each rank scans from its true entry state.
+            from attn_gym.linear.kda import context_parallel_kda
+
+            assert cu_seqlens is not None
+            output_1THV, _ = context_parallel_kda(
+                l2norm(q_1THK),
+                l2norm(k_1THK),
+                v_1THV,
+                gate_1THK,
+                raw_beta_1TH.float().sigmoid(),
+                cu_seqlens=cu_seqlens,
+                plan=cp_plan,
+                group=cp_group,
+            )
+            return output_1THV
         output_1THV, _ = chunk_kda(
             l2norm(q_1THK),
             l2norm(k_1THK),
@@ -144,11 +165,36 @@ class InnerKDA(Module):
         conv_v_weight_C1W: torch.Tensor,
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
-        *,
         cu_seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
-        raw_gate_1THK = raw_gate_THK.unsqueeze(0)
-        raw_beta_1TH = raw_beta_TH.unsqueeze(0)
+        mixed_qkv_1TC, conv_weight_C1W = self._pack_inputs(
+            query_TC,
+            key_TC,
+            value_TC,
+            conv_q_weight_C1W,
+            conv_k_weight_C1W,
+            conv_v_weight_C1W,
+        )
+        return self._conv_and_scan(
+            mixed_qkv_1TC,
+            conv_weight_C1W,
+            raw_gate_THK,
+            raw_beta_TH,
+            A_log_H,
+            dt_bias_HK,
+            cu_seqlens=cu_seqlens,
+        )
+
+    @staticmethod
+    def _pack_inputs(
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fuse q/k/v and their conv weights so one convolution serves all three."""
         mixed_qkv_1TC = torch.cat(
             (query_TC, key_TC, value_TC),
             dim=-1,
@@ -157,11 +203,29 @@ class InnerKDA(Module):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
+        return mixed_qkv_1TC, conv_weight_C1W
+
+    def _conv_and_scan(
+        self,
+        mixed_qkv_1TC: torch.Tensor,
+        conv_weight_C1W: torch.Tensor,
+        raw_gate_THK: torch.Tensor,
+        raw_beta_TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        conv_state: torch.Tensor | None = None,
+        cp_plan: ContextParallelPlan | None = None,
+        cp_group: dist.ProcessGroup | None = None,
+    ) -> torch.Tensor:
+        """Causal conv then the delta-rule scan; the CP kernel passes its plan."""
         conv_output_1TC = causal_conv1d(
             mixed_qkv_1TC,
             conv_weight_C1W[:, 0],
             activation="silu",
             cu_seqlens=cu_seqlens,
+            initial_state=conv_state,
         )
         assert isinstance(conv_output_1TC, torch.Tensor)
 
@@ -174,11 +238,13 @@ class InnerKDA(Module):
             q_1THK,
             k_1THK,
             v_1THV,
-            raw_gate_1THK,
-            raw_beta_1TH,
+            raw_gate_THK.unsqueeze(0),
+            raw_beta_TH.unsqueeze(0),
             A_log_H,
             dt_bias_HK,
             cu_seqlens=cu_seqlens,
+            cp_plan=cp_plan,
+            cp_group=cp_group,
         )
         return output_1THV.squeeze(0)
 

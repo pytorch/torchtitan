@@ -555,3 +555,27 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config.checkpoint.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config
+
+
+def kimi_k3_debugmodel_cp2() -> Trainer.Config:
+    """Kimi K3 with context parallel over two ranks.
+
+    The packed Ulysses kernel on the MLA layers, KCP on the KDA layers.
+    """
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+    from torchtitan_recipes.kimi_k3 import kimi_k3_context_parallel
+
+    return kimi_k3_context_parallel(kimi_k3_debugmodel(), cp_degree=2)
+
+
+def kimi_k3_debugmodel_cp2_allgather() -> Trainer.Config:
+    """The cp2 flavor with the packed all-gather KV kernel on the MLA layers."""
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+    from torchtitan.models.kimi_k3.context_parallel import MLAAllGatherCPFlexAttention
+
+    from torchtitan_recipes.kimi_k3 import kimi_k3_context_parallel
+
+    return kimi_k3_context_parallel(
+        kimi_k3_debugmodel(), cp_degree=2, mla_kernel=MLAAllGatherCPFlexAttention
+    )

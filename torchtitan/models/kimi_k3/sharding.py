@@ -143,6 +143,7 @@ def _set_mla_sharding(
         getattr(attention_cfg, name).sharding_config = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)}
         )
+    # An identity boundary on the cp axis: a CP kernel issues its own exchange.
     set_gqa_inner_attention_local_map(attention_cfg.inner_attention)
 
 
