@@ -8,7 +8,7 @@ import dataclasses
 import json
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any, cast
@@ -18,6 +18,11 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.pipelining.schedules import (
+    _PipelineScheduleRuntime,
+    get_schedule_class,
+    PipelineScheduleMulti,
+)
 from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
@@ -44,11 +49,7 @@ from torchtitan.distributed.activation_checkpoint import (
     MemoryBudgetAC,
     SelectiveAC,
 )
-from torchtitan.distributed.cudagraph import (
-    cudagraph_teardown,
-    ForwardBackwardFn,
-    wrap_with_cuda_graph,
-)
+from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
@@ -174,11 +175,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if self.training.disable_cuda_graphs:
                 return
 
-            if self.parallelism.pipeline_parallel_degree > 1:
+            pp_enabled = self.parallelism.pipeline_parallel_degree > 1
+            if pp_enabled and self.validator.enable:
                 raise ValueError(
-                    "CUDA graphs do not support pipeline parallelism yet. "
-                    "Set --training.disable_cuda_graphs."
+                    "CUDA graphs with pipeline parallelism do not support "
+                    "validation because validation reinitializes the shared "
+                    "pipeline schedule. Disable validation or CUDA graphs."
                 )
+
+            if pp_enabled:
+                pp_schedule_class = (
+                    _PipelineScheduleRuntime
+                    if self.parallelism.pipeline_parallel_schedule_csv
+                    else get_schedule_class(
+                        self.parallelism.pipeline_parallel_schedule
+                    )
+                )
+                if issubclass(pp_schedule_class, PipelineScheduleMulti):
+                    raise ValueError(
+                        "CUDA graphs do not support looped pipeline schedules yet. "
+                        "Use a single-stage pipeline schedule or disable CUDA graphs."
+                    )
 
             if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
                 return
@@ -289,7 +306,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     device: torch.device
     gc_handler: utils.GarbageCollection
     train_context: dist_utils.SpmdContext
-    fwd_bwd_fn: ForwardBackwardFn
+    fwd_bwd_fn: Callable[..., torch.Tensor]
+    _pp_loss_sentinel: torch.Tensor
     gradient_accumulation_steps: int
     num_pp_microbatches: int
     pp_has_first_stage: bool
@@ -634,7 +652,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and config.debug.spmd_typechecking
             ),
         )
-        self.fwd_bwd_fn = self._forward_backward_body
+        if parallel_dims.pp_enabled:
+            self.fwd_bwd_fn = self._pp_forward_backward_body
+            self._pp_loss_sentinel = torch.full((1,), -1.0, device=self.device)
+        else:
+            self.fwd_bwd_fn = self._forward_backward_body
+
         if not config.training.disable_cuda_graphs:
             # Two optimizer steps initialize lazy optimizer state and establish
             # the steady-state allocator behavior before the graph pool is fixed.
@@ -825,11 +848,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if target_mbs is not None:
                 target_mbs.append(labels)
 
+        return self.fwd_bwd_fn(
+            arg_mbs if self.pp_has_first_stage else None,
+            kwarg_mbs,
+            target_mbs,
+            global_valid_tokens,
+        )
+
+    def _pp_forward_backward_body(
+        self,
+        arg_mbs: list[tuple[torch.Tensor, ...]] | None,
+        kwarg_mbs: list[dict[str, Any]],
+        target_mbs: list[torch.Tensor] | None,
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
         loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
             losses = [] if self.pp_has_last_stage else None
             self.pp_schedule.step(
-                arg_mbs=arg_mbs if self.pp_has_first_stage else None,
+                arg_mbs=arg_mbs,
                 kwarg_mbs=kwarg_mbs,
                 target_mbs=target_mbs,
                 losses=losses,
@@ -837,7 +874,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 return_outputs=False,
             )
 
-        # TODO: PP+FSDP unexpectedly puts the loss back to the CPU.
         if self.pp_has_last_stage:
             assert losses is not None
             # Backward has consumed these losses. Report through detached views,
@@ -845,7 +881,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
             return torch.sum(torch.stack(detached_losses)).to(self.device)
-        return torch.tensor([-1.0], device=self.device)
+        return self._pp_loss_sentinel
 
     def train_step(self, data_iterator: Iterator[TrainerBatch]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)

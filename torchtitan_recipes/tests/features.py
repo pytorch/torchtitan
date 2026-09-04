@@ -240,6 +240,12 @@ def llama3_debugmodel_pp2_1f1b() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_pp2_1f1b_cudagraph() -> Trainer.Config:
+    config = llama3_debugmodel_pp2_1f1b()
+    config.training.disable_cuda_graphs = False
+    return config
+
+
 def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)

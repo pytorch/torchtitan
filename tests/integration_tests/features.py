@@ -111,6 +111,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_pp2_1f1b_cudagraph],
+            test_descr="PP 1D 1F1B CUDA graph test",
+            test_name="pp_1f1b_cudagraph",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[
                 recipes.llama3_debugmodel_fsdp2_pp2_1f1b,
                 recipes.llama3_debugmodel_fsdp2_pp2_1f1b_layers_per_stage,
