@@ -20,7 +20,6 @@ With ``cache=False`` no rank keeps anything and every hop carries the whole
 stack: the plain transport, kept for comparison.
 """
 
-import torch
 import torch.distributed as dist
 
 
@@ -39,9 +38,8 @@ class BlockLayoutTables:
     ) -> None:
         if n_layers <= 0 or layers_per_block <= 0:
             raise ValueError("n_layers and layers_per_block must be positive")
-        # A partial final block is legal: K3 uses attn_res_block_size=12 over
-        # 93 layers, so the last block holds 9 layers and never reaches a
-        # commit. num_blocks is therefore the CEIL.
+        # A partial final block is legal (K3: 93 layers over blocks of 12), so
+        # num_blocks is the ceiling.
         expected_blocks = -(-n_layers // layers_per_block)
         if num_blocks != expected_blocks:
             raise ValueError(
@@ -123,9 +121,8 @@ class BlockLayoutTables:
                 f"{len(self._producer_stage_of_block)}."
             )
 
-        # One micro-batch's forward in stage order, which is the data order:
-        # stage S+1 needs S's hidden state. Every rank remembers what it has
-        # seen when the cache is on.
+        # One micro-batch's forward in stage order; with the cache on, every
+        # rank remembers what it has seen.
         held: dict[int, set[int]] = {r: set() for r in set(self.stage_to_rank.values())}
         accumulated: set[int] = set()
         for stage_id in range(self.num_stages):
@@ -234,8 +231,3 @@ def gather_layer_to_stage(stages, group) -> dict[int, int]:
         assert part is not None
         merged.update(part)
     return merged
-
-
-def unstack_blocks(blocks_tensor: torch.Tensor) -> list[torch.Tensor]:
-    """The columns of a ``[T, N, D]`` carrier, as a list of blocks."""
-    return [blocks_tensor[:, i] for i in range(blocks_tensor.shape[1])]

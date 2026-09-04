@@ -281,12 +281,18 @@ class AttnResPipelineStage(PipelineStage):
         grad_hidden, grad_delta = grads
         mine = set(layout.commits_at(self.stage_index))
         out_blocks = layout.delta_to_send(self.stage_index)
-        if grad_delta is not None and any(b in mine for b in out_blocks):
-            grad_delta = grad_delta.clone()
-            for j, b in enumerate(out_blocks):
-                if b not in mine:
-                    continue
-                self._collect_into(grad_delta[:, j], bwd_chunk_id, b)
+        committed = [j for j, b in enumerate(out_blocks) if b in mine]
+        if not committed:
+            return (grad_hidden, grad_delta)
+        if grad_delta is None:
+            raise RuntimeError(
+                f"stage {self.stage_index} micro-batch {bwd_chunk_id}: no gradient "
+                f"arrived for the payload carrying its own blocks "
+                f"{[out_blocks[j] for j in committed]}"
+            )
+        grad_delta = grad_delta.clone()
+        for j in committed:
+            self._collect_into(grad_delta[:, j], bwd_chunk_id, out_blocks[j])
         return (grad_hidden, grad_delta)
 
     def _collect_into(self, grad_col_TD: torch.Tensor, mb: int, b: int) -> None:
@@ -334,9 +340,8 @@ class AttnResPipelineStage(PipelineStage):
         # the rank's later stages deposited for them.
         for j, b in enumerate(delta_blocks):
             self._collect_into(grad_delta[:, j], bwd_chunk_id, b)
-        # A delta that carried nothing, or otherwise needed no gradient, has no
-        # receive buffer on the previous stage: its gradient is None, as for
-        # any stage input that does not require one.
+        # A delta that needs no gradient has no receive buffer on the previous
+        # stage: its gradient is None, like any such stage input.
         inputs_meta = self._stage_meta.inputs
         delta_needs_grad = inputs_meta is not None and inputs_meta[1].requires_grad
         self.bwd_cache[bwd_chunk_id] = (
