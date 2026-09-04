@@ -287,6 +287,57 @@ def test_init_distributed_configures_pipeline_process_groups(
     from_config.assert_called_once_with(parallelism, 8)
 
 
+@pytest.mark.parametrize(
+    ("disable_cuda_graphs", "gradient_accumulation_steps", "expected"),
+    [
+        (True, 1, True),
+        (True, 2, True),
+        (False, 1, True),
+        (False, 2, False),
+    ],
+)
+def test_trainer_selects_gradient_clearing_mode(
+    disable_cuda_graphs: bool,
+    gradient_accumulation_steps: int,
+    expected: bool,
+) -> None:
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
+        training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs)
+    )
+    trainer.gradient_accumulation_steps = gradient_accumulation_steps
+
+    assert Trainer._should_clear_gradients_to_none(trainer) is expected
+
+
+@pytest.mark.parametrize("gradient_accumulation_steps", [1, 2])
+def test_cuda_graph_gradient_restore_requires_one_backward_call(
+    gradient_accumulation_steps: int,
+) -> None:
+    model = torch.nn.Linear(2, 2)
+    trainer = Trainer.__new__(Trainer)
+    trainer.config = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
+        training=SimpleNamespace(disable_cuda_graphs=False), sdc_replayer=None
+    )
+    trainer.parallel_dims = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
+        pp_enabled=False
+    )
+    trainer.model_parts = [model]
+    trainer.gradient_accumulation_steps = gradient_accumulation_steps
+
+    with patch(
+        "torchtitan.trainer.wrap_with_cuda_graph",
+        side_effect=lambda fn, **kwargs: fn,
+    ) as wrap:
+        Trainer._init_forward_backward_functions(trainer)
+
+    parameters = wrap.call_args.kwargs["restore_gradients_for"]
+    if gradient_accumulation_steps == 1:
+        assert tuple(parameters) == tuple(model.parameters())
+    else:
+        assert parameters is None
+
+
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
         def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
@@ -403,6 +454,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             metrics_processor=metrics_processor,
             step=1,
             ntokens_seen=3,
+            _should_clear_gradients_to_none=lambda: False,
         ),
     )
     data_iterator = iter([_batch() for _ in range(3)])
@@ -413,6 +465,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     ):
         Trainer.train_step(trainer, data_iterator)
 
+    trainer.optimizers.zero_grad.assert_called_once_with(set_to_none=False)
     metrics_processor.log.assert_called_once_with(
         1,
         6.0,
@@ -423,6 +476,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
+    trainer.optimizers.zero_grad.reset_mock()
     with patch(
         "torchtitan.trainer.dist_utils.clip_grad_norm_",
         return_value=torch.tensor(4.0),
@@ -432,6 +486,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             data_iterator=iter([_batch() for _ in range(3)]),
         )
 
+    trainer.optimizers.zero_grad.assert_called_once_with(set_to_none=False)
     metrics_processor.log.assert_not_called()
 
 
@@ -465,6 +520,7 @@ def test_train_step_replay_checks_only_first_forward_backward():
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,
             ntokens_seen=0,
+            _should_clear_gradients_to_none=lambda: True,
         ),
     )
 
@@ -516,6 +572,7 @@ def test_replay_failure_happens_before_optimizer():
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,
             ntokens_seen=0,
+            _should_clear_gradients_to_none=lambda: True,
         ),
     )
 

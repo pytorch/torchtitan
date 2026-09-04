@@ -168,3 +168,63 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
     torch.testing.assert_close(captured_batches[1]["x"], torch.tensor(7.0))
     torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(5.0))
     assert cast(MagicMock, graph.replay).call_count == 2
+
+
+def test_cudagraph_wrapper_restores_capture_allocated_gradients() -> None:
+    parameter = torch.nn.Parameter(torch.ones(2))
+    captured_gradient = torch.full_like(parameter, 3.0)
+    graph = cast(torch.cuda.CUDAGraph, MagicMock())
+
+    def forward_backward(value):
+        parameter.grad = captured_gradient
+        return value
+
+    with (
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+        patch.object(_manager, "_graph_pool", object()),
+        patch.object(_manager, "_stream", MagicMock()),
+        patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.cuda.graph", return_value=nullcontext()),
+        patch(
+            "torchtitan.distributed.cudagraph.get_kernel_annotations",
+            return_value={},
+        ),
+    ):
+        wrapper = CUDAGraphWrapper(
+            forward_backward,
+            (torch.tensor(1.0),),
+            num_warmup_iterations=0,
+            restore_gradients_for=(parameter,),
+        )
+
+        wrapper(torch.tensor(2.0))
+        assert parameter.grad is captured_gradient
+
+        parameter.grad = None
+        wrapper(torch.tensor(3.0))
+        assert parameter.grad is captured_gradient
+
+        wrapper.teardown()
+        assert parameter.grad is None
+
+    assert cast(MagicMock, graph.replay).call_count == 2
+
+
+def test_cudagraph_wrapper_requires_cleared_restored_gradients() -> None:
+    parameter = torch.nn.Parameter(torch.ones(2))
+    parameter.grad = torch.ones_like(parameter)
+
+    with (
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+    ):
+        wrapper = CUDAGraphWrapper(
+            lambda value: value,
+            (torch.tensor(1.0),),
+            num_warmup_iterations=0,
+            restore_gradients_for=(parameter,),
+        )
+
+    with pytest.raises(RuntimeError, match=r"zero_grad\(set_to_none=True\)"):
+        wrapper(torch.tensor(2.0))
