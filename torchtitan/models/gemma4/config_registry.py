@@ -246,6 +246,9 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
+gemma4_26b = gemma4_26b_a4b
+
+
 def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("31b", seq_len=seq_len)
     return Trainer.Config(
