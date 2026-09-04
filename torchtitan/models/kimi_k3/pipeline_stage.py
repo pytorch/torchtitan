@@ -155,6 +155,8 @@ def split_stack_grad(
     return grad_delta, deposits
 
 
+# NOTE: pending decision, to be further reviewed on design and moved (this
+# class or the entire related stack) into torch.distributed.pipelining.
 class AttnResPipelineStage(PipelineStage):
     """``PipelineStage`` whose hops carry the block residual's delta."""
 
