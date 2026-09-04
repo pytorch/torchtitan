@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1320" height="1530" viewBox="0 0 1320 1530">
+<defs>
+  <marker id="gray" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="8.5" refY="5" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#5f6368"/></marker>
+  <marker id="blue" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="8.5" refY="5" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#1a73e8"/></marker>
+  <marker id="purple" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="8.5" refY="5" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#9334e6"/></marker>
+  <marker id="green" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="8.5" refY="5" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#188038"/></marker>
+  <marker id="orange" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="8.5" refY="5" orient="auto-start-reverse" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#f9ab00"/></marker>
+</defs>
+<rect width="1320" height="1530" fill="#ffffff"/>
+<text x="660" y="42" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="30" font-weight="700" text-anchor="middle">
+<tspan x="660" dy="0">TorchTitan + Verifiers: Current Integration</tspan>
+</text>
+<rect x="50" y="85" width="1200" height="260" rx="18" fill="#ffffff" stroke="#1a73e8" stroke-width="3"/>
+<text x="650" y="120" fill="#174ea6" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" text-anchor="middle">
+<tspan x="650" dy="0">TorchTitan Controller / VerifiersRollouter process</tspan>
+</text>
+<rect x="90" y="150" width="170" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
+<text x="175" y="185" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
+<tspan x="175" dy="0">VerifiersRollouter</tspan>
+</text>
+<rect x="300" y="150" width="130" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
+<text x="365" y="185" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
+<tspan x="365" dy="0">EnvClient</tspan>
+</text>
+<rect x="520" y="150" width="190" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
+<text x="615" y="176" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
+<tspan x="615" dy="0">GenerationServer</tspan>
+<tspan x="615" dy="18">HTTP bridge</tspan>
+</text>
+<rect x="820" y="150" width="160" height="60" rx="12" fill="#e8f0fe" stroke="#5f6368" stroke-width="2"/>
+<text x="900" y="176" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="500" text-anchor="middle">
+<tspan x="900" dy="0">GenerateFn closure</tspan>
+<tspan x="900" dy="18">RPC call only</tspan>
+</text>
+<rect x="50" y="430" width="570" height="240" rx="18" fill="#ffffff" stroke="#d93025" stroke-width="3"/>
+<text x="335" y="465" fill="#b31412" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="middle">
+<tspan x="335" dy="0">TorchTitan Generator actor / GPU processes</tspan>
+</text>
+<rect x="160" y="510" width="350" height="72" rx="12" fill="#fce8e6" stroke="#d93025" stroke-width="2"/>
+<text x="335" y="542" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="500" text-anchor="middle">
+<tspan x="335" dy="0">VLLMGenerator actors</tspan>
+<tspan x="335" dy="18">Model inference</tspan>
+</text>
+<rect x="680" y="430" width="570" height="240" rx="18" fill="#ffffff" stroke="#9334e6" stroke-width="3"/>
+<text x="965" y="465" fill="#7627bb" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="middle">
+<tspan x="965" dy="0">TorchTitan Generator router process</tspan>
+</text>
+<rect x="800" y="510" width="330" height="72" rx="12" fill="#f3e8fd" stroke="#9334e6" stroke-width="2"/>
+<text x="965" y="551" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
+<tspan x="965" dy="0">InterGeneratorRouter.generate</tspan>
+</text>
+<rect x="50" y="730" width="1200" height="400" rx="18" fill="#ffffff" stroke="#188038" stroke-width="3"/>
+<text x="650" y="765" fill="#137333" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" text-anchor="middle">
+<tspan x="650" dy="0">Verifiers EnvServer Process(es)</tspan>
+</text>
+<rect x="90" y="810" width="140" height="65" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
+<text x="160" y="847.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
+<tspan x="160" dy="0">EnvServer</tspan>
+</text>
+<rect x="270" y="805" width="210" height="75" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
+<text x="375" y="824.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="375" dy="0">Current: Agent + harness</tspan>
+<tspan x="375" dy="17">RolloutRun</tspan>
+<tspan x="375" dy="17">outside sandbox</tspan>
+</text>
+<rect x="520" y="810" width="170" height="65" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
+<text x="605" y="847.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="500" text-anchor="middle">
+<tspan x="605" dy="0">InterceptionServer</tspan>
+</text>
+<rect x="790" y="810" width="240" height="65" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
+<text x="910" y="838.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="500" text-anchor="middle">
+<tspan x="910" dy="0">Completed Episode</tspan>
+<tspan x="910" dy="18">rollout trace + reward</tspan>
+</text>
+<rect x="520" y="1010" width="210" height="65" rx="12" fill="#e6f4ea" stroke="#5f6368" stroke-width="2"/>
+<text x="625" y="1047.5" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="15" font-weight="500" text-anchor="middle">
+<tspan x="625" dy="0">TrainClient + renderer</tspan>
+</text>
+<rect x="400" y="1190" width="520" height="290" rx="18" fill="#ffffff" stroke="#f9ab00" stroke-width="3"/>
+<text x="660" y="1225" fill="#b06000" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="middle">
+<tspan x="660" dy="0">Verifiers-configured runtime / sandbox</tspan>
+</text>
+<rect x="440" y="1260" width="440" height="70" rx="12" fill="#fef7e0" stroke="#8d6e3f" stroke-width="2"/>
+<text x="660" y="1287" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="500" text-anchor="middle">
+<tspan x="660" dy="0">Current DAPO-Math: local Subprocess runtime</tspan>
+<tspan x="660" dy="18">Null harness; no tools or isolation</tspan>
+</text>
+<rect x="440" y="1370" width="440" height="80" rx="12" fill="#fff8e1" stroke="#f9ab00" stroke-width="2" stroke-dasharray="8 7"/>
+<text x="660" y="1401" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="660" dy="0">Potential: Agent + harness + model client in sandbox</tspan>
+<tspan x="660" dy="17">Requires GenerationServer network access from the sandbox</tspan>
+</text>
+<path d="M260 180 H300" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
+<rect x="235" y="218" width="260" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="365" y="235" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="365" dy="0">run episode / return Episode[Trace]</tspan>
+</text>
+<path d="M710 180 H820" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
+<rect x="705" y="216" width="130" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="770" y="233" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="770" dy="0">in-process call</tspan>
+</text>
+<path d="M900 210 V510" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-start="url(#gray)" marker-end="url(#gray)"/>
+<rect x="915" y="275" width="200" height="44" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="1015" y="292" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="1015" dy="0">Monarch actor RPC</tspan>
+<tspan x="1015" dy="17">request / Completion</tspan>
+</text>
+<path d="M800 546 H510" fill="none" stroke="#1a73e8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-start="url(#blue)" marker-end="url(#blue)"/>
+<rect x="385" y="605" width="210" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="490" y="622" fill="#174ea6" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="490" dy="0">request / Completion</tspan>
+</text>
+<path d="M365 210 V370 H650 V700 H160 V810" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-start="url(#gray)" marker-end="url(#gray)"/>
+<rect x="615" y="675" width="70" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="650" y="692" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="middle">
+<tspan x="650" dy="0">ZMQ</tspan>
+</text>
+<path d="M230 842 H270" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
+<rect x="220" y="782" width="80" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="260" y="799" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="260" dy="0">start</tspan>
+</text>
+<path d="M480 842 H520" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
+<rect x="455" y="782" width="110" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="510" y="799" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="510" dy="0">model turn</tspan>
+</text>
+<path d="M690 842 H790" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
+<rect x="690" y="782" width="100" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="740" y="799" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="740" dy="0">finish episode</tspan>
+</text>
+<path d="M605 875 V950 H625 V1010" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#gray)"/>
+<rect x="630" y="925" width="170" height="27" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="715" y="942" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="715" dy="0">render messages</tspan>
+</text>
+<path d="M730 1042 H1280 V65 H615 V150" fill="none" stroke="#5f6368" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-start="url(#gray)" marker-end="url(#gray)"/>
+<rect x="1015" y="680" width="245" height="44" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="1137.5" y="697" fill="#3c4043" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="1137.5" dy="0">HTTP token generation</tspan>
+<tspan x="1137.5" dy="17">request / response</tspan>
+</text>
+<path d="M330 880 V1155 H330 V1295 H440" fill="none" stroke="#f9ab00" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#orange)"/>
+<rect x="180" y="1138" width="210" height="44" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="285" y="1155" fill="#b06000" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="285" dy="0">runtime lifecycle /</tspan>
+<tspan x="285" dy="17">environment actions</tspan>
+</text>
+<path d="M430 880 V1160 H940 V1410 H880" fill="none" stroke="#f9ab00" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="8 7" marker-end="url(#orange)"/>
+<rect x="680" y="1142" width="250" height="44" rx="5" fill="#ffffff" stroke="none" stroke-width="0"/>
+<text x="805" y="1159" fill="#b06000" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="500" text-anchor="middle">
+<tspan x="805" dy="0">potential placement:</tspan>
+<tspan x="805" dy="17">move agent into sandbox</tspan>
+</text>
+</svg>

@@ -18,6 +18,8 @@ experiments:
 The shared components bridge Verifiers episode execution to TitanRL without
 changing TitanRL's controller, generator, or training interfaces:
 
+![TorchTitan and Verifiers integration architecture](./assets/integration_architecture.svg)
+
 1. `components/dataset.py` loads one Verifiers taskset and converts its task
    data into a serializable TitanRL sample stream.
    Configure it with the taskset's concrete `TasksetConfig` subclass, such as
