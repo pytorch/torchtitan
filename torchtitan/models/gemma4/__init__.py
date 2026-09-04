@@ -267,32 +267,42 @@ def _31b(
 
 
 gemma4_configs = {
-    "debugmodel": _debugmodel,
-    "12b": _12b,
-    "12B": _12b,
-    "31b": _31b,
-    "31B": _31b,
+    "debugmodel": (_debugmodel, 256000),
+    "12b": (_12b, 256000),
+    "12B": (_12b, 256000),
+    "31b": (_31b, 256000),
+    "31B": (_31b, 256000),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     """Register Gemma-4 model with TorchTitan.
-    
+
     Args:
         flavor: Model size ("12b", "debugmodel")
+        seq_len: Optional sequence length override
         attn_backend: Attention backend ("flex", "sdpa")
         tp_gemm_backend: Tensor parallel GEMM backend
         converters: Optional config converters for custom experimentation
-    
+
     Returns:
         ModelSpec for training with TorchTitan
     """
-    config = gemma4_configs[flavor](
+    get_config, max_context_len = gemma4_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
         attn_backend=attn_backend, tp_gemm_backend=tp_gemm_backend
     )
     if converters is not None:
@@ -303,6 +313,7 @@ def model_registry(
         name="gemma4",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_gemma4,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,
