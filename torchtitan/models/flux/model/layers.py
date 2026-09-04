@@ -13,6 +13,7 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
@@ -31,6 +32,27 @@ def local_split_text_image(
     text_seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return combined[:, :text_seq_len], combined[:, text_seq_len:]
+
+
+def _gather_cp_keys_values(k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
+    cp_group = spmd_mesh_group("cp")
+    if cp_group is None:
+        return k, v
+    k = spmd.all_gather(
+        k,
+        cp_group,
+        src=spmd.S(1),
+        dst=spmd.R,
+        backward_options={"op_dtype": k.dtype},
+    )
+    v = spmd.all_gather(
+        v,
+        cp_group,
+        src=spmd.S(1),
+        dst=spmd.R,
+        backward_options={"op_dtype": v.dtype},
+    )
+    return k, v
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
@@ -167,6 +189,7 @@ class SelfAttention(Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
+        k, v = _gather_cp_keys_values(k, v)
         x = self.inner_attention(q, k, v, is_causal=False)
         x = rearrange(x, "B L H D -> B L (H D)")
         x = self.proj(x)
@@ -303,6 +326,7 @@ class DoubleStreamBlock(Module):
         v = _local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
+        k, v = _gather_cp_keys_values(k, v)
         attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
@@ -380,6 +404,7 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
+        k, v = _gather_cp_keys_values(k, v)
         attn = self.inner_attention(q, k, v, is_causal=False)
         attn = rearrange(attn, "B L H D -> B L (H D)")
 

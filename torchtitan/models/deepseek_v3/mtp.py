@@ -22,6 +22,7 @@ from torchtitan.components.loss import (
 )
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -146,6 +147,14 @@ class MTPTransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None and sp_enabled():
+            mtp_input_valid_mask = spmd.shard(
+                mtp_input_valid_mask,
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0),
+            )
         mtp_input_valid_mask = mtp_input_valid_mask.unsqueeze(-1).to(
             dtype=prev_embed.dtype
         )
@@ -234,6 +243,15 @@ class MTPDecoder(Decoder):
         # Keep this aligned with Decoder.forward(), but preserve the pre-norm
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(tokens)
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            h = spmd.redistribute(
+                h,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": h.dtype},
+            )
         for layer in self.layers.values():
             h = layer(h, attention_masks, positions)
 
@@ -255,6 +273,14 @@ class MTPDecoder(Decoder):
                 return_valid_mask=True,
             )
             mtp_input_embed = self.tok_embeddings(mtp_input_tokens)
+            if tp_group is not None:
+                mtp_input_embed = spmd.redistribute(
+                    mtp_input_embed,
+                    tp_group,
+                    src=spmd.P,
+                    dst=spmd.S(0) if sp_enabled() else spmd.I,
+                    backward_options={"op_dtype": mtp_input_embed.dtype},
+                )
             prev_depth_hidden = layer(
                 mtp_input_embed,
                 prev_depth_hidden,
@@ -270,9 +296,20 @@ class MTPDecoder(Decoder):
                 "skip_lm_head is not supported with MTP decoder until "
                 "ChunkedLoss supports MTP outputs."
             )
-        return [
-            self.lm_head(item) if self.lm_head is not None else item for item in outputs
-        ]
+        if self.lm_head is None:
+            return outputs
+        if tp_group is not None:
+            outputs = [
+                spmd.redistribute(
+                    item,
+                    tp_group,
+                    src=spmd.S(0) if sp_enabled() else spmd.I,
+                    dst=spmd.R,
+                    backward_options={"op_dtype": item.dtype},
+                )
+                for item in outputs
+            ]
+        return [self.lm_head(item) for item in outputs]
 
 
 def apply_fsdp_to_mtp_decoder(

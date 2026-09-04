@@ -8,9 +8,13 @@ import dataclasses
 import math
 from dataclasses import dataclass
 
+import spmd_types as spmd
+
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
+
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -102,11 +106,37 @@ class Attention(BaseAttention):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=spmd.S(0) if sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
         num_tokens = x.shape[0]
 
         q, k, v = self.qkv_linear(x)
 
         q, k = self.rope(q, k, positions)
+
+        cp_group = spmd_mesh_group("cp")
+        if cp_group is not None:
+            k = spmd.all_gather(
+                k,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": k.dtype},
+            )
+            v = spmd.all_gather(
+                v,
+                cp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": v.dtype},
+            )
 
         output = self.inner_attention(
             q,
@@ -120,7 +150,16 @@ class Attention(BaseAttention):
 
         # Reshape and project output
         output = output.reshape(num_tokens, -1).contiguous()
-        return self.wo(output)
+        output = self.wo(output)
+        if tp_group is not None:
+            output = spmd.redistribute(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if sp_enabled() else spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        return output
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""

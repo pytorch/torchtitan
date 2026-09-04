@@ -22,12 +22,9 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
-    current_spmd_mesh,
     set_current_spmd_mesh,
     spmd_axes,
     spmd_distribute_tensor,
-    spmd_redistribute_per_axis,
-    spmd_validate_redistributions,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -217,8 +214,7 @@ class Module(nn.Module, Configurable):
         For each module with a ``sharding_config``:
 
         1. Shard states (parameters and buffers).
-        2. Wrap the forward with:
-            ``reshard inputs -> [optional local SPMD] forward -> reshard outputs``.
+        2. Wrap forward with boundary type checks and an optional local region.
 
         ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
 
@@ -245,17 +241,56 @@ class Module(nn.Module, Configurable):
         if self._sharding_config is None:
             return
 
-        spmd_validate_redistributions(self._sharding_config)
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
-        fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
+        fn = self._maybe_wrap_with_local_region(self.forward)
 
-        def forward_with_redistribution(*args, **kwargs):
-            args, kwargs = self._redistribute_inputs(parallel_dims, args, kwargs)
+        def forward_with_typechecking(*args, **kwargs):
+            self._check_input_shardings(args, kwargs)
             outputs = fn(*args, **kwargs)
-            return self._redistribute_outputs(parallel_dims, outputs)
+            self._check_output_shardings(outputs)
+            return outputs
 
-        self.forward = forward_with_redistribution
+        self.forward = forward_with_typechecking
+
+    def _check_input_shardings(self, args: tuple, kwargs: dict) -> None:
+        """Check configured forward-input contracts when typechecking."""
+        if not spmd.is_type_checking():
+            return
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        in_shardings = sharding_config.in_shardings or {}
+        pos_arg_names = [
+            name for name in self._cache_pos_arg_names() if name not in kwargs
+        ]
+        named_args = dict(zip(pos_arg_names, args, strict=False))
+        named_args.update(kwargs)
+        for name, layout in in_shardings.items():
+            value = named_args.get(name)
+            if isinstance(value, torch.Tensor):
+                spmd.assert_type(value, layout)
+
+    def _check_output_shardings(self, outputs: Any) -> None:
+        """Check configured forward-output contracts when typechecking."""
+        if not spmd.is_type_checking():
+            return
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        out_shardings = sharding_config.out_shardings
+        if out_shardings is None:
+            return
+
+        def assert_leaf(output, layout):
+            if layout is not None:
+                spmd.assert_type(output, layout)
+            return output
+
+        tree_map(
+            assert_leaf,
+            outputs,
+            out_shardings,
+            is_leaf=lambda x: isinstance(x, SpmdType),
+        )
 
     def _spmd_distribute_state(
         self,
@@ -383,44 +418,39 @@ class Module(nn.Module, Configurable):
     def _maybe_wrap_with_local_region(
         self,
         fn: Callable,
-        parallel_dims: ParallelDims,
     ) -> Callable:
         """Wrap ``fn`` with a local-tensor region if configured.
 
-        Input layouts come from ``in_dst_shardings`` (the same dict
-        ``_redistribute_inputs`` uses to pre-align inputs); output layouts
-        come from ``out_src_shardings``.
+        Input and output layouts come from the module boundary contracts.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
         if not sharding_config.local_spmd:
             return fn
 
-        in_dst = (
-            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
-        )
+        in_shardings = sharding_config.in_shardings or {}
         pos_args = self._cache_pos_arg_names()
-        out_src = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
-        if out_src is None:
+        out_shardings = sharding_config.out_shardings
+        if out_shardings is None:
             raise AssertionError(
                 f"{type(self).__name__}: local_spmd is set but "
-                "out_src_shardings is None."
+                "out_shardings is None."
             )
-        missing_in = [name for name in pos_args if name not in in_dst]
+        missing_in = [name for name in pos_args if name not in in_shardings]
         if missing_in:
             raise AssertionError(
-                f"{type(self).__name__}: local_spmd is set but in_dst_shardings "
+                f"{type(self).__name__}: local_spmd is set but in_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[SpmdType] = [in_dst[name] for name in pos_args]
+        in_named: list[SpmdType] = [in_shardings[name] for name in pos_args]
 
-        return self._spmd_apply_local_region(fn, in_named, out_src)
+        return self._spmd_apply_local_region(fn, in_named, out_shardings)
 
     def _spmd_apply_local_region(
         self,
         fn: Callable,
         in_named: list[SpmdType],
-        out_src: SpmdType | tuple[SpmdType | None, ...],
+        out_shardings: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
         """Apply spmd_types local_map for a local-tensor compute region."""
         in_types = tuple(
@@ -428,114 +458,13 @@ class Module(nn.Module, Configurable):
         )
         out_types = tree_map(
             lambda layout: (layout.local_type, layout.partition_spec),
-            out_src,
+            out_shardings,
             is_leaf=lambda x: isinstance(x, SpmdType),
         )
         return spmd.no_typecheck(
             in_types=in_types,
             out_types=out_types,
         )(fn)
-
-    def _redistribute_inputs(
-        self,
-        parallel_dims: ParallelDims,
-        args: tuple,
-        kwargs: dict,
-    ) -> tuple[tuple, dict]:
-        """Redistribute inputs to desired placements.
-
-        Per input present in ``in_src_shardings`` / ``in_dst_shardings``,
-        assert the source SPMD layout and redistribute to the destination.
-        """
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-
-        if (
-            sharding_config.in_dst_shardings is None
-            and sharding_config.in_src_shardings is None
-        ):
-            return args, kwargs
-
-        pos_arg_names = [
-            name for name in self._cache_pos_arg_names() if name not in kwargs
-        ]
-        new_kwargs = dict(zip(pos_arg_names, args, strict=False))
-        new_kwargs.update(kwargs)
-
-        in_dst_shardings = sharding_config.in_dst_shardings or {}
-        in_src_shardings = sharding_config.in_src_shardings or {}
-
-        for name, value in new_kwargs.items():
-            if not isinstance(value, torch.Tensor):
-                continue
-            src_spmd_layout = in_src_shardings.get(name)
-            dst_spmd_layout = in_dst_shardings.get(name)
-
-            if src_spmd_layout is None:
-                if dst_spmd_layout is not None:
-                    raise ValueError(
-                        f"{type(self).__name__}.{name}: SPMD input "
-                        "redistribution requires explicit in_src_shardings."
-                    )
-                continue
-
-            # SPMD source layouts are part of the config contract: assert before
-            # redistributing so typechecking catches layout mismatches.
-            if spmd.is_type_checking():
-                spmd.assert_type(value, src_spmd_layout)
-
-            if dst_spmd_layout is not None:
-                value = spmd_redistribute_per_axis(
-                    value,
-                    current_spmd_mesh(),
-                    src_spmd_layout,
-                    dst_spmd_layout,
-                )
-            new_kwargs[name] = value
-
-        new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
-        return new_args, new_kwargs
-
-    def _redistribute_outputs(self, parallel_dims: ParallelDims, outputs: Any) -> Any:
-        """Redistribute output to desired placement.
-
-        TODO: Currently only handles a single tensor output. Extend to
-        support nested outputs (tuples, dicts) when models with
-        multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
-        sharding. ``out_dst_shardings`` would also need to become a nested
-        structure.
-        """
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-
-        out_src = sharding_config.out_src_shardings
-        out_dst = sharding_config.out_dst_shardings
-        if not isinstance(outputs, torch.Tensor):
-            return outputs
-
-        if out_src is None:
-            if out_dst is not None:
-                raise ValueError(
-                    f"{type(self).__name__}: SPMD output redistribution "
-                    "requires explicit out_src_shardings."
-                )
-            return outputs
-        if isinstance(out_src, tuple):
-            raise ValueError(
-                f"{type(self).__name__}: SPMD output redistribution only "
-                "supports a single tensor output."
-            )
-        if spmd.is_type_checking():
-            spmd.assert_type(outputs, out_src)
-
-        if out_dst is None:
-            return outputs
-        return spmd_redistribute_per_axis(
-            outputs,
-            current_spmd_mesh(),
-            out_src,
-            out_dst,
-        )
 
 
 class ModuleList(nn.ModuleList, Module):

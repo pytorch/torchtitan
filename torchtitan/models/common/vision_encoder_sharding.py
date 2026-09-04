@@ -71,14 +71,10 @@ def invariant_norm_config(*, include_cp_axis: bool = False) -> ShardingConfig:
             ),
             "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
         },
-        in_src_shardings={
+        in_shardings={
             "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
-        },
-        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
+        out_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 
@@ -91,20 +87,15 @@ def vision_invariant_linear_config(*, include_cp_axis: bool = False) -> Sharding
             ),
             "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
         },
-        in_src_shardings={
+        in_shardings={
             "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
-        },
-        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
+        out_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 
 def vision_colwise_config(
     *,
-    input_tp: spmd.PerMeshAxisSpmdType = spmd.I,
     include_cp_axis: bool = False,
 ) -> ShardingConfig:
     """Colwise vision linear with a TP-replicated local matmul input."""
@@ -117,17 +108,12 @@ def vision_colwise_config(
                 tp=spmd.S(0), include_cp_axis=include_cp_axis
             ),
         },
-        in_src_shardings={
-            "input": _vision_activation_placement(
-                tp=input_tp, include_cp_axis=include_cp_axis
-            ),
-        },
-        in_dst_shardings={
+        in_shardings={
             "input": _vision_activation_placement(
                 tp=spmd.R, include_cp_axis=include_cp_axis
             ),
         },
-        out_src_shardings=_vision_activation_placement(
+        out_shardings=_vision_activation_placement(
             tp=spmd.S(-1), include_cp_axis=include_cp_axis
         ),
     )
@@ -147,16 +133,12 @@ def vision_scaled_bias_rowwise_config(
             ),
             "bias": _vision_state_placement(tp=spmd.R, include_cp_axis=include_cp_axis),
         },
-        in_src_shardings={
+        in_shardings={
             "input": input_layout,
         },
-        in_dst_shardings={
-            "input": input_layout,
-        },
-        out_src_shardings=_vision_activation_placement(
+        out_shardings=_vision_activation_placement(
             tp=spmd.P, include_cp_axis=include_cp_axis
         ),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
         local_spmd=True,
     )
 
@@ -172,31 +154,23 @@ def set_vision_transformer_block_sharding_config(
     block.norm2.sharding_config = invariant_norm_config(include_cp_axis=include_cp_axis)
 
     block.attn.sharding_config = ShardingConfig(
-        in_src_shardings={
+        in_shardings={
             "x": _vision_activation_placement(include_cp_axis=include_cp_axis),
             "rope_cache": _vision_activation_placement(
-                dp=rope_cache_dp, include_cp_axis=include_cp_axis
-            ),
-        },
-        in_dst_shardings={
-            "x": _vision_activation_placement(
-                tp=spmd.R, include_cp_axis=include_cp_axis
-            ),
-            "rope_cache": _vision_activation_placement(
                 dp=rope_cache_dp,
-                tp=spmd.R,
                 include_cp_axis=include_cp_axis,
             ),
         },
+        out_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
     block.attn.wq.sharding_config = vision_colwise_config(
-        input_tp=spmd.R, include_cp_axis=include_cp_axis
+        include_cp_axis=include_cp_axis
     )
     block.attn.wk.sharding_config = vision_colwise_config(
-        input_tp=spmd.R, include_cp_axis=include_cp_axis
+        include_cp_axis=include_cp_axis
     )
     block.attn.wv.sharding_config = vision_colwise_config(
-        input_tp=spmd.R, include_cp_axis=include_cp_axis
+        include_cp_axis=include_cp_axis
     )
     block.attn.proj.sharding_config = vision_scaled_bias_rowwise_config(
         include_cp_axis=include_cp_axis
@@ -205,19 +179,13 @@ def set_vision_transformer_block_sharding_config(
         attention_layout = _vision_activation_placement(
             tp=spmd.S(1), include_cp_axis=True
         )
-        attention_grad_layout = SpmdType({DP: spmd.V, CP: spmd.P, TP: spmd.S(1)})
         block.attn.inner_attention.sharding_config = ShardingConfig(
-            in_src_shardings={
+            in_shardings={
                 "q_THK": attention_layout,
                 "k_THK": attention_layout,
                 "v_THV": attention_layout,
             },
-            in_dst_shardings={
-                "q_THK": attention_layout,
-                "k_THK": attention_layout,
-                "v_THV": attention_layout,
-            },
-            out_src_shardings=attention_layout,
+            out_shardings=attention_layout,
             local_spmd=True,
         )
     else:

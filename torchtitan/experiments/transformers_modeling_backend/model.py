@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, fields, MISSING
 from fractions import Fraction
 from typing import Any
 
+import spmd_types as spmd
+
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -24,6 +26,7 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -1300,6 +1303,15 @@ class HFTransformerModel(BaseModel):
 
         output = self.model.model(*model_args, **kwargs)
         hidden_states = output.last_hidden_state.squeeze(0)
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None and sp_enabled():
+            hidden_states = spmd.all_gather(
+                hidden_states,
+                tp_group,
+                src=spmd.S(0),
+                dst=spmd.R,
+                backward_options={"op_dtype": hidden_states.dtype},
+            )
 
         if self._skip_lm_head:
             return hidden_states

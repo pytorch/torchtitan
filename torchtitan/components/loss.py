@@ -333,7 +333,7 @@ def compute_logprobs(
         # dst=I, not R: the vocab all-gather's grad is the replicated upstream
         # grad sliced back to this rank's vocab shard (I's backward), not an
         # all-reduce (R's backward). The latter over-counts by tp_degree and
-        logits = spmd.redistribute(
+        logits = spmd.all_gather(
             logits,
             "tp",
             src=spmd.S(-1),

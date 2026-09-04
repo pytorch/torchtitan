@@ -65,8 +65,8 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
         weight = dense_param_placement(tp=spmd.R)
         sharding = ShardingConfig(
             state_shardings={"weight": weight},
-            in_src_shardings={"input": activation},
-            out_src_shardings=activation,
+            in_shardings={"input": activation},
+            out_shardings=activation,
         )
         stock_config = OffsetRMSNorm.Config(
             dim=32,
@@ -77,18 +77,7 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
 
         self.assertIsNotNone(replacement.sharding_config)
         assert replacement.sharding_config is not None
-        self.assertIsNotNone(replacement.sharding_config.local_map)
-        assert replacement.sharding_config.local_map is not None
-        self.assertEqual(
-            replacement.sharding_config.local_map.in_grad_placements,
-            (activation,),
-        )
-        self.assertIsNotNone(replacement.weight_grad_sharding)
-        assert replacement.weight_grad_sharding is not None
-        self.assertEqual(
-            replacement.weight_grad_sharding.local_type["tp"],
-            spmd.P,
-        )
+        self.assertTrue(replacement.sharding_config.local_spmd)
 
     def test_cpu_fallback_matches_stock_module(self):
         config = OffsetRMSNorm.Config(dim=32, eps=1e-6)

@@ -325,6 +325,7 @@ class VLLMModelWrapper(Module):
         self.spmd_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,
+            enable_sp=training_parallelism.enable_sequence_parallel,
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
@@ -495,7 +496,7 @@ class VLLMModelWrapper(Module):
             if self.parallel_dims.tp_enabled:
                 mesh = current_spmd_mesh()
                 assert mesh is not None
-                logits = spmd.redistribute(
+                logits = spmd.all_gather(
                     logits,
                     mesh.get_group("tp"),
                     src=spmd.S(-1),

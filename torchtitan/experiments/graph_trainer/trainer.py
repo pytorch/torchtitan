@@ -226,6 +226,7 @@ class GraphTrainer(Trainer):
                 trace_context = dist_utils.get_spmd_context(
                     parallel_dims=self.parallel_dims,
                     spmd_typechecking=False,
+                    enable_sp=self.config.parallelism.enable_sequence_parallel,
                 )
                 with trace_context(), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(

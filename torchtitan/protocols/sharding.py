@@ -35,48 +35,27 @@ class ShardingConfig:
 
     All placements use ``SpmdType`` keyed by mesh axis names. At
     ``parallelize()`` time, parameters and buffers are locally sharded and
-    annotated, while activation layouts drive explicit redistributions.
+    annotated, while activation layouts are checked at module boundaries.
 
-    Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
+    Completely dtype-agnostic at this moment -- quantization (Float8/MXFP8) is
     orthogonal.
-
-    Redistribution is expressed as a (source, destination) pair: src declares
-    what the tensor's placement is entering the boundary, dst declares the
-    desired placement after redistribution. Both sides are explicit because
-    local SPMD types are erased at runtime.
 
     Attributes:
         state_shardings: Parameter/buffer SPMD layouts. Outer dict keys are
             state names.
             e.g. ``{"weight": {TP: Shard(0)}}`` for colwise.
-        in_src_shardings: Source placements of inputs, keyed by ``forward()``
-            arg name. Used to assert the input's local SPMD type and declare
-            the source side of the input redistribution pair.
+        in_shardings: Expected input placements, keyed by ``forward()``
+            argument name.
             e.g. ``{"x": {TP: Shard(1)}}``.
-        in_dst_shardings: Desired input placements after redistribution,
-            keyed by ``forward()`` arg name.
-            e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
-            ``None`` means no input redistribution.
-        out_src_shardings: Source SPMD type of the forward's output. When
-            ``local_map`` is set, this declares the local region's output
-            type. Accepts a single
-            ``SpmdType`` (single-output case) or a tuple (multi-
-            output case). ``None``
-            means "infer from the output" or that there is no local region.
-            e.g. ``{TP: Partial()}`` for the MoE wrapper.
-        out_dst_shardings: Desired output placement after redistribution.
-            e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
-            ``None`` means no output redistribution.
+        out_shardings: Expected output placements. Accepts a single
+            ``SpmdType`` or a pytree matching the output structure.
         local_spmd: If true, wraps forward with ``spmd.no_typecheck()`` using
-            input types from ``in_dst_shardings`` and output types from
-            ``out_src_shardings``.
+            ``in_shardings`` and ``out_shardings`` as its boundary types.
     """
 
     state_shardings: dict[str, SpmdType] = field(default_factory=dict)
-    in_src_shardings: dict[str, SpmdType] | None = None
-    in_dst_shardings: dict[str, SpmdType] | None = None
-    out_src_shardings: SpmdType | tuple[SpmdType, ...] | None = None
-    out_dst_shardings: SpmdType | None = None
+    in_shardings: dict[str, SpmdType] | None = None
+    out_shardings: SpmdType | tuple[SpmdType | None, ...] | None = None
     local_spmd: bool = False
 
     def to_dict(self) -> dict:

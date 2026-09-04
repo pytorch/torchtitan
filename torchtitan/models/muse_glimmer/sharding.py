@@ -116,10 +116,6 @@ def _set_multimodal_sharding(
         )
     if config.perception_emb_norm is not None:
         vision_norm = invariant_norm_config(include_cp_axis=True)
-        if enable_sp:
-            vision_norm.out_dst_shardings = SpmdType(
-                {DP: spmd.V, CP: spmd.R, TP: spmd.R}
-            )
         config.perception_emb_norm.sharding_config = vision_norm
 
 
@@ -144,8 +140,8 @@ def _set_muse_glimmer_layer_sharding(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
         },
-        in_src_shardings={"input": sp_activation},
-        out_src_shardings=sp_activation,
+        in_shardings={"input": sp_activation},
+        out_shardings=sp_activation,
     )
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.ffn_norm.sharding_config = norm
@@ -160,10 +156,8 @@ def _set_muse_glimmer_layer_sharding(
     if attention.qk_norm is not None:
         head_shard = attention_activation_placement()
         attention.qk_norm.sharding_config = ShardingConfig(
-            in_src_shardings={"input": head_shard},
-            in_dst_shardings={"input": head_shard},
-            out_src_shardings=head_shard,
-            out_dst_shardings=head_shard,
+            in_shardings={"input": head_shard},
+            out_shardings=head_shard,
         )
 
     # Output gate: colwise so its Shard(-1) output aligns with the head-sharded
@@ -227,15 +221,13 @@ def set_muse_glimmer_vision_sharding_config(
     vision_invariant = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
     pos_param_invariant = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
     encoder_cfg.pos_embed.sharding_config = ShardingConfig(
-        in_src_shardings={"pos_param": pos_param_invariant},
-        in_dst_shardings={"pos_param": pos_param_invariant},
-        out_src_shardings=vision_invariant,
+        in_shardings={"pos_param": pos_param_invariant},
+        out_shardings=vision_invariant,
         local_spmd=True,
     )
     encoder_cfg.token_permute.sharding_config = ShardingConfig(
-        in_src_shardings={"x": vision_invariant, "index": vision_invariant},
-        in_dst_shardings={"x": vision_invariant, "index": vision_invariant},
-        out_src_shardings=vision_invariant,
+        in_shardings={"x": vision_invariant, "index": vision_invariant},
+        out_shardings=vision_invariant,
         local_spmd=True,
     )
 

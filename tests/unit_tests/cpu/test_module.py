@@ -349,7 +349,7 @@ class TestConfigBuildPropagatesParamInit(unittest.TestCase):
         self.assertTrue(torch.all(m.linear.weight == 1))
 
 
-class TestModuleRedistribution(unittest.TestCase):
+class TestModuleStateSharding(unittest.TestCase):
     class WeightModule(Module):
         def __init__(self, shape: tuple[int, ...], layout: SpmdType):
             super().__init__()
