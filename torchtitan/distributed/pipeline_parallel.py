@@ -326,6 +326,7 @@ def _build_pipeline_schedule(
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
+            defer_pp_recv=parallelism.pipeline_parallel_defer_recv,  # pyrefly: ignore [unexpected-keyword]
         )
     else:
         schedule = schedule_class(
