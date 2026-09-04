@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import tempfile
 import unittest
 from unittest import mock
+
+import torch
 
 from torchtitan.tools.profiler import Profiler
 
@@ -154,8 +157,6 @@ class TestProfilerEnabledPaths(unittest.TestCase):
         self.patcher_rank.stop()
 
     def test_build_torch_profiler_returns_active_handle(self):
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmpdir:
             profiler = Profiler(
                 Profiler.Config(
@@ -170,9 +171,45 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             with profiler:
                 self.assertIsNotNone(profiler.torch_profiler)
 
-    def test_memory_snapshot_frequency_is_independent(self):
-        import tempfile
+    def test_trace_export_includes_cuda_graph_annotations(self):
+        for annotations, expected_graph_lanes in (
+            ({42: [{"module_fqn": "layers.0"}]}, "all"),
+            ({}, "none"),
+        ):
+            with (
+                self.subTest(expected_graph_lanes=expected_graph_lanes),
+                tempfile.TemporaryDirectory() as tmpdir,
+                mock.patch(
+                    "torchtitan.tools.profiler.get_cudagraph_annotations",
+                    return_value=annotations,
+                ),
+                mock.patch.object(
+                    torch.profiler.profile,
+                    "export_chrome_trace",
+                    autospec=True,
+                ) as export_trace,
+            ):
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_profiling=True,
+                        profile_freq=4,
+                        profiler_warmup=1,
+                        profiler_active=1,
+                    ),
+                    global_step=0,
+                    base_folder=tmpdir,
+                )
+                with profiler:
+                    for _ in range(4):
+                        profiler.step()
 
+            export_trace.assert_called_once()
+            args, kwargs = export_trace.call_args
+            self.assertTrue(args[1].endswith("rank0_trace.json.gz"))
+            self.assertIs(kwargs["cuda_graph_annotations"], annotations)
+            self.assertEqual(kwargs["graph_lanes"], expected_graph_lanes)
+
+    def test_memory_snapshot_frequency_is_independent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
                 "torchtitan.tools.profiler.MemoryProfiler"
@@ -194,8 +231,6 @@ class TestProfilerEnabledPaths(unittest.TestCase):
         self.assertEqual(memory_profiler_cls.call_args.args[1], 3)
 
     def test_memory_snapshot_frequency_defaults_to_profile_frequency(self):
-        import tempfile
-
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
                 "torchtitan.tools.profiler.MemoryProfiler"
@@ -215,8 +250,6 @@ class TestProfilerEnabledPaths(unittest.TestCase):
         self.assertEqual(memory_profiler_cls.call_args.args[1], 6)
 
     def test_memory_snapshot_frequency_must_be_positive(self):
-        import tempfile
-
         profiler = Profiler(
             Profiler.Config(
                 enable_memory_snapshot=True,
