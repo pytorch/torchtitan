@@ -118,7 +118,7 @@ def make_mla_attention_config(
         wq_b = None
         # q_norm is unused when q_lora_rank == 0 (never built), but the field is
         # required on Attention.Config so we supply a placeholder.
-        q_norm = RMSNorm.Config(normalized_shape=1, param_init=norm_init)
+        q_norm = RMSNorm.Config(normalized_shape=1, eps=1e-6, param_init=norm_init)
     else:
         wq = None
         wq_a = Linear.Config(
@@ -131,7 +131,9 @@ def make_mla_attention_config(
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
         )
-        q_norm = RMSNorm.Config(normalized_shape=q_lora_rank, param_init=norm_init)
+        q_norm = RMSNorm.Config(
+            normalized_shape=q_lora_rank, eps=1e-6, param_init=norm_init
+        )
 
     return Attention.Config(
         dim=dim,
@@ -151,7 +153,9 @@ def make_mla_attention_config(
             out_features=kv_lora_rank + qk_rope_head_dim,
             param_init=linear_init,
         ),
-        kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank, param_init=norm_init),
+        kv_norm=RMSNorm.Config(
+            normalized_shape=kv_lora_rank, eps=1e-6, param_init=norm_init
+        ),
         wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
@@ -271,9 +275,11 @@ def build_mla_moe_layers(
             DeepSeekV3TransformerBlock.Config(
                 attention=attn_cfg,
                 attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, param_init=norm_init
+                    normalized_shape=dim, eps=1e-6, param_init=norm_init
                 ),
-                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=norm_init),
+                ffn_norm=RMSNorm.Config(
+                    normalized_shape=dim, eps=1e-6, param_init=norm_init
+                ),
                 feed_forward=ffn_cfg,
                 moe=moe_cfg,
             )
@@ -307,14 +313,14 @@ def _build_mtp_layers(
                 moe=copy.deepcopy(inner_cfg.moe),
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
                 ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
-                enorm=RMSNorm.Config(normalized_shape=dim),
-                hnorm=RMSNorm.Config(normalized_shape=dim),
+                enorm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
+                hnorm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
                 eh_proj=Linear.Config(
                     in_features=dim * 2,
                     out_features=dim,
                     bias=False,
                 ),
-                mtp_norm=RMSNorm.Config(normalized_shape=dim),
+                mtp_norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
             )
         )
     return mtp_layers
@@ -376,7 +382,7 @@ def _debugmodel(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -448,7 +454,7 @@ def _16b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -524,7 +530,7 @@ def _236b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -601,7 +607,7 @@ def _671b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
