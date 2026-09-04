@@ -18,6 +18,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
     resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from .model import KimiK3Model
@@ -41,7 +42,6 @@ def parallelize_kimi_k3(
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
             ("context parallel", parallel_dims.cp_enabled),
-            ("expert parallel", parallel_dims.ep_enabled),
         )
         if enabled
     ]
@@ -53,15 +53,38 @@ def parallelize_kimi_k3(
     if compile_config.enable and "model" in compile_config.components:
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
-    if parallelism.spmd_backend == "spmd_types":
-        annotate_replicated_parameters(model, parallel_dims)
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh = parallel_dims.get_activated_mesh(["dp_replicate", "fsdp"])
-        assert dp_mesh is not None
-        dp_mesh_dims = None
-
     assert isinstance(model, KimiK3Model)
+    if parallelism.spmd_backend == "spmd_types":
+        # Kimi K3 only declares layouts for its MoE modules. Seed replicated
+        # layouts for the remaining decoder and vision parameters before the
+        # MoE declarations replace the expert parameters with sparse shards.
+        annotate_replicated_parameters(model, parallel_dims)
+
+    if parallelism.spmd_backend == "spmd_types" or parallel_dims.ep_enabled:
+        # model_registry's moe_comm_backend picks the dispatcher: standard
+        # (default), deepep and minimal_async_ep run on this model; hybridep
+        # needs GB200-class hardware.
+        model.parallelize(parallel_dims)
+
+    if parallelism.spmd_backend == "spmd_types":
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+    else:
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+        dp_mesh_dims = None
+        edp_mesh = None
+        edp_mesh_dims = None
+        if parallel_dims.ep_enabled:
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
         ac_policy.apply(model)
@@ -91,8 +114,10 @@ def parallelize_kimi_k3(
         pp_enabled=False,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        ep_degree=1,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 

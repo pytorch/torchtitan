@@ -10,7 +10,8 @@ Compiler passes for graph_trainer training.
 This module provides pass orchestration: building the pass list, applying passes
 in order, and the pass registries.  Individual passes live in dedicated modules:
 
-- ``memory_policy.py`` — SAC tagging and memory policy dispatch
+- ``memory_policy.py`` - SAC and min-cut policy tagging and dispatch
+- ``decompositions.py`` — standalone graph decomposition
 - ``inductor_passes.py`` — regional and full Inductor compilation
 - ``cudagraph.py`` — cudagraph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
@@ -18,6 +19,8 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
   cleanup bundled as ``canonicalize_graph_pass`` (detach, identity view/slice,
   back-to-back transpose, view→reshape normalization)
 - ``performance_passes.py`` — opt-in numerics-changing optimizations
+- ``subgraph_regions.py`` — region annotation, invoke_subgraph outlining, and
+  shared region prologue extraction
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
 - ``custom_codegen.py`` — custom code generation for profiling/debugging

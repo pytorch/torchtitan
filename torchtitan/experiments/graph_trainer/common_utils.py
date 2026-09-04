@@ -35,6 +35,22 @@ LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
 AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
 
 
+def _get_graph_modules(
+    gm: torch.fx.GraphModule,
+    *,
+    recurse: bool,
+    apply_to_root: bool,
+) -> list[torch.fx.GraphModule]:
+    modules = [gm] if apply_to_root else []
+    if recurse:
+        modules.extend(
+            module
+            for name, module in gm.named_modules()
+            if name and isinstance(module, torch.fx.GraphModule)
+        )
+    return modules
+
+
 class GraphTrainerScaledDotProductAttention(ScaledDotProductAttention):
     """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
 
