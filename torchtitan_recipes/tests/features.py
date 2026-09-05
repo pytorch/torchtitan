@@ -520,28 +520,9 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     return config
 
 
-def kimi_k3_debugmodel_pp2() -> Trainer.Config:
-    """Kimi K3 text decoder split over two pipeline stages.
-
-    The block attention residual is defined over the whole stack, so it travels
-    between stages as a second stage payload alongside the hidden states.
-    """
-    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
-
-    config = kimi_k3_debugmodel()
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    return config
-
-
 def kimi_k3_debugmodel_pp8_vp4() -> Trainer.Config:
-    """Eight ranks, four virtual stages each, on the interleaved schedule.
-
-    One layer per stage over 32 stages: the 30 layers plus the embedding and
-    the head, each counted as a layer, so the first and last stages hold no
-    transformer layer and the block residual crosses every boundary the
-    schedule has.
-    """
+    # 35 units (33 layers, the embedding and the head) over 32 stages, so the
+    # split is uneven and the last stage holds the head alone.
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
