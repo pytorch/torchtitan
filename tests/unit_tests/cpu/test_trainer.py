@@ -181,6 +181,9 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             metrics_processor=metrics_processor,
             step=1,
             ntokens_seen=3,
+            _anticipatory_prefetched_data=None,
+            _anticipatory_routing_cache=None,
+            _anticipatory_routing_enabled=False,
         ),
     )
     data_iterator = iter([_batch() for _ in range(3)])
@@ -243,6 +246,9 @@ def test_train_step_replay_checks_only_first_forward_backward():
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,
             ntokens_seen=0,
+            _anticipatory_prefetched_data=None,
+            _anticipatory_routing_cache=None,
+            _anticipatory_routing_enabled=False,
         ),
     )
 
@@ -294,6 +300,9 @@ def test_replay_failure_happens_before_optimizer():
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,
             ntokens_seen=0,
+            _anticipatory_prefetched_data=None,
+            _anticipatory_routing_cache=None,
+            _anticipatory_routing_enabled=False,
         ),
     )
 
@@ -308,7 +317,14 @@ def test_replay_failure_happens_before_optimizer():
 
 def test_loading_checkpoint_rearms_replay_schedule():
     replayer = SimpleNamespace(reset_schedule=MagicMock())
-    trainer = cast(Trainer, SimpleNamespace(sdc_replayer=replayer))
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            sdc_replayer=replayer,
+            _anticipatory_routing_cache=None,
+            _anticipatory_prefetched_data=None,
+        ),
+    )
 
     Trainer.load_state_dict(trainer, {"step": 12, "ntokens_seen": 34})
 
@@ -316,7 +332,14 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert trainer.ntokens_seen == 34
     replayer.reset_schedule.assert_called_once_with()
 
-    disabled = cast(Trainer, SimpleNamespace(sdc_replayer=None))
+    disabled = cast(
+        Trainer,
+        SimpleNamespace(
+            sdc_replayer=None,
+            _anticipatory_routing_cache=None,
+            _anticipatory_prefetched_data=None,
+        ),
+    )
     Trainer.load_state_dict(disabled, {"step": 1, "ntokens_seen": 2})
     assert disabled.step == 1
 
