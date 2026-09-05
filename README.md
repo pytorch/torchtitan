@@ -70,7 +70,7 @@ We look forward to your contributions!
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](torchtitan/components/quantization/float8.md))
-7. [MXFP8 training for dense and MoE models](torchtitan/components/quantization/mxfp8.md) on Blackwell GPUs.
+7. [MXFP8 training for dense and MoE models](torchtitan/components/quantization/mxfp8/README.md) on Blackwell GPUs.
 8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 9. DDP and HSDP
 10. [TorchFT](https://github.com/pytorch/torchft) integration
@@ -117,6 +117,16 @@ pip install -r requirements.txt
 ```
 
 > **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
+
+`torchao` is not installed by the command above. It is only needed for the
+low-precision training recipes (float8, MXFP8, NVFP4), and it is deliberately
+left out so that it does not get resolved independently of the `torch` you
+already have. Install a nightly matching your accelerator build when you need
+one, replacing `cu130` to match:
+
+```bash
+USE_CPP=0 python -m pip install --pre --upgrade torchao --index-url https://download.pytorch.org/whl/nightly/cu130
+```
 
 ### Nightly builds
 

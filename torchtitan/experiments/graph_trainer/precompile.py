@@ -11,7 +11,7 @@ import hashlib
 import os
 import pickle
 from dataclasses import dataclass
-from typing import NewType, TYPE_CHECKING
+from typing import Any, NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
@@ -22,6 +22,8 @@ import torch.utils._pytree as pytree
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    _unwrap_subclasses,
+    extract_train_state,
     SubclassLayout,
     TracedResult,
 )
@@ -29,6 +31,22 @@ from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
+
+
+def flatten_runtime_inputs(
+    module: torch.nn.Module,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    precompile_meshes: list[DeviceMesh] | None = None,
+) -> tuple[Any, ...]:
+    """Flatten live model state, meshes, and call inputs for a precompiled graph."""
+    model_state, optim_state = extract_train_state(module)
+    state_flat, _ = pytree.tree_flatten({"model": model_state, "optim": optim_state})
+    user_inputs_flat, _ = pytree.tree_flatten((args, kwargs))
+    flat_inputs, _ = _unwrap_subclasses(
+        [*state_flat, *(precompile_meshes or []), *user_inputs_flat]
+    )
+    return tuple(flat_inputs)
 
 
 def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
@@ -235,7 +253,7 @@ class PrecompiledFxTraceArtifact:
             config_fingerprint=config_fingerprint or ConfigFingerprint(""),
         )
 
-    def to_traced_result(self) -> TracedResult:
+    def to_traced_result(self, example_inputs: tuple[Any, ...]) -> TracedResult:
         """Deserialize back into a TracedResult.
 
         Registers CooR custom ops, then deserializes the GraphModule
@@ -261,7 +279,7 @@ class PrecompiledFxTraceArtifact:
 
         return TracedResult(
             gm=gm,
-            example_inputs=(),
+            example_inputs=example_inputs,
             num_flat_inputs=self.num_flat_inputs,
             input_subclass_layouts=self.input_subclass_layouts,
             user_inputs_spec=dummy_spec,
@@ -303,6 +321,7 @@ def precompile_fx_trace_save(
 def precompile_fx_trace_load(
     storage: StorageAdapter,
     expected_fingerprint: ConfigFingerprint,
+    example_inputs: tuple[Any, ...],
 ) -> TracedResult:
     """Load a precompiled aot_fx_trace artifact.
 
@@ -327,4 +346,4 @@ def precompile_fx_trace_load(
         f"fingerprint={artifact.config_fingerprint}"
     )
 
-    return artifact.to_traced_result()
+    return artifact.to_traced_result(example_inputs)

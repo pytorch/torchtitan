@@ -33,9 +33,9 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     resolve_fsdp_mesh,
 )
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
-from torchtitan.models.flux.sharding import annotate_dp_cp_params_as_r
 from torchtitan.tools.logging import logger
 
 
@@ -54,7 +54,7 @@ def parallelize_flux(
 
     if parallelism.spmd_backend == "spmd_types":
         model.parallelize(parallel_dims)
-        annotate_dp_cp_params_as_r(model, parallel_dims)
+        annotate_replicated_parameters(model, parallel_dims)
 
     if compile_config.enable and "model" in compile_config.components:
         apply_compile(model, compile_config)
@@ -218,7 +218,7 @@ def parallelize_encoders(
     hf_module = t5_model.hf_module
     assert isinstance(hf_module, nn.Module)
     if parallel_dims.spmd_backend == "spmd_types":
-        annotate_dp_cp_params_as_r(hf_module, parallel_dims)
+        annotate_replicated_parameters(hf_module, parallel_dims)
     # pyrefly: ignore [missing-attribute, not-iterable]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)
