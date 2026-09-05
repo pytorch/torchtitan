@@ -77,6 +77,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v4_debugmodel_fsdp2_tp2_ep2],
+            test_descr="DeepSeek V4 FSDP+TP+EP",
+            test_name="deepseek_v4_fsdp+tp+ep",
+            ngpu=4,
+            # Sparse attention / indexer kernels are CUDA-only and unvalidated
+            # on ROCm.
+            skip_rocm_test=True,
+        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             configs=[recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8],
