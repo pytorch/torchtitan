@@ -386,15 +386,12 @@ def make_token_dispatcher_config(
     """
     # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
     # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
-    if (
-        comm_backend in ("deepep", "hybridep", "minimal_async_ep")
-        and absorb_router_scores
-    ):
+    if comm_backend == "minimal_async_ep" and absorb_router_scores:
         raise ValueError(
             f"absorb_router_scores=True is not supported with "
             f"comm_backend='{comm_backend}': this backend applies router "
-            "scores inside its combine. Use comm_backend='standard' or "
-            "set absorb_router_scores=False."
+            "scores inside its fused combine kernel. Use comm_backend="
+            "'standard' or set absorb_router_scores=False."
         )
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
@@ -409,6 +406,7 @@ def make_token_dispatcher_config(
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             cudagraphable=cudagraphable,
+            absorb_router_scores=absorb_router_scores,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -417,6 +415,7 @@ def make_token_dispatcher_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
+            absorb_router_scores=absorb_router_scores,
         )
     elif comm_backend == "minimal_async_ep":
         return MinimalAsyncEPTokenDispatcher.Config(

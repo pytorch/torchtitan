@@ -847,6 +847,7 @@ class EPDispatchMetadata:
     """Metadata for DeepEP, HybridEP, and MinimalAsyncEP token dispatch."""
 
     state: object  # Backend-specific dispatch state.
+    routed_scores_R: torch.Tensor | None = None  # noqa: N815
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
@@ -882,12 +883,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             raise ValueError(
                 "DeepEP num_max_tokens_per_rank must be positive, got "
                 f"{config.num_max_tokens_per_rank}."
-            )
-        if config.absorb_router_scores:
-            logger.warning(
-                "DeepEPTokenDispatcher applies router scores inside its "
-                "combine; absorb_router_scores=True is ignored and scores "
-                "stay post-combine."
             )
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
@@ -941,7 +936,13 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             cudagraphable=self.cudagraphable,
         )
 
-        metadata = EPDispatchMetadata(state=state)
+        routed_scores_R = None
+        if self.absorb_router_scores:
+            from torchtitan.distributed.deepep.deepep import extract_routed_scores
+
+            routed_scores_R = extract_routed_scores(state, hidden_states_RD.shape[0])
+
+        metadata = EPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]
@@ -1007,12 +1008,6 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        if config.absorb_router_scores:
-            logger.warning(
-                "HybridEPTokenDispatcher applies router scores inside its "
-                "combine; absorb_router_scores=True is ignored and scores "
-                "stay post-combine."
-            )
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
         self.hidden_dim = config.hidden_dim
@@ -1072,7 +1067,13 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
 
-        metadata = EPDispatchMetadata(state=state)
+        routed_scores_R = None
+        if self.absorb_router_scores:
+            from torchtitan.distributed.deepep.hybridep import extract_routed_scores
+
+            routed_scores_R = extract_routed_scores(state)
+
+        metadata = EPDispatchMetadata(state=state, routed_scores_R=routed_scores_R)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
 
     # pyrefly: ignore [bad-override]

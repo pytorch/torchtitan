@@ -603,3 +603,17 @@ def combine_tokens(
         )
         hidden_states = hidden_states * per_row_score.to(hidden_states.dtype)
     return torch.ops.deepep.combine(hidden_states, state.handle_id, will_backward)
+
+
+def extract_routed_scores(
+    state: DispatchState, num_recv_rows: int
+) -> torch.Tensor | None:
+    if state.cudagraphable:
+        recv_scores = state.recv_scores
+        state.recv_scores = None
+        if recv_scores is None:
+            return None
+        return recv_scores.reshape(num_recv_rows, -1).sum(dim=-1).reshape(-1)
+    permuted_scores = state.permuted_scores
+    state.permuted_scores = None
+    return permuted_scores
