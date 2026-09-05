@@ -118,6 +118,16 @@ class TrainingConfig:
     many temporary files.
     """
 
+    anticipatory_routing: bool = False
+    """
+    Enable anticipatory routing for MoE layers (DeepSeek-V4 technique). When
+    enabled, routing decisions are computed one step ahead using a forward-only
+    pass and replayed at the next step. This decouples backbone and router
+    parameter updates to reduce loss spikes during MoE training. Only effective
+    for models with MoE layers; silently ignored otherwise. Incompatible with
+    pipeline parallelism and CUDA graphs.
+    """
+
 
 @dataclass(kw_only=True, slots=True)
 class ParallelismConfig:
@@ -306,13 +316,6 @@ class CompileConfig:
     backend: str = "inductor"
 
     def __post_init__(self) -> None:
-        allowed = frozenset({"model", "loss"})
-        unknown = [c for c in self.components if c not in allowed]
-        if unknown:
-            raise ValueError(
-                f"Unknown compile.components entries {unknown}; "
-                f"allowed values are {sorted(allowed)}"
-            )
         if self.enable_async_tensor_parallel and not (
             self.enable and "model" in self.components
         ):
