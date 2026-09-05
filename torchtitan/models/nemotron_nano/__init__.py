@@ -20,10 +20,10 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_moe_config,
-    make_router_config,
-    make_routed_experts_config,
     make_gqa_config,
+    make_moe_config,
+    make_routed_experts_config,
+    make_router_config,
     TpGemmBackend,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
@@ -58,6 +58,7 @@ def _output_linear_init(dim: int) -> dict[str, Callable]:
         "bias": nn.init.zeros_,
     }
 
+
 def _depth_init(layer_id: int) -> dict[str, Callable]:
     return {
         "weight": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
@@ -91,15 +92,27 @@ def _build_nemotron_layers(
                 mamba_state_dim=mamba_state_dim,
                 mamba_conv_dim=mamba_conv_dim,
                 mamba_input_projection=Linear.Config(
-                    in_features=dim, out_features=mamba_conv_dim, param_init=_LINEAR_INIT
-                ) if is_mamba else None,
+                    in_features=dim,
+                    out_features=mamba_conv_dim,
+                    param_init=_LINEAR_INIT,
+                )
+                if is_mamba
+                else None,
                 mamba_output_projection=Linear.Config(
-                    in_features=mamba_conv_dim, out_features=dim, param_init=_LINEAR_INIT
-                ) if is_mamba else None,
+                    in_features=mamba_conv_dim,
+                    out_features=dim,
+                    param_init=_LINEAR_INIT,
+                )
+                if is_mamba
+                else None,
                 attention_norm=RMSNorm.Config(
                     normalized_shape=dim, param_init=_NORM_INIT
                 ),
-                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT) if not is_mamba else None,
+                # pyre-ignore[6]
+                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT)
+                if not is_mamba
+                else None,
+                # pyre-ignore[6]
                 attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
@@ -110,7 +123,9 @@ def _build_nemotron_layers(
                     fuse_qkv=fuse_qkv,
                     rope=rope,
                     tp_gemm_backend=tp_gemm_backend,
-                ) if not is_mamba else None,
+                )
+                if not is_mamba
+                else None,
                 moe=make_moe_config(
                     num_experts=num_experts,
                     router=make_router_config(
@@ -131,10 +146,13 @@ def _build_nemotron_layers(
                         },
                         comm_backend="standard",
                     ),
-                ) if not is_mamba else None,
+                )
+                if not is_mamba
+                else None,
             )
         )
     return layers
+
 
 def _debugmodel(
     attn_backend: str,

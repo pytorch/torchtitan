@@ -46,7 +46,7 @@ def parallelize_nemotron(
         or parallel_dims.ep_enabled
     ):
         model.parallelize(parallel_dims)
-    
+
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )

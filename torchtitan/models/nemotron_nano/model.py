@@ -10,30 +10,31 @@
 from dataclasses import dataclass
 
 import torch
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
+
+import torchtitan.distributed
+import torchtitan.protocols.module
+from torchtitan.models.common import Linear
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common import Linear
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-)
+from torchtitan.models.utils import get_nparams_and_active_nparams
 
 
 class NemotronTransformerBlock(TransformerBlock):
     """
     Nemotron-3 Nano TransformerBlock: Hybrid Mamba-Transformer layer.
-    
+
     Alternates between:
     - Mamba-2 blocks (state-space models) for efficient long-range dependencies
     - Transformer blocks (GQA) for local context and multi-head attention
-    
+
     This hybrid design provides:
     - Linear complexity for Mamba blocks
     - Strong local modeling from Transformer blocks
     - Efficient memory usage and high throughput
-    
+
     Args:
         layer_id (int): Layer identifier
         config (NemotronTransformerBlock.Config): Block configuration
@@ -54,46 +55,57 @@ class NemotronTransformerBlock(TransformerBlock):
         self.is_mamba_block = config.is_mamba_block
         self.moe_enabled = not self.is_mamba_block and config.moe is not None
         self.mamba_state_dim = config.mamba_state_dim
-        
+
         if self.is_mamba_block:
             # Mamba block: state-space model reference implementation
             self.norm = config.attention_norm.build()
-            
+            assert config.mamba_input_projection is not None
             dim = config.mamba_input_projection.in_features
             d_inner = config.mamba_conv_dim
             d_state = config.mamba_state_dim
             dt_rank = max(16, int(dim / 16))
-            
+
             self.in_proj = nn.Linear(dim, d_inner * 2, bias=False)
             self.conv1d = nn.Conv1d(
-                in_channels=d_inner, out_channels=d_inner, kernel_size=4, groups=d_inner, padding=3
+                in_channels=d_inner,
+                out_channels=d_inner,
+                kernel_size=4,
+                groups=d_inner,
+                padding=3,
             )
             self.x_proj = nn.Linear(d_inner, dt_rank + 2 * d_state, bias=False)
             self.dt_proj = nn.Linear(dt_rank, d_inner, bias=True)
             self.out_proj = nn.Linear(d_inner, dim, bias=False)
-            
+
             # SSM parameters
             self.A_log = nn.Parameter(
-                torch.log(torch.arange(1, d_state + 1, dtype=torch.float32).repeat(d_inner, 1))
+                torch.log(
+                    torch.arange(1, d_state + 1, dtype=torch.float32).repeat(d_inner, 1)
+                )
             )
             self.D = nn.Parameter(torch.ones(d_inner))
-            
+
             # Basic init
             nn.init.normal_(self.A_log, mean=0.0, std=0.02)
             nn.init.normal_(self.D, mean=1.0, std=0.02)
         else:
             # Transformer block: attention + FFN
+            assert config.attention is not None
             self.attention = config.attention.build()
             self.attention_norm = config.attention_norm.build()
-            
+
             if config.feed_forward is not None:
+                assert config.ffn_norm is not None
+                self.ffn_norm = config.ffn_norm.build()
                 self.feed_forward = config.feed_forward.build()
-                self.ffn_norm = config.ffn_norm.build()
             elif config.moe is not None:
-                self.moe = config.moe.build()
+                assert config.ffn_norm is not None
                 self.ffn_norm = config.ffn_norm.build()
+                self.moe = config.moe.build()
             else:
-                raise ValueError("Either feed_forward or moe must be provided for Transformer blocks")
+                raise ValueError(
+                    "Either feed_forward or moe must be provided for Transformer blocks"
+                )
 
     def forward(
         self,
@@ -104,57 +116,65 @@ class NemotronTransformerBlock(TransformerBlock):
         if self.is_mamba_block:
             # Mamba block forward: reference SSM
             x_norm = self.norm(x)
-            
+
             is_flattened = x_norm.dim() == 2
             if is_flattened:
                 x_norm = x_norm.unsqueeze(0)
-                
+
             B, L, D = x_norm.shape
-            
+
             # 1. in_proj
             xz = self.in_proj(x_norm)
             x_mamba, z = xz.chunk(2, dim=-1)
-            
+
             # 2. conv1d
             x_mamba = x_mamba.transpose(1, 2)
             x_mamba = self.conv1d(x_mamba)[:, :, :L]
             x_mamba = x_mamba.transpose(1, 2)
             x_mamba = F.silu(x_mamba)
-            
+
             # 3. x_proj to dt, B, C
             dt_b_c = self.x_proj(x_mamba)
             dt, B_param, C_param = torch.split(
-                dt_b_c, [self.dt_proj.in_features, self.mamba_state_dim, self.mamba_state_dim], dim=-1
+                dt_b_c,
+                [self.dt_proj.in_features, self.mamba_state_dim, self.mamba_state_dim],
+                dim=-1,
             )
-            
+
             # 4. dt_proj
             dt = F.softplus(self.dt_proj(dt))
-            
+
             # 5. Continuous A
             A = -torch.exp(self.A_log.float())
-            
+
             # 6. SSM scan loop (PyTorch sequential implementation)
-            h = torch.zeros(B, self.conv1d.in_channels, self.mamba_state_dim, device=x.device, dtype=torch.float32)
+            h = torch.zeros(
+                B,
+                self.conv1d.in_channels,
+                self.mamba_state_dim,
+                device=x.device,
+                dtype=torch.float32,
+            )
             y_seq = []
-            
+
             for t in range(L):
                 dt_t = dt[:, t, :].unsqueeze(-1).float()
                 A_t = torch.exp(dt_t * A)
                 B_t = B_param[:, t, :].unsqueeze(1).float()
                 x_t = x_mamba[:, t, :].unsqueeze(-1).float()
-                
+
                 h = A_t * h + (dt_t * B_t) * x_t
-                
+
                 C_t = C_param[:, t, :].unsqueeze(1).unsqueeze(-1).float()
                 y_t = (h.unsqueeze(2) @ C_t).squeeze(-1).squeeze(-1)
                 y_seq.append(y_t)
-                
+
             y = torch.stack(y_seq, dim=1).to(x.dtype)
-            
+
             # 7. Add D residual and gate
             y = y + x_mamba * self.D
             y = y * F.silu(z)
-            
+
             # 8. out_proj
             out = self.out_proj(y)
             if is_flattened:
@@ -163,32 +183,78 @@ class NemotronTransformerBlock(TransformerBlock):
         else:
             # Transformer block forward: attention + FFN/MoE
             h = x + self.attention(self.attention_norm(x), attention_masks, positions)
-            
-            if hasattr(self, 'feed_forward'):
+
+            if hasattr(self, "feed_forward"):
                 out = h + self.feed_forward(self.ffn_norm(h))
             else:  # MoE
                 out = h + self.moe(self.ffn_norm(h))
-            
+
             return out
 
     def reset_parameters(self) -> None:
         pass
+
+    def parallelize(self, parallel_dims: "torchtitan.distributed.ParallelDims") -> None:
+        super().parallelize(parallel_dims)
+
+        if self.is_mamba_block and parallel_dims.spmd_backend == "spmd_types":
+            import spmd_types as spmd
+
+            from torchtitan.distributed.spmd_types import (
+                set_current_spmd_mesh,
+                spmd_distribute_tensor,
+            )
+
+            # Mamba blocks instantiate raw PyTorch parameters/modules that torchtitan's
+            # Module.parallelize skips. FSDP2 requires *all* parameters to be DTensors
+            # (or annotated plain tensors in spmd_types). We Replicate them across the mesh.
+            mesh = parallel_dims.spmd_dense_mesh()
+            from torchtitan.models.common.decoder_sharding import dense_param_placement
+
+            layout = dense_param_placement(tp=spmd.R)
+
+            def _distribute_and_annotate(module):
+                if isinstance(module, torchtitan.protocols.module.Module) and module is not self:
+                    return
+                for name, param in module.named_parameters(recurse=False):
+                    requires_grad = param.requires_grad
+                    dtensor = spmd_distribute_tensor(param, mesh, layout)
+                    module.register_parameter(
+                        name, nn.Parameter(dtensor, requires_grad=requires_grad)
+                    )
+                    registered = module._parameters[name]
+                    with set_current_spmd_mesh(mesh):
+                        spmd.assert_type(registered, layout)
+                for name, buffer in module.named_buffers(recurse=False):
+                    if buffer is not None:
+                        dtensor = spmd_distribute_tensor(buffer, mesh, layout)
+                        module.register_buffer(name, dtensor)
+                        registered = module._buffers[name]
+                        with set_current_spmd_mesh(mesh):
+                            spmd.assert_type(registered, layout)
+                for child in module.children():
+                    _distribute_and_annotate(child)
+
+            # Distribute direct parameters (A_log, D) and raw PyTorch layers
+            _distribute_and_annotate(self)
+
+
 class Nemotron3NanoModel(Decoder):
     """
     Nemotron-3 Nano: Hybrid Mamba-Transformer Mixture-of-Experts model.
-    
+
     Key specifications:
     - Architecture: Alternating Mamba-2 + Transformer (GQA) layers
     - Parameters: 31.6B total, 3.2B activated per token (MoE)
     - Experts: 128 total, 6 activated (granular top-k routing)
     - Context: Up to 1 million tokens (1M)
     - Training: 25 trillion tokens with 2-phase curriculum
-    
+
     Performance characteristics:
     - 3.3x higher inference throughput vs GPT-OSS-20B, Qwen3-30B-A3B
     - Superior performance on code, math, reasoning, chat, long-context tasks
     - Supports multi-environment RL post-training
-    
+
     Args:
         config (Nemotron3NanoModel.Config): Model configuration
     """
@@ -215,7 +281,9 @@ class Nemotron3NanoModel(Decoder):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            from torchtitan.models.nemotron_nano.sharding import set_nemotron_sharding_config
+            from torchtitan.models.nemotron_nano.sharding import (
+                set_nemotron_sharding_config,
+            )
 
             set_nemotron_sharding_config(
                 self,
