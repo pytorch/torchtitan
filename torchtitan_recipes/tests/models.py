@@ -114,6 +114,23 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+    from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(seq_len=512)
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 1
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
@@ -203,6 +220,22 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
 
     config = qwen35_debugmodel_moe(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    config.parallelism.pipeline_parallel_degree = 1
+    config.training.num_tokens_per_microbatch_per_dp_rank = (
+        config.training.max_context_length
+    )
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def qwen38_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel_moe
+
+    config = qwen38_debugmodel_moe(seq_len=512)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
