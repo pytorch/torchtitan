@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
 from unittest.mock import patch
 
 import spmd_types as spmd
@@ -28,16 +29,18 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
+    BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    LossTerm,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import set_spmd_backend
-from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import MTPDecoder, MTPLoss, roll_mtp_sequence
 
 
 class TestLoss(unittest.TestCase):
@@ -83,11 +86,11 @@ class TestLoss(unittest.TestCase):
         # TorchTitan positions reset at each document boundary.
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
         labels = torch.arange(8)
-        pred = [
+        pred = (
             torch.zeros(8, 16),
             torch.zeros(8, 16),
             torch.zeros(8, 16),
-        ]
+        )
 
         loss_fn(pred, labels, positions=positions)
 
@@ -110,7 +113,7 @@ class TestLoss(unittest.TestCase):
         labels = torch.zeros(1, 4, dtype=torch.long)
         positions = torch.arange(4).unsqueeze(0)
 
-        with self.assertRaisesRegex(ValueError, "expects a list"):
+        with self.assertRaisesRegex(ValueError, "expects a tuple"):
             loss_fn(pred, labels, positions=positions)
 
     def test_ignore_index_equal_per_token_contribution(self):
@@ -499,6 +502,88 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
+class _IdentityDecoderBlock(nn.Module):
+    def forward(self, hidden, attention_masks, positions):
+        del attention_masks, positions
+        return hidden
+
+
+class _AddMTPBlock(nn.Module):
+    def forward(
+        self,
+        mtp_input_embed,
+        prev_embed,
+        mtp_input_valid_mask,
+        attention_masks,
+        positions,
+    ):
+        del attention_masks, positions
+        return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
+
+
+class _FakeMTPDecoder(MTPDecoder):
+    def __init__(self, *, skip_lm_head: bool):
+        nn.Module.__init__(self)
+        self._skip_lm_head = skip_lm_head
+        self.tok_embeddings = nn.Embedding(16, 4)
+        self.layers = nn.ModuleDict({"0": _IdentityDecoderBlock()})
+        self.norm = nn.Identity()
+        self.lm_head = nn.Linear(4, 16, bias=False)
+        self.mtp_layers = nn.ModuleList([_AddMTPBlock()])
+
+
+class _WeightedTwoOutputLoss(BaseLoss):
+    """Two-output objective used to exercise generic chunked-loss plumbing."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        auxiliary_weight: float = 0.25
+
+    def __init__(self, config: Config, *, compile_config=None):
+        del compile_config
+        self.fn = cross_entropy_loss
+        self.auxiliary_weight = config.auxiliary_weight
+
+    def _build_loss_terms(
+        self,
+        pred: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor,
+        **loss_inputs,
+    ) -> tuple[LossTerm, ...]:
+        del loss_inputs
+        if not isinstance(pred, tuple) or len(pred) != 2:
+            raise ValueError("Expected exactly two prediction tensors.")
+        return (
+            LossTerm(pred[0], labels),
+            LossTerm(pred[1], labels, weight=self.auxiliary_weight),
+        )
+
+
+class _RecordingFSDPLinear(nn.Linear):
+    def __init__(self, *args, events: list[str], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.events = events
+
+    def set_reshard_after_forward(self, enabled):
+        self.events.append(f"set_reshard_after_forward({enabled})")
+
+    def set_reshard_after_backward(self, enabled):
+        self.events.append(f"set_reshard_after_backward({enabled})")
+
+    def set_requires_gradient_sync(self, enabled, *, recurse):
+        self.events.append(f"gradient_sync({enabled})")
+
+    def unshard(self):
+        self.events.append("unshard")
+
+    def reshard(self):
+        self.events.append("reshard")
+
+    def forward(self, input):
+        self.events.append("forward")
+        return super().forward(input)
+
+
 class TestChunkedLossWrapper(unittest.TestCase):
     def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
         """Create a fake Decoder and ChunkedLossWrapper for testing."""
@@ -586,6 +671,146 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.testing.assert_close(
             model_chunked.output.weight.grad, model_ref.output.weight.grad
         )
+
+    def test_weighted_multi_output_matches_full_objective(self):
+        torch.manual_seed(42)
+        T, D, V, num_chunks = 24, 5, 17, 3
+        auxiliary_weight = 0.25
+        model_ref, _ = self._make_model_and_loss(D, V, num_chunks)
+        model_chunked, _ = self._make_model_and_loss(D, V, num_chunks)
+        model_chunked.output.load_state_dict(model_ref.output.state_dict())
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(
+                num_chunks=num_chunks,
+                loss_fn=_WeightedTwoOutputLoss.Config(
+                    auxiliary_weight=auxiliary_weight
+                ),
+            )
+        )
+        chunked_loss.set_lm_head(model_chunked.output)
+
+        hidden = torch.randn(2, T, D)
+        labels = torch.randint(0, V, (T,))
+        global_valid_tokens = (labels != IGNORE_INDEX).sum()
+        ref_hidden = tuple(
+            item.detach().clone().requires_grad_(True) for item in hidden
+        )
+        chunked_hidden = tuple(
+            item.detach().clone().requires_grad_(True) for item in hidden
+        )
+
+        ref_loss = (
+            cross_entropy_loss(model_ref.output(ref_hidden[0]), labels)
+            + auxiliary_weight
+            * cross_entropy_loss(model_ref.output(ref_hidden[1]), labels)
+        ) / global_valid_tokens
+        chunked_value, _ = chunked_loss(
+            chunked_hidden,
+            labels,
+            global_valid_tokens,
+        )
+        ref_loss.backward()
+        chunked_value.backward()
+
+        torch.testing.assert_close(chunked_value, ref_loss)
+        for actual, expected in zip(chunked_hidden, ref_hidden, strict=True):
+            torch.testing.assert_close(actual.grad, expected.grad)
+        torch.testing.assert_close(
+            model_chunked.output.weight.grad,
+            model_ref.output.weight.grad,
+        )
+
+    def test_mtp_decoder_returns_predictions(self):
+        tokens = torch.tensor([1, 2, 3, 4])
+        positions = torch.tensor([0, 1, 0, 1])
+
+        hidden_outputs = _FakeMTPDecoder(skip_lm_head=True)(tokens, positions)
+        self.assertIsInstance(hidden_outputs, tuple)
+        self.assertEqual(len(hidden_outputs), 2)
+        self.assertEqual(hidden_outputs[0].shape, (4, 4))
+        self.assertEqual(hidden_outputs[1].shape, (4, 4))
+
+        full_outputs = _FakeMTPDecoder(skip_lm_head=False)(tokens, positions)
+        self.assertEqual(full_outputs[0].shape, (4, 16))
+        self.assertEqual(full_outputs[1].shape, (4, 16))
+
+    def test_chunked_mtp_matches_full_objective(self):
+        torch.manual_seed(42)
+        seq_len, dim, vocab_size, num_chunks = 8, 5, 17, 2
+        model_ref, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
+        model_chunked, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
+        model_chunked.output.load_state_dict(model_ref.output.state_dict())
+        loss_config = MTPLoss.Config(
+            mtp_scale=0.3,
+            global_vocab_size=vocab_size,
+        )
+        full_loss = MTPLoss(loss_config)
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(
+                num_chunks=num_chunks,
+                loss_fn=loss_config,
+            )
+        )
+        chunked_loss.set_lm_head(model_chunked.output)
+
+        labels = torch.randint(0, vocab_size, (seq_len,))
+        positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+        hidden = tuple(torch.randn(seq_len, dim) for _ in range(3))
+        reference_hidden = tuple(
+            value.detach().clone().requires_grad_(True) for value in hidden
+        )
+        chunked_hidden = tuple(
+            value.detach().clone().requires_grad_(True) for value in hidden
+        )
+        global_valid_tokens = (labels != IGNORE_INDEX).sum()
+
+        reference_value, _ = full_loss(
+            tuple(model_ref.output(value) for value in reference_hidden),
+            labels,
+            global_valid_tokens,
+            positions=positions,
+        )
+        chunked_value, _ = chunked_loss(
+            chunked_hidden,
+            labels,
+            global_valid_tokens,
+            positions=positions,
+        )
+        reference_value.backward()
+        chunked_value.backward()
+
+        torch.testing.assert_close(chunked_value, reference_value)
+        for actual, expected in zip(chunked_hidden, reference_hidden, strict=True):
+            torch.testing.assert_close(actual.grad, expected.grad)
+        torch.testing.assert_close(
+            model_chunked.output.weight.grad,
+            model_ref.output.weight.grad,
+        )
+
+    def test_multi_output_fsdp_lifecycle_spans_all_terms(self):
+        events: list[str] = []
+        chunked_loss = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(
+                num_chunks=2,
+                loss_fn=_WeightedTwoOutputLoss.Config(),
+            )
+        )
+        chunked_loss.set_lm_head(_RecordingFSDPLinear(4, 8, bias=False, events=events))
+        predictions = (
+            torch.randn(4, 4, requires_grad=True),
+            torch.randn(4, 4, requires_grad=True),
+        )
+        labels = torch.randint(0, 8, (4,))
+
+        with patch(
+            "torch.distributed._composable.fsdp.FSDPModule", _RecordingFSDPLinear
+        ):
+            chunked_loss(predictions, labels)
+
+        self.assertEqual(events.count("unshard"), 1)
+        self.assertEqual(events.count("forward"), 4)
+        self.assertEqual(events.count("gradient_sync(True)"), 1)
+        self.assertEqual(events.count("reshard"), 1)
 
     def test_fsdp_unshards_once_before_chunk_forwards(self):
         events: list[str] = []
