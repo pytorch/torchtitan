@@ -1069,14 +1069,20 @@ def _dtensor_storage_regions(
         elif storage_mesh.size(mesh_axis) != 1 and type(placement) is not Replicate:
             if not (
                 preserved_shard_axis is None
-                and type(transport_placement) is Shard
                 and type(placement) is Shard
-                and transport_placement.dim % tensor.ndim != placement.dim % tensor.ndim
+                and (
+                    type(transport_placement) is Replicate
+                    or (
+                        type(transport_placement) is Shard
+                        and transport_placement.dim % tensor.ndim
+                        != placement.dim % tensor.ndim
+                    )
+                )
             ):
                 raise ValueError(
                     "redistributed optimizer storage requires Replicate outside "
-                    "the communication mesh axis, except for one orthogonal "
-                    "exact Shard"
+                    "the communication mesh axis, except for one exact Shard "
+                    "with replicated or orthogonally sharded transport storage"
                 )
             preserved_shard_axis = mesh_axis
 
