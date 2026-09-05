@@ -621,9 +621,38 @@ def clip_grad_norm_(
         # prevent generators from being exhausted
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
+    # Group by mesh before the norm: a model with undeclared (inert, hence
+    # replicated) modules under TP holds grads on two meshes -- the declared
+    # parameters on (fsdp, tp), the inert ones on (fsdp,) -- and
+    # get_total_norm's foreach stack refuses to mix them. Disjoint groups
+    # combine exactly ((sum of norm^p)^(1/p); max for inf), the same algebra
+    # the EP path above already uses for its two groups. With one mesh this
+    # is the single get_total_norm call it always was.
+    by_mesh: dict = {}
+    for param in parameters:
+        if param.grad is None:
+            continue
+        g = param.grad
+        key = g.device_mesh if isinstance(g, DTensor) else None
+        by_mesh.setdefault(key, []).append(param)
+    if len(by_mesh) <= 1:
+        total_norm = torch.nn.utils.get_total_norm(
+            grads, norm_type, error_if_nonfinite, foreach
+        )
+    else:
+        group_norms = []
+        for group_params in by_mesh.values():
+            n = torch.nn.utils.get_total_norm(
+                [p.grad for p in group_params], norm_type, error_if_nonfinite, foreach
+            )
+            if isinstance(n, DTensor):
+                n = n.full_tensor()
+            group_norms.append(n)
+        stacked = torch.stack(group_norms)
+        if math.isinf(norm_type):
+            total_norm = stacked.max()
+        else:
+            total_norm = (stacked**norm_type).sum() ** (1.0 / norm_type)
 
     # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
     # We can simply reduce the DTensor to get the total norm in this tensor's process group
@@ -644,7 +673,16 @@ def clip_grad_norm_(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    if len(by_mesh) <= 1:
+        torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    else:
+        # Same scale for every group -- the clip is grad * (max_norm /
+        # total_norm) with ONE total_norm -- so applying it group by group is
+        # the identical arithmetic, just never stacking across meshes.
+        for group_params in by_mesh.values():
+            torch.nn.utils.clip_grads_with_norm_(
+                group_params, max_norm, total_norm, foreach
+            )
     return total_norm
 
 
