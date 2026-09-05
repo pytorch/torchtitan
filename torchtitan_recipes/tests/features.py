@@ -236,13 +236,6 @@ def llama3_debugmodel_pp2_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
-    return config
-
-
-def llama3_debugmodel_pp2_1f1b_cudagraph() -> Trainer.Config:
-    config = llama3_debugmodel_pp2_1f1b()
-    config.training.disable_cuda_graphs = False
     return config
 
 
@@ -254,7 +247,6 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
