@@ -46,6 +46,7 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
             num_experts=dispatcher.num_experts,
             top_k=dispatcher.top_k,
             pad_multiple=pad_multiple,
+            absorb_router_scores=dispatcher.absorb_router_scores,
         )
     elif isinstance(dispatcher, HybridEPTokenDispatcher.Config):
         routed_experts_config.token_dispatcher = HybridEPTokenDispatcher.Config(
@@ -55,6 +56,7 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
             pad_multiple=pad_multiple,
             hidden_dim=dispatcher.hidden_dim,
             num_max_tokens_per_rank=dispatcher.num_max_tokens_per_rank,
+            absorb_router_scores=dispatcher.absorb_router_scores,
         )
     else:
         raise ValueError(

@@ -386,6 +386,16 @@ def make_token_dispatcher_config(
     """
     # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
     # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
+    if (
+        comm_backend in ("deepep", "hybridep", "minimal_async_ep")
+        and absorb_router_scores
+    ):
+        raise ValueError(
+            f"absorb_router_scores=True is not supported with "
+            f"comm_backend='{comm_backend}': this backend applies router "
+            "scores inside its combine. Use comm_backend='standard' or "
+            "set absorb_router_scores=False."
+        )
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
         # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
@@ -438,9 +448,11 @@ def make_routed_experts_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
-    absorb_router_scores: bool = True,
+    absorb_router_scores: bool | None = None,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    if absorb_router_scores is None:
+        absorb_router_scores = comm_backend == "standard"
     return RoutedExperts.Config(
         inner_experts=GroupedExperts.Config(
             dim=dim,

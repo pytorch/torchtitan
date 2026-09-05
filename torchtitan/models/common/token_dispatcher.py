@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, cast
@@ -24,6 +25,8 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh, maybe_set_spars
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.tools.utils import device_module, device_type
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -522,12 +525,19 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_splits=input_splits_list,
             output_splits=output_splits_list,
             routed_scores_R=(
-                routed_scores_rank_major_R[permuted_indices]
+                self._gather_routed_scores(routed_scores_rank_major_R, permuted_indices)
                 if routed_scores_rank_major_R is not None
                 else None
             ),
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
+
+    def _gather_routed_scores(
+        self,
+        routed_scores_rank_major_R: torch.Tensor,
+        permuted_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        return routed_scores_rank_major_R[permuted_indices]
 
     def _permute(
         self,
@@ -716,14 +726,23 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             num_tokens_per_local_expert_padded_e,
         ) = self._permute(routed_input_ND, num_local_tokens_per_expert_E)
 
+        routed_scores_R = None
+        if self.absorb_router_scores:
+            routed_scores_R = self._gather_routed_scores(
+                topk_scores_experts_sorted_N, permuted_indices
+            )
+
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            topk_scores_experts_sorted_N=(
+                None if self.absorb_router_scores else topk_scores_experts_sorted_N
+            ),
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             # Unused in the EP=1 combine path (no all-to-all to reverse).
             input_splits=[],
             output_splits=[],
+            routed_scores_R=routed_scores_R,
         )
         return routed_input_RD, num_tokens_per_local_expert_padded_e, metadata
 
@@ -749,10 +768,11 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         )
 
         out_TD = torch.zeros_like(x_TD)
-        routed_output_RD = (
-            routed_output_RD.to(torch.float32)
-            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-        ).to(routed_output_RD.dtype)
+        if metadata.routed_scores_R is None:
+            routed_output_RD = (
+                routed_output_RD.to(torch.float32)
+                * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
+            ).to(routed_output_RD.dtype)
 
         dim = x_TD.shape[-1]
         out_TD = deterministic_scatter_add(
@@ -761,6 +781,21 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             routed_output_RD,
         )
         return out_TD
+
+    def _gather_routed_scores(
+        self,
+        routed_scores_rank_major_R: torch.Tensor,
+        permuted_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        # Pad positions index the appended zero sentinel row via -1, which the
+        # scores tensor lacks; appending one zero score makes pad rows read 0
+        # instead of wrapping to the last real score.
+        return torch.cat(
+            [
+                routed_scores_rank_major_R,
+                routed_scores_rank_major_R.new_zeros(1),
+            ]
+        )[permuted_indices]
 
     def _permute(
         self,
@@ -847,6 +882,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             raise ValueError(
                 "DeepEP num_max_tokens_per_rank must be positive, got "
                 f"{config.num_max_tokens_per_rank}."
+            )
+        if config.absorb_router_scores:
+            logger.warning(
+                "DeepEPTokenDispatcher applies router scores inside its "
+                "combine; absorb_router_scores=True is ignored and scores "
+                "stay post-combine."
             )
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
@@ -966,6 +1007,12 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        if config.absorb_router_scores:
+            logger.warning(
+                "HybridEPTokenDispatcher applies router scores inside its "
+                "combine; absorb_router_scores=True is ignored and scores "
+                "stay post-combine."
+            )
         self.non_blocking_capacity_factor = config.non_blocking_capacity_factor
         self.pad_multiple = config.pad_multiple
         self.hidden_dim = config.hidden_dim
@@ -1070,6 +1117,12 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        if config.absorb_router_scores:
+            logger.warning(
+                "MinimalAsyncEPTokenDispatcher applies router scores inside "
+                "its combine; absorb_router_scores=True is ignored and "
+                "scores stay post-combine."
+            )
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.dtype = config.dtype
