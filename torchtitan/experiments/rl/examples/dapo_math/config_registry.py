@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from renderers import Qwen3RendererConfig
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -33,7 +35,6 @@ from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
@@ -81,7 +82,7 @@ def _qwen3_4b_dapo_math_config(
                 ),
             ),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        renderer=Qwen3RendererConfig(enable_thinking=True),
         num_generators=6,
         generator_router=InterGeneratorRouter.Config(
             strategy=LeastLoadedRoutingStrategy.Config()
