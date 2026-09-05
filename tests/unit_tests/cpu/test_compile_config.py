@@ -33,8 +33,8 @@ def test_compile_config_empty_components() -> None:
 
 
 def test_compile_config_rejects_unknown_component() -> None:
-    with pytest.raises(ValueError, match=r"modell.*allowed values are.*loss.*model"):
-        CompileConfig(components=["modell"])
+    with pytest.raises(ValueError, match=r"foo.*allowed values are.*loss.*model"):
+        CompileConfig(components=["foo"])
 
 
 def test_compile_config_rejects_unknown_component_when_disabled() -> None:
@@ -56,9 +56,6 @@ def test_compile_config_rejects_unknown_component_when_disabled() -> None:
 def test_compile_config_async_tp_requires_model_compile(kwargs: dict) -> None:
     with pytest.raises(
         ValueError,
-        match=(
-            "Async TP requires 'model' in --compile.components and "
-            "--compile.enable"
-        ),
+        match="Async TP requires 'model' in --compile.components and --compile.enable",
     ):
         CompileConfig(**kwargs)
