@@ -48,6 +48,7 @@ def _get_default_save_ops() -> set:
         # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
+        torch.ops.aten.mm.dtype,
         # topk can be non-deterministic; save to keep MoE expert assignments
         # stable between forward and recompute.
         torch.ops.aten.topk.default,
@@ -238,7 +239,11 @@ class SelectiveAC(ActivationCheckpointing):
 
         # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
         # instead of decomposing it into aten.mm, so we must handle both.
-        mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
+        mm_ops = (
+            torch.ops.aten.mm.default,
+            torch.ops.aten.mm.dtype,
+            torch.ops.aten.linear.default,
+        )
 
         def _get_custom_policy():
             meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
