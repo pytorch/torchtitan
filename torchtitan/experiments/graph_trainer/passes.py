@@ -287,6 +287,9 @@ def compile_time_passes(
             fsdp_param_module_order=get_fsdp_param_module_order(
                 traced_result.state_fqns
             ),
+            fsdp_contiguous_module_fqns=tuple(
+                config.compile.fsdp_contiguous_module_fqns
+            ),
         )
     )
 

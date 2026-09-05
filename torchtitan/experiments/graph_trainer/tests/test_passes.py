@@ -82,6 +82,7 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
+    _materialize_fsdp_bucket_outputs,
     deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
     reassign_collective_pgs_pass,
@@ -226,6 +227,48 @@ class TestFSDPUnshardDedupPass(TestCase):
             sum(1 for node in gm.graph.nodes if is_all_gather(node)),
             1,
         )
+        gm.graph.lint()
+
+
+class TestMaterializeFSDPBucketOutputs(TestCase):
+    def test_materializes_all_gather_bucket_outputs(self):
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        all_gather = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            args=(param, 2, "fsdp_pg"),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(all_gather,),
+        )
+        reshaped = graph.call_function(
+            torch.ops.aten.reshape.default,
+            args=(wait, [2, 6]),
+        )
+        split = graph.call_function(
+            torch.ops.aten.split_with_sizes.default,
+            args=(reshaped, [4, 2], 1),
+        )
+        left = graph.call_function(operator.getitem, args=(split, 0))
+        right = graph.call_function(operator.getitem, args=(split, 1))
+        graph.output((left, right))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        gathered = torch.empty(2, 6)
+        split_values = gathered.split([4, 2], dim=1)
+        param.meta["val"] = torch.empty(6)
+        all_gather.meta["val"] = gathered
+        wait.meta["val"] = gathered
+        reshaped.meta["val"] = gathered
+        split.meta["val"] = split_values
+        left.meta["val"], right.meta["val"] = split_values
+
+        _materialize_fsdp_bucket_outputs([split])
+
+        self.assertIs(split.target, torch.ops.aten.split_with_sizes_copy.default)
+        self.assertTrue(left.meta["val"].is_contiguous())
+        self.assertTrue(right.meta["val"].is_contiguous())
         gm.graph.lint()
 
 
@@ -3738,6 +3781,22 @@ class TestChunkPasses(TestCase):
             names.index("concretize_ep_chunk_symbolic_shapes_pass"),
             names.index("full_inductor_compilation_pass"),
         )
+
+    def test_fsdp_contiguous_fqns_are_forwarded_to_bucketer(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        patterns = ("layers.*.moe.routed_experts",)
+        config.compile.fsdp_contiguous_module_fqns = list(patterns)
+
+        bucket_pass = next(
+            pass_fn
+            for pass_fn in compile_time_passes(
+                traced_result, config, use_cudagraph=False
+            )
+            if getattr(getattr(pass_fn, "func", None), "__name__", None)
+            == "joint_transformer_block_bucketing_reordering_pass"
+        )
+
+        self.assertEqual(bucket_pass.keywords["fsdp_contiguous_module_fqns"], patterns)
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
