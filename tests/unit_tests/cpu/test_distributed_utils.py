@@ -61,3 +61,21 @@ def test_dist_sum_tensor_waits_for_distributed_result():
     assert result is reduced
     reduce.assert_called_once_with(value, reduceOp="SUM", group=mesh)
     wait.assert_called_once_with(reduced)
+
+
+def test_clip_grad_norm_uses_logical_subset_but_clips_all_parameters() -> None:
+    canonical = torch.nn.Parameter(torch.tensor([0.0]))
+    replica = torch.nn.Parameter(torch.tensor([0.0]))
+    canonical.grad = torch.tensor([3.0])
+    replica.grad = torch.tensor([4.0])
+
+    total_norm = dist_utils.clip_grad_norm_(
+        (canonical, replica),
+        max_norm=1.0,
+        norm_parameters=(canonical,),
+    )
+
+    torch.testing.assert_close(total_norm, torch.tensor(3.0))
+    expected_scale = 1.0 / (3.0 + 1e-6)
+    torch.testing.assert_close(canonical.grad, torch.tensor([3.0 * expected_scale]))
+    torch.testing.assert_close(replica.grad, torch.tensor([4.0 * expected_scale]))
