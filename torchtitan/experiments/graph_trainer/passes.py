@@ -75,6 +75,9 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
+from torchtitan.experiments.graph_trainer.gradient_accumulation import (
+    finalize_graph_gradient_accumulation,
+)
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
@@ -342,6 +345,14 @@ def compile_time_passes(
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
+    if traced_result.graph_state_fqns:
+        passes.append(
+            functools.partial(
+                finalize_graph_gradient_accumulation,
+                traced_result=traced_result,
+            )
+        )
+
     if not include_inductor:
         return passes
 
@@ -466,6 +477,14 @@ def _filter_disabled_passes(
 ) -> list[Callable]:
     """Remove passes whose names exactly match any entry in ``disable_names``."""
     disable_set = set(disable_names)
+    mandatory = {"finalize_graph_gradient_accumulation"}
+    available_names = {_get_pass_name(pass_fn) for pass_fn in passes}
+    disabled_mandatory = disable_set & mandatory & available_names
+    if disabled_mandatory:
+        raise ValueError(
+            "The following correctness passes cannot be disabled: "
+            f"{sorted(disabled_mandatory)}"
+        )
     filtered = []
     skipped = []
     for pass_fn in passes:

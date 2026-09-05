@@ -18,7 +18,13 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _maybe_materialize_grad_for_param_layout,
+    accumulate_param_grads_,
+    compute_parameter_gradients,
     maybe_register_blockmask_pytree_node,
+)
+from torchtitan.experiments.graph_trainer.gradient_accumulation import (
+    finalize_graph_gradient_accumulation,
+    GraphGradientState,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
@@ -29,6 +35,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
+)
+from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    remove_parameter_gradient_markers_pass,
 )
 
 
@@ -147,6 +156,284 @@ class _TraceableWrapper(torch.Tensor):
     @staticmethod
     def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
         return _TraceableWrapper(inner_tensors["elem"])
+
+
+class TestGraphGradientAccumulation(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_cuda_graph_numerics_match_external_accumulation(self):
+        from types import SimpleNamespace
+
+        from torchtitan.components.optimizer import (
+            OptimizersContainer,
+            ParamGroupConfig,
+        )
+        from torchtitan.distributed.cudagraph import (
+            cudagraph_teardown,
+            CUDAGraphWrapper,
+        )
+        from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
+            build_minimal_trainer,
+        )
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        torch.manual_seed(42)
+        model_default = nn.Linear(3, 2, device="cuda")
+        model_inplace = deepcopy(model_default)
+        model_config = SimpleNamespace(layers=[])
+
+        def make_trainer(model, *, inplace):
+            trainer = build_minimal_trainer(
+                model,
+                model_config,
+                GraphTrainer,
+                compile_enable_inplace_graph_gradient_accumulation=inplace,
+                compile_inductor_compilation="full",
+            )
+            trainer.optimizers = OptimizersContainer(
+                OptimizersContainer.Config(
+                    param_groups=[
+                        ParamGroupConfig(
+                            pattern=r".*",
+                            optimizer_name="AdamW",
+                            optimizer_kwargs={"lr": 0.05, "weight_decay": 0.0},
+                        )
+                    ],
+                    implementation="for-loop",
+                ),
+                model_parts=[model],
+            )
+            return trainer
+
+        microbatches = [
+            (
+                torch.randn(4, 3, device="cuda"),
+                torch.randint(0, 2, (4,), device="cuda"),
+            )
+            for _ in range(3)
+        ]
+
+        def run_trainer(model, *, use_inplace_accumulation):
+            trainer = make_trainer(model, inplace=use_inplace_accumulation)
+            # CUDA graph capture retains its input tensors as replay buffers.
+            first_batches = [
+                (inputs.clone(), labels.clone()) for inputs, labels in microbatches
+            ]
+            second_batches = [
+                (inputs.clone(), labels.clone()) for inputs, labels in microbatches[:1]
+            ]
+
+            def run_microbatches(trainer, model, batches):
+                losses = []
+                params = list(model.parameters())
+                for inputs, labels in batches:
+                    valid_tokens = torch.tensor(
+                        labels.numel(), device="cuda", dtype=torch.float
+                    )
+                    loss = trainer._make_fx_forward_backward_step(
+                        model,
+                        inputs,
+                        labels,
+                        valid_tokens,
+                        params,
+                        {},
+                    )
+                    losses.append(loss.item())
+                grads = [param.grad.detach().cpu().clone() for param in params]
+                return losses, grads
+
+            try:
+                first_losses, first_grads = run_microbatches(
+                    trainer, model, first_batches
+                )
+                self.assertIsInstance(trainer._traced_step.gm.forward, CUDAGraphWrapper)
+
+                gradient_state = trainer._graph_gradient_state
+                if use_inplace_accumulation:
+                    if gradient_state is None:
+                        raise AssertionError(
+                            "in-place gradient state was not initialized"
+                        )
+                    grad_buffers = gradient_state.buffers
+                    grad_ptrs = tuple(grad.data_ptr() for grad in grad_buffers)
+
+                trainer.optimizers.step()
+                first_params = [
+                    param.detach().cpu().clone() for param in model.parameters()
+                ]
+                trainer._zero_grad()
+
+                if use_inplace_accumulation:
+                    for param, grad, ptr in zip(
+                        model.parameters(), grad_buffers, grad_ptrs, strict=True
+                    ):
+                        self.assertIs(param.grad, grad)
+                        self.assertEqual(param.grad.data_ptr(), ptr)
+                        self.assertEqual(torch.count_nonzero(param.grad), 0)
+
+                second_losses, second_grads = run_microbatches(
+                    trainer, model, second_batches
+                )
+                trainer.optimizers.step()
+                second_params = [
+                    param.detach().cpu().clone() for param in model.parameters()
+                ]
+                return (
+                    first_losses,
+                    first_grads,
+                    first_params,
+                    second_losses,
+                    second_grads,
+                    second_params,
+                )
+            finally:
+                cudagraph_teardown()
+
+        default_result = run_trainer(model_default, use_inplace_accumulation=False)
+        inplace_result = run_trainer(model_inplace, use_inplace_accumulation=True)
+        self.assertEqual(inplace_result[0], default_result[0])
+        self.assertEqual(inplace_result[3], default_result[3])
+        for default_tensors, inplace_tensors in zip(
+            (
+                default_result[1],
+                default_result[2],
+                default_result[4],
+                default_result[5],
+            ),
+            (
+                inplace_result[1],
+                inplace_result[2],
+                inplace_result[4],
+                inplace_result[5],
+            ),
+            strict=True,
+        ):
+            for default_tensor, inplace_tensor in zip(
+                default_tensors, inplace_tensors, strict=True
+            ):
+                torch.testing.assert_close(inplace_tensor, default_tensor)
+
+    def test_inplace_grad_accumulation_uses_stable_optimizer_buffers(self):
+        torch.manual_seed(42)
+        model_ref = nn.Linear(3, 2, dtype=torch.float64)
+        model_test = deepcopy(model_ref)
+        optimizer_ref = torch.optim.SGD(model_ref.parameters(), lr=0.05)
+        optimizer_test = torch.optim.SGD(model_test.parameters(), lr=0.05)
+        gradient_state = GraphGradientState.create(model_test, [optimizer_test])
+
+        def train_step(inputs, targets):
+            loss = torch.nn.functional.mse_loss(
+                model_test(inputs), targets, reduction="sum"
+            )
+            grads = compute_parameter_gradients(
+                loss, list(model_test.named_parameters())
+            )
+            return [loss, *grads]
+
+        microbatches = [
+            (
+                torch.randn(4, 3, dtype=torch.float64),
+                torch.randn(4, 2, dtype=torch.float64),
+            )
+            for _ in range(2)
+        ]
+        traced = minimal_fx_tracer(
+            train_step,
+            module=model_test,
+            graph_state=gradient_state.graph_state,
+        )(*microbatches[0])
+        traced.gm = remove_parameter_gradient_markers_pass(
+            traced.gm, traced.example_inputs
+        )
+        traced.gm = finalize_graph_gradient_accumulation(
+            traced.gm, traced_result=traced
+        )
+        run = run_traced(
+            traced,
+            module=model_test,
+            graph_state=gradient_state.graph_state,
+        )
+        grad_ids = tuple(id(parameter.grad) for parameter in model_test.parameters())
+        grad_ptrs = tuple(
+            parameter.grad.data_ptr() for parameter in model_test.parameters()
+        )
+
+        for inputs, targets in microbatches:
+            loss_ref = torch.nn.functional.mse_loss(
+                model_ref(inputs), targets, reduction="sum"
+            )
+            loss_ref.backward()
+            outputs = run(inputs, targets)
+            self.assertEqual(len(outputs), 1)
+            self.assertEqual(outputs[0], loss_ref)
+            for parameter_ref, parameter_test in zip(
+                model_ref.parameters(), model_test.parameters(), strict=True
+            ):
+                torch.testing.assert_close(parameter_test.grad, parameter_ref.grad)
+
+        self.assertEqual(
+            tuple(id(parameter.grad) for parameter in model_test.parameters()),
+            grad_ids,
+        )
+        self.assertEqual(
+            tuple(parameter.grad.data_ptr() for parameter in model_test.parameters()),
+            grad_ptrs,
+        )
+        optimizer_ref.step()
+        optimizer_test.step()
+        for parameter_ref, parameter_test in zip(
+            model_ref.parameters(), model_test.parameters(), strict=True
+        ):
+            torch.testing.assert_close(parameter_test, parameter_ref)
+
+    def test_graph_gradient_state_rejects_tied_parameters(self):
+        class TiedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(torch.ones(2, 2))
+                self.tied_weight = self.weight
+
+        model = TiedModel()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        with self.assertRaisesRegex(ValueError, "tied parameter"):
+            GraphGradientState.create(model, [optimizer])
+
+    def test_graph_gradient_state_rejects_shared_empty_storage(self):
+        class AliasedModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                storage = torch.empty(0)
+                self.first = nn.Parameter(storage[:])
+                self.second = nn.Parameter(storage[:])
+
+        model = AliasedModel()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        with self.assertRaisesRegex(ValueError, "sharing storage"):
+            GraphGradientState.create(model, [optimizer])
+
+    def test_graph_gradient_state_rejects_parameter_storage_replacement(self):
+        model = nn.Linear(2, 2)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        gradient_state = GraphGradientState.create(model, [optimizer])
+        with torch.no_grad():
+            model.weight.set_(model.weight.detach().clone())
+
+        with self.assertRaisesRegex(RuntimeError, "parameter storage"):
+            gradient_state.validate_parameters(tuple(model.parameters()))
+
+    def test_accumulate_param_grads_clones_param_grad_when_requested(self):
+        param = nn.Parameter(torch.zeros(2))
+        graph_grad = torch.tensor([1.0, 2.0])
+
+        accumulate_param_grads_(
+            [param], [graph_grad], clone_grads_to_initialize_param_grad=True
+        )
+        graph_grad.fill_(3.0)
+
+        self.assertTrue(torch.equal(param.grad, torch.tensor([1.0, 2.0])))
+        accumulate_param_grads_(
+            [param], [graph_grad], clone_grads_to_initialize_param_grad=True
+        )
+        self.assertTrue(torch.equal(param.grad, torch.tensor([4.0, 5.0])))
 
 
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
@@ -1834,6 +2121,85 @@ class TestTraceFSDP(FSDPTest):
             world_size=self.world_size,
             spmd_backend="partial_dtensor",
         )
+
+    def test_graph_gradient_accumulation_preserves_fsdp_layout(self):
+        from torch.distributed.tensor import DTensor
+
+        from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+
+        torch.manual_seed(42)
+        self._setup()
+        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        model_ref = nn.Linear(8, 4, device="cuda")
+        model_test = nn.Linear(8, 4, device="cuda")
+        model_test.load_state_dict(model_ref.state_dict())
+        model_ref = data_parallel(model_ref, device_mesh=fsdp_mesh, mode="fully_shard")
+        model_test = data_parallel(
+            model_test,
+            device_mesh=fsdp_mesh,
+            mode="fully_shard",
+        )
+        optimizer_ref = torch.optim.SGD(model_ref.parameters(), lr=0.1)
+        optimizer_test = torch.optim.SGD(model_test.parameters(), lr=0.1)
+        gradient_state = GraphGradientState.create(model_test, [optimizer_test])
+
+        def train_step(inputs, targets):
+            loss = torch.nn.functional.mse_loss(
+                model_test(inputs), targets, reduction="sum"
+            )
+            grads = torch.autograd.grad(loss, tuple(model_test.parameters()))
+            return [loss, *grads]
+
+        microbatches = [
+            (
+                torch.randn(3, 8, device="cuda"),
+                torch.randn(3, 4, device="cuda"),
+            )
+            for _ in range(2)
+        ]
+        traced = minimal_fx_tracer(
+            train_step,
+            module=model_test,
+            graph_state=gradient_state.graph_state,
+        )(*microbatches[0])
+        traced.gm = finalize_graph_gradient_accumulation(
+            traced.gm, traced_result=traced
+        )
+        run = run_traced(
+            traced,
+            module=model_test,
+            graph_state=gradient_state.graph_state,
+        )
+
+        for inputs, targets in microbatches:
+            loss_ref = torch.nn.functional.mse_loss(
+                model_ref(inputs), targets, reduction="sum"
+            )
+            loss_ref.backward()
+            outputs = run(inputs, targets)
+            self.assertEqual(len(outputs), 1)
+            torch.testing.assert_close(outputs[0], loss_ref)
+            for parameter_ref, parameter_test, buffer in zip(
+                model_ref.parameters(),
+                model_test.parameters(),
+                gradient_state.buffers,
+                strict=True,
+            ):
+                self.assertIs(parameter_test.grad, buffer)
+                self.assertIsInstance(buffer, DTensor)
+                self.assertEqual(buffer.placements, parameter_test.placements)
+                torch.testing.assert_close(
+                    buffer.to_local(), parameter_ref.grad.to_local()
+                )
+
+        optimizer_ref.step()
+        optimizer_test.step()
+        for parameter_ref, parameter_test in zip(
+            model_ref.parameters(), model_test.parameters(), strict=True
+        ):
+            torch.testing.assert_close(
+                parameter_test.to_local(), parameter_ref.to_local()
+            )
 
     def _run_fsdp_model_test(
         self,

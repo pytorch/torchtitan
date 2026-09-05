@@ -27,6 +27,7 @@ def build_minimal_trainer(
     *,
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
+    compile_enable_inplace_graph_gradient_accumulation: bool = False,
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
     compile_ep_overlap_chunk_dim: str = "batch",
@@ -61,6 +62,9 @@ def build_minimal_trainer(
                 enable=True,
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
+                enable_inplace_graph_gradient_accumulation=(
+                    compile_enable_inplace_graph_gradient_accumulation
+                ),
                 passes=[] if compile_passes is None else list(compile_passes),
                 disable_passes=(
                     []
@@ -80,6 +84,7 @@ def build_minimal_trainer(
                 ),
             ),
             model_spec=SimpleNamespace(model=model_config),
+            training=SimpleNamespace(disable_cuda_graphs=False),
             activation_checkpoint={
                 "none": None,
                 "selective": SelectiveAC.Config(),
@@ -93,6 +98,7 @@ def build_minimal_trainer(
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
+        trainer._graph_gradient_state = None
     else:
         trainer.config = SimpleNamespace(
             parallelism=SimpleNamespace(spmd_backend="partial_dtensor"),
