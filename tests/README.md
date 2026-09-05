@@ -81,16 +81,20 @@ and uses its fixed initialization path.
 - Qwen3.5 MoE FSDP 4 x TP 2, EP 4 does not have a numerical golden. Its A10G
   Real-PG results are not bitwise deterministic, so the case provides
   end-to-end coverage only.
+- DeepSeek V4 FSDP 2 x TP 2, EP 2 and Qwen3.8 MoE FSDP 4 x TP 2, EP 4 are
+  end-to-end coverage only. Neither case has a numerical golden.
 
 | A10G model | Topology (Fake-PG and Real-PG) |
 | --- | --- |
 | Llama 3 | FSDP 2 x TP 2 x CP 2 |
 | Llama 3 SFT | FSDP 2 |
 | DeepSeek V3 | FSDP 8, EP 8 |
+| DeepSeek V4 | FSDP 2 x TP 2, EP 2 |
 | GPT-OSS | FSDP 4 x TP 2, EP 4 |
 | Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 |
 | Muse Glimmer text | FSDP 8 |
 | Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 |
+| Qwen3.8 MoE multimodal | FSDP 4 x TP 2, EP 4 |
 
 Kimi K2.5 continues to run as an FSDP 8, EP 8 integration case. Its multimodal
 backward uses bicubic upsampling, whose CUDA backward has no deterministic
