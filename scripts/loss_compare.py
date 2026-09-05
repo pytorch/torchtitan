@@ -16,8 +16,8 @@ If --output-folder is specified, all outputs are organized in that
 folder with detailed analysis and statistical summaries.
 
 The --assert-equal flag can be used for CI testing to verify that
-losses are identical between runs. If losses differ, the script will
-exit with a non-zero status code.
+selected metrics are identical between runs. If metrics differ, the
+script will exit with a non-zero status code.
 
 Example usages:
 1. Compare losses between two different git commits with default config:
@@ -689,12 +689,18 @@ def generate_step_comparison(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float],
     stats_file: str | None,
+    metric_name: str = "loss",
 ) -> None:
-    """Generate step-by-step comparison."""
+    """Generate a step-by-step comparison for one metric."""
+    metric_label = metric_name.replace("_", " ").title()
     log_and_save("", stats_file)
-    log_and_save(f"{LOG_PREFIX} Step-by-step loss comparison:", stats_file)
     log_and_save(
-        f"{LOG_PREFIX} Step    Baseline Loss    Test Loss   Difference",
+        f"{LOG_PREFIX} Step-by-step {metric_name.replace('_', ' ')} comparison:",
+        stats_file,
+    )
+    log_and_save(
+        f"{LOG_PREFIX} Step    Baseline {metric_label}    "
+        f"Test {metric_label}   Difference",
         stats_file,
     )
     log_and_save(
@@ -704,13 +710,13 @@ def generate_step_comparison(
 
     # Generate comparison for common steps
     for step in sorted(set(baseline_losses.keys()) & set(test_losses.keys())):
-        baseline_loss = baseline_losses[step]
-        test_loss = test_losses[step]
-        diff = test_loss - baseline_loss
+        baseline_value = baseline_losses[step]
+        test_value = test_losses[step]
+        diff = test_value - baseline_value
 
         formatted_line = (
-            f"{LOG_PREFIX} {step:<6}  {baseline_loss:<13}    "
-            f"{test_loss:<14}   {diff:.6f}"
+            f"{LOG_PREFIX} {step:<6}  {baseline_value:<13}    "
+            f"{test_value:<14}   {diff:.6f}"
         )
         log_and_save(formatted_line, stats_file)
 
@@ -719,10 +725,56 @@ def generate_summary_statistics(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float],
     stats_file: str | None,
+    metric_name: str = "loss",
 ) -> None:
-    """Generate summary statistics."""
+    """Generate exact comparison diagnostics for one metric."""
+    common_steps = sorted(set(baseline_losses) & set(test_losses))
+    num_baseline_steps = len(baseline_losses)
+    num_test_steps = len(test_losses)
+    num_common_steps = len(common_steps)
+    num_exact_matches = sum(
+        baseline_losses[step] == test_losses[step] for step in common_steps
+    )
+    first_divergent_step = next(
+        (step for step in common_steps if baseline_losses[step] != test_losses[step]),
+        None,
+    )
+
     log_and_save(f"{LOG_PREFIX}", stats_file)
     log_and_save(f"{LOG_PREFIX} Summary statistics:", stats_file)
+    log_and_save(f"{LOG_PREFIX} metric: {metric_name}", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} steps: {num_baseline_steps}/{num_test_steps}",
+        stats_file,
+    )
+    log_and_save(f"{LOG_PREFIX} common_steps: {num_common_steps}", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} exact_matches: {num_exact_matches}/{num_common_steps}",
+        stats_file,
+    )
+    first_divergent_step_str = (
+        str(first_divergent_step) if first_divergent_step is not None else "N/A"
+    )
+    log_and_save(
+        f"{LOG_PREFIX} first_divergent_step: {first_divergent_step_str}",
+        stats_file,
+    )
+    if not common_steps:
+        max_diff = "N/A"
+    else:
+        max_absolute_diff_step = max(
+            common_steps,
+            key=lambda step: (
+                abs(test_losses[step] - baseline_losses[step]),
+                -step,
+            ),
+        )
+        max_absolute_diff = abs(
+            test_losses[max_absolute_diff_step]
+            - baseline_losses[max_absolute_diff_step]
+        )
+        max_diff = f"{max_absolute_diff:.6e} at step {max_absolute_diff_step}"
+    log_and_save(f"{LOG_PREFIX} max_abs_diff: {max_diff}", stats_file)
 
     # Calculate average losses
     def calculate_average(losses: dict[int, float]) -> float | None:
@@ -737,8 +789,11 @@ def generate_summary_statistics(
     baseline_avg_str = f"{baseline_avg}" if baseline_avg is not None else "N/A"
     test_avg_str = f"{test_avg}" if test_avg is not None else "N/A"
 
-    log_and_save(f"{LOG_PREFIX} Average baseline loss:  {baseline_avg_str}", stats_file)
-    log_and_save(f"{LOG_PREFIX} Average test loss: {test_avg_str}", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} Average baseline {metric_name}:  {baseline_avg_str}",
+        stats_file,
+    )
+    log_and_save(f"{LOG_PREFIX} Average test {metric_name}: {test_avg_str}", stats_file)
 
     # Calculate overall difference if both averages are available
     if baseline_avg is not None and test_avg is not None:
@@ -750,19 +805,23 @@ def perform_loss_analysis(
     baseline_losses: dict[int, float],
     test_losses: dict[int, float],
     stats_file: str | None,
+    metric_name: str = "loss",
 ) -> None:
-    """Perform loss comparison analysis."""
+    """Perform comparison analysis for one metric."""
     # Initialize stats file and add header
     log_and_save(f"{LOG_PREFIX} ==========================================", stats_file)
-    log_and_save(f"{LOG_PREFIX} LOSS COMPARISON ANALYSIS", stats_file)
+    log_and_save(
+        f"{LOG_PREFIX} {metric_name.replace('_', ' ').upper()} " "COMPARISON ANALYSIS",
+        stats_file,
+    )
     log_and_save(f"{LOG_PREFIX} ==========================================", stats_file)
 
-    # Check if losses were extracted successfully
-    name_losses = [("baseline", baseline_losses), ("test", test_losses)]
-    for name, losses in name_losses:
-        if not losses:
+    # Check if values were extracted successfully
+    name_values = [("baseline", baseline_losses), ("test", test_losses)]
+    for name, values in name_values:
+        if not values:
             log_and_save(
-                f"{LOG_PREFIX} Warning: No loss data for {name}.",
+                f"{LOG_PREFIX} Warning: No {metric_name} data for {name}.",
                 stats_file,
             )
             log_and_save(
@@ -773,8 +832,15 @@ def perform_loss_analysis(
             return
 
     # Generate comparison outputs
-    generate_step_comparison(baseline_losses, test_losses, stats_file)
-    generate_summary_statistics(baseline_losses, test_losses, stats_file)
+    generate_step_comparison(
+        baseline_losses, test_losses, stats_file, metric_name=metric_name
+    )
+    generate_summary_statistics(
+        baseline_losses,
+        test_losses,
+        stats_file,
+        metric_name=metric_name,
+    )
 
 
 def assert_metrics_equal(
@@ -1303,6 +1369,16 @@ def main() -> None:
             )
         log_print()
 
+        # Report diagnostics before --assert-equal can exit on a mismatch.
+        if test_metrics is not None:
+            for metric_name in metric_names:
+                perform_loss_analysis(
+                    baseline_metrics[metric_name],
+                    test_metrics[metric_name],
+                    stats_file,
+                    metric_name=metric_name,
+                )
+
         # Assert losses are equal if requested
         if args.assert_equal:
             assert_metrics_equal(baseline_metrics, test_metrics, args.import_result)
@@ -1326,11 +1402,6 @@ def main() -> None:
                 args.baseline_ngpus,
             )
 
-        # Analysis and reporting (skip in baseline-only mode as there's no test to compare)
-        if not baseline_only_mode and test_metrics is not None:
-            perform_loss_analysis(
-                baseline_metrics["loss"], test_metrics["loss"], stats_file
-            )
         print_completion_summary(
             args.output_folder, enable_seed_checkpoint, baseline_only_mode
         )
