@@ -28,7 +28,12 @@ def _batch() -> tuple[dict[str, object], torch.Tensor]:
     )
 
 
+def _bind_pp_forward_backward_body(trainer: Trainer) -> None:
+    trainer.fwd_bwd_fn = lambda *args: Trainer._pp_forward_backward_body(trainer, *args)
+
+
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
+    sentinel = torch.full((1,), -1.0)
     trainer = cast(
         Trainer,
         SimpleNamespace(
@@ -49,8 +54,10 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             config=SimpleNamespace(parallelism="PARA"),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            _pp_loss_sentinel=sentinel,
         ),
     )
+    _bind_pp_forward_backward_body(trainer)
 
     loss = Trainer.pp_forward_backward_step(
         trainer,
@@ -59,7 +66,7 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
         global_valid_tokens=torch.tensor(1),
     )
 
-    torch.testing.assert_close(loss, torch.tensor([-1.0]))
+    assert loss is sentinel
 
 
 def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
@@ -102,6 +109,7 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
             device=torch.device("cpu"),
         ),
     )
+    _bind_pp_forward_backward_body(trainer)
 
     reporting_loss = Trainer.pp_forward_backward_step(
         trainer,
@@ -117,6 +125,53 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
     assert loss_containers == [[]]
     assert all(reference() is None for reference in loss_refs)
     assert all(reference() is None for reference in activation_refs)
+
+
+def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
+    fwd_bwd_fn = MagicMock(return_value=torch.tensor(0.0))
+
+    class _FakeModel:
+        def preprocess_inputs(self, input_dict, **kwargs):
+            return (
+                input_dict["input"] + 1,
+                input_dict["labels"] + 2,
+                {"positions": input_dict["positions"] + 3},
+            )
+
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            model_parts=[_FakeModel()],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            fwd_bwd_fn=fwd_bwd_fn,
+        ),
+    )
+    global_valid_tokens = torch.tensor(2)
+
+    result = Trainer.pp_forward_backward_step(
+        trainer,
+        input_dict_mbs=[
+            {"input": torch.tensor(1), "positions": torch.tensor(10)},
+            {"input": torch.tensor(2), "positions": torch.tensor(20)},
+        ],
+        label_mbs=[torch.tensor([3]), torch.tensor([4])],
+        global_valid_tokens=global_valid_tokens,
+    )
+
+    torch.testing.assert_close(result, torch.tensor(0.0))
+    arg_mbs, kwarg_mbs, target_mbs, passed_valid_tokens = fwd_bwd_fn.call_args.args
+    torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
+    torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
+    torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
+    torch.testing.assert_close(kwarg_mbs[1]["positions"], torch.tensor(23))
+    torch.testing.assert_close(target_mbs[0], torch.tensor([5]))
+    torch.testing.assert_close(target_mbs[1], torch.tensor([6]))
+    assert passed_valid_tokens is global_valid_tokens
+    assert trainer.ntokens_seen == 2
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
