@@ -42,7 +42,7 @@ def gemma4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10,
         ),
