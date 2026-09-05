@@ -12,6 +12,15 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
 )
+from torchtitan.models.deepseek_v3 import model_registry
+from torchtitan.models.deepseek_v3.mtp import (
+    _build_mtp_stage_metadata,
+    _generate_mtp_fqn_per_model_part,
+    _validate_mtp_fqn_per_model_part,
+    MTPDecoder,
+    MTPLoss,
+    pipeline_deepseek_v3,
+)
 
 
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):
