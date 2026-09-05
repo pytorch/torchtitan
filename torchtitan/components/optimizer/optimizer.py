@@ -419,11 +419,20 @@ def register_moe_load_balancing_hook(
         model_parts: list[nn.Module],
     ) -> Iterator[tuple[nn.Module, _MoELike]]:
         for model_part in model_parts:
-            layers = model_part.get_submodule("layers")
-            assert isinstance(layers, nn.ModuleDict)
-            for transformer_block in layers.values():
-                if getattr(transformer_block, "moe_enabled", False):
-                    yield transformer_block, cast(_MoELike, transformer_block.moe)
+            # MTP decoder blocks live in ``mtp_layers`` after FSDP wrapping;
+            # they are only temporarily inserted into ``layers`` while FSDP
+            # is applied. Keep both containers in the runtime hook so MTP
+            # expert bias and usage counters receive the same update as the
+            # main decoder layers.
+            layer_containers = [model_part.get_submodule("layers")]
+            mtp_layers = getattr(model_part, "mtp_layers", None)
+            if mtp_layers is not None:
+                layer_containers.append(mtp_layers)
+            for layers in layer_containers:
+                assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
+                for transformer_block in layers.children():
+                    if getattr(transformer_block, "moe_enabled", False):
+                        yield transformer_block, cast(_MoELike, transformer_block.moe)
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         moe_layers = list(_iter_moe_layers(model_parts))
@@ -492,31 +501,23 @@ def register_moe_load_balancing_hook(
 
         moe_layer_idx = 0
         with torch.no_grad():
-            for model_part in model_parts:
-                layers = model_part.get_submodule("layers")
-                assert isinstance(layers, nn.ModuleDict)
-                for transformer_block in layers.values():
-                    if not transformer_block.moe_enabled:
-                        continue
-                    moe = cast(_MoELike, transformer_block.moe)
-                    load_balance_coeff = moe.load_balance_coeff
-                    assert load_balance_coeff is not None
+            for _transformer_block, moe in _iter_moe_layers(model_parts):
+                load_balance_coeff = moe.load_balance_coeff
+                assert load_balance_coeff is not None
 
-                    tokens_per_expert_E = tokens_per_expert_E_by_layer[
-                        moe_layer_idx
-                    ].float()
-                    moe_layer_idx += 1
+                tokens_per_expert_E = tokens_per_expert_E_by_layer[
+                    moe_layer_idx
+                ].float()
+                moe_layer_idx += 1
 
-                    # update the expert bias
-                    # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                    expert_bias_delta_E = load_balance_coeff * torch.sign(
-                        tokens_per_expert_E.mean() - tokens_per_expert_E
-                    )
-                    expert_bias_delta_E = (
-                        expert_bias_delta_E - expert_bias_delta_E.mean()
-                    )
-                    moe.expert_bias_E.add_(expert_bias_delta_E)
-                    moe.tokens_per_expert_E.zero_()
+                # update the expert bias
+                # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                expert_bias_delta_E = load_balance_coeff * torch.sign(
+                    tokens_per_expert_E.mean() - tokens_per_expert_E
+                )
+                expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
+                moe.expert_bias_E.add_(expert_bias_delta_E)
+                moe.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
