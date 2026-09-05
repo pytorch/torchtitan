@@ -75,15 +75,16 @@ def purge_thread(
 def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Whether ``a`` and ``b`` are backed by the same storage.
 
-    For ``DTensor`` the local shard's storage is compared via ``_local_tensor``
-    rather than ``to_local()``, which is autograd-aware; this is a read-only
-    identity check on the local storage.
+    For ``DTensor`` the local shard is compared via ``_local_tensor`` rather
+    than ``to_local()``, which is autograd-aware. The dispatcher-level alias
+    check also supports wrapper subclasses without directly accessible storage.
     """
     if isinstance(a, DTensor):
         a = a._local_tensor
     if isinstance(b, DTensor):
         b = b._local_tensor
-    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+    # pyrefly: ignore [missing-attribute]
+    return torch._C._is_alias_of(a, b)
 
 
 class ModelWrapper(Stateful):
