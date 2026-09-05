@@ -407,8 +407,11 @@ def _muse_glimmer_config(
             output_multiplier=output_multiplier,
             output_soft_cap_temp=20.0,
         ),
-        # Final output norm is gain-centered on 0.0.
-        norm=_gain_norm(dim, _NORM_EPS, gain_center=0.0),
+        # Keep the checkpoint's zero gain center, but initialize to unit scale.
+        norm=dataclasses.replace(
+            _gain_norm(dim, _NORM_EPS, gain_center=0.0),
+            param_init={"weight": nn.init.ones_},
+        ),
         layers=_build_muse_glimmer_layers(
             n_layers=n_layers,
             dim=dim,

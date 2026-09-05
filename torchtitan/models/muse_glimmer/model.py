@@ -56,8 +56,9 @@ def _window_mask_key(window_size: int | None) -> str:
 class RMSGainCenterNorm(RMSNorm):
     """RMSNorm whose effective scale is ``weight + gain_center``.
 
-    The learnable ``weight`` is initialized to 0 so the norm starts centered
-    on ``gain_center`` (1.0 for pre/post norms, 0.0 for the final output norm).
+    Pre/post norms initialize ``weight`` to 0 with ``gain_center=1.0``.
+    The final output norm initializes ``weight`` to 1 with ``gain_center=0.0``,
+    so all of these norms start with unit effective scale.
     """
 
     @dataclass(kw_only=True, slots=True)
