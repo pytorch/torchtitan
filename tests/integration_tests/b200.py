@@ -14,7 +14,7 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
     return [
         OverrideDefinitions(
             configs=[recipes.kimi_k3_debugmodel_mm_fsdp2],
-            test_descr="Kimi K3 multimodal FSDP",
+            test_descr="Kimi K3 multimodal SPMD-typed FSDP",
             test_name="kimi_k3_mm_fsdp",
             ngpu=2,
         ),
