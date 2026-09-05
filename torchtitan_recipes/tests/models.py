@@ -284,6 +284,20 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     return config
 
 
+def kimi_k2_5_debugmodel_muon_fsdp2_cp2_ep2() -> Trainer.Config:
+    from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
+
+    config = kimi_k2_5_debugmodel()
+    _use_spmd_types(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = "ptrr"
+    config.parallelism.expert_parallel_degree = 2
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     """One four-GPU smoke path covering PP=2, FSDP=2, and EP=2.
 

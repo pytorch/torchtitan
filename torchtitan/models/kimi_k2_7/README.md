@@ -19,8 +19,9 @@ pip install av torchvision
   position embeddings (plus a sinusoidal temporal term for video), 2D RoPE,
   pre-norm transformer blocks, temporal mean-pool + 2x2 spatial merge, then a
   2-layer MLP projector to the decoder hidden size.
-- **Multimodal forward** — projected vision embeddings are scattered into the
-  text embedding sequence at runs of the shared media placeholder token.
+- **Multimodal forward** — absolute vision-bank indices are built before CP
+  permutes and shards the token sequence, then projected vision embeddings are
+  gathered into each rank's local placeholder tokens.
 
 ## Model variants
 
@@ -45,6 +46,7 @@ The update currently uses the report values `threshold=100.0` and `alpha=0.5`.
 |---------|-------|
 | FSDP / HSDP | Decoder sharded per-layer. Without PP, the vision encoder is a separate FSDP unit; with PP, it belongs to the first-stage root FSDP unit |
 | Tensor Parallelism (TP) | Model support exists, but DistMuon recipes currently reject TP-produced `_StridedShard` layouts ([#3353](https://github.com/pytorch/torchtitan/issues/3353)) |
+| Context Parallelism (CP) | Decoder tokens are sharded across CP ranks. MoonViT remains replicated across CP, and pre-CP vision-bank indices drive rank-local fusion for preprocessed image or video inputs |
 | Expert Parallelism (EP) | DeepSeek-V3 routed + shared experts. DistMuon preserves the EP-axis `Shard(0)` storage placement while redistributing the EFSDP-axis storage placement from `Shard(1)` to compute `Shard(0)` ordered after EP when `efsdp_size * ep_size > num_experts` ([#4122](https://github.com/pytorch/torchtitan/pull/4122)) |
 | Pipeline Parallel (PP) | Vision encoder folded into the first stage; 1F1B and Interleaved1F1B schedules. DistMuon additionally requires every stage to own at least one transformer layer: a stage holding only `norm` and `lm_head` has no Muon matrices, so its param group is empty and the optimizer build fails with `matched no parameters`. This needs the stage count to approach the layer count (61 for Kimi K2), so it does not arise at realistic depths |
 
@@ -74,4 +76,3 @@ Test scripts:
   and K2.7-Code 1T checkpoints are INT4 group-quantized; the inherited
   DeepSeek-V3 adapter only handles FP8 block-scale, so the 1T config trains from
   scratch but cannot load them yet.
-- Add Context Parallel (CP) support.

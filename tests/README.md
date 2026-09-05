@@ -98,13 +98,14 @@ implementation, so the case does not carry a numerical golden. For manual
 comparisons, `loss_compare.py` can create the model-only seed checkpoint with a
 model-equivalent AdamW config while the measured run continues to use DistMuon.
 
-Additional A10G Real-PG-only cases exercise CP and pipeline communication:
+Additional A10G Real-PG-only cases exercise CP, EP, and pipeline communication:
 
-| A10G model | Pipeline-parallel topology |
+| A10G model | Real-PG-only topology |
 | --- | --- |
 | DeepSeek V3 | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
 | Llama 3 | FSDP 2 x TP 2 x PP 2, 1F1B |
 | GPT-OSS | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
+| Kimi K2.5 | FSDP 2 x CP 2, EP 2 |
 
 On pull requests, the Fake-PG lane and the `real_pg_required` Real-PG scope
 partition the enabled A10G tests without overlap. Post-merge and scheduled
