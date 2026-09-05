@@ -6,13 +6,15 @@
 
 # @lint-ignore-every CITRINE
 
+import copy
 import unittest
 from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, DTensor, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -401,6 +403,434 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonHSDPOwnedCompute(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_multi_axis_owned_compute_uses_packed_redistribution(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        shapes = ((4, 3), (1, 4, 3), (4, 3), (1, 4, 3))
+        values = tuple(
+            torch.arange(12, device=device)
+            .reshape(shape)
+            .float()
+            .div_(10)
+            .add_(parameter_index + 1)
+            for parameter_index, shape in enumerate(shapes)
+        )
+        gradients = tuple(
+            torch.arange(1, 13, device=device)
+            .reshape(shape)
+            .float()
+            .add_(parameter_index)
+            .div_(17)
+            for parameter_index, shape in enumerate(shapes)
+        )
+        placements = (Replicate(), Shard(0))
+        fqns = tuple(f"layers.{index}.weight" for index in range(4))
+
+        def run_steps(*, deduplicate_replicas):
+            parameters = tuple(
+                torch.nn.Parameter(distribute_tensor(value.clone(), mesh, placements))
+                for value in values
+            )
+            owned_mesh_axes = (
+                {"dp_replicate": Owned(), "dp_shard": Owned()}
+                if deduplicate_replicas
+                else {"dp_shard": Owned()}
+            )
+            optimizer = build_dist_muon(
+                [{"params": parameters, "param_names": fqns}],
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis=owned_mesh_axes,
+                    )
+                    for fqn in fqns
+                },
+                bucket_configs=[BucketConfig(patterns=("layers.*",))],
+                lr=0.03,
+                weight_decay=0.2,
+                momentum=0.8,
+                nesterov=True,
+                ns_steps=2,
+            )
+            num_local_compute_calls = 0
+            num_local_all_to_all_calls = 0
+            compute_update = optimizer._compute_update
+            all_to_all_single = dist.all_to_all_single
+
+            def count_compute(compute_layout, compute):
+                nonlocal num_local_compute_calls
+                num_local_compute_calls += 1
+                compute_update(compute_layout, compute)
+
+            def count_all_to_all(*args, **kwargs):
+                nonlocal num_local_all_to_all_calls
+                num_local_all_to_all_calls += 1
+                return all_to_all_single(*args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    optimizer,
+                    "_compute_update",
+                    side_effect=count_compute,
+                ),
+                mock.patch.object(
+                    dist,
+                    "all_to_all_single",
+                    side_effect=count_all_to_all,
+                ),
+            ):
+                for reverse_rows in (False, True):
+                    for parameter, gradient in zip(parameters, gradients, strict=True):
+                        step_gradient = (
+                            gradient.flip(-2).contiguous() if reverse_rows else gradient
+                        )
+                        parameter.grad = distribute_tensor(
+                            step_gradient.clone(), mesh, placements
+                        )
+                    optimizer.step()
+
+            num_global_compute_calls = torch.tensor(
+                num_local_compute_calls,
+                device=device,
+                dtype=torch.int64,
+            )
+            dist.all_reduce(num_global_compute_calls)
+            return (
+                tuple(
+                    parameter.to_local().detach().clone() for parameter in parameters
+                ),
+                tuple(
+                    optimizer.state[parameter]["momentum_buffer"]
+                    .to_local()
+                    .detach()
+                    .clone()
+                    for parameter in parameters
+                ),
+                num_local_compute_calls,
+                int(num_global_compute_calls.item()),
+                num_local_all_to_all_calls,
+                optimizer,
+            )
+
+        (
+            baseline_params,
+            baseline_momenta,
+            _,
+            baseline_compute_calls,
+            _,
+            _,
+        ) = run_steps(deduplicate_replicas=False)
+        (
+            deduplicated_params,
+            deduplicated_momenta,
+            deduplicated_local_compute_calls,
+            deduplicated_compute_calls,
+            deduplicated_all_to_all_calls,
+            deduplicated_optimizer,
+        ) = run_steps(deduplicate_replicas=True)
+
+        self.assertEqual(baseline_compute_calls, 16)
+        self.assertEqual(deduplicated_compute_calls, 8)
+        # Four equal-cost whole-matrix tasks are assigned one per rank.
+        self.assertEqual(deduplicated_local_compute_calls, 2)
+        self.assertEqual(deduplicated_all_to_all_calls, 4)
+        bucket_plan = deduplicated_optimizer._bucket_plans[0]
+        self.assertEqual(len(bucket_plan.group.participants), self.world_size)
+        self.assertTrue(bucket_plan.storage_to_compute_schedule.has_remote_transfers)
+        self.assertTrue(bucket_plan.compute_to_storage_schedule.has_remote_transfers)
+        for actual, expected in zip(deduplicated_params, baseline_params, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        for actual, expected in zip(
+            deduplicated_momenta, baseline_momenta, strict=True
+        ):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    @with_comms
+    def test_balances_heterogeneous_whole_matrix_tasks(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        shapes = ((9, 3), (1, 8, 3), (7, 3), (1, 6, 3), (5, 3), (4, 3))
+        placements = (Replicate(), Shard(0))
+        parameters = tuple(
+            torch.nn.Parameter(
+                distribute_tensor(torch.ones(shape, device=device), mesh, placements)
+            )
+            for shape in shapes
+        )
+        fqns = tuple(f"layers.{index}.weight" for index in range(len(parameters)))
+        optimizer = build_dist_muon(
+            [{"params": parameters, "param_names": fqns}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_replicate": Owned(),
+                        "dp_shard": Owned(),
+                    }
+                )
+                for fqn in fqns
+            },
+            bucket_configs=[BucketConfig(patterns=("layers.*",))],
+        )
+        bucket_plan = optimizer._bucket_plans[0]
+        owner_ranks = []
+        for redistribution_plan in bucket_plan.redistribution_plans:
+            owners = [
+                partition.participant
+                for partition in redistribution_plan.compute_partitions
+                if partition.tensor_shape != (0,)
+            ]
+            self.assertEqual(len(owners), 1)
+            owner_ranks.extend(owners)
+
+        self.assertEqual(set(owner_ranks), set(bucket_plan.group.participants))
+        self.assertEqual(
+            sorted(owner_ranks.count(rank) for rank in bucket_plan.group.participants),
+            [1, 1, 2, 2],
+        )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonHSDPShardCompute(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_replica_sharding_preserves_storage_and_compute_order(self):
+        device = torch.device(self.device_type, self.rank)
+        for replica_first in (True, False):
+            names = (
+                ("dp_replicate", "dp_shard")
+                if replica_first
+                else ("dp_shard", "dp_replicate")
+            )
+            mesh = init_device_mesh(self.device_type, (2, 2), mesh_dim_names=names)
+            placements = tuple(
+                Replicate() if name == "dp_replicate" else Shard(0) for name in names
+            )
+            for num_matrices in (8, 3, 1):
+                with self.subTest(replica_first=replica_first, matrices=num_matrices):
+                    value = (
+                        torch.arange(
+                            num_matrices * 5 * 3, device=device, dtype=torch.float32
+                        )
+                        .reshape(num_matrices, 5, 3)
+                        .div_(13)
+                    )
+                    parameter = torch.nn.Parameter(
+                        distribute_tensor(value.clone(), mesh, placements)
+                    )
+
+                    def make_optimizer(order, parameter=parameter):
+                        return build_dist_muon(
+                            [{"params": [parameter], "param_names": ["weight"]}],
+                            compute_sharding_by_fqn={
+                                "weight": ComputeLayout(
+                                    shardings_by_mesh_axis={
+                                        "dp_replicate": Shard(0),
+                                        "dp_shard": Shard(0),
+                                    },
+                                    shard_order_by_tensor_dim=order,
+                                )
+                            },
+                            bucket_configs=[BucketConfig(patterns=("weight",))],
+                            lr=0.03,
+                            weight_decay=0.2,
+                            momentum=0.0,
+                            nesterov=False,
+                        )
+
+                    if replica_first:
+                        with self.assertRaisesRegex(
+                            ValueError, "must declare shard_order"
+                        ):
+                            make_optimizer({})
+                    optimizer = make_optimizer(
+                        {0: ("dp_shard", "dp_replicate")} if replica_first else {}
+                    )
+                    coordinate = mesh.get_coordinate()
+                    shard_coordinate = coordinate[names.index("dp_shard")]
+                    replica_coordinate = coordinate[names.index("dp_replicate")]
+                    shard_size, shard_offset = Shard.local_shard_size_and_offset(
+                        num_matrices, 2, shard_coordinate
+                    )
+                    compute_size, compute_offset = Shard.local_shard_size_and_offset(
+                        shard_size, 2, replica_coordinate
+                    )
+                    gradient = value.sin()
+                    parameter.grad = distribute_tensor(
+                        gradient.clone(), mesh, placements
+                    )
+                    captured = []
+
+                    def capture_compute(_layout, compute, captured=captured):
+                        captured.append(compute.clone())
+                        compute.mul_(0.5).add_(0.25)
+
+                    with mock.patch.object(
+                        optimizer, "_compute_update", side_effect=capture_compute
+                    ):
+                        optimizer.step()
+                    if compute_size:
+                        self.assertEqual(len(captured), 1)
+                        torch.testing.assert_close(
+                            captured[0],
+                            gradient.narrow(
+                                0, shard_offset + compute_offset, compute_size
+                            ),
+                            rtol=0,
+                            atol=0,
+                        )
+                    else:
+                        self.assertEqual(captured, [])
+                    expected = value * (1 - 0.03 * 0.2)
+                    expected.add_(
+                        gradient * 0.5 + 0.25,
+                        alpha=-_adjust_muon_learning_rate(0.03, None, value.shape),
+                    )
+                    torch.testing.assert_close(
+                        parameter.full_tensor(), expected, rtol=0, atol=0
+                    )
+                    self.assertEqual(parameter.placements, placements)
+                    bucket = optimizer._bucket_plans[0]
+                    self.assertEqual(
+                        set(bucket.group.participants),
+                        set(mesh["dp_replicate"].mesh.tolist()),
+                    )
+
+    @with_comms
+    def test_replica_sharding_matches_muon_across_checkpoint(self):
+        device = torch.device(self.device_type, self.rank)
+        mesh = init_device_mesh(
+            self.device_type, (2, 2), mesh_dim_names=("dp_replicate", "dp_shard")
+        )
+        placements = (Replicate(), Shard(0))
+        value = torch.arange(3 * 5 * 3, device=device).reshape(3, 5, 3).float().div_(31)
+        for nesterov in (False, True):
+            parameters = [
+                torch.nn.Parameter(distribute_tensor(value.clone(), mesh, placements))
+                for _ in range(2)
+            ]
+
+            def make_optimizer(parameter, shard_replicas, nesterov=nesterov):
+                return build_dist_muon(
+                    [{"params": [parameter], "param_names": ["weight"]}],
+                    compute_sharding_by_fqn={
+                        "weight": ComputeLayout(
+                            shardings_by_mesh_axis=(
+                                {"dp_replicate": Shard(0), "dp_shard": Shard(0)}
+                                if shard_replicas
+                                else {"dp_shard": Shard(0)}
+                            ),
+                            shard_order_by_tensor_dim=(
+                                {0: ("dp_shard", "dp_replicate")}
+                                if shard_replicas
+                                else {}
+                            ),
+                        )
+                    },
+                    bucket_configs=[BucketConfig(patterns=("weight",))],
+                    lr=0.03,
+                    weight_decay=0.2,
+                    momentum=0.8,
+                    nesterov=nesterov,
+                    ns_steps=2,
+                )
+
+            optimizers = [
+                make_optimizer(param, bool(index))
+                for index, param in enumerate(parameters)
+            ]
+            compute_numel = [0, 0]
+            for step in range(10):
+                gradient = (value * 0.37 + 0.2 + step).sin()
+                before = [param.to_local().detach().clone() for param in parameters]
+                for index, (param, optimizer) in enumerate(
+                    zip(parameters, optimizers, strict=True)
+                ):
+                    param.grad = distribute_tensor(gradient.clone(), mesh, placements)
+                    with mock.patch.object(
+                        optimizer, "_compute_update", wraps=optimizer._compute_update
+                    ) as compute_update:
+                        optimizer.step()
+                    if index < 2:
+                        compute_numel[index] += sum(
+                            call.args[1].numel()
+                            for call in compute_update.call_args_list
+                        )
+                # BF16 batched kernels may differ with batch size. Check updates
+                # as well as parameters so large initial values cannot hide error.
+                torch.testing.assert_close(
+                    parameters[1].to_local() - before[1],
+                    parameters[0].to_local() - before[0],
+                    rtol=2e-2,
+                    atol=2e-2,
+                )
+                torch.testing.assert_close(
+                    parameters[1].to_local(),
+                    parameters[0].to_local(),
+                    rtol=2e-2,
+                    atol=2e-2,
+                )
+                torch.testing.assert_close(
+                    optimizers[1].state[parameters[1]]["momentum_buffer"].to_local(),
+                    optimizers[0].state[parameters[0]]["momentum_buffer"].to_local(),
+                    rtol=0,
+                    atol=0,
+                )
+                if step > 4:
+                    torch.testing.assert_close(
+                        parameters[2].to_local(),
+                        parameters[1].to_local(),
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        optimizers[2]
+                        .state[parameters[2]]["momentum_buffer"]
+                        .to_local(),
+                        optimizers[1]
+                        .state[parameters[1]]["momentum_buffer"]
+                        .to_local(),
+                        rtol=0,
+                        atol=0,
+                    )
+                if step == 4:
+                    state = copy.deepcopy(optimizers[1].state_dict())
+                    restored_parameter = torch.nn.Parameter(
+                        parameters[1].detach().clone()
+                    )
+                    restored = make_optimizer(restored_parameter, True)
+                    restored.load_state_dict(state)
+                    parameters.append(restored_parameter)
+                    optimizers.append(restored)
+            counts = torch.tensor(compute_numel, device=device)
+            dist.all_reduce(counts)
+            self.assertEqual(counts.tolist(), [20 * value.numel(), 10 * value.numel()])
 
 
 if __name__ == "__main__":
