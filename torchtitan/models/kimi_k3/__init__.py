@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Conv1d, Embedding, Linear
+from torchtitan.models.common import Conv1d, Embedding, Linear, RouterGateLinear
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
@@ -231,7 +231,12 @@ def _latent_moe_config(
         router=TokenChoiceTopKRouter.Config(
             num_experts=num_experts,
             top_k=top_k,
-            gate=_linear(dim, num_experts),
+            gate=RouterGateLinear.Config(
+                in_features=dim,
+                out_features=num_experts,
+                bias=False,
+                param_init=_LINEAR_INIT,
+            ),
             score_func="sigmoid",
             route_norm=True,
             route_scale=1.0,

@@ -116,7 +116,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     Each selector has the form ``MODULE_FQN_PATTERN::OP``. Separate multiple
     selectors with ``|`` and quote the full argument in the shell. For example:
-    ``layers.*.moe.router.gate::aten.mm.default | layers.*.attention.wkv_a::aten.mm.default``.
+    ``layers.*.moe.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
     """
 
     pass_pipeline: str = "default"

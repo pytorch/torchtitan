@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -194,7 +194,7 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: Linear.Config
+        gate: RouterGateLinear.Config
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
@@ -309,12 +309,10 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             scores_TE: Full routing scores ``(T, E)``.
         """
-        # Compute gate in float32 to help stability of expert load balancing.
-        with torch.autocast(device_type=x_TD.device.type, dtype=torch.float32):
-            scores_TE = self.gate(x_TD)
+        scores_TE = self.gate(x_TD)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
-        # scores_TE is already float32 from the autocast above.
+        # RouterGateLinear returns scores_TE in FP32.
         if self.score_func == "sigmoid":
             scores_TE = torch.sigmoid(scores_TE)
         elif self.score_func == "softmax":
