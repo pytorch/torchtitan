@@ -54,15 +54,15 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             config=SimpleNamespace(parallelism="PARA"),
             ntokens_seen=0,
             device=torch.device("cpu"),
-            _pp_loss_sentinel=sentinel,
+            _pp_loss_sentinel_on_non_last_stage=sentinel,
         ),
     )
     _bind_pp_forward_backward_body(trainer)
 
-    loss = Trainer.pp_forward_backward_step(
+    loss = Trainer.forward_backward_step(
         trainer,
-        input_dict_mbs=[{"input": torch.ones(1)}],
-        label_mbs=[torch.ones(1)],
+        input_dict=[{"input": torch.ones(1)}],
+        labels=[torch.ones(1)],
         global_valid_tokens=torch.tensor(1),
     )
 
@@ -111,10 +111,10 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
     )
     _bind_pp_forward_backward_body(trainer)
 
-    reporting_loss = Trainer.pp_forward_backward_step(
+    reporting_loss = Trainer.forward_backward_step(
         trainer,
-        input_dict_mbs=[{"input": torch.ones(1)}] * 2,
-        label_mbs=[torch.ones(1)] * 2,
+        input_dict=[{"input": torch.ones(1)}] * 2,
+        labels=[torch.ones(1)] * 2,
         global_valid_tokens=torch.tensor(2),
     )
 
@@ -152,13 +152,13 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     )
     global_valid_tokens = torch.tensor(2)
 
-    result = Trainer.pp_forward_backward_step(
+    result = Trainer.forward_backward_step(
         trainer,
-        input_dict_mbs=[
+        input_dict=[
             {"input": torch.tensor(1), "positions": torch.tensor(10)},
             {"input": torch.tensor(2), "positions": torch.tensor(20)},
         ],
-        label_mbs=[torch.tensor([3]), torch.tensor([4])],
+        labels=[torch.tensor([3]), torch.tensor([4])],
         global_valid_tokens=global_valid_tokens,
     )
 
@@ -212,30 +212,6 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     }
 
 
-@pytest.mark.parametrize(
-    ("gradient_accumulation_steps", "sdc_config", "expected"),
-    [
-        (1, None, 2),
-        (4, None, 8),
-        (1, SimpleNamespace(num_steps=1, num_replays=1), 3),
-        (4, SimpleNamespace(num_steps=2, num_replays=1), 10),
-        (4, SimpleNamespace(num_steps=-1, num_replays=1), 10),
-    ],
-)
-def test_cuda_graph_warmup_covers_two_optimizer_steps(
-    gradient_accumulation_steps: int,
-    sdc_config: SimpleNamespace | None,
-    expected: int,
-) -> None:
-    trainer = Trainer.__new__(Trainer)
-    trainer.config = SimpleNamespace(  # pyrefly: ignore [bad-assignment]
-        sdc_replayer=sdc_config
-    )
-    trainer.gradient_accumulation_steps = gradient_accumulation_steps
-
-    assert Trainer._num_cuda_graph_warmup_iterations(trainer) == expected
-
-
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
         def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
@@ -257,7 +233,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             PassthroughCUDAGraphWrapper,
         ),
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd, num_warmup_iterations=2)
+        runner = wrap_with_cuda_graph(fwd_bwd)
         for value in (1.0, 2.0, 3.0):
             graph_loss.fill_(value)
             loss = runner(
@@ -295,7 +271,7 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             PassthroughCUDAGraphWrapper,
         ),
     ):
-        run = wrap_with_cuda_graph(fn, num_warmup_iterations=2)
+        run = wrap_with_cuda_graph(fn)
         output = run(
             [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
             scale=torch.tensor(3.0),

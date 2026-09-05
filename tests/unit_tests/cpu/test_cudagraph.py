@@ -42,6 +42,63 @@ def test_cudagraph_wrapper_rejects_negative_warmup_iterations() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("gradient_accumulation_steps", "sdc_num_steps", "sdc_num_replays", "expected"),
+    [
+        (1, 0, 0, 2),
+        (4, 0, 0, 8),
+        (1, 1, 1, 3),
+        (4, 2, 1, 10),
+        (4, -1, 1, 10),
+        (4, 1, 3, 11),
+        (4, 5, 3, 14),
+    ],
+)
+def test_cuda_graph_warmup_covers_two_optimizer_steps(
+    gradient_accumulation_steps: int,
+    sdc_num_steps: int,
+    sdc_num_replays: int,
+    expected: int,
+) -> None:
+    graph = MagicMock()
+    fn = MagicMock(side_effect=lambda value: value)
+    with (
+        patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(torch.version, "hip", None),
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+        patch.object(_manager, "_graph_pool", object()),
+        patch.object(_manager, "_stream", MagicMock()),
+        patch("torch.cuda.current_stream", return_value=MagicMock()),
+        patch("torch.cuda.stream", return_value=nullcontext()),
+        patch("torch.cuda.CUDAGraph", return_value=graph) as graph_constructor,
+        patch("torch.cuda.graph", return_value=nullcontext()),
+        patch(
+            "torchtitan.distributed.cudagraph.get_kernel_annotations",
+            return_value={},
+        ),
+    ):
+        run = wrap_with_cuda_graph(
+            fn,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            sdc_num_steps=sdc_num_steps,
+            sdc_num_replays=sdc_num_replays,
+        )
+        value = torch.tensor(1.0)
+        for _ in range(expected):
+            run(value)
+        graph_constructor.assert_not_called()
+        assert fn.call_count == expected
+
+        run(value)
+        graph_constructor.assert_called_once()
+        graph.replay.assert_called_once()
+        run(value)
+        assert fn.call_count == expected + 1
+        assert graph.replay.call_count == 2
+
+
 def test_tensor_input_indices_control_replay_copies() -> None:
     static_input = torch.tensor(1)
     excluded_input = torch.tensor(2)
@@ -131,7 +188,7 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
             return_value={},
         ),
     ):
-        run = wrap_with_cuda_graph(fn)
+        run = wrap_with_cuda_graph(fn, num_warmup_steps=1)
         torch.testing.assert_close(
             run(
                 [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],

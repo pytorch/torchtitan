@@ -354,8 +354,14 @@ class CUDAGraphWrapper:
         self._non_tensor_inputs.clear()
 
 
+# TODO: Unify PP and non-PP callable signatures to restore strict input typing.
 def wrap_with_cuda_graph(
-    fn: Callable[..., torch.Tensor], *, num_warmup_iterations: int = 1
+    fn: Callable[..., torch.Tensor],
+    *,
+    gradient_accumulation_steps: int = 1,
+    sdc_num_steps: int = 0,
+    sdc_num_replays: int = 0,
+    num_warmup_steps: int = 2,
 ) -> Callable[..., torch.Tensor]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -363,9 +369,16 @@ def wrap_with_cuda_graph(
     tensor metadata across calls. After capture, tensor outputs alias
     graph-owned storage that is overwritten by the next replay.
 
+    Two optimizer steps are a conservative warmup default, allowing an eager
+    step after lazy optimizer state initialization. One full step may suffice;
+    a fixed warmup count does not guarantee all lazy initialization is complete.
+
     Args:
         fn: Callable to capture.
-        num_warmup_iterations: Number of eager invocations before capture.
+        gradient_accumulation_steps: Forward-backward calls per optimizer step.
+        sdc_num_steps: Initial optimizer steps checked by SDC, or -1 for all.
+        sdc_num_replays: Additional calls for each SDC-checked optimizer step.
+        num_warmup_steps: Number of eager optimizer steps before capture.
     """
 
     if not (
@@ -378,6 +391,17 @@ def wrap_with_cuda_graph(
             "using eager execution."
         )
         return fn
+
+    # SDC checks only the first accumulation group of each checked step.
+    num_checked_steps = (
+        num_warmup_steps
+        if sdc_num_steps == -1
+        else min(num_warmup_steps, sdc_num_steps)
+    )
+    num_warmup_iterations = (
+        num_warmup_steps * gradient_accumulation_steps
+        + num_checked_steps * sdc_num_replays
+    )
 
     # Every wrapper is registered to the manager in this module and persists
     # until cudagraph_teardown is called.
