@@ -6,6 +6,7 @@
 
 import unittest
 from collections import Counter
+from contextlib import contextmanager
 from copy import deepcopy
 
 import torch
@@ -26,9 +27,14 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
     TracedResult,
+    TraceTimeTransform,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
+)
+from torchtitan.experiments.graph_trainer.simple_cp import (
+    simple_cp_flex,
+    SimpleCPTransform,
 )
 
 
@@ -570,6 +576,48 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
                 forward(x_other, y_other),
                 run_traced(traced)(x_other, y_other),
             )
+        )
+
+
+class TestMinimalFXTracerTraceTimeTransforms(unittest.TestCase):
+    def test_trace_time_transform_is_active_during_trace(self):
+        transform_active = False
+
+        class ActivateTransform(TraceTimeTransform):
+            @contextmanager
+            def activate(self):
+                nonlocal transform_active
+                transform_active = True
+                try:
+                    yield
+                finally:
+                    transform_active = False
+
+        def forward(x):
+            return x + 1 if transform_active else x - 1
+
+        x = torch.randn(4)
+        traced = minimal_fx_tracer(
+            forward, trace_time_transforms=[ActivateTransform()]
+        )(x)
+
+        self.assertFalse(transform_active)
+        torch.testing.assert_close(run_traced(traced)(x), x + 1)
+
+    def test_simple_cp_transform_without_mesh_is_noop(self):
+        def attention(query, key, value, **kwargs):
+            return query + key + value
+
+        marked_attention = simple_cp_flex(attention)
+        query = torch.randn(4)
+        key = torch.randn(4)
+        value = torch.randn(4)
+        traced = minimal_fx_tracer(
+            marked_attention, trace_time_transforms=[SimpleCPTransform(None)]
+        )(query, key, value)
+
+        torch.testing.assert_close(
+            run_traced(traced)(query, key, value), query + key + value
         )
 
 
