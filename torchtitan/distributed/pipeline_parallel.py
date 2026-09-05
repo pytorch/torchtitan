@@ -383,7 +383,7 @@ def pipeline_llm(
     model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-    stage_args_factory: Callable[[int, int], tuple[Any, Any]] | None = None,
+    stage_metadata_fn: Callable[[int, int], tuple[Any, Any]] | None = None,
 ) -> PipelineResult:
     """Build a pipeline for a decoder model.
 
@@ -399,9 +399,9 @@ def pipeline_llm(
         model_config: Decoder model configuration.
         parallelize_fn: Function applying stage-local parallelisms.
         loss_fn: Loss used by the pipeline schedule.
-        stage_args_factory: Optional factory that takes a global virtual-stage
+        stage_metadata_fn: Optional function that takes a global virtual-stage
             index and total stage count, then returns example input and output
-            arguments used to configure ``PipelineStage`` communication metadata.
+            tensors used to configure ``PipelineStage`` boundary metadata.
 
     Returns:
         The schedule, local model parts, stage ownership, and runtime hooks.
@@ -431,7 +431,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
-        static_stage_args=stage_args_factory,
+        stage_metadata_fn=stage_metadata_fn,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -552,6 +552,27 @@ def _get_pipeline_metadata(
     # Higher weights mean these modules are treated as "heavier" in the distribution
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
+
+    if parallelism.module_fqns_per_model_part is not None:
+        num_virtual_stages = len(parallelism.module_fqns_per_model_part)
+        if num_virtual_stages == 0 or num_virtual_stages % parallel_dims.pp != 0:
+            raise ValueError(
+                f"Explicit pipeline layout has {num_virtual_stages} stages, "
+                "which must be a positive multiple of pipeline parallel size "
+                f"{parallel_dims.pp}."
+            )
+        stages_per_rank = num_virtual_stages // parallel_dims.pp
+        if is_single_stage_schedule and stages_per_rank != 1:
+            raise ValueError(
+                "Single-stage schedules require exactly one explicit stage "
+                f"per rank, got {stages_per_rank}."
+            )
+        if not is_single_stage_schedule and stages_per_rank < 2:
+            raise ValueError(
+                "Multi-stage schedules require at least two explicit stages "
+                f"per rank, got {stages_per_rank}."
+            )
+        return num_virtual_stages, num_layers, input_weight, output_weight
 
     # Calculate number of virtual stages
     if layers_per_stage is not None:
@@ -914,7 +935,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-    static_stage_args: Callable[[int, int], tuple[Any, Any]] | None = None,
+    stage_metadata_fn: Callable[[int, int], tuple[Any, Any]] | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -938,7 +959,8 @@ def _pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
-        static_stage_args: Optional factory for fixed input/output metadata.
+        stage_metadata_fn: Optional function returning example input and output
+            tensors for each stage's boundary metadata.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -963,8 +985,8 @@ def _pipeline_module_split(
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
         input_args, output_args = (
-            static_stage_args(stage_idx, num_stages)
-            if static_stage_args is not None
+            stage_metadata_fn(stage_idx, num_stages)
+            if stage_metadata_fn is not None
             else (None, None)
         )
         stage = PipelineStage(

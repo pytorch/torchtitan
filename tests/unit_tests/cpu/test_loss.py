@@ -71,7 +71,7 @@ class TestLoss(unittest.TestCase):
             torch.tensor([12, 0, 0, 22, 23, 24, 0, 0]),
         )
 
-    def test_mtp_loss_masks_document_boundaries_from_positions(self):
+    def test_mtp_loss_uses_model_validity_masks(self):
         """MTP auxiliary labels must not cross packed-document boundaries."""
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
         recorded_labels = []
@@ -86,13 +86,29 @@ class TestLoss(unittest.TestCase):
         # TorchTitan positions reset at each document boundary.
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
         labels = torch.arange(8)
+        _, depth_1_mask = roll_mtp_sequence(
+            labels,
+            shift=1,
+            positions=positions,
+            fill_value=0,
+            return_valid_mask=True,
+        )
+        _, depth_2_mask = roll_mtp_sequence(
+            labels,
+            shift=2,
+            positions=positions,
+            fill_value=0,
+            return_valid_mask=True,
+        )
         pred = (
             torch.zeros(8, 16),
             torch.zeros(8, 16),
             torch.zeros(8, 16),
+            depth_1_mask,
+            depth_2_mask,
         )
 
-        loss_fn(pred, labels, positions=positions)
+        loss_fn(pred, labels)
 
         self.assertEqual(len(recorded_labels), 3)
         torch.testing.assert_close(recorded_labels[0], labels)
@@ -111,10 +127,8 @@ class TestLoss(unittest.TestCase):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
         labels = torch.zeros(1, 4, dtype=torch.long)
-        positions = torch.arange(4).unsqueeze(0)
-
-        with self.assertRaisesRegex(ValueError, "expects a tuple"):
-            loss_fn(pred, labels, positions=positions)
+        with self.assertRaisesRegex(ValueError, "expects the flat tuple"):
+            loss_fn(pred, labels)
 
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
@@ -524,6 +538,7 @@ class _AddMTPBlock(nn.Module):
 class _FakeMTPDecoder(MTPDecoder):
     def __init__(self, *, skip_lm_head: bool):
         nn.Module.__init__(self)
+        self.num_mtp_layers = 1
         self._skip_lm_head = skip_lm_head
         self.tok_embeddings = nn.Embedding(16, 4)
         self.layers = nn.ModuleDict({"0": _IdentityDecoderBlock()})
@@ -726,13 +741,17 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         hidden_outputs = _FakeMTPDecoder(skip_lm_head=True)(tokens, positions)
         self.assertIsInstance(hidden_outputs, tuple)
-        self.assertEqual(len(hidden_outputs), 2)
+        self.assertEqual(len(hidden_outputs), 3)
         self.assertEqual(hidden_outputs[0].shape, (4, 4))
         self.assertEqual(hidden_outputs[1].shape, (4, 4))
+        torch.testing.assert_close(
+            hidden_outputs[2], torch.tensor([True, False, True, False])
+        )
 
         full_outputs = _FakeMTPDecoder(skip_lm_head=False)(tokens, positions)
         self.assertEqual(full_outputs[0].shape, (4, 16))
         self.assertEqual(full_outputs[1].shape, (4, 16))
+        torch.testing.assert_close(full_outputs[2], hidden_outputs[2])
 
     def test_chunked_mtp_matches_full_objective(self):
         torch.manual_seed(42)
@@ -755,6 +774,16 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         labels = torch.randint(0, vocab_size, (seq_len,))
         positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+        masks = tuple(
+            roll_mtp_sequence(
+                labels,
+                shift=depth,
+                positions=positions,
+                fill_value=0,
+                return_valid_mask=True,
+            )[1]
+            for depth in (1, 2)
+        )
         hidden = tuple(torch.randn(seq_len, dim) for _ in range(3))
         reference_hidden = tuple(
             value.detach().clone().requires_grad_(True) for value in hidden
@@ -765,16 +794,17 @@ class TestChunkedLossWrapper(unittest.TestCase):
         global_valid_tokens = (labels != IGNORE_INDEX).sum()
 
         reference_value, _ = full_loss(
-            tuple(model_ref.output(value) for value in reference_hidden),
+            (
+                *(model_ref.output(value) for value in reference_hidden),
+                *masks,
+            ),
             labels,
             global_valid_tokens,
-            positions=positions,
         )
         chunked_value, _ = chunked_loss(
-            chunked_hidden,
+            (*chunked_hidden, *masks),
             labels,
             global_valid_tokens,
-            positions=positions,
         )
         reference_value.backward()
         chunked_value.backward()

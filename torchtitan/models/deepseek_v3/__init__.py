@@ -36,7 +36,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
-from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
+from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock, pipeline_deepseek_v3
 from .parallelize import parallelize_deepseekv3
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
@@ -46,6 +46,7 @@ __all__ = [
     "MTPLoss",
     "MTPDecoder",
     "MTPTransformerBlock",
+    "pipeline_deepseek_v3",
     "deepseekv3_configs",
 ]
 
@@ -665,7 +666,7 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=pipeline_llm,
+        pipelining_fn=pipeline_deepseek_v3 if num_mtp_layers else pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
