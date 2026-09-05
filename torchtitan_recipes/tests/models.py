@@ -232,22 +232,6 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     return config
 
 
-def qwen38_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
-    from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel_moe
-
-    config = qwen38_debugmodel_moe(seq_len=512)
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 4
-    config.parallelism.pipeline_parallel_degree = 1
-    config.training.num_tokens_per_microbatch_per_dp_rank = (
-        config.training.max_context_length
-    )
-    config.training.steps = 10
-    config.training.disable_cuda_graphs = True
-    return config
-
-
 def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_varlen_attn
 

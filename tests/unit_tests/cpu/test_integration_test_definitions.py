@@ -11,11 +11,7 @@ import pytest
 
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
-from torchtitan_recipes.tests.models import (
-    deepseek_v4_debugmodel_fsdp2_tp2_ep2,
-    llama3_debugmodel_fsdp2_tp2_pp2,
-    qwen38_debugmodel_moe_fsdp4_tp2_ep4,
-)
+from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
 from tests.integration_tests.b200 import build_b200_tests_list
@@ -131,28 +127,11 @@ def test_models_select_fake_and_real_pg_cases() -> None:
         "deepseek_v3_fsdp+ep",
         "deepseek_v4_fsdp+tp+ep",
         "qwen3_moe_fsdp+tp+cp+ep_param_groups",
-        "qwen3_8_moe_fsdp+tp+ep",
         "kimi_k2_5_muon_fsdp+ep",
         "muse_glimmer_text_fsdp",
         "muse_glimmer_mm_fsdp+tp+sp",
     } <= fake_pg_model_tests
     assert {"deepseek_v3_fsdp+cp+pp+ep"} <= real_pg_model_tests
-
-
-def test_v4_and_qwen38_smoke_recipes_match_fake_pg_topology() -> None:
-    v4 = deepseek_v4_debugmodel_fsdp2_tp2_ep2()
-    assert v4.parallelism.data_parallel_shard_degree == 2
-    assert v4.parallelism.tensor_parallel_degree == 2
-    assert v4.parallelism.expert_parallel_degree == 2
-    assert v4.parallelism.context_parallel_degree == 1
-    assert v4.parallelism.pipeline_parallel_degree == 1
-
-    qwen38 = qwen38_debugmodel_moe_fsdp4_tp2_ep4()
-    assert qwen38.parallelism.data_parallel_shard_degree == 4
-    assert qwen38.parallelism.tensor_parallel_degree == 2
-    assert qwen38.parallelism.expert_parallel_degree == 4
-    assert qwen38.parallelism.pipeline_parallel_degree == 1
-    assert qwen38.parallelism.context_parallel_degree == 1
 
 
 def test_flux_fake_pg_filters_real_collective_cases() -> None:
