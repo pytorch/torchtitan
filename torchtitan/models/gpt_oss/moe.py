@@ -177,6 +177,8 @@ class GptOssGroupedExperts(GroupedExperts):
         h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
+        if routed_scores_R is not None:
+            h_RF = (h_RF.float() * routed_scores_R.reshape(-1, 1)).to(h_RF.dtype)
         h_RD = self._grouped_mm(A=h_RF, weight_EOI=mlp2_weight_EDF, offs=offsets_E)
 
         # Apply custom autograd function to scale bias in forward but not in backward
@@ -186,6 +188,8 @@ class GptOssGroupedExperts(GroupedExperts):
         b2_RD = b2.repeat_interleave(
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
+        if routed_scores_R is not None:
+            b2_RD = b2_RD.float() * routed_scores_R.reshape(-1, 1)
         b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
         return h_RD + b2_RD
 
