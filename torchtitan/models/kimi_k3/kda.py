@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from attn_gym.linear.context_parallel import ContextParallelPlan
+from attn_gym.linear.context_parallel import ContextParallelRouting
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
@@ -85,18 +85,11 @@ class KDAKernel(Module):
         dt_bias_HK: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor | None = None,
-        cp_plan: ContextParallelPlan | None = None,
+        cp_routing: ContextParallelRouting | None = None,
         cp_group: dist.ProcessGroup | None = None,
     ) -> torch.Tensor:
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
-        capability = torch.cuda.get_device_capability(q_1THK.device)
-        if capability not in {(10, 0), (10, 3)}:
-            raise RuntimeError(
-                "Attention Gym KDA requires Blackwell SM100/SM103; "
-                f"got CUDA capability {capability}."
-            )
-
         gate_1THK = bound_gate(
             raw_gate_1THK,
             # TODO: The long-term solution is to specify mixed precision per FQN
@@ -106,20 +99,19 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
-        if cp_plan is not None:
+        if cp_routing is not None:
             # KCP: the sequence stays sharded; attn-gym exchanges per-fragment
             # affine state summaries so each rank scans from its true entry state.
             from attn_gym.linear.kda import context_parallel_kda
 
-            assert cu_seqlens is not None
+            assert cp_group is not None
             output_1THV, _ = context_parallel_kda(
                 l2norm(q_1THK),
                 l2norm(k_1THK),
                 v_1THV,
                 gate_1THK,
                 raw_beta_1TH.float().sigmoid(),
-                cu_seqlens=cu_seqlens,
-                plan=cp_plan,
+                routing=cp_routing,
                 group=cp_group,
             )
             return output_1THV
@@ -216,10 +208,10 @@ class InnerKDA(Module):
         *,
         cu_seqlens: torch.Tensor | None,
         conv_state: torch.Tensor | None = None,
-        cp_plan: ContextParallelPlan | None = None,
+        cp_routing: ContextParallelRouting | None = None,
         cp_group: dist.ProcessGroup | None = None,
     ) -> torch.Tensor:
-        """Causal conv then the delta-rule scan; the CP kernel passes its plan."""
+        """Causal conv then the delta-rule scan; the CP kernel passes its routing."""
         conv_output_1TC = causal_conv1d(
             mixed_qkv_1TC,
             conv_weight_C1W[:, 0],
@@ -243,7 +235,7 @@ class InnerKDA(Module):
             A_log_H,
             dt_bias_HK,
             cu_seqlens=cu_seqlens,
-            cp_plan=cp_plan,
+            cp_routing=cp_routing,
             cp_group=cp_group,
         )
         return output_1THV.squeeze(0)

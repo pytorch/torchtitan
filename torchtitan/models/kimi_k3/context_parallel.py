@@ -29,7 +29,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from attn_gym.linear.context_parallel import ContextParallelPlan
+from attn_gym.linear.context_parallel import ContextParallelPlan, ContextParallelRouting
 
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.cp_attention import (
@@ -44,7 +44,7 @@ __all__ = [
     "ContextParallelInnerKDA",
     "MLAAllGatherCPFlexAttention",
     "MLAUlyssesCPFlexAttention",
-    "kcp_plan",
+    "kcp_routing",
 ]
 
 _SEQ_DIM = 0
@@ -150,18 +150,26 @@ class MLAAllGatherCPFlexAttention(AllGatherCPFlexAttention):
         )
 
 
-def kcp_plan(seq_len_local: int, group: dist.ProcessGroup) -> ContextParallelPlan:
-    """attn-gym routing plan for one sequence split into equal contiguous shards.
+def kcp_routing(
+    seq_len_local: int,
+    group: dist.ProcessGroup,
+    *,
+    conv_history: int,
+    device: torch.device,
+) -> ContextParallelRouting:
+    """attn-gym routing for one sequence split into equal contiguous shards.
 
-    Every rank owns ``[rank * L, (rank + 1) * L)`` of one document; CP rejects a
-    load balancer so this table is the sharding the trainer actually applied.
-    Host-only, so it costs nothing to rebuild per call.
+    Every rank owns ``[rank * L, (rank + 1) * L)`` of one document; CP rejects
+    a load balancer so this table is the sharding the trainer actually
+    applied. The plan is host-only; the routing is its device tensors, sized
+    by the span and the conv's history.
     """
     world = dist.get_world_size(group)
-    ranges = [[(r * seq_len_local, (r + 1) * seq_len_local)] for r in range(world)]
-    return ContextParallelPlan.from_token_ranges(
-        [0, seq_len_local * world], ranges, dist.get_rank(group)
+    fragments = [[(r * seq_len_local, (r + 1) * seq_len_local)] for r in range(world)]
+    plan = ContextParallelPlan.from_fragments(
+        [0, seq_len_local * world], fragments, dist.get_rank(group)
     )
+    return plan.routing(device, conv_history=conv_history)
 
 
 class ContextParallelInnerKDA(ContextParallelKernel, InnerKDA):
@@ -194,6 +202,23 @@ class ContextParallelInnerKDA(ContextParallelKernel, InnerKDA):
                 f"import failed with: {err}."
             ) from err
 
+    def _routing(
+        self,
+        seq_len_local: int,
+        group: dist.ProcessGroup,
+        conv_history: int,
+        device: torch.device,
+    ) -> ContextParallelRouting:
+        # The routing's tensors depend on the span and the history alone, so
+        # one per shape serves every layer and step.
+        key = (seq_len_local, dist.get_world_size(group), conv_history, str(device))
+        cache = self.__dict__.setdefault("_routing_cache", {})
+        if key not in cache:
+            cache[key] = kcp_routing(
+                seq_len_local, group, conv_history=conv_history, device=device
+            )
+        return cache[key]
+
     def forward(
         self,
         query_TC: torch.Tensor,
@@ -224,14 +249,16 @@ class ContextParallelInnerKDA(ContextParallelKernel, InnerKDA):
             conv_k_weight_C1W,
             conv_v_weight_C1W,
         )
-        cp_plan = kcp_plan(mixed_qkv_1TC.shape[1], group)
+        seq_len_local = mixed_qkv_1TC.shape[1]
+        routing = self._routing(
+            seq_len_local, group, conv_weight_C1W.shape[-1] - 1, mixed_qkv_1TC.device
+        )
+        # One document per rank shard: the local span is one segment.
         cu_seqlens = torch.tensor(
-            cp_plan.cu_seqlens, dtype=torch.int32, device=mixed_qkv_1TC.device
+            [0, seq_len_local], dtype=torch.int32, device=mixed_qkv_1TC.device
         )
         # The causal conv needs the previous rank's tail as history.
-        conv_state = context_parallel_conv_history(
-            mixed_qkv_1TC, cp_plan, group, conv_weight_C1W.shape[-1] - 1
-        )
+        conv_state = context_parallel_conv_history(mixed_qkv_1TC, routing, group)
         return self._conv_and_scan(
             mixed_qkv_1TC,
             conv_weight_C1W,
@@ -241,6 +268,6 @@ class ContextParallelInnerKDA(ContextParallelKernel, InnerKDA):
             dt_bias_HK,
             cu_seqlens=cu_seqlens,
             conv_state=conv_state,
-            cp_plan=cp_plan,
+            cp_routing=routing,
             cp_group=group,
         )
