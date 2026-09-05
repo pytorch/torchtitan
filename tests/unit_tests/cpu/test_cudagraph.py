@@ -8,12 +8,14 @@ from contextlib import nullcontext
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from torchtitan.distributed.cudagraph import (
     _manager,
     CUDAGraphWrapper,
     get_cudagraph_annotations,
+    wrap_with_cuda_graph,
 )
 
 
@@ -81,3 +83,65 @@ def test_cudagraph_wrapper_collects_annotations() -> None:
             enable_annotations=True,
             capture_error_mode="thread_local",
         )
+
+
+def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
+    graph = cast(torch.cuda.CUDAGraph, MagicMock())
+    graph_stream = MagicMock()
+    current_stream = MagicMock()
+    fn = MagicMock(side_effect=lambda batches, *, scale: batches[1]["x"] * scale)
+
+    with (
+        patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(torch.version, "hip", None),
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+        patch.object(_manager, "_graph_pool", object()),
+        patch.object(_manager, "_stream", graph_stream),
+        patch("torch.cuda.current_stream", return_value=current_stream),
+        patch("torch.cuda.stream", return_value=nullcontext()),
+        patch("torch.cuda.CUDAGraph", return_value=graph),
+        patch("torch.cuda.graph", return_value=nullcontext()),
+        patch(
+            "torchtitan.distributed.cudagraph.get_kernel_annotations",
+            return_value={},
+        ),
+    ):
+        run = wrap_with_cuda_graph(fn)
+        torch.testing.assert_close(
+            run(
+                [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
+                scale=torch.tensor(3.0),
+            ),
+            torch.tensor(6.0),
+        )
+        torch.testing.assert_close(
+            run(
+                [{"x": torch.tensor(4.0)}, {"x": torch.tensor(5.0)}],
+                scale=torch.tensor(4.0),
+            ),
+            torch.tensor(20.0),
+        )
+        torch.testing.assert_close(
+            run(
+                [{"x": torch.tensor(6.0)}, {"x": torch.tensor(7.0)}],
+                scale=torch.tensor(5.0),
+            ),
+            torch.tensor(20.0),
+        )
+
+        with pytest.raises(ValueError, match="structure must remain constant"):
+            run([{"x": torch.tensor(1.0)}], scale=torch.tensor(1.0))
+        with pytest.raises(ValueError, match="same shape, dtype, and device"):
+            run(
+                [{"x": torch.ones(2)}, {"x": torch.tensor(1.0)}],
+                scale=torch.tensor(1.0),
+            )
+
+    assert fn.call_count == 2
+    captured_batches = fn.call_args.args[0]
+    torch.testing.assert_close(captured_batches[0]["x"], torch.tensor(6.0))
+    torch.testing.assert_close(captured_batches[1]["x"], torch.tensor(7.0))
+    torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(5.0))
+    assert cast(MagicMock, graph.replay).call_count == 2
