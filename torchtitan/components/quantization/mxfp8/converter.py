@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
 
+import torch
+
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
@@ -30,6 +32,27 @@ try:
 except ImportError as import_error:
     MXFP8Linear = None
     _mxfp8_linear_import_error = import_error
+
+
+def _torchao_nightly_install_command() -> str:
+    """Return the pip command that installs a torchao nightly for this torch.
+
+    torchao nightlies live on download.pytorch.org rather than PyPI and are
+    published per accelerator build, so the channel has to come from the torch
+    actually installed. ``--upgrade`` matters as much as ``--pre``: an existing
+    but older nightly is the common case, and without it pip leaves it alone.
+    ``USE_CPP=0`` skips building the C++ extensions, which MXFP8 does not need.
+    """
+    if torch.version.cuda:
+        channel = "cu" + torch.version.cuda.replace(".", "")
+    elif torch.version.hip:
+        channel = "rocm" + ".".join(torch.version.hip.split(".")[:2])
+    else:
+        channel = "cpu"
+    return (
+        "USE_CPP=0 python -m pip install --pre --upgrade torchao "
+        f"--index-url https://download.pytorch.org/whl/nightly/{channel}"
+    )
 
 
 class MXFP8LinearConverter(QuantizationConverter):
@@ -87,8 +110,9 @@ class MXFP8LinearConverter(QuantizationConverter):
         if MXFP8Linear is None:
             raise ImportError(
                 "MXFP8 linear layers need torchao's 32x32 swizzled cast "
-                "kernels, added in pytorch/ao#4777 and not in any release up "
-                "to v0.18.0. Install a torchao that contains it."
+                "kernels, which are not in any release up to v0.18.0, so a "
+                "nightly is required:\n\n"
+                f"    {_torchao_nightly_install_command()}\n"
             ) from _mxfp8_linear_import_error
 
         if not has_cuda_capability(10, 0):

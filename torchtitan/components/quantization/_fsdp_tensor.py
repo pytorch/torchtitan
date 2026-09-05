@@ -481,6 +481,19 @@ class _UnshardedFSDPTensor(_FSDPTensorBase):
         for name in _unsharded_inner_tensor_names(type(operands)):
             setattr(self, f"_{name}", getattr(operands, name))
 
+    def __repr__(self) -> str:  # noqa: D401
+        # The default tensor printer indexes into the data, which the dispatch
+        # guard below refuses once FSDP has freed the storage. Printing is
+        # diagnostics, not a read, and callers are not always ours: AOTAutograd
+        # renders graph metadata through ``dataclass_repr`` when structured
+        # logging is on, and an exception there aborts the compile. Report the
+        # logical metadata instead of the values.
+        return (
+            f"{type(self).__name__}(shape={tuple(self.shape)}, "
+            f"dtype={self.dtype}, device={self.device}, "
+            f"operands={type(self._operands).__name__})"
+        )
+
     def __tensor_flatten__(self):
         operands_cls = type(self._operands)
         names = [f"_{name}" for name in _unsharded_inner_tensor_names(operands_cls)]
