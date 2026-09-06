@@ -143,7 +143,9 @@ class ScaledBiasRowwiseLinear(Linear):
             self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         )
         bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-        bias = bias / self.tp_degree
+        if self.tp_degree > 1:
+            # Scale the forward contribution without scaling the replicated bias gradient.
+            bias = bias + (bias / self.tp_degree - bias).detach()
         return F.linear(input, weight, bias)
 
 
