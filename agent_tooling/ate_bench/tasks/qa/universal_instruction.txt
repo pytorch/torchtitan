@@ -1,0 +1,9 @@
+Your task is to explore this training framework codebase and answer the question
+that follows. Every claim must be verified against the code on disk before you
+state it: use your CLI tools (Read, Grep, Glob, Bash) to locate the exact symbol,
+file, and line, then cite the path/to/file.py:LINE you actually read. Wrap your
+final response in <final_answer> tags, trace the execution path step by step, and
+give one citation per claim. If a feature is genuinely absent from this codebase,
+say so explicitly and cite negative evidence (the grep command and pattern that
+returned zero matches, or the file you inspected that does not contain it). A
+correct "absent, verified" answer is preferred over a fabricated one.
