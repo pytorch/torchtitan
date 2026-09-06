@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, fields
+from typing import Literal
 
-from renderers import config_from_name, create_renderer, Renderer
+from renderers import AutoRendererConfig, config_from_name, create_renderer, Renderer
 
 from torchtitan.config import Configurable
 
@@ -30,7 +31,7 @@ _RENDERER_BY_MODEL = {
     # the library owns. See rl/models/muse_glimmer/renderer.py.
     "muse_glimmer": "muse_glimmer",
     "default": "default",  # llama3
-    "auto": "auto",  # ignores knobs, resolves from tokenizer,
+    "auto": "auto",  # resolves from tokenizer; carries only thinking_retention
 }
 
 
@@ -49,8 +50,14 @@ class RendererConfig(Configurable.Config):
         tool_parser: Tool-call parser name, when the renderer supports it.
         reasoning_parser: Reasoning parser name, when the renderer supports it.
         enable_thinking: Let the model emit reasoning, when supported.
-        preserve_all_thinking: Keep historical reasoning in future prompts.
-        preserve_thinking_between_tool_calls: Keep reasoning during tool loops.
+        preserve_all_thinking: Removed upstream; see `thinking_retention`.
+        preserve_thinking_between_tool_calls: Removed upstream; see
+            `thinking_retention`.
+        thinking_retention: Historical-reasoning policy, forwarded to `renderers`.
+            `"all"` keeps reasoning across the whole history, `"tool_cycle"` keeps
+            it within a tool loop, and `None` defers to the chat template. It is
+            carried through auto-resolution; `DefaultRenderer` is the one renderer
+            that cannot honour an explicit policy.
 
     Every field defaults to `None`; a non-`None` value overrides that knob on the
     chosen renderer's config, otherwise the renderer keeps its own default.
@@ -69,6 +76,7 @@ class RendererConfig(Configurable.Config):
     enable_thinking: bool | None = None
     preserve_all_thinking: bool | None = None
     preserve_thinking_between_tool_calls: bool | None = None
+    thinking_retention: Literal["tool_cycle", "all"] | None = None
 
     def build(self, *, tokenizer_path: str) -> Renderer:
         # TODO(renderers#70): use TorchTitan's tokenizer once `renderers` supports
@@ -95,8 +103,65 @@ class RendererConfig(Configurable.Config):
 
             _muse_glimmer_renderer.register()
         renderer_config = config_from_name(renderer_name) if renderer_name else None
+
+        # `renderers` replaced these two bools with the single `thinking_retention`
+        # enum (PrimeIntellect-ai/renderers#88), so neither is a field on a renderer
+        # config any more and the name-match forwarding below drops them without a
+        # word -- and drops them before the library's own validator, which raises
+        # and names the replacement, can see them. Naming a renderer does not bring
+        # them back, so report the replacement rather than the path.
+        removed = sorted(
+            name
+            for name in (
+                "preserve_all_thinking",
+                "preserve_thinking_between_tool_calls",
+            )
+            # Only a `True` asked for something the renderer can no longer be told;
+            # an explicit `False` meant "defer to the chat template", which is what
+            # dropping it already does.
+            if getattr(self, name)
+            and name not in getattr(type(renderer_config), "model_fields", {})
+        )
+        if removed:
+            raise ValueError(
+                f"{removed} were replaced by `thinking_retention` in `renderers`. "
+                'Set thinking_retention="all" to keep reasoning across the whole '
+                'history, or "tool_cycle" to keep it within a tool loop. '
+                "DefaultRenderer cannot honour an explicit policy; the "
+                "model-specific renderers can."
+            )
+
         if renderer_config is None:
-            return create_renderer(tokenizer, None)
+            # `name=None` / "auto" resolves the renderer from the tokenizer.
+            # AutoRendererConfig carries `thinking_retention` into the resolved
+            # config and deliberately nothing else, so forward that one knob and
+            # report the rest instead of dropping them.
+            unused = sorted(
+                field.name
+                for field in fields(self)
+                # The removed knobs are answered above and only when set to
+                # `True`; an explicit `False` on them means "defer to the chat
+                # template", which is what this path does anyway.
+                if field.name
+                not in (
+                    "name",
+                    "thinking_retention",
+                    "preserve_all_thinking",
+                    "preserve_thinking_between_tool_calls",
+                )
+                and getattr(self, field.name) is not None
+            )
+            if unused:
+                raise ValueError(
+                    f"RendererConfig set {unused} with name={self.name!r}. "
+                    "Auto-resolution forwards only `thinking_retention`; name the "
+                    "renderer to use the rest."
+                )
+            if self.thinking_retention is None:
+                return create_renderer(tokenizer, None)
+            return create_renderer(
+                tokenizer, AutoRendererConfig(thinking_retention=self.thinking_retention)
+            )
 
         # Rebuild the typed config and pass parameters
         # that are not None and are supported
