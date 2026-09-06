@@ -84,7 +84,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         layer_num: str,
     ) -> tuple[str, str]:
         new_key = self.from_hf_map[abstract_key]
-        if len(getattr(self.model_config, "mtp_layers", [])) > 0:
+        if getattr(self.model_config, "mtp_layers", None):
             # pyrefly: ignore [missing-attribute]
             num_main_layers = len(self.model_config.layers)
             layer_idx = int(layer_num)
@@ -162,17 +162,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         for key, value in state_dict.items():
             if "moe.routed_experts.inner_experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                if key.startswith("mtp_layers."):
-                    abstract_key = abstract_key.replace(
-                        "mtp_layers.{}.",
-                        "layers.{}.",
-                        1,
-                    ).replace("mtp_layers.{}.", "layers.{}.", 1)
-                    # pyrefly: ignore [missing-attribute]
-                    layer_num = str(len(self.model_config.layers) + int(layer_num))
-                new_abstract_key = to_hf_map[abstract_key]
+                new_abstract_key, layer_num = self._map_to_hf_layer_key(key, to_hf_map)
 
                 # Store the GroupedExperts Weight metadata for from_hf()
                 if isinstance(value, DTensor):
