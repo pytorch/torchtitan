@@ -14,8 +14,8 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import (
-    dp_local_context,
     maybe_set_sparse_mesh,
+    spmd_local_context,
     spmd_mesh_size,
 )
 from torchtitan.distributed.utils import get_spmd_backend
@@ -435,7 +435,7 @@ class SeqwiseLoadBalanceLoss(LoggedAuxLoss):
         # after the reduction the stats have Varying@DP with no PartitionSpec,
         # so all consumers of those stats must run under the same DP-local
         # mesh semantics.
-        with dp_local_context():
+        with spmd_local_context("dp"):
             combined_2E = self._seqwise_counts(scores_TE, topk_expert_ids_TK)
             # Child boundary already reduced; split the (counts, prob_sums).
             E = scores_TE.size(-1)

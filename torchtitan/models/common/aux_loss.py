@@ -182,7 +182,8 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
     Returns `{metric_name}/mean` per group, `{}` if none configured. All ranks
     call this at log time; value is the last completed step.
 
-    TODO: replace with the GPU tensor logging effort.
+    TODO(#4202): migrate aux-loss metric collection to the distributed tensor
+    logging framework once it lands.
     """
 
     if not LoggedAuxLoss._group_counts:

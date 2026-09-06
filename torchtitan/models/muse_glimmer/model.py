@@ -15,7 +15,10 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    spmd_local_context,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -35,7 +38,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     build_vision_bank_indices,
     gather_vision_embeds,
-    multimodal_context,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -520,7 +522,7 @@ class MuseGlimmerModel(Decoder):
         # is already hidden states, so injection is skipped there.
         if self.tok_embeddings is not None:
             h_TD = self.tok_embeddings(tokens)
-            with multimodal_context():
+            with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
                     h_TD,
                     pixel_values=pixel_values,

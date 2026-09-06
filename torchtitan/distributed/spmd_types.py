@@ -33,7 +33,7 @@ __all__ = [
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
     "current_spmd_mesh",
-    "dp_local_context",
+    "spmd_local_context",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
     "maybe_set_sparse_mesh",
@@ -157,14 +157,24 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
-def dp_local_context() -> contextlib.AbstractContextManager[None]:
-    """Context manager treating the DP mesh axis as a local axis.
+def spmd_local_context(
+    *local_axes: str,
+) -> contextlib.AbstractContextManager[None]:
+    """Context manager treating the named mesh axes as local axes.
 
-    A no-op outside spmd_types or when DP has size 1.
+    Local axes retain per-coordinate SPMD semantics during global type
+    checking: each coordinate selects an independent tensor, and only the
+    remaining axes describe that tensor's global sharding.  This is a no-op
+    outside spmd_types and for axes with size 1.
     """
-    if get_spmd_backend() == "spmd_types" and spmd_mesh_size("dp") > 1:
-        return spmd.set_current_mesh(local_axes=("dp",))
-    return contextlib.nullcontext()
+    if get_spmd_backend() != "spmd_types":
+        return contextlib.nullcontext()
+    active_axes = tuple(
+        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
+    )
+    if not active_axes:
+        return contextlib.nullcontext()
+    return spmd.set_current_mesh(local_axes=active_axes)
 
 
 @contextlib.contextmanager
@@ -287,6 +297,11 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     reduction (Partial -> Invariant/Replicate), whose sequential all-reduces
     are order-independent; shard moves and order changes are not supported.
 
+    Note: sequential all-reduces on multiple process groups do not guarantee
+    bitwise-identical results on every rank on all backends (NCCL backend:
+    https://github.com/pytorch/pytorch/issues/171916).  Avoid multi-axis
+    reductions for values that ranks must compare bitwise.
+
     TODO(pianpwk): this is transitional code while ShardingConfig-based
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
@@ -340,6 +355,8 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         if len(changed_axes) > 1:
             # Multi-axis moves are allowed only as pure reductions
             # (P -> I/R): sequential all-reduces are order-independent.
+            # NCCL does not guarantee bitwise-identical all-reduce results on
+            # every rank across different process groups; see issue 171916.
             non_reductions = [
                 axis_name
                 for axis_name in changed_axes

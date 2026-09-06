@@ -308,7 +308,7 @@ def _seqwise_counts_sharding_config(*, enable_ep: bool) -> ShardingConfig:
 
     With the fold-batch-dim training layout the router still outputs one
     ``(tokens, experts)`` stream per dp rank. ``SeqwiseLoadBalanceLoss.forward``
-    calls this child inside ``dp_local_context()``, so the child sums over
+    calls this child inside ``spmd_local_context("dp")``, so the child sums over
     tokens with DP treated as local. Its ``(2E,)`` output is Partial on CP and
     TP but Varying on DP (each rank owns an independent stream; DP must not be
     reduced). The boundary all-reduces CP and, under EP token sharding, TP.
