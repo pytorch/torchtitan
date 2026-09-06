@@ -5187,6 +5187,65 @@ class TestChunkPasses(TestCase):
         self.assertFalse(free_symbols(x.meta["val"].shape[1]))
         self.assertNotIn(batch_symbol, free_symbols(x.meta["val"].shape[0]))
 
+    def test_concretize_ep_chunk_symbolic_shapes_preserves_dynamic_gather_length(
+        self,
+    ):
+        from torch.fx.experimental.symbolic_shapes import free_symbols, ShapeEnv
+
+        shape_env = ShapeEnv()
+        fake_mode = torch._subclasses.FakeTensorMode(
+            allow_non_fake_inputs=True, shape_env=shape_env
+        )
+        with fake_mode:
+            seq = shape_env.create_unbacked_symint()
+            gathered_tokens = shape_env.create_unbacked_symint()
+            torch._dynamo.override_optimization_hint(seq, 8)
+            torch._dynamo.override_optimization_hint(gathered_tokens, 5)
+            x_meta = torch.empty(seq, 4)
+            indices_meta = torch.empty(gathered_tokens, dtype=torch.int64)
+            gathered_meta = x_meta[indices_meta]
+            expanded_meta = gathered_meta.reshape(1, -1, 4)
+
+        # DSV4 gathers complete compression blocks using independent metadata,
+        # then flattens [1, gathered_tokens, hidden_dim]. Only seq is chunked.
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        indices = graph.placeholder("gather_indices")
+        gathered = graph.call_function(torch.ops.aten.index.Tensor, args=(x, [indices]))
+        expanded = graph.call_function(
+            torch.ops.aten.reshape.default, args=(gathered, [1, -1, 4])
+        )
+        size = graph.call_function(torch.ops.aten.sym_size.int, args=(expanded, 1))
+        flattened = graph.call_function(
+            torch.ops.aten.reshape.default, args=(expanded, [size, 4])
+        )
+        graph.output(flattened)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        x.meta["val"] = x_meta
+        x.meta[CHUNK_SYMBOL_HINTS_META] = {next(iter(free_symbols(seq))): 8}
+        indices.meta["val"] = indices_meta
+        gathered.meta["val"] = gathered_meta
+        expanded.meta["val"] = expanded_meta
+        size.meta["val"] = gathered_tokens
+        flattened.meta["val"] = gathered_meta
+
+        real_x = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        # Establish that the graph works before the pass, with lengths that
+        # differ from the optimization hint. No CUDA execution is needed.
+        for count in (3, 6):
+            real_indices = torch.arange(count)
+            self.assertEqual(gm(real_x, real_indices), real_x[real_indices])
+
+        concretize_ep_chunk_symbolic_shapes_pass(gm, [x_meta, indices_meta])
+
+        # Execute the same transformed graph with both runtime lengths.
+        # The unfixed pass replaces size with 5, so the first call raises:
+        # RuntimeError: shape '[5, 4]' is invalid for input of size 12.
+        for count in (3, 6):
+            with self.subTest(gathered_tokens=count):
+                real_indices = torch.arange(count)
+                self.assertEqual(gm(real_x, real_indices), real_x[real_indices])
+
     def test_chunk_copied_meta_rewrites_chunk_symbol_inside_product(self):
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
