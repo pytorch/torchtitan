@@ -6,12 +6,13 @@
 
 """Parallelization for Kimi K2.5 (MoonViT3d vision encoder + DeepSeekV3 decoder).
 
-TP/SP/EP is applied by ``model.parallelize(parallel_dims)`` from the
+TP/SP/CP/EP is applied by ``model.parallelize(parallel_dims)`` from the
 ``ShardingConfig`` that ``set_kimi_k2_5_sharding_config`` sets on every
 sub-config (see ``sharding.py``). FSDP is then applied in two parts: the vision
 encoder as a single unit (its compute is small, so one all-gather beats many
-per-layer ones), then the decoder with MoE-aware per-layer wrapping. Context
-Parallel is not supported.
+per-layer ones), then the decoder with MoE-aware per-layer wrapping. CP shards
+the decoder token activations while MoonViT inputs and activations are
+replicated across the CP axis.
 """
 
 import torch.nn as nn
@@ -43,21 +44,15 @@ def parallelize_kimi_k2_5(
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
-    """Apply TP/EP, activation checkpointing, ``torch.compile``, and FSDP.
+    """Apply TP/CP/EP, activation checkpointing, ``torch.compile``, and FSDP.
 
-    Order: config-based TP/EP (``model.parallelize``) -> activation
+    Order: config-based TP/CP/EP (``model.parallelize``) -> activation
     checkpointing -> compile (including async TP setup) -> FSDP (vision encoder
     as a single unit, then the MoE-aware decoder).
 
     NOTE: the passed-in model should preferably be on meta device; otherwise it
     must fit in GPU or CPU memory.
     """
-    if parallel_dims.cp_enabled:
-        raise NotImplementedError(
-            "Context Parallel is not yet supported for Kimi K2.5: vision scatter "
-            "needs the full sequence before CP would shard it."
-        )
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
