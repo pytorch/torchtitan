@@ -45,13 +45,16 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-EMA_OPTIMIZER = "ema_optimizer"
+# "EMA" is also the class name (torchtitan.components.ema.EMA), aliased on
+# import below to avoid shadowing this state-dict key constant, which follows
+# the same NAME = "name" convention as MODEL/OPTIMIZER/etc. above.
+EMA = "ema"
 
 if TYPE_CHECKING:
     import torch.nn as nn
 
     from torchtitan.components.data.loader import BaseDataLoader
-    from torchtitan.components.ema import EMAOptimizersContainer
+    from torchtitan.components.ema import EMA as EMAContainer  # noqa: N811
     from torchtitan.components.optimizer import (
         LRSchedulersContainer,
         OptimizersContainer,
@@ -127,11 +130,10 @@ class CheckpointManager(BaseCheckpointManager):
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
-        ema_optimizer (EMAOptimizersContainer): Online EMA of model weights.
-            Always built and passed in (see EMAOptimizersContainer), so its
-            checkpoint contribution is empty when EMA is disabled.
+        ema (Optional[EMA]): Online EMA of model weights, or None when the
+            user hasn't configured one (see torchtitan.components.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
-            previous 5 components.
+            previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
@@ -163,7 +165,7 @@ class CheckpointManager(BaseCheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
-        ema_optimizer: EMAOptimizersContainer,
+        ema: EMAContainer | None,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
@@ -184,9 +186,10 @@ class CheckpointManager(BaseCheckpointManager):
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
-                EMA_OPTIMIZER: ema_optimizer,
             }
         )
+        if ema is not None:
+            self.states[EMA] = ema
 
         # Loading & Saving Policy
         self.load_only = config.load_only
@@ -422,14 +425,12 @@ class CheckpointManager(BaseCheckpointManager):
         super()._load_checkpoint(
             states, checkpoint_id, from_hf=from_hf, from_quantized=from_quantized
         )
-        # EMA_OPTIMIZER wasn't restored from the checkpoint (excluded, or a
-        # model_only load that never requested it) -- reseed it from the
-        # just-loaded model weights instead of leaving it at its pre-load
-        # (fresh-init) values. MODEL is never excludable, so its presence
-        # distinguishes this from torchft's per-replica dataloader-only load,
-        # which also calls _load_checkpoint but never includes MODEL.
-        if MODEL in states and EMA_OPTIMIZER in self.states and EMA_OPTIMIZER not in states:
-            self.states[EMA_OPTIMIZER].load_state_dict({})
+        # Reseed EMA from the just-loaded weights if it wasn't itself restored
+        # (excluded, or a model_only load). MODEL is never excludable, so its
+        # presence rules out torchft's per-replica dataloader-only load, which
+        # also calls _load_checkpoint but never includes MODEL.
+        if MODEL in states and EMA in self.states and EMA not in states:
+            self.states[EMA].load_state_dict({})
 
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
