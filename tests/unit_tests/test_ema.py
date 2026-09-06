@@ -12,8 +12,9 @@ import unittest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
-from torchtitan.components.ema import EMAOptimizersContainer
+from torchtitan.components.ema import EMA
 
 
 class TestEMADynamicDecay(unittest.TestCase):
@@ -25,7 +26,7 @@ class TestEMADynamicDecay(unittest.TestCase):
 
     def test_default_n1_matches_closed_form(self):
         model = nn.Linear(4, 4)
-        ema = EMAOptimizersContainer.Config(enable=True).build(model_parts=[model])
+        ema = EMA.Config().build(model_parts=[model])
         expected = ema.optimizers[0].state[model.weight]["ema_params"].clone()
         for step in range(1, 6):
             with torch.no_grad():
@@ -41,9 +42,7 @@ class TestEMADynamicDecay(unittest.TestCase):
         firings, not the raw step count, or it ages far faster than
         intended whenever update_every_n_steps > 1."""
         model = nn.Linear(4, 4)
-        ema = EMAOptimizersContainer.Config(enable=True, update_every_n_steps=2).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(update_every_n_steps=2).build(model_parts=[model])
         expected = ema.optimizers[0].state[model.weight]["ema_params"].clone()
         fire_count = 0
         for step in range(1, 11):
@@ -63,9 +62,7 @@ class TestEMADynamicDecay(unittest.TestCase):
         """step_bias lets a deliberate Trainer.step reset keep the EMA aging
         as if training had continued uninterrupted."""
         model = nn.Linear(4, 4)
-        ema = EMAOptimizersContainer.Config(enable=True, step_bias=6).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(step_bias=6).build(model_parts=[model])
         start = ema.optimizers[0].state[model.weight]["ema_params"].clone()
         with torch.no_grad():
             model.weight.fill_(7.0)
@@ -79,9 +76,7 @@ class TestEMADynamicDecay(unittest.TestCase):
         """A fixed `decay` bypasses the half-life schedule entirely -- same
         value regardless of how many times it's fired."""
         model = nn.Linear(4, 4)
-        ema = EMAOptimizersContainer.Config(enable=True, decay=0.9).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(decay=0.9).build(model_parts=[model])
         expected = ema.optimizers[0].state[model.weight]["ema_params"].clone()
         for step in range(1, 4):
             with torch.no_grad():
@@ -91,12 +86,74 @@ class TestEMADynamicDecay(unittest.TestCase):
             actual = ema.optimizers[0].state[model.weight]["ema_params"]
             torch.testing.assert_close(actual, expected, atol=1e-6, rtol=0)
 
-    def test_disabled_is_true_noop(self):
-        model = nn.Linear(4, 4)
-        ema = EMAOptimizersContainer.Config(enable=False).build(model_parts=[model])
+
+class _ModelWithExpertBias(nn.Module):
+    """Toy stand-in for a module with a non-gradient-updated buffer (e.g.
+    MoE's expert_bias_E, updated by a load-balancing heuristic)."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+        self.register_buffer("expert_bias_E", torch.zeros(4))
+
+
+class TestEMABufferSupport(unittest.TestCase):
+    """CPU-only: verifies buffer_patterns tracks matching buffers alongside
+    parameters, folded into the same "ema" checkpoint key."""
+
+    def test_matched_buffer_converges_like_a_parameter(self):
+        model = _ModelWithExpertBias()
+        ema = EMA.Config(buffer_patterns=["expert_bias_E"]).build(model_parts=[model])
+        expected = (
+            ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"].clone()
+        )
+        for step in range(1, 6):
+            with torch.no_grad():
+                model.expert_bias_E.fill_(float(step))
+            ema.step(step)
+            beta = 2.0 ** (-1.0 / (0.05 * step))
+            expected = expected * beta + model.expert_bias_E.detach() * (1 - beta)
+            actual = ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=0)
+
+    def test_default_empty_patterns_leaves_buffers_untracked(self):
+        """Regression test: buffer_patterns defaults to [], so existing
+        configs see zero behavior change -- no buffer_optimizers built."""
+        model = _ModelWithExpertBias()
+        ema = EMA.Config().build(model_parts=[model])
+        self.assertEqual(ema.buffer_optimizers, [])
+        ema.step(1)  # must not error despite the untracked buffer existing
+
+    def test_checkpoint_round_trip_folds_buffer_into_ema_key(self):
+        import torch.distributed.checkpoint as dcp
+
+        model = _ModelWithExpertBias()
+        ema = EMA.Config(buffer_patterns=["expert_bias_E"]).build(model_parts=[model])
+        with torch.no_grad():
+            model.expert_bias_E.fill_(3.0)
         ema.step(1)
-        self.assertEqual(ema.state_dict(), {})
-        self.assertTrue(all(len(st) == 0 for st in ema.optimizers[0].state.values()))
+        saved_buffer_ema = (
+            ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"].clone()
+        )
+
+        ckpt_dir = tempfile.mkdtemp()
+        try:
+            state_dict = {"ema": ema}
+            dcp.save(state_dict, checkpoint_id=ckpt_dir)
+            # No separate "ema_buffer" key -- the buffer's FQN is folded into
+            # the same flat state dict alongside parameter FQNs.
+            self.assertIn("state.expert_bias_E.ema_params", ema.state_dict())
+
+            model2 = _ModelWithExpertBias()
+            ema2 = EMA.Config(buffer_patterns=["expert_bias_E"]).build(
+                model_parts=[model2]
+            )
+            dcp.load({"ema": ema2}, checkpoint_id=ckpt_dir)
+
+            actual = ema2.buffer_optimizers[0].state[model2.expert_bias_E]["ema_params"]
+            torch.testing.assert_close(actual, saved_buffer_ema, atol=1e-6, rtol=0)
+        finally:
+            shutil.rmtree(ckpt_dir, ignore_errors=True)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
@@ -137,9 +194,7 @@ class TestEMACpuOffload(unittest.TestCase):
         no pin_memory() dispatch support, so construction must operate on
         the local shard, not the DTensor itself."""
         model = self._build_sharded_model()
-        ema = EMAOptimizersContainer.Config(enable=True, offload_to_cpu=True).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(offload_to_cpu=True).build(model_parts=[model])
         for ema_opt in ema.optimizers:
             for param_state in ema_opt.state.values():
                 t = param_state["ema_params"]
@@ -148,9 +203,7 @@ class TestEMACpuOffload(unittest.TestCase):
 
     def test_step_updates_offloaded_values_correctly(self):
         model = self._build_sharded_model()
-        ema = EMAOptimizersContainer.Config(enable=True, offload_to_cpu=True).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(offload_to_cpu=True).build(model_parts=[model])
         initial = {
             id(p): st["ema_params"].clone()
             for opt in ema.optimizers
@@ -176,9 +229,7 @@ class TestEMACpuOffload(unittest.TestCase):
         step() calls -- previously keyed off id() of a freshly-constructed
         list each call, which is not a reliable identity to cache against."""
         model = self._build_sharded_model()
-        ema = EMAOptimizersContainer.Config(enable=True, offload_to_cpu=True).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(offload_to_cpu=True).build(model_parts=[model])
         for step in range(1, 4):
             with torch.no_grad():
                 for p in model.parameters():
@@ -190,9 +241,7 @@ class TestEMACpuOffload(unittest.TestCase):
         import torch.distributed.checkpoint as dcp
 
         model = self._build_sharded_model()
-        ema = EMAOptimizersContainer.Config(enable=True, offload_to_cpu=True).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(offload_to_cpu=True).build(model_parts=[model])
         with torch.no_grad():
             for p in model.parameters():
                 p.fill_(3.0)
@@ -201,13 +250,11 @@ class TestEMACpuOffload(unittest.TestCase):
 
         ckpt_dir = tempfile.mkdtemp()
         try:
-            dcp.save({"ema_optimizer": ema}, checkpoint_id=ckpt_dir)
+            dcp.save({"ema": ema}, checkpoint_id=ckpt_dir)
 
             model2 = self._build_sharded_model()
-            ema2 = EMAOptimizersContainer.Config(
-                enable=True, offload_to_cpu=True
-            ).build(model_parts=[model2])
-            dcp.load({"ema_optimizer": ema2}, checkpoint_id=ckpt_dir)
+            ema2 = EMA.Config(offload_to_cpu=True).build(model_parts=[model2])
+            dcp.load({"ema": ema2}, checkpoint_id=ckpt_dir)
 
             for opt1, opt2 in zip(ema.optimizers, ema2.optimizers):
                 for (_, st1), (_, st2) in zip(opt1.state.items(), opt2.state.items()):
@@ -215,6 +262,55 @@ class TestEMACpuOffload(unittest.TestCase):
                     self.assertFalse(v2.is_cuda)
                     self.assertTrue(v2.is_pinned())
                     torch.testing.assert_close(st1["ema_params"], v2, atol=1e-6, rtol=0)
+        finally:
+            shutil.rmtree(ckpt_dir, ignore_errors=True)
+
+    def _build_sharded_model_with_buffer(self) -> nn.Module:
+        from torch.distributed.device_mesh import init_device_mesh
+        from torch.distributed.fsdp import fully_shard
+
+        mesh = init_device_mesh("cuda", (1,), mesh_dim_names=("dp_shard",))
+        model = _ModelWithExpertBias().cuda()
+        fully_shard(model, mesh=mesh)
+        return model
+
+    def test_buffer_offload_round_trip_under_fsdp2(self):
+        """Regression test for offload+buffer parity: FSDP2's fully_shard only
+        shards parameters, not buffers, so expert_bias_E-like buffers stay
+        plain (non-DTensor) tensors even on a DTensor-param model --
+        _pin_local/_materialize_dtensor must handle that mixed case, not just
+        the all-DTensor or all-plain-tensor cases exercised above."""
+        import torch.distributed.checkpoint as dcp
+
+        model = self._build_sharded_model_with_buffer()
+        self.assertFalse(isinstance(model.expert_bias_E, DTensor))
+        ema = EMA.Config(
+            offload_to_cpu=True, buffer_patterns=[r"expert_bias_E$"]
+        ).build(model_parts=[model])
+        bias_state = ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+        self.assertFalse(bias_state.is_cuda)
+        self.assertTrue(bias_state.is_pinned())
+
+        with torch.no_grad():
+            model.expert_bias_E.fill_(2.0)
+        ema.step(1)
+        torch.cuda.synchronize()
+        bias_state = ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+
+        ckpt_dir = tempfile.mkdtemp()
+        try:
+            dcp.save({"ema": ema}, checkpoint_id=ckpt_dir)
+
+            model2 = self._build_sharded_model_with_buffer()
+            ema2 = EMA.Config(
+                offload_to_cpu=True, buffer_patterns=[r"expert_bias_E$"]
+            ).build(model_parts=[model2])
+            dcp.load({"ema": ema2}, checkpoint_id=ckpt_dir)
+
+            v2 = ema2.buffer_optimizers[0].state[model2.expert_bias_E]["ema_params"]
+            self.assertFalse(v2.is_cuda)
+            self.assertTrue(v2.is_pinned())
+            torch.testing.assert_close(bias_state, v2, atol=1e-6, rtol=0)
         finally:
             shutil.rmtree(ckpt_dir, ignore_errors=True)
 

@@ -28,7 +28,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.ema import EMAOptimizersContainer
+from torchtitan.components.ema import EMA
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
@@ -101,9 +101,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         lr_scheduler: LRSchedulersContainer.Config = field(
             default_factory=LRSchedulersContainer.Config
         )
-        ema_weights: EMAOptimizersContainer.Config = field(
-            default_factory=EMAOptimizersContainer.Config
-        )
+        ema: EMA.Config | None = None
+        """Online EMA of model weights, e.g. for cheap mid-WSD-training eval
+        without a full LR decay. Unset (None) means EMA is disabled."""
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpoint: BaseCheckpointManager.Config = field(
@@ -300,7 +300,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     loss_fn: BaseLoss
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
-    ema_optimizer: EMAOptimizersContainer
+    ema: EMA | None
     validator: BaseValidator
     metrics_processor: MetricsProcessor
     checkpointer: BaseCheckpointManager
@@ -598,12 +598,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.metrics_processor.model_parts = self.model_parts
 
         # Online EMA of model weights (e.g. for cheap mid-WSD-training eval
-        # without a full LR decay). Always built and the hook always
-        # registered; EMAOptimizersContainer internally no-ops everything
-        # when config.ema_weights.enable is False.
-        self.ema_optimizer = config.ema_weights.build(model_parts=self.model_parts)
-        self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: self.ema_optimizer.step(self.step)
+        # without a full LR decay). None means the user hasn't configured one;
+        # stepped explicitly in train_step(), right after optimizers.step().
+        self.ema = (
+            config.ema.build(model_parts=self.model_parts)
+            if config.ema is not None
+            else None
         )
 
         # Initialize trainer states that will be saved in checkpoint.
@@ -648,7 +648,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states={"train_state": self},
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, config.hf_assets_path)
@@ -1003,6 +1003,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
             self.lr_schedulers.step()
+            # self.step is already incremented (in train(), before train_step()
+            # runs) to the step that was just optimized, so this reads correctly.
+            if self.ema is not None:
+                self.ema.step(self.step)
 
         # log metrics
         if not should_log:

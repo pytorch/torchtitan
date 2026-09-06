@@ -43,13 +43,16 @@ from .base import (
     purge_thread,
 )
 
-EMA_OPTIMIZER = "ema_optimizer"
+# "EMA" is also the class name (torchtitan.components.ema.EMA), aliased on
+# import below to avoid shadowing this state-dict key constant, which follows
+# the same NAME = "name" convention as MODEL/OPTIMIZER/etc. above.
+EMA = "ema"
 
 if TYPE_CHECKING:
     import torch.nn as nn
 
     from torchtitan.components.data.loader import BaseDataLoader
-    from torchtitan.components.ema import EMAOptimizersContainer
+    from torchtitan.components.ema import EMA as EMAContainer  # noqa: N811
     from torchtitan.components.optimizer import (
         LRSchedulersContainer,
         OptimizersContainer,
@@ -125,11 +128,10 @@ class CheckpointManager(BaseCheckpointManager):
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
-        ema_optimizer (EMAOptimizersContainer): Online EMA of model weights.
-            Always built and passed in (see EMAOptimizersContainer), so its
-            checkpoint contribution is empty when EMA is disabled.
+        ema (Optional[EMA]): Online EMA of model weights, or None when the
+            user hasn't configured one (see torchtitan.components.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
-            previous 5 components.
+            previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
@@ -161,7 +163,7 @@ class CheckpointManager(BaseCheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
-        ema_optimizer: EMAOptimizersContainer,
+        ema: EMAContainer | None,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
@@ -182,9 +184,10 @@ class CheckpointManager(BaseCheckpointManager):
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
-                EMA_OPTIMIZER: ema_optimizer,
             }
         )
+        if ema is not None:
+            self.states[EMA] = ema
 
         # Loading & Saving Policy
         self.load_only = config.load_only
@@ -604,17 +607,19 @@ class CheckpointManager(BaseCheckpointManager):
         # resumes continue exactly. If world size changes, omit it during load and
         # keep each rank's newly initialized RNG stream.
         states = self._states_to_load(model_only)
-        needs_ema_reseed = not model_only and self._maybe_exclude_missing_ema(
-            states, checkpoint_id
-        )
         self.dcp_load(
             states,
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
-        if needs_ema_reseed:
-            self.states[EMA_OPTIMIZER].load_state_dict({})
+        # EMA is excluded from loading (e.g. resuming with EMA newly enabled
+        # against a checkpoint that predates it, or was saved with EMA off)
+        # via the same exclude_from_loading a caller uses for any other
+        # optional state -- reseed it from the just-loaded model weights
+        # rather than leaving it at its pre-load (fresh-init) values.
+        if not model_only and EMA in self.exclude_from_loading and EMA in self.states:
+            self.states[EMA].load_state_dict({})
 
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -735,36 +740,6 @@ class CheckpointManager(BaseCheckpointManager):
         }
 
         return self._flattened_model_states_sd(states_to_load)
-
-    def _checkpoint_has_prefix(self, checkpoint_id: str, prefix: str) -> bool:
-        """Whether the on-disk checkpoint's metadata has any key starting with
-        ``prefix``. Used to detect an optional component that is genuinely
-        absent from a checkpoint before attempting to load it.
-        """
-        try:
-            metadata = dcp.FileSystemReader(checkpoint_id).read_metadata()
-            return any(k.startswith(prefix) for k in metadata.state_dict_metadata)
-        except Exception:
-            return False
-
-    def _maybe_exclude_missing_ema(
-        self, states_to_load: dict[str, Any], checkpoint_id: str
-    ) -> bool:
-        """Drop EMA_OPTIMIZER from ``states_to_load`` (in place) if this
-        checkpoint has no EMA data on disk (saved with EMA disabled, or
-        predating EMA support) -- otherwise DCP's load planner raises before
-        our own load_state_dict() ever runs.
-
-        Returns whether the caller must reseed EMA_OPTIMIZER (by calling
-        ``self.states[EMA_OPTIMIZER].load_state_dict({})``) once the model has
-        been loaded, so EMA cold-starts from the resumed weights.
-        """
-        if EMA_OPTIMIZER not in states_to_load or self._checkpoint_has_prefix(
-            checkpoint_id, f"{EMA_OPTIMIZER}."
-        ):
-            return False
-        del states_to_load[EMA_OPTIMIZER]
-        return True
 
     def _save_last_step(self, curr_step: int) -> None:
         """Execute the final checkpoint save at the completion of training.

@@ -37,7 +37,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
-from torchtitan.components.ema import EMAOptimizersContainer
+from torchtitan.components.ema import EMA
 from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.config import Function
 
@@ -64,17 +64,6 @@ class FakeLRSchedulersContainer:
 
     def __init__(self):
         pass
-
-    def state_dict(self):
-        return {}
-
-    def load_state_dict(self, sd: dict):
-        pass
-
-
-class FakeEMAOptimizersContainer:
-    """A fake EMAOptimizersContainer that returns an empty state dict, matching
-    the disabled-EMA contract (empty checkpoint contribution)."""
 
     def state_dict(self):
         return {}
@@ -211,6 +200,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -242,7 +232,7 @@ class TestCheckpointManager(unittest.TestCase):
         # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
-        self.ema_optimizer = FakeEMAOptimizersContainer()
+        self.ema = None
         self.data_loader = FakeDataLoader()
 
         ckpt_cfg = CheckpointManager.Config(
@@ -305,7 +295,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -339,7 +329,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -381,7 +371,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -406,7 +396,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -426,7 +416,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -452,7 +442,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -482,7 +472,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -522,7 +512,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -553,7 +543,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -583,7 +573,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -618,7 +608,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -639,7 +629,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -701,7 +691,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=checkpoint_config,
             sd_adapter=None,
@@ -749,7 +739,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=states,
             config=checkpoint_config,
             sd_adapter=None,
@@ -779,6 +769,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             config=checkpoint_config,
             sd_adapter=None,
@@ -829,7 +820,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -856,7 +847,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -903,7 +894,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=[fake_model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -942,7 +933,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -970,7 +961,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -1012,7 +1003,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             config=self.trainer_config.checkpoint,
             sd_adapter=None,
@@ -1035,7 +1026,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
@@ -1053,7 +1044,7 @@ class TestCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
-            ema_optimizer=self.ema_optimizer,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
@@ -1594,12 +1585,15 @@ class TestModelWrapper(unittest.TestCase):
 
 
 class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
-    """Exercises the real EMAOptimizersContainer + CheckpointManager save/load
-    path (no dcp mocking) across every combination of ``ema.enable`` differing
-    between the save-time and resume-time run -- that flexibility is the
-    point of wiring EMA as a first-class CheckpointManager component instead
-    of a plain ``states`` entry, so a genuinely-missing optional key must
-    never crash the load.
+    """Exercises the real EMA + CheckpointManager save/load path (no dcp
+    mocking) across combinations of ``ema`` being ``None`` vs. configured,
+    differing between the save-time and resume-time run.
+
+    Resuming with ``ema`` configured against a checkpoint that has no EMA
+    state requires the caller to explicitly pass
+    ``checkpoint.exclude_from_loading=["ema"]`` (matching how any other
+    optional state is excluded) -- otherwise DCP raises its normal
+    missing-key error. See test_missing_ema_without_exclude_raises below.
     """
 
     @classmethod
@@ -1623,7 +1617,7 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.base_temp_dir, ignore_errors=True)
 
-    def _build_manager(self, folder, ema_enable, model):
+    def _build_manager(self, folder, model, *, with_ema, exclude_from_loading=()):
         ckpt_cfg = CheckpointManager.Config(
             enable=True,
             async_mode="disabled",
@@ -1631,17 +1625,16 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
             interval=1,
             keep_latest_k=0,
             last_save_model_only=False,
+            exclude_from_loading=list(exclude_from_loading),
         )
-        ema = EMAOptimizersContainer.Config(enable=ema_enable).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config().build(model_parts=[model]) if with_ema else None
         manager = CheckpointManager(
             config=ckpt_cfg,
             dataloader=FakeDataLoader(),
             model_parts=[model],
             optimizers=FakeOptimizersContainer(),
             lr_schedulers=FakeLRSchedulersContainer(),
-            ema_optimizer=ema,
+            ema=ema,
             states={},
             sd_adapter=None,
             base_folder="",
@@ -1651,7 +1644,7 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
     def test_resume_with_ema_enabled_after_saving_with_ema_disabled(self):
         folder = os.path.join(self.base_temp_dir, "ckpt")
         model = nn.Linear(2, 2)
-        manager, _ = self._build_manager(folder, ema_enable=False, model=model)
+        manager, _ = self._build_manager(folder, model, with_ema=False)
         manager.save(curr_step=1)
         manager.close()
 
@@ -1659,7 +1652,9 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         with torch.no_grad():
             model2.weight.zero_()
             model2.bias.zero_()
-        manager2, ema2 = self._build_manager(folder, ema_enable=True, model=model2)
+        manager2, ema2 = self._build_manager(
+            folder, model2, with_ema=True, exclude_from_loading=["ema"]
+        )
         manager2.load(step=1)
 
         # No crash, and EMA cold-starts from the just-resumed model weights.
@@ -1668,36 +1663,76 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
 
+    def test_missing_ema_without_exclude_raises(self):
+        """Resuming with EMA enabled against a checkpoint that has no EMA
+        data raises DCP's normal missing-key error unless the caller
+        explicitly excludes "ema" via exclude_from_loading."""
+        folder = os.path.join(self.base_temp_dir, "ckpt")
+        model = nn.Linear(2, 2)
+        manager, _ = self._build_manager(folder, model, with_ema=False)
+        manager.save(curr_step=1)
+        manager.close()
+
+        model2 = nn.Linear(2, 2)
+        manager2, _ = self._build_manager(folder, model2, with_ema=True)
+        with self.assertRaises(BaseException):
+            manager2.load(step=1)
+        manager2.close()
+
     def test_resume_with_ema_enabled_after_saving_with_ema_enabled(self):
         folder = os.path.join(self.base_temp_dir, "ckpt")
         model = nn.Linear(2, 2)
-        manager, ema = self._build_manager(folder, ema_enable=True, model=model)
+        manager, ema = self._build_manager(folder, model, with_ema=True)
         ema.step(1)  # populate a non-trivial EMA value, distinct from the raw weight
         saved_ema_weight = ema.optimizers[0].state[model.weight]["ema_params"].clone()
         manager.save(curr_step=1)
         manager.close()
 
         model2 = nn.Linear(2, 2)
-        manager2, ema2 = self._build_manager(folder, ema_enable=True, model=model2)
+        manager2, ema2 = self._build_manager(folder, model2, with_ema=True)
         manager2.load(step=1)
 
         ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
         self.assertTrue(torch.allclose(ema_weight, saved_ema_weight))
         manager2.close()
 
-    def test_resume_with_ema_disabled_after_saving_with_ema_enabled(self):
+    def test_exclude_ema_honored_even_when_data_is_present(self):
+        """Excluding "ema" via exclude_from_loading is honored
+        unconditionally, even against a checkpoint that does have EMA data."""
         folder = os.path.join(self.base_temp_dir, "ckpt")
         model = nn.Linear(2, 2)
-        manager, ema = self._build_manager(folder, ema_enable=True, model=model)
+        manager, ema = self._build_manager(folder, model, with_ema=True)
         ema.step(1)
         manager.save(curr_step=1)
         manager.close()
 
         model2 = nn.Linear(2, 2)
-        manager2, ema2 = self._build_manager(folder, ema_enable=False, model=model2)
+        with torch.no_grad():
+            model2.weight.fill_(9.0)
+        manager2, ema2 = self._build_manager(
+            folder, model2, with_ema=True, exclude_from_loading=["ema"]
+        )
+        manager2.load(step=1)
+
+        # Cold-started from model2's own (unrelated) weights, not the saved
+        # EMA value -- proves the checkpoint's real EMA data was never read.
+        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
+        self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
+        manager2.close()
+
+    def test_resume_with_ema_disabled_after_saving_with_ema_enabled(self):
+        folder = os.path.join(self.base_temp_dir, "ckpt")
+        model = nn.Linear(2, 2)
+        manager, ema = self._build_manager(folder, model, with_ema=True)
+        ema.step(1)
+        manager.save(curr_step=1)
+        manager.close()
+
+        model2 = nn.Linear(2, 2)
+        manager2, ema2 = self._build_manager(folder, model2, with_ema=False)
         manager2.load(step=1)  # must not crash; EMA state is simply never requested
 
-        self.assertEqual(ema2.state_dict(), {})
+        self.assertIsNone(ema2)
         manager2.close()
 
 
