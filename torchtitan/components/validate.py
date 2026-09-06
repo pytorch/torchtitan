@@ -267,8 +267,22 @@ class Validator(BaseValidator):
             total_global_valid_tokens.add_(global_valid_tokens)
             num_steps += 1
 
-        assert accumulated_loss is not None
+        if accumulated_loss is None:
+            raise ValueError(
+                "Validation ran zero batches on this rank. This happens when the "
+                "validation dataset supplies fewer than num_tokens_per_batch "
+                "tokens on this rank, because concat-then-split packing drops "
+                "partially filled batches. Decrease "
+                "training.num_tokens_per_microbatch_per_dp_rank or use a larger "
+                "validation dataset."
+            )
         num_global_valid_tokens = int(total_global_valid_tokens.item())
+        if num_global_valid_tokens == 0:
+            raise ValueError(
+                "Validation ran on zero valid tokens; cannot compute an average "
+                "validation loss. Ensure the validation batches contain unmasked "
+                "labels."
+            )
         if parallel_dims.dp_cp_enabled:
             global_loss_sum = dist_utils.dist_sum(
                 accumulated_loss, parallel_dims.get_optional_mesh("loss")
