@@ -16,6 +16,7 @@ from torchtitan.components.checkpointer.base import ModelWrapper
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.models.deepseek_v4 import model_registry as deepseek_v4_model_registry
+from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
@@ -102,6 +103,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 config = deepseek_v4_model_registry(
                     "debugmodel", seq_len=128, n_mtp_layers=num_mtp_layers
                 ).model
+                assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
                 model.init_states()
                 state_dict = model.state_dict()
@@ -146,6 +148,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 config = deepseek_v4_model_registry(
                     "debugmodel", seq_len=128, n_mtp_layers=1
                 ).model
+                assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
                 model.init_states()
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
