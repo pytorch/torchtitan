@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -30,15 +31,16 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
 
     @staticmethod
     def _gradient_backprop(
-        hidden_states: torch.Tensor,
-        accumulated_grad: torch.Tensor,
+        hidden_states: tuple[torch.Tensor, ...],
+        accumulated_grads: tuple[torch.Tensor, ...],
         total_loss: torch.Tensor,
         lm_head: nn.Module,
         fsdp_enabled: bool,
     ) -> torch.Tensor:
         return _ChunkedLossWrapperWithParamGrads.apply(
-            hidden_states,
-            accumulated_grad,
+            len(hidden_states),
+            *hidden_states,
+            *accumulated_grads,
             total_loss,
             lm_head,
             fsdp_enabled,
@@ -67,15 +69,19 @@ class _ChunkedLossWrapperWithParamGrads(torch.autograd.Function):
 
     @staticmethod
     # pyrefly: ignore [bad-override]
-    def forward(
-        ctx,
-        hidden_states: torch.Tensor,
-        accumulated_h_grad: torch.Tensor,
-        total_loss: torch.Tensor,
-        lm_head: nn.Module,
-        fsdp_enabled: bool,
-        *lm_params: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(ctx, num_predictions: int, *args: Any) -> torch.Tensor:
+        expected_fixed_args = 2 * num_predictions + 3
+        if len(args) < expected_fixed_args:
+            raise ValueError(
+                "Graph chunked-loss autograd bridge expected at least "
+                f"{expected_fixed_args} arguments for {num_predictions} "
+                f"predictions, got {len(args)}."
+            )
+        accumulated_h_grads = args[num_predictions : 2 * num_predictions]
+        total_loss = args[2 * num_predictions]
+        lm_head = args[2 * num_predictions + 1]
+        fsdp_enabled = args[2 * num_predictions + 2]
+        lm_params = args[2 * num_predictions + 3 :]
         # The chunk loop above already populated each lm_head param's
         # ``.grad`` with the correctly sharded value via the FSDP last-chunk
         # post-accumulate-grad hook (reduce-scatter). Capture those grads
@@ -92,7 +98,8 @@ class _ChunkedLossWrapperWithParamGrads(torch.autograd.Function):
             p.grad = None
         if fsdp_enabled:
             lm_head.set_requires_gradient_sync(False, recurse=False)
-        ctx.save_for_backward(accumulated_h_grad, *sharded_param_grads)
+        ctx.num_predictions = num_predictions
+        ctx.save_for_backward(*accumulated_h_grads, *sharded_param_grads)
         ctx.lm_head = lm_head
         ctx.fsdp_enabled = fsdp_enabled
         return total_loss.detach().clone()
@@ -100,8 +107,8 @@ class _ChunkedLossWrapperWithParamGrads(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):  # pyrefly: ignore[bad-override]
         saved = ctx.saved_tensors
-        accumulated_h_grad = saved[0]
-        param_grads = saved[1:]
+        accumulated_h_grads = saved[: ctx.num_predictions]
+        param_grads = saved[ctx.num_predictions :]
         if ctx.fsdp_enabled:
             # Restore FSDP grad sync that forward() disabled. Use
             # queue_callback to defer the restore until the engine drains
@@ -115,8 +122,9 @@ class _ChunkedLossWrapperWithParamGrads(torch.autograd.Function):
                 lambda: lm_head.set_requires_gradient_sync(True, recurse=False)
             )
         return (
-            accumulated_h_grad,
             None,
+            *accumulated_h_grads,
+            *(None for _ in range(ctx.num_predictions)),
             None,
             None,
             None,

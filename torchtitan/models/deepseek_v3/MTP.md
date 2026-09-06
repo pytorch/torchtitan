@@ -10,7 +10,7 @@ DeepSeek-V3 MTP is currently enabled through the model registry:
 
 - `model_registry(..., num_mtp_layers=N)` controls whether MTP is enabled.
 - `_build_mtp_layers(...)` builds MTP layer configs from the last main decoder layer config.
-- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `MTPLoss.Config(mtp_scale=0.3)`.
+- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `ChunkedLossWrapper` with `MTPLoss.Config(mtp_scale=0.3)` as its inner loss.
 
 Each MTP layer follows the normal decoder layer structure, with the following MTP-specific modules:
 
@@ -183,9 +183,12 @@ The intended behavior is that MTP layers under EP match normal decoder layers, i
 
 ### 4.1 Input Form
 
-`MTPLoss` only supports list output from `MTPDecoder`: element 0 is the main model prediction, and the following elements are auxiliary predictions for each MTP depth. A plain tensor is intentionally rejected so non-MTP training continues to use the normal `CrossEntropyLoss` / `ChunkedLossWrapper` paths.
+`MTPDecoder` returns a tuple containing the main prediction followed by one
+auxiliary prediction per MTP depth. Predictions are logits on the ordinary path
+and hidden states when `_skip_lm_head=True` for `ChunkedLossWrapper`. A plain
+tensor is intentionally rejected by `MTPLoss`.
 
-`positions` is required because the loss must determine whether shifted labels cross packed document boundaries.
+`positions` is required because the loss must determine whether shifted labels cross packed-document boundaries.
 
 ### 4.2 Main Loss
 
@@ -202,15 +205,15 @@ This keeps the main training objective aligned with the normal decoder path.
 The prediction for MTP depth `depth` uses shifted labels:
 
 ```python
-offset_labels = roll_mtp_sequence(
-    labels[:, :mtp_seq_len],
+mtp_labels = roll_mtp_sequence(
+    labels[:mtp_seq_len],
     shift=depth,
-    positions=positions[:, :mtp_seq_len],
+    positions=positions[:mtp_seq_len],
     fill_value=IGNORE_INDEX,
 )
 ```
 
-`IGNORE_INDEX` masks labels that are outside the current sequence range or cross a packed document boundary. Losses from all MTP depths are averaged first, then scaled by `mtp_scale`:
+`IGNORE_INDEX` masks labels that are outside the current sequence range or cross a packed document boundary. Each MTP loss term receives weight `mtp_scale / num_mtp_layers`; summing the weighted terms is equivalent to averaging the MTP losses and then scaling by `mtp_scale`:
 
 ```python
 total_loss = main_loss + mtp_scale * mean(mtp_losses)
@@ -221,6 +224,13 @@ The final loss is then normalized with `global_valid_tokens`, keeping token norm
 ### 4.4 Loss Parallel
 
 When `global_vocab_size` is configured, `MTPLoss` uses the vocab size required by the loss-parallel cross entropy path. Main and auxiliary predictions share the same cross entropy helper so the loss semantics do not diverge across depths.
+
+### 4.5 Chunked Loss
+
+`MTPLoss._build_loss_terms()` pairs the main prediction with its labels and each
+auxiliary prediction with its depth-shifted labels and weight before sequence chunking.
+`ChunkedLossWrapper` then applies the shared LM head to one chunk at a time and
+routes one accumulated hidden-state gradient back to each model output.
 
 ## TODO
 
@@ -245,14 +255,3 @@ Under PP, the ownership of MTP layers across pipeline stages must be defined, an
 - Wrapping and communication order when PP is combined with FSDP, TP, and EP.
 
 Until PP integration is complete, enabling MTP with PP should remain unsupported.
-
-### 3. ChunkLoss Integration
-
-The current MTP loss path primarily expects a logits list and is not integrated with ChunkLoss yet. The following pieces are still needed:
-
-- Chunked cross entropy over list outputs.
-- A unified interface for main hidden states and MTP hidden states when `_skip_lm_head` is enabled.
-- Token normalization rules for multi-depth chunk loss.
-- Shifted-label and packed-boundary mask handling inside chunks.
-
-Until ChunkLoss integration is complete, MTP training should continue to use the non-chunked loss path.
