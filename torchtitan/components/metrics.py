@@ -13,13 +13,13 @@ from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
-
 
 # named tuple for passing device memory stats for logging
 DeviceMemStats = namedtuple(
@@ -311,6 +311,8 @@ class MetricsProcessor(Configurable):
 
     gpu_peak_flops: float
     ntokens_since_last_log: int
+    vision_flops_since_last_log: int
+    has_vision: bool
     data_loading_times: list[float]
     time_last_log: float
     step_last_log: int | None
@@ -353,6 +355,8 @@ class MetricsProcessor(Configurable):
             self.device_memory_monitor.device_name
         )
         self.ntokens_since_last_log = 0
+        self.vision_flops_since_last_log = 0
+        self.has_vision = False
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.step_last_log = None
@@ -485,16 +489,29 @@ class MetricsProcessor(Configurable):
         tps = self.ntokens_since_last_log / (
             time_delta * self.parallel_dims.non_data_parallel_size
         )
+        vision_flops = self.vision_flops_since_last_log
+        if self.has_vision and self.parallel_dims.dp_enabled:
+            vision_flops = dist_utils.dist_mean(
+                torch.tensor(
+                    vision_flops,
+                    dtype=torch.float64,
+                    device=self.device_memory_monitor.device,
+                ),
+                self.parallel_dims.get_mesh("batch"),
+            )
+        flops_per_second = (
+            self.num_flops_per_token * self.ntokens_since_last_log + vision_flops
+        ) / (time_delta * self.parallel_dims.non_data_parallel_size)
         # model FLOPS utilization
         # For its definition and calculation, please refer to the PaLM paper:
         # https://arxiv.org/abs/2204.02311
         # MFU is based on BF16 peak FLOPS which is misleading when quantization
         # (FP8/MX) is active, so we skip it in that case.
-        tflops = self.num_flops_per_token * tps / 1e12
+        tflops = flops_per_second / 1e12
         if self.has_quantization:
             mfu = None
         else:
-            mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+            mfu = 100 * flops_per_second / self.gpu_peak_flops
 
         assert self.step_last_log is not None
         time_end_to_end = time_delta / (step - self.step_last_log)
@@ -541,6 +558,7 @@ class MetricsProcessor(Configurable):
         )
 
         self.ntokens_since_last_log = 0
+        self.vision_flops_since_last_log = 0
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()
         self.step_last_log = step
@@ -582,6 +600,7 @@ class MetricsProcessor(Configurable):
         )
 
         self.ntokens_since_last_log = 0
+        self.vision_flops_since_last_log = 0
         self.time_last_log = time.perf_counter()
         self.step_last_log = step
         self.device_memory_monitor.reset_peak_stats()
