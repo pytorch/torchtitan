@@ -94,6 +94,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
+        self.ema = None
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager(enabled=True, participating_rank=0)
         self.patcher_group = mock.patch(
@@ -143,6 +144,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
@@ -183,6 +185,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
