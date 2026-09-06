@@ -592,6 +592,45 @@ def set_pg_timeouts(
 
 
 @torch.no_grad()
+def _get_total_norm_fp32(
+    tensors: Iterable[torch.Tensor],
+    norm_type: float,
+    error_if_nonfinite: bool,
+    foreach: bool | None,
+) -> torch.Tensor:
+    """``torch.nn.utils.get_total_norm`` with the reduction carried in float32.
+
+    That function returns the norm in the tensors' dtype, so with bf16 gradients the
+    total depends on how the tensors are GROUPED -- under PP or EP, on where the model
+    was cut rather than only on the gradients. Structure follows upstream so precision
+    is the only difference; DTensors take the per-tensor path because upstream's foreach
+    check excludes them, and the dtype argument preserves ``_NormPartial``.
+    """
+    tensors = list(tensors)
+    if not tensors:
+        # Plain CPU scalar, as upstream: a PP rank with no gradients contributes nothing.
+        return torch.tensor(0.0)
+    if foreach is False or any(isinstance(t, DTensor) for t in tensors):
+        norms: list[torch.Tensor] = [
+            torch.linalg.vector_norm(t, norm_type, dtype=torch.float32) for t in tensors
+        ]
+    else:
+        norms = list(torch._foreach_norm(tensors, norm_type, dtype=torch.float32))
+    first_device = tensors[0].device
+    total_norm = torch.linalg.vector_norm(
+        torch.stack([norm.to(first_device) for norm in norms]), norm_type
+    )
+    if error_if_nonfinite and torch.logical_or(total_norm.isnan(), total_norm.isinf()):
+        raise RuntimeError(
+            f"The total norm of order {norm_type} for gradients from "
+            "`parameters` is non-finite, so it cannot be clipped. To disable "
+            "this error and scale the gradients by the non-finite norm anyway, "
+            "set `error_if_nonfinite=False`"
+        )
+    return total_norm
+
+
+@torch.no_grad()
 def clip_grad_norm_(
     parameters: torch.Tensor | Iterable[torch.Tensor],
     max_norm: float,
@@ -645,7 +684,7 @@ def clip_grad_norm_(
         # prevent generators from being exhausted
         parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
+    total_norm = _get_total_norm_fp32(
         grads, norm_type, error_if_nonfinite, foreach
     )
 
@@ -704,14 +743,14 @@ def _clip_grad_norm_with_ep(
     # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
     #   so non_ep_grads would be empty
     # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
-    ep_grads_total_norm = torch.nn.utils.get_total_norm(
+    ep_grads_total_norm = _get_total_norm_fp32(
         ep_grads, norm_type, error_if_nonfinite, foreach
     )
     # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
+    non_ep_grads_total_norm = _get_total_norm_fp32(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
     )
     # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
