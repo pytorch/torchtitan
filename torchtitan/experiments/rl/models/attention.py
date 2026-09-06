@@ -13,6 +13,8 @@ import torch
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
+    sdpa_kernel,
+    SDPBackend,
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
@@ -63,6 +65,9 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
             _cudagraph_support = AttentionCGSupport.ALWAYS
 
         return PyTorchVarlenAttentionMetadataBuilder
+
+
+_VARLEN_BACKEND_PRIORITY = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION]
 
 
 class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
@@ -227,21 +232,27 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         if self.out_transform is not None:
             extra_kwargs["return_aux"] = AuxRequest(lse=True)
 
-        result = torch.nn.attention.varlen.varlen_attn_out(
-            output[:num_actual_tokens],
-            query[:num_actual_tokens],
-            key_cache,
-            value_cache,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            scale=self.scale,
-            window_size=sliding_window_size,
-            block_table=block_table,
-            seqused_k=seqused_k,
-            **extra_kwargs,
-        )
+        # vLLM disables cuDNN SDPA process-wide (vllm/platforms/cuda.py), which
+        # varlen_attn_out honors. Restore PyTorch's default varlen order so
+        # eligible calls use cuDNN and everything else still falls back to Flash.
+        # On SM100 this is what serves head_dim=256 with a paged KV cache, which
+        # FA4 rejects (pytorch/pytorch#195603).
+        with sdpa_kernel(_VARLEN_BACKEND_PRIORITY, set_priority=True):
+            result = torch.nn.attention.varlen.varlen_attn_out(
+                output[:num_actual_tokens],
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                scale=self.scale,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                seqused_k=seqused_k,
+                **extra_kwargs,
+            )
         if self.out_transform is None:
             return result
 
