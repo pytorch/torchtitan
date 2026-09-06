@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import logging
 import queue
 import unittest
 from concurrent.futures import Future
@@ -16,6 +17,7 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
+import torchtitan.components.checkpointer.torch_checkpointing as manager_module
 from torch.distributed.checkpoint.stateful import Stateful
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch_checkpointing.checkpoint_manager import (
@@ -26,6 +28,7 @@ from torch_checkpointing.config import (
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torchtitan.components.checkpointer import (
     BaseCheckpointManager,
     CheckpointManager,
@@ -542,3 +545,89 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         sync_config = build.call_args.args[0]
         self.assertIsNone(sync_config.pre_finalize_callback)
         manager.close()
+
+    def test_save_stamps_the_step_on_backend_events(self) -> None:
+        # The backend reads this context when it builds its own events and
+        # exports it to the async save subprocess. Without it every forwarded
+        # backend metric carries step=None, which makes them hard to line up
+        # against the training step they belong to.
+        config = TorchCheckpointingManager.Config(
+            enable=True,
+            interval=1,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+        )
+        manager, backend_manager = self._build_manager(config)
+        self.addCleanup(checkpoint_logging_context.import_context, {})
+
+        self.assertTrue(manager.save(curr_step=7))
+
+        self.assertEqual(7, checkpoint_logging_context.get("step"))
+        backend_manager.save_result.set_result(None)
+        manager.close()
+
+    def test_subprocess_logging_initializes_and_delegates(self) -> None:
+        calls = []
+        init_fn = mock.Mock(side_effect=lambda *_args: calls.append("existing"))
+        structured_logger_init_fn = mock.Mock(
+            side_effect=lambda: calls.append("structured")
+        )
+        manager_module._init_subprocess_logging(
+            structured_logger_init_fn,
+            init_fn,
+            ("argument",),
+        )
+
+        structured_logger_init_fn.assert_called_once_with()
+        init_fn.assert_called_once_with("argument")
+        self.assertEqual(["existing", "structured"], calls)
+
+    def _init_subprocess_logging(self) -> None:
+        manager_module._init_subprocess_logging(mock.Mock(), None, ())
+
+    def test_subprocess_logging_only_overrides_suppressed_inherited_level(self) -> None:
+        root_logger = logging.getLogger()
+        backend_logger = logging.getLogger(manager_module.CHECKPOINTING_LOGGER_NAME)
+        self.addCleanup(root_logger.setLevel, root_logger.level)
+        self.addCleanup(backend_logger.setLevel, backend_logger.level)
+        for root_level, backend_level, expected_level in (
+            (logging.WARNING, logging.NOTSET, logging.INFO),
+            (logging.WARNING, logging.DEBUG, logging.DEBUG),
+            (logging.WARNING, logging.WARNING, logging.WARNING),
+            (logging.DEBUG, logging.NOTSET, logging.NOTSET),
+        ):
+            with self.subTest(root_level=root_level, backend_level=backend_level):
+                root_logger.setLevel(root_level)
+                backend_logger.setLevel(backend_level)
+
+                self._init_subprocess_logging()
+
+                self.assertEqual(expected_level, backend_logger.level)
+
+    def test_async_backend_config_composes_subprocess_logging_initializer(self) -> None:
+        original_init_fn = mock.Mock()
+        structured_logger_init_fn = mock.Mock()
+
+        with mock.patch.object(
+            manager_module.sl,
+            "get_structured_logger_subprocess_init_fn",
+            return_value=structured_logger_init_fn,
+        ):
+            backend_config = _default_backend_config(
+                _async_save_config(),
+                subprocess_init_fn=original_init_fn,
+                subprocess_init_args=("argument",),
+            )
+
+        self.assertIs(
+            backend_config.subprocess_init_fn,
+            manager_module._init_subprocess_logging,
+        )
+        self.assertEqual(
+            (
+                structured_logger_init_fn,
+                original_init_fn,
+                ("argument",),
+            ),
+            backend_config.subprocess_init_args,
+        )
