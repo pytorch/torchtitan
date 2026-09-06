@@ -166,6 +166,13 @@ class GraphTrainerCompileConfig(CompileConfig):
     as a standalone FSDP scheduling ablation.
     """
 
+    fsdp_contiguous_module_fqns: list[str] = field(default_factory=list)
+    """Module FQN patterns whose bucketed all-gather outputs must be contiguous.
+
+    If any owner in an FSDP bucket matches, bucketing materializes every output
+    in that bucket. Patterns match complete dot-separated FQN components.
+    """
+
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
     """Configuration for EP-overlap chunking and scheduling."""
 

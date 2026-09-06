@@ -24,6 +24,7 @@ import torch
 import torch.fx as fx
 from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
+    _recompute_changed_user_metadata,
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
     is_wait_tensor,
@@ -45,8 +46,9 @@ from torch._inductor.fx_passes.overlap_scheduling import (
 from torch.utils._ordered_set import OrderedSet
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_module_fqn as get_fqn,
     _is_backward_node,
-    _MODULE_FQN,
+    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import find_fsdp_unshard_outputs
 from torchtitan.tools.logging import logger
@@ -273,6 +275,18 @@ def get_fsdp_param_module_order(state_fqns: list[str]) -> dict[str, int]:
     return order
 
 
+def _materialize_fsdp_bucket_outputs(nodes: Iterable[fx.Node]) -> None:
+    splits = [
+        node for node in nodes if node.target == torch.ops.aten.split_with_sizes.default
+    ]
+    if len(splits) != 1:
+        raise AssertionError(
+            f"Expected one output split for an FSDP all-gather bucket, got {len(splits)}"
+        )
+    splits[0].target = torch.ops.aten.split_with_sizes_copy.default
+    _recompute_changed_user_metadata(splits)
+
+
 class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
     """Pack FSDP buckets in Eager FSDP2 parameter order."""
 
@@ -280,20 +294,39 @@ class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
         self,
         *args: Any,
         fsdp_param_module_order: dict[str, int] | None = None,
+        fsdp_contiguous_module_fqns: tuple[str, ...] = (),
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.fsdp_param_module_order = fsdp_param_module_order or {}
+        self.fsdp_contiguous_module_fqns = fsdp_contiguous_module_fqns
 
     def _param_order_key(self, node: fx.Node) -> tuple[int, int]:
-        module_fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+        module_fqn = get_fqn(node)
         param_idx = self.fsdp_param_module_order.get(module_fqn, len(self.node_idx))
         return (param_idx, self.node_idx[node])
 
     def _bucket_group(self, coll_nodes: list[fx.Node]) -> None:
         if self.fsdp_param_module_order:
             coll_nodes = sorted(coll_nodes, key=self._param_order_key)
-        return super()._bucket_group(coll_nodes)
+        # If fqn present in fsdp_contiguous_module_fqns for all_gather buckets
+        # we replace split_with_sizes to split_with_sizes_copy to guarantee
+        # contiguous tensors.
+        materialize_outputs = is_all_gather(coll_nodes[0]) and any(
+            matches_module_fqn_pattern(pattern, fqn)
+            for node in coll_nodes
+            if (fqn := get_fqn(node))
+            for pattern in self.fsdp_contiguous_module_fqns
+        )
+        pre_nodes = set(self.graph.nodes) if materialize_outputs else set()
+        super()._bucket_group(coll_nodes)
+        if materialize_outputs:
+            # Assumption that bucketing split is implemented via split_with_sizes that produces aliases,
+            # replacing to split_with_sizes_copy to materialize as contiguous tensors.
+            # Alternative better design would be to bucket with replacement that already has split_with_sizes_copy
+            _materialize_fsdp_bucket_outputs(
+                node for node in self.graph.nodes if node not in pre_nodes
+            )
 
 
 class JointManualOverlapScheduler(ManualOverlapScheduler):
@@ -332,6 +365,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         module_stack_fn: Callable[[fx.Node], list[tuple[str, type[Any]]]],
         bucket_mode: BucketMode | None = None,
         fsdp_param_module_order: dict[str, int] | None = None,
+        fsdp_contiguous_module_fqns: tuple[str, ...] = (),
     ) -> None:
         super().__init__(
             gm,
@@ -348,6 +382,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             scheduled=OrderedSet(self.graph.nodes),
             bucket_mode=effective_bucket_mode,
             fsdp_param_module_order=fsdp_param_module_order,
+            fsdp_contiguous_module_fqns=fsdp_contiguous_module_fqns,
         )
 
     def _manual_bucket_collectives(self) -> None:
@@ -548,6 +583,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
     fsdp_param_module_order: dict[str, int] | None = None,
+    fsdp_contiguous_module_fqns: tuple[str, ...] = (),
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -571,10 +607,12 @@ def joint_transformer_block_bucketing_reordering_pass(
             defaults to ``"custom_ops"`` via the parent class.
         fsdp_param_module_order: module order derived from traced parameter
             FQNs, used to pack FSDP buckets like Eager FSDP2.
+        fsdp_contiguous_module_fqns: module FQN patterns whose all-gather
+            bucket outputs must be contiguous.
     """
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
-        fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+        fqn = get_fqn(node)
         if not fqn:
             return []
         return [(fqn, torch.nn.Module)]
@@ -587,6 +625,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
         fsdp_param_module_order=fsdp_param_module_order,
+        fsdp_contiguous_module_fqns=fsdp_contiguous_module_fqns,
     )
     overlapped_gm = scheduler.run()
     overlapped_gm.recompile()
@@ -730,6 +769,7 @@ def _is_dense_region_target_node(node: fx.Node) -> bool:
         torch.ops.aten.reshape.default,
         torch.ops.aten.slice.Tensor,
         torch.ops.aten.split_with_sizes.default,
+        torch.ops.aten.split_with_sizes_copy.default,
         torch.ops.aten.sym_size.int,
         torch.ops.aten.t.default,
         torch.ops.aten.transpose.int,
@@ -770,7 +810,7 @@ def _build_layer_dense_regions(
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
-        fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+        fqn = get_fqn(node)
         if not fqn:
             continue
         layer_id = _layer_id_from_fqn(fqn)
@@ -791,7 +831,7 @@ def _build_top_dense_regions(gm: torch.fx.GraphModule) -> dict[str, list[fx.Node
     for node in gm.graph.nodes:
         if node.op != "call_function":
             continue
-        fqn = node.meta.get("custom", {}).get(_MODULE_FQN)
+        fqn = get_fqn(node)
         if not fqn or not _is_top_level_param_fqn(fqn):
             continue
         if not _is_dense_region_target_node(node):
@@ -845,7 +885,7 @@ def _collect_bucketed_fsdp_comms(
                     if n in visited or n.op == "output":
                         continue
                     visited.add(n)
-                    candidate = n.meta.get("custom", {}).get(_MODULE_FQN)
+                    candidate = get_fqn(n)
                     if candidate:
                         candidates.append(
                             (candidate, _is_backward_or_recomputed_node(n))
@@ -865,14 +905,14 @@ def _collect_bucketed_fsdp_comms(
             if first_backward_pos is not None and order[wait] >= first_backward_pos:
                 is_bwd = True
             return fqn, is_bwd
-        fqn = wait.meta.get("custom", {}).get(_MODULE_FQN)
-        if fqn is not None:
+        fqn = get_fqn(wait)
+        if fqn:
             is_bwd = _is_backward_or_recomputed_node(wait)
             if first_backward_pos is not None and order[wait] >= first_backward_pos:
                 is_bwd = True
             return fqn, is_bwd
-        fqn = launch.meta.get("custom", {}).get(_MODULE_FQN)
-        if fqn is not None:
+        fqn = get_fqn(launch)
+        if fqn:
             is_bwd = _is_backward_or_recomputed_node(launch)
             if first_backward_pos is not None and order[wait] >= first_backward_pos:
                 is_bwd = True
@@ -1073,6 +1113,7 @@ def schedule_fsdp_comms_to_dense_regions_pass(
         torch.ops.aten.reshape.default,
         torch.ops.aten.slice.Tensor,
         torch.ops.aten.split_with_sizes.default,
+        torch.ops.aten.split_with_sizes_copy.default,
         torch.ops.aten.view.default,
         torch.ops.aten.view.dtype,
     }
