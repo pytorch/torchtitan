@@ -14,9 +14,11 @@ packed-bank row for every placeholder token.
 
 import contextlib
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.spmd_types import dp_local_context
+from torchtitan.distributed.utils import get_spmd_backend
 
 
 def multimodal_context() -> contextlib.AbstractContextManager[None]:

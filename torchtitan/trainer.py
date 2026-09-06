@@ -1033,7 +1033,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
-            **collect_aux_loss_metrics(self.model_parts, parallel_dims),
+            **collect_aux_loss_metrics(parallel_dims),
         }
         self.metrics_processor.log(
             self.step,

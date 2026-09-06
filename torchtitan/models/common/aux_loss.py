@@ -176,7 +176,7 @@ def _zero_aux_losses(model_parts) -> None:
                 module._acc_sum.zero_()
 
 
-def collect_aux_loss_metrics(model_parts, parallel_dims) -> dict[str, float]:
+def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
     """Reduce the per-step snapshots over the inferred mesh and PP.
 
     Returns `{metric_name}/mean` per group, `{}` if none configured. All ranks

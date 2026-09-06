@@ -6,7 +6,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
@@ -209,9 +209,8 @@ class Decoder(BaseModel):
                         )
 
                 # Per-step normalization denominator, set before model build.
-                for _fqn, aux_loss_cfg, _parent, _attr in self.traverse(
-                    LoggedAuxLoss.Config
-                ):
+                for _fqn, cfg, _parent, _attr in self.traverse(LoggedAuxLoss.Config):
+                    aux_loss_cfg = cast(LoggedAuxLoss.Config, cfg)
                     aux_loss_cfg.per_step_denominator = {
                         "token": config.training.num_tokens_per_train_step,
                         "sequence": (

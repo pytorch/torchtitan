@@ -96,8 +96,7 @@ class FaultTolerantTrainer(Trainer):
         )
         self.num_pp_microbatches = num_pp_microbatches
         num_tokens_per_dp_rank = (
-            config.training.num_tokens_per_microbatch_per_dp_rank
-            * num_pp_microbatches
+            config.training.num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches
         )
 
         # Resolve the global per-step token budget before model configs are
@@ -114,6 +113,7 @@ class FaultTolerantTrainer(Trainer):
             num_tokens_per_train_step=config.training.num_tokens_per_train_step,
             dp_degree=batch_degree,
         )
+        config.training.num_tokens_per_train_step = num_tokens_per_train_step
 
         # build dataloader
         num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
