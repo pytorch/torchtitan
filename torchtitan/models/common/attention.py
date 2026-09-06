@@ -112,8 +112,13 @@ def local_head_split(
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
     use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
-    input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
-    output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    # Heads are sharded on tp unless the input is invariant there (a tower
+    # that runs whole on every rank); the view keeps either.
+    tp_type: spmd.PerMeshAxisSpmdType = spmd.S(t.ndim - 1)
+    if use_spmd and spmd.maybe_get_axis_local_type(t, "tp") is spmd.I:
+        tp_type = spmd.I
+    input_type = {"dp": spmd.S(dp_shard_dim), "tp": tp_type}
+    output_type = {"dp": spmd.S(dp_shard_dim), "tp": tp_type}
     with spmd.local():
         if use_spmd:
             spmd.assert_type(t, input_type)

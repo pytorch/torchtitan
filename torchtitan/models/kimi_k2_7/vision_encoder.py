@@ -120,9 +120,8 @@ def _compute_learned_pos_embeds(
 
     packed_pos = torch.cat([pos[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        packed_pos = spmd.mutate_type(
-            packed_pos, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
-        )
+        # Per rank on dp, as the grids are; on tp the table's declaration holds.
+        packed_pos = spmd.mutate_type(packed_pos, "dp", src=spmd.R, dst=spmd.V)
     return packed_pos
 
 
@@ -182,9 +181,7 @@ def _compute_2d_rope_cache(
     # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
     packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-        packed_angles = spmd.mutate_type(
-            packed_angles, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
-        )
+        packed_angles = spmd.mutate_type(packed_angles, "dp", src=spmd.R, dst=spmd.V)
     return torch.polar(torch.ones_like(packed_angles), packed_angles).unsqueeze(1)
 
 
