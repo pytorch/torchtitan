@@ -3693,6 +3693,7 @@ class TestChunkPasses(TestCase):
 
     def test_ep_overlap_pass_pipeline_order(self):
         traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.coda_patterns = ["b6_bf16_weight_grad_cast"]
         names = self._compile_pass_names(traced_result, config)
         dead_code_indices = [
             i for i, name in enumerate(names) if name == "eliminate_dead_code_pass"
@@ -3736,6 +3737,10 @@ class TestChunkPasses(TestCase):
         )
         self.assertLess(
             names.index("concretize_ep_chunk_symbolic_shapes_pass"),
+            names.index("fuse_b6_bf16_weight_grad_cast_pass"),
+        )
+        self.assertLess(
+            names.index("fuse_b6_bf16_weight_grad_cast_pass"),
             names.index("full_inductor_compilation_pass"),
         )
 
