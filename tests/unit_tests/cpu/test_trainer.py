@@ -28,7 +28,12 @@ def _batch() -> tuple[dict[str, object], torch.Tensor]:
     )
 
 
+def _bind_pp_forward_backward_body(trainer: Trainer) -> None:
+    trainer.fwd_bwd_fn = lambda *args: Trainer._pp_forward_backward_body(trainer, *args)
+
+
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
+    sentinel = torch.full((1,), -1.0)
     trainer = cast(
         Trainer,
         SimpleNamespace(
@@ -49,17 +54,19 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
             config=SimpleNamespace(parallelism="PARA"),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            _pp_loss_sentinel_on_non_last_stage=sentinel,
         ),
     )
+    _bind_pp_forward_backward_body(trainer)
 
-    loss = Trainer.pp_forward_backward_step(
+    loss = Trainer.forward_backward_step(
         trainer,
-        input_dict_mbs=[{"input": torch.ones(1)}],
-        label_mbs=[torch.ones(1)],
+        input_dict=[{"input": torch.ones(1)}],
+        labels=[torch.ones(1)],
         global_valid_tokens=torch.tensor(1),
     )
 
-    torch.testing.assert_close(loss, torch.tensor([-1.0]))
+    assert loss is sentinel
 
 
 def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
@@ -102,11 +109,12 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
             device=torch.device("cpu"),
         ),
     )
+    _bind_pp_forward_backward_body(trainer)
 
-    reporting_loss = Trainer.pp_forward_backward_step(
+    reporting_loss = Trainer.forward_backward_step(
         trainer,
-        input_dict_mbs=[{"input": torch.ones(1)}] * 2,
-        label_mbs=[torch.ones(1)] * 2,
+        input_dict=[{"input": torch.ones(1)}] * 2,
+        labels=[torch.ones(1)] * 2,
         global_valid_tokens=torch.tensor(2),
     )
 
@@ -117,6 +125,53 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
     assert loss_containers == [[]]
     assert all(reference() is None for reference in loss_refs)
     assert all(reference() is None for reference in activation_refs)
+
+
+def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
+    fwd_bwd_fn = MagicMock(return_value=torch.tensor(0.0))
+
+    class _FakeModel:
+        def preprocess_inputs(self, input_dict, **kwargs):
+            return (
+                input_dict["input"] + 1,
+                input_dict["labels"] + 2,
+                {"positions": input_dict["positions"] + 3},
+            )
+
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            pp_has_first_stage=True,
+            pp_has_last_stage=True,
+            model_parts=[_FakeModel()],
+            parallel_dims=SimpleNamespace(pp_enabled=True),
+            config=SimpleNamespace(parallelism="PARA"),
+            ntokens_seen=0,
+            fwd_bwd_fn=fwd_bwd_fn,
+        ),
+    )
+    global_valid_tokens = torch.tensor(2)
+
+    result = Trainer.forward_backward_step(
+        trainer,
+        input_dict=[
+            {"input": torch.tensor(1), "positions": torch.tensor(10)},
+            {"input": torch.tensor(2), "positions": torch.tensor(20)},
+        ],
+        labels=[torch.tensor([3]), torch.tensor([4])],
+        global_valid_tokens=global_valid_tokens,
+    )
+
+    torch.testing.assert_close(result, torch.tensor(0.0))
+    arg_mbs, kwarg_mbs, target_mbs, passed_valid_tokens = fwd_bwd_fn.call_args.args
+    torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
+    torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
+    torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
+    torch.testing.assert_close(kwarg_mbs[1]["positions"], torch.tensor(23))
+    torch.testing.assert_close(target_mbs[0], torch.tensor([5]))
+    torch.testing.assert_close(target_mbs[1], torch.tensor([6]))
+    assert passed_valid_tokens is global_valid_tokens
+    assert trainer.ntokens_seen == 2
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
@@ -159,8 +214,9 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs):
+        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
             self.fn = fn
+            assert num_warmup_iterations == 2
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -177,7 +233,12 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             PassthroughCUDAGraphWrapper,
         ),
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd)
+        runner = wrap_with_cuda_graph(
+            fwd_bwd,
+            gradient_accumulation_steps=1,
+            sdc_num_steps=0,
+            sdc_num_replays=0,
+        )
         for value in (1.0, 2.0, 3.0):
             graph_loss.fill_(value)
             loss = runner(
@@ -194,6 +255,44 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
     torch.testing.assert_close(global_valid_tokens, torch.tensor(1))
     assert global_valid_tokens.dtype == torch.int64
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
+
+
+def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
+    class PassthroughCUDAGraphWrapper:
+        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
+            self.fn = fn
+            assert num_warmup_iterations == 2
+
+        def __call__(self, *args):
+            return self.fn(*args)
+
+    fn = MagicMock(side_effect=lambda batches, *, scale: batches[1]["x"] * scale)
+    with (
+        patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(torch.version, "hip", None),
+        patch(
+            "torchtitan.distributed.cudagraph.CUDAGraphWrapper",
+            PassthroughCUDAGraphWrapper,
+        ),
+    ):
+        run = wrap_with_cuda_graph(
+            fn,
+            gradient_accumulation_steps=1,
+            sdc_num_steps=0,
+            sdc_num_replays=0,
+        )
+        output = run(
+            [{"x": torch.tensor(1.0)}, {"x": torch.tensor(2.0)}],
+            scale=torch.tensor(3.0),
+        )
+
+    torch.testing.assert_close(output, torch.tensor(6.0))
+    fn.assert_called_once()
+    batches = fn.call_args.args[0]
+    torch.testing.assert_close(batches[0]["x"], torch.tensor(1.0))
+    torch.testing.assert_close(batches[1]["x"], torch.tensor(2.0))
+    torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(3.0))
 
 
 def test_trainer_accumulates_reused_cuda_graph_losses():
@@ -401,7 +500,12 @@ def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
         patch.object(torch.version, "hip", hip_version),
         patch("torchtitan.distributed.cudagraph.logger.warning") as warning,
     ):
-        runner = wrap_with_cuda_graph(fwd_bwd)
+        runner = wrap_with_cuda_graph(
+            fwd_bwd,
+            gradient_accumulation_steps=1,
+            sdc_num_steps=0,
+            sdc_num_replays=0,
+        )
 
     assert runner is fwd_bwd
     warning.assert_called_once()
