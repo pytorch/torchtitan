@@ -4,7 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Literal
+import json
+from dataclasses import dataclass
 
 import pytest
 from renderers import (
@@ -16,23 +17,24 @@ from renderers import (
 )
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.config import Configurable
 from torchtitan.experiments.rl.renderer import (
-    build_renderer,
-    RendererTokenizer,
-    TorchTitanRendererConfig,
+    RendererConfig,
+    RenderersLibraryConfig,
+    RendererTokenizerWrapper,
 )
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
 
 
-# --- build_renderer ---
+# --- RenderersLibraryConfig ---
 
 
 def test_build_renders_with_titan_tokenizer() -> None:
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-    renderer = build_renderer(
-        tokenizer=tokenizer, config=Qwen3RendererConfig(enable_thinking=False)
-    )
+    renderer = RenderersLibraryConfig(
+        renderers_config=Qwen3RendererConfig(enable_thinking=False)
+    ).build(tokenizer=tokenizer)
     rendered = renderer.render(
         [{"role": "user", "content": "hi"}], add_generation_prompt=True
     )
@@ -45,42 +47,45 @@ def test_build_renders_with_titan_tokenizer() -> None:
 
 
 @pytest.mark.parametrize(
-    ("config", "reason"),
+    ("renderers_config", "reason"),
     [
         (AutoRendererConfig(), "MODEL_RENDERER_MAP"),
         (DefaultRendererConfig(), "special-token variables"),
     ],
 )
-def test_auto_and_default_are_refused(config, reason: str) -> None:
+def test_auto_and_default_are_refused(renderers_config, reason: str) -> None:
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
     with pytest.raises(ValueError) as error:
-        build_renderer(tokenizer=tokenizer, config=config)
+        RenderersLibraryConfig(renderers_config=renderers_config).build(
+            tokenizer=tokenizer
+        )
     assert reason in str(error.value)
     assert "Pick the model's renderer" in str(error.value)
 
 
-def test_build_uses_the_torchtitan_renderer_class() -> None:
-    class _FakeRenderer:
-        def __init__(self, tokenizer, config):
-            self.tokenizer, self.config = tokenizer, config
+def test_config_to_dict_is_json() -> None:
+    # The controller logs `Controller.Config.to_dict()` as the job config.
+    @dataclass(kw_only=True, slots=True)
+    class _Holder(Configurable.Config):
+        renderer: RendererConfig
 
-    class _FakeConfig(TorchTitanRendererConfig):
-        name: Literal["fake"] = "fake"
-        renderer_cls = _FakeRenderer
+    holder = _Holder(
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        )
+    )
+    value = holder.to_dict()
+    assert value["renderer"]["renderers_config"]["name"] == "qwen3"
+    assert value["renderer"]["renderers_config"]["enable_thinking"] is False
+    json.dumps(value)
 
-    tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-    renderer = build_renderer(tokenizer=tokenizer, config=_FakeConfig())
-    assert isinstance(renderer, _FakeRenderer)
-    assert isinstance(renderer.tokenizer, RendererTokenizer)
-    assert isinstance(renderer.config, _FakeConfig)
 
-
-# --- RendererTokenizer ---
+# --- RendererTokenizerWrapper ---
 
 
 def test_renderer_tokenizer_satisfies_offset_protocol() -> None:
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-    renderer_tokenizer = RendererTokenizer(tokenizer)
+    renderer_tokenizer = RendererTokenizerWrapper(tokenizer)
     assert isinstance(renderer_tokenizer, Tokenizer)
     assert isinstance(renderer_tokenizer, OffsetTokenizer)
     assert renderer_tokenizer.eos_token_id == tokenizer.eos_id
@@ -98,7 +103,7 @@ def test_encode_never_adds_bos() -> None:
     # The debug tokenizer has a BOS token; renderers place special tokens themselves.
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
     assert tokenizer.bos_id is not None
-    assert tokenizer.bos_id not in RendererTokenizer(tokenizer).encode("hi")
+    assert tokenizer.bos_id not in RendererTokenizerWrapper(tokenizer).encode("hi")
 
 
 def test_render_matches_hf_tokenizer_path() -> None:
@@ -116,7 +121,7 @@ def test_render_matches_hf_tokenizer_path() -> None:
         transformers.AutoTokenizer.from_pretrained(_TOKENIZER_PATH), config
     )
     titan = create_renderer(
-        RendererTokenizer(HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)),
+        RendererTokenizerWrapper(HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)),
         config,
     )
     expected = hf.render(messages, add_generation_prompt=True)

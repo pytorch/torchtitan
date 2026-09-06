@@ -6,90 +6,76 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from dataclasses import dataclass
+from typing import Annotated, Any
 
+import tyro
 from renderers import create_renderer, Renderer
 from renderers.configs import BaseRendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.config import Configurable
 
 
-class TorchTitanRendererConfig(BaseRendererConfig):
-    """Config of a renderer whose code lives in TorchTitan, not in `renderers`.
+@dataclass(kw_only=True, slots=True)
+class RendererConfig(Configurable.Config):
+    """Base config of a renderer; `build` returns a `renderers.Renderer` on TorchTitan's tokenizer.
 
-    How the library builds a renderer: a config only carries options, so
-    `renderers.create_renderer(tokenizer, config)` looks `config.name` up in the
-    library's registry to find the renderer class, then calls `cls(tokenizer, config)`.
-    That registry only lists the library's own renderers, so it cannot find one defined
-    here. We skip the registry: a TorchTitan renderer's config stores the class in
-    `renderer_cls`, and `build_renderer` calls `renderer_cls(tokenizer, config)` itself.
-
-    Example (Muse Glimmer, `rl/models/muse_glimmer/renderer.py`):
-
-        class MuseGlimmerRendererConfig(TorchTitanRendererConfig):
-            name: Literal["muse_glimmer"] = "muse_glimmer"
-            ...
-
-        class MuseGlimmerRenderer:            # implements renderers.Renderer
-            def __init__(self, tokenizer, config: MuseGlimmerRendererConfig): ...
-
-        MuseGlimmerRendererConfig.renderer_cls = MuseGlimmerRenderer
-
-        build_renderer(tokenizer=tokenizer, config=MuseGlimmerRendererConfig())
-        # -> MuseGlimmerRenderer(RendererTokenizer(tokenizer), config), no registry involved
+    Subclasses: `RenderersLibraryConfig` for a renderer from the `renderers` library, and
+    in-tree renderers such as `MuseGlimmerRendererConfig`.
     """
 
-    renderer_cls: ClassVar[type[Renderer]]
+    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+        raise NotImplementedError
 
 
-def build_renderer(
-    *, tokenizer: HuggingFaceTokenizer, config: BaseRendererConfig
-) -> Renderer:
-    """Build a renderer with TorchTitan's loaded tokenizer.
-
-    Args:
-        tokenizer: TorchTitan tokenizer to reuse.
-        config: Typed renderer configuration from `renderers` (or a
-            `TorchTitanRendererConfig`). Renderers and their options:
-            https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/docs/renderer-config.md
+@dataclass(kw_only=True, slots=True)
+class RenderersLibraryConfig(RendererConfig):
+    """Builds one of the `renderers` library's renderers on TorchTitan's tokenizer.
 
     Example:
 
         from renderers import Qwen3RendererConfig
 
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.experiments.rl.renderer import build_renderer
+        from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 
-        tokenizer = HuggingFaceTokenizer(tokenizer_path="./Qwen3-0.6B")
-        renderer = build_renderer(
-            tokenizer=tokenizer,
-            config=Qwen3RendererConfig(enable_thinking=False),
-        )
+        renderer = RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ).build(tokenizer=HuggingFaceTokenizer(tokenizer_path="./Qwen3-0.6B"))
         prompt_ids = renderer.render_ids(
             [{"role": "user", "content": "hi"}],
             add_generation_prompt=True,
         )
     """
-    if config.name == "auto":
-        raise ValueError(
-            f"AutoRendererConfig resolves by exact match of tokenizer.name_or_path ({tokenizer.tokenizer_path!r}) "
-            "against renderers' MODEL_RENDERER_MAP, else falls back to DefaultRenderer (unsupported here). "
-            "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
+
+    renderers_config: Annotated[BaseRendererConfig, tyro.conf.Suppress]
+    """The library's typed config for the model, e.g. `Qwen3RendererConfig(enable_thinking=False)`.
+    Renderers and their options:
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/docs/renderer-config.md"""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"renderers_config": self.renderers_config.model_dump(mode="json")}
+
+    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+        if self.renderers_config.name == "auto":
+            raise ValueError(
+                f"AutoRendererConfig resolves by exact match of tokenizer.name_or_path ({tokenizer.tokenizer_path!r}) "
+                "against renderers' MODEL_RENDERER_MAP, else falls back to DefaultRenderer (unsupported here). "
+                "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
+            )
+        if self.renderers_config.name == "default":
+            raise ValueError(
+                "DefaultRenderer needs Hugging Face apply_chat_template; TorchTitan's template rendering lacks "
+                "its special-token variables (bos_token, ...) and would silently produce different tokens. "
+                "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
+            )
+        return create_renderer(
+            tokenizer=RendererTokenizerWrapper(tokenizer), config=self.renderers_config
         )
-    if config.name == "default":
-        raise ValueError(
-            "DefaultRenderer needs Hugging Face apply_chat_template; TorchTitan's template rendering lacks "
-            "its special-token variables (bos_token, ...) and would silently produce different tokens. "
-            "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
-        )
-
-    renderer_tokenizer = RendererTokenizer(tokenizer)
-    if isinstance(config, TorchTitanRendererConfig):
-        return config.renderer_cls(renderer_tokenizer, config)
-    return create_renderer(tokenizer=renderer_tokenizer, config=config)
 
 
-class RendererTokenizer:
+class RendererTokenizerWrapper:
     """Adapt TorchTitan's loaded tokenizer to `renderers.OffsetTokenizer`.
 
     Protocol and bring-your-own-tokenizer guide:
@@ -105,9 +91,9 @@ class RendererTokenizer:
     Example:
 
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.experiments.rl.renderer import RendererTokenizer
+        from torchtitan.experiments.rl.renderer import RendererTokenizerWrapper
 
-        tokenizer = RendererTokenizer(
+        tokenizer = RendererTokenizerWrapper(
             HuggingFaceTokenizer(tokenizer_path="./Qwen3-0.6B")
         )
         tokenizer.encode("hi")  # [6023]

@@ -23,6 +23,7 @@ import os
 
 import pytest
 
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.experiments.rl.models.muse_glimmer.renderer import (
     EOM_ID,
     EOT_ID,
@@ -225,6 +226,21 @@ def tokenizer():
 
 def _renderer(tokenizer, **overrides):
     return MuseGlimmerRenderer(tokenizer, MuseGlimmerRendererConfig(**overrides))
+
+
+def test_config_build_matches_hf_tokenizer_path(tokenizer):
+    path = os.environ.get("MUSE_GLIMMER_TOKENIZER", DEFAULT_TOKENIZER)
+    if not os.path.isdir(path):
+        pytest.skip("HuggingFaceTokenizer needs a local tokenizer directory")
+    titan = MuseGlimmerRendererConfig(reasoning_strength="low").build(
+        tokenizer=HuggingFaceTokenizer(tokenizer_path=path)
+    )
+    assert isinstance(titan, MuseGlimmerRenderer)
+    hf = _renderer(tokenizer, reasoning_strength="low")
+    messages = [{"role": "user", "content": "search for bob"}]
+    assert titan.render_ids(
+        messages, tools=TOOLS, add_generation_prompt=True
+    ) == hf.render_ids(messages, tools=TOOLS, add_generation_prompt=True)
 
 
 def _template_kwargs(config: MuseGlimmerRendererConfig) -> dict:

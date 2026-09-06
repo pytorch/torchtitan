@@ -11,8 +11,11 @@ from types import SimpleNamespace
 
 from renderers import Qwen3RendererConfig
 
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
 from torchtitan.experiments.rl.actors.generator import SamplingConfig
 from torchtitan.experiments.rl.environment.token import TokenEnvOutput
+from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout import RolloutStatus
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rubrics import RubricOutput
@@ -123,7 +126,10 @@ def test_worker_executes_group_without_actor_mesh() -> None:
         )
         worker = _CustomWorker(worker_config)
         await worker.setup_async(
-            renderer_config=Qwen3RendererConfig(enable_thinking=False),
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=RenderersLibraryConfig(
+                renderers_config=Qwen3RendererConfig(enable_thinking=False)
+            ),
             hf_assets_path="tests/assets/tokenizer",
         )
         group = await worker.run_group(

@@ -51,6 +51,7 @@ from torchtitan.experiments.rl.models.muse_glimmer.renderer import (
 )
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
+from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
 from torchtitan.models.muse_glimmer.state_dict_adapter import (
@@ -82,7 +83,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=Qwen3RendererConfig(enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -210,7 +213,9 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=Qwen3RendererConfig(enable_thinking=False),  # TODO: TBD
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),

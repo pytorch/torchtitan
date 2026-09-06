@@ -16,7 +16,7 @@ from monarch.actor import ProcMesh, this_host
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
-from torchtitan.experiments.rl.renderer import build_renderer
+from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,
@@ -30,8 +30,6 @@ from torchtitan.experiments.rl.types import RolloutTurnID
 
 if TYPE_CHECKING:
     from renderers import Renderer
-
-    from renderers.configs import BaseRendererConfig
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.experiments.rl.actors.generator import SamplingConfig
@@ -138,7 +136,8 @@ class Rollouter(Configurable):
     async def setup_async(
         self,
         *,
-        renderer_config: BaseRendererConfig,
+        tokenizer_config: HuggingFaceTokenizer.Config,
+        renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
         """Spawn and initialize the owned worker proc mesh and actor pool."""
@@ -158,6 +157,7 @@ class Rollouter(Configurable):
             num_threads=self._config.num_threads_per_worker,
         )
         await self._worker_actors.setup_async.call(
+            tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
         )
@@ -244,12 +244,13 @@ class RolloutWorker(Configurable):
     async def setup_async(
         self,
         *,
-        renderer_config: BaseRendererConfig,
+        tokenizer_config: HuggingFaceTokenizer.Config,
+        renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
         """Build runtime dependencies after the worker actor is spawned."""
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=hf_assets_path)
-        self._renderer = build_renderer(tokenizer=tokenizer, config=renderer_config)
+        tokenizer = tokenizer_config.build(tokenizer_path=hf_assets_path)
+        self._renderer = renderer_config.build(tokenizer=tokenizer)
 
     def make_env_group(
         self,

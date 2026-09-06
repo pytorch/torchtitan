@@ -35,6 +35,7 @@ from torchtitan.experiments.rl.losses import DAPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
+from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
@@ -82,7 +83,9 @@ def _qwen3_4b_dapo_math_config(
                 ),
             ),
         ),
-        renderer=Qwen3RendererConfig(enable_thinking=True),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=True)
+        ),
         num_generators=6,
         generator_router=InterGeneratorRouter.Config(
             strategy=LeastLoadedRoutingStrategy.Config()

@@ -28,13 +28,13 @@ renderer test asserts equality with ``apply_chat_template`` across roles, tool s
 reasoning states. Treat that test as the spec -- if the template changes upstream, it
 fails first.
 
-Implements the ``renderers.Renderer`` Protocol. Its config is a ``TorchTitanRendererConfig``
-naming this class, so ``build_renderer`` constructs it directly instead of looking it up in
-the ``renderers`` registry (Muse Glimmer is not in the library yet).
+Implements the ``renderers.Renderer`` Protocol. Muse Glimmer is not in the library yet, so
+``MuseGlimmerRendererConfig`` is a TorchTitan ``RendererConfig`` whose ``build`` constructs
+this class directly.
 
 TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
-atem.py -> a tool parser in renderers/parsers.py), then delete both files and the
-``renderer_cls`` assignment at the bottom of this module.
+atem.py -> a tool parser in renderers/parsers.py), then delete both files and select it
+through ``RenderersLibraryConfig`` like the other renderers.
 
 It lives under ``experiments/rl`` rather than ``torchtitan/models/muse_glimmer`` because
 RL is its only consumer and ``renderers`` is an RL-only optional dependency; keeping it
@@ -46,8 +46,10 @@ from __future__ import annotations
 import datetime
 import json
 import re
-from typing import ClassVar, Literal, NamedTuple
+from dataclasses import dataclass
+from typing import NamedTuple
 
+from renderers import Renderer
 from renderers.base import (
     extract_message_tool_names,
     ParsedResponse,
@@ -58,29 +60,17 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
+from renderers.configs import ThinkingRetention
 
-from torchtitan.experiments.rl.renderer import TorchTitanRendererConfig
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.rl.renderer import RendererConfig, RendererTokenizerWrapper
 
 from .atem import parse_atem_tool_calls, render_atem_tool_call
 
 
-class MuseGlimmerRendererConfig(TorchTitanRendererConfig):
+@dataclass(kw_only=True, slots=True)
+class MuseGlimmerRendererConfig(RendererConfig):
     """Muse Glimmer (harmony chat format + ATEM tool calls) renderer config."""
-
-    name: Literal["muse_glimmer"] = "muse_glimmer"
-
-    # renderers validates in BaseRendererConfig.__pydantic_init_subclass__ that every
-    # non-base field is classified as either a chat-template kwarg or a renderer-internal
-    # knob; the two sets must be disjoint and together cover all of them. Declared
-    # unconditionally -- versions without the validator ignore these ClassVars, so this
-    # is compatible with both. The template fields mirror kwargs the published
-    # chat_template.jinja reads, which is what the library's parity matrix varies.
-    _template_fields: ClassVar[frozenset[str]] = frozenset(
-        {"reasoning_strength", "knowledge_cutoff", "current_date"}
-    )
-    _internal_fields: ClassVar[frozenset[str]] = frozenset(
-        {"retain_reasoning_in_history", "answer_from_reasoning_fallback"}
-    )
 
     reasoning_strength: str | None = None
     """Sizes the reasoning budget, rendered as ``Reasoning strength: <value>.``
@@ -124,6 +114,13 @@ class MuseGlimmerRendererConfig(TorchTitanRendererConfig):
     usually not what you want. Useful for outcome-scored RL, where a rollout with an
     empty ``content`` is unscoreable and the answer is often the final reasoning line.
     """
+
+    thinking_retention: ThinkingRetention | None = None
+    """The library-wide bridge policy override (`renderers.BaseRendererConfig.thinking_retention`).
+    ``None`` keeps the template's implied policy; ``"tool_cycle"`` re-renders at a new user query."""
+
+    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+        return MuseGlimmerRenderer(RendererTokenizerWrapper(tokenizer), self)
 
 
 # Muse Glimmer special tokens. The ids are checked against the tokenizer in __init__
@@ -341,10 +338,9 @@ class MuseGlimmerRenderer:
         self._tok = tokenizer
         self._config = config or MuseGlimmerRendererConfig()
         self._bos = tokenizer.bos_token or ""
-        # BaseRendererConfig.thinking_retention is the library-wide knob every renderer
-        # is expected to honour in its bridge. Muse Glimmer's published chat template
-        # renders reasoning_content for every assistant turn unconditionally -- no
-        # query-boundary drop like gpt-oss's auto_drop_analysis or Qwen3's think-block
+        # `thinking_retention` is the library-wide bridge knob. Muse Glimmer's published
+        # chat template renders reasoning_content for every assistant turn unconditionally
+        # -- no query-boundary drop like gpt-oss's auto_drop_analysis or Qwen3's think-block
         # stripping -- so "all" is the template-faithful implied policy. An explicit
         # thinking_retention on the config overrides it.
         self.effective_thinking_retention = resolve_thinking_retention(
@@ -749,8 +745,3 @@ class MuseGlimmerRenderer:
             reasoning_content=reasoning,
             tool_calls=tool_calls,
         )
-
-
-# TODO: upstream Muse Glimmer to PrimeIntellect-ai/renderers, then make the config a plain
-# BaseRendererConfig again and delete this line (the renderer class is defined above).
-MuseGlimmerRendererConfig.renderer_cls = MuseGlimmerRenderer
