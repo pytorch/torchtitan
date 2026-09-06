@@ -11,6 +11,7 @@ import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch import nn
 from torch.distributed.tensor import DTensor
 
@@ -322,20 +323,22 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        topk_expert_ids_TK = self._select_experts(
-            scores_TE, expert_bias_E, **router_kwargs
-        )
-
-        # NOTE: The expert_bias is only used for routing. The gating value
-        #       topk_scores_TK is still derived from the original scores.
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-
-        # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
-            (
-                topk_expert_ids_TK,
-                topk_scores_TK,
-            ) = self._debug_force_load_balance_routing(scores_TE)
+            topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
+                scores_TE
+            )
+        else:
+            # Routing choices must remain identical between forward and replay.
+            topk_expert_ids_TK = remat.region(
+                self._select_experts,
+                "routing_decision",
+                recompute=False,
+            )(scores_TE, expert_bias_E, **router_kwargs)
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
+
+            # The expert bias is only used for routing. The gating value is
+            # still derived from the original scores.
+            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
             denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20

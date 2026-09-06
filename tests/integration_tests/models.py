@@ -28,6 +28,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ),
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_remat_fsdp2_tp2_cp2],
+            test_descr="Llama 3 FSDP+TP+CP+remat",
+            test_name="llama3_fsdp+tp+cp+remat",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
             test_descr="Llama 3 FSDP+TP+PP",
             test_name="llama3_fsdp+tp+pp",

@@ -9,11 +9,13 @@
 
 import os
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import Annotated, cast
 
 import torch
 import torch._functorch.config
 import torch.nn as nn
+import torch_remat as remat
 import tyro
 from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -292,6 +294,125 @@ class SelectiveAC(ActivationCheckpointing):
         )
 
 
+class RematAC(ActivationCheckpointing):
+    """Retain model-declared regions and recompute the rest of each block.
+
+    Models must declare compatible regions and provide an explicit save policy
+    before selecting this activation-checkpointing implementation.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationCheckpointing.Config):
+        save_regions: list[str]
+        """
+        Qualified save-region glob patterns, relative to a transformer block.
+        Save regions are exposed by model code through
+        ``AVAILABLE_REMAT_SAVE_REGIONS``. Everything outside a retained region
+        is recomputed.
+
+        NB: Save-region names are relative to a transformer block, so the same
+        policy applies to every transformer block. Per-block remat policies are
+        not currently supported.
+        """
+
+        allow_unmatched_save_regions: bool = False
+        """
+        Allow save-region patterns that do not match this model part. By
+        default, unmatched patterns raise an error because they usually indicate
+        a typo or a policy that is stale for the selected model. Set this to true
+        only when unmatched patterns are expected, such as with pipeline
+        parallelism when a pattern matches regions assigned to another stage.
+        Unmatched patterns still emit a warning.
+        """
+
+        preserve_rng_state: bool = False
+        """
+        Must remain false. torch_remat requires explicit RecomputeStateHooks for
+        random state that can advance inside retained regions.
+        """
+
+    def _validate_config(self) -> "RematAC.Config":
+        config = cast("RematAC.Config", self.config)
+        if config.preserve_rng_state:
+            raise ValueError(
+                "RematAC does not support preserve_rng_state=True. Register a "
+                "torch_remat RecomputeStateHook for random state used in retained "
+                "regions."
+            )
+        if config.debug:
+            raise ValueError(
+                "RematAC does not support the activation checkpoint debug option."
+            )
+        return config
+
+    def _wrap_block(
+        self, module: nn.Module, *, base_fqn: str | None = None
+    ) -> nn.Module:
+        config = self._validate_config()
+        checkpoint_region_name = base_fqn or type(module).__name__
+        checkpointed_forward = remat.checkpoint(
+            region_name=checkpoint_region_name,
+            determinism_check=config.determinism_check,
+            preserve_rng_state=False,
+        )(module.forward)
+        module.forward = checkpointed_forward
+        return module
+
+    def apply(self, model: nn.Module) -> None:
+        from torchtitan.models.common.remat import (
+            available_remat_save_regions,
+            configure_remat_save_regions,
+        )
+
+        config = self._validate_config()
+        layers = model.get_submodule("layers")
+        transformer_blocks = list(layers.named_children())
+        if not transformer_blocks:
+            logger.info("RematAC found no transformer blocks in this model part")
+            return
+
+        available_regions = list(
+            dict.fromkeys(
+                region
+                for _, transformer_block in transformer_blocks
+                for region in available_remat_save_regions(transformer_block)
+            )
+        )
+        unmatched_patterns = [
+            pattern
+            for pattern in config.save_regions
+            if not any(fnmatch(region, pattern) for region in available_regions)
+        ]
+        # This model can be one pipeline partition, so a pattern absent here may
+        # still match a region assigned to another stage.
+        if unmatched_patterns:
+            if not config.allow_unmatched_save_regions:
+                raise ValueError(
+                    "RematAC save_regions patterns did not match this model part: "
+                    f"{unmatched_patterns}. Available save regions: "
+                    f"{available_regions}. Check save_regions for typos. If these "
+                    "patterns are expected to match another pipeline stage, set "
+                    "allow_unmatched_save_regions=True."
+                )
+            logger.warning(
+                "RematAC save_regions patterns did not match this model part: %s",
+                unmatched_patterns,
+            )
+
+        selected_regions = []
+        for layer_id, transformer_block in transformer_blocks:
+            selected_for_block, _ = configure_remat_save_regions(
+                transformer_block, config.save_regions
+            )
+            selected_regions.extend(selected_for_block)
+            self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
+        logger.info(
+            "Applied RematAC to %d transformer blocks. Retained regions: %s",
+            len(transformer_blocks),
+            list(dict.fromkeys(selected_regions)) or "none",
+        )
+
+
 class MemoryBudgetAC(ActivationCheckpointing):
     """Let the compiler partitioner trade compute for memory via a memory budget.
 
@@ -340,6 +461,7 @@ class MemoryBudgetAC(ActivationCheckpointing):
 # every nested Config class is named "Config" and would otherwise collide.
 ActivationCheckpointingConfig = (
     Annotated[SelectiveAC.Config, tyro.conf.subcommand("selective")]
+    | Annotated[RematAC.Config, tyro.conf.subcommand("remat")]
     | Annotated[FullAC.Config, tyro.conf.subcommand("full")]
     | Annotated[MemoryBudgetAC.Config, tyro.conf.subcommand("memory-budget")]
     | Annotated[None, tyro.conf.subcommand("none")]

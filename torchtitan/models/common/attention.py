@@ -19,6 +19,7 @@ from typing import Any, ClassVar, NamedTuple
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -869,6 +870,12 @@ class GQAttention(BaseAttention):
     :class:`FusedQKVLinear` for a single fused projection.
     """
 
+    AVAILABLE_REMAT_SAVE_REGIONS: tuple[str, ...] = (
+        "qkv",
+        "inner_attention",
+        "wo",
+    )
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -931,7 +938,12 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+        xq_THK, xk_THK, xv_THV = remat.region(
+            self.qkv_linear,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
+        remat.recompute_needs_tensor(xq_THK, xk_THK, xv_THV)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -942,13 +954,25 @@ class GQAttention(BaseAttention):
         # Apply rotary embeddings
         xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq_THK,
             xk_THK,
             xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        return self.wo(out_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
