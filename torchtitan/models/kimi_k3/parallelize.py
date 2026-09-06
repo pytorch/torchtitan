@@ -21,7 +21,6 @@ from torchtitan.distributed.fsdp import (
     resolve_sparse_fsdp_mesh,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
-from torchtitan.tools.logging import logger
 from .model import KimiK3Model
 
 
@@ -54,8 +53,6 @@ def parallelize_kimi_k3(
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
     assert isinstance(model, KimiK3Model)
-    if parallel_dims.cp_enabled:
-        apply_cp_kimi_k3(model, parallel_dims)
     if parallelism.spmd_backend == "spmd_types":
         # Kimi K3 only declares layouts for its MoE modules. Seed replicated
         # layouts for the remaining decoder and vision parameters before the
@@ -124,19 +121,3 @@ def parallelize_kimi_k3(
     )
 
     return model
-
-
-def apply_cp_kimi_k3(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-) -> None:
-    """Hand the vision splice the context-parallel group.
-
-    The attention layers need nothing here: under CP their inner kernels are
-    ``ContextParallelKernel`` instances (Ulysses for MLA, KCP for KDA) that
-    take the group from the active SPMD mesh. The vision splice runs in the
-    model body, outside any kernel, so it is wired explicitly.
-    """
-    assert isinstance(model, KimiK3Model)
-    model._cp_group = parallel_dims.get_mesh("cp").get_group()
-    logger.info("Applied context parallel to the Kimi K3 vision splice.")

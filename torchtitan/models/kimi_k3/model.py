@@ -15,7 +15,10 @@ from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    current_spmd_mesh,
+)
 from torchtitan.distributed.utils import get_spmd_backend
 
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
@@ -394,9 +397,6 @@ class KimiK3Model(Decoder):
                     )
             return nparams, 6 * active_nparams + attention_op_flops
 
-    # Set by apply_cp_kimi_k3 to this model's context-parallel process group.
-    _cp_group: dist.ProcessGroup | None = None
-
     def __init__(self, config: Config):
         super().__init__(config)
         self.output_res_norm = config.output_res_norm.build()
@@ -479,7 +479,8 @@ class KimiK3Model(Decoder):
         num_tokens_per_item = (grid_thw[:, 1] // kernel_h) * (
             grid_thw[:, 2] // kernel_w
         )
-        if self._cp_group is not None and dist.get_world_size(self._cp_group) > 1:
+        cp_group = self._context_parallel_group()
+        if cp_group is not None:
             # This rank holds a sequence shard but encoded every image: take the
             # feature slice its placeholders correspond to and scatter that.
             # get_vision_positions needs whole visual items, which a shard does
@@ -487,9 +488,11 @@ class KimiK3Model(Decoder):
             # visual item(s)" as soon as a shard splits or omits an item.
             local_mask = tokens == special_tokens["image_id"]
             counts = self._exchange_sentinel_counts(
-                int(local_mask.sum().item()), vision_embeds
+                int(local_mask.sum().item()), vision_embeds, cp_group
             )
-            mine = self._select_cp_shard(vision_embeds, counts).to(embeddings_TD.dtype)
+            mine = self._select_cp_shard(vision_embeds, counts, cp_group).to(
+                embeddings_TD.dtype
+            )
             # Rows this rank did not consume still have to reach the graph, or
             # the tower's reduce-scatter is issued by a subset of the group.
             unused = vision_embeds.sum().to(embeddings_TD.dtype)
@@ -556,15 +559,24 @@ class KimiK3Model(Decoder):
             spliced_TD = spliced_TD.redistribute(placements=sp_placements)
         return spliced_TD
 
+    @staticmethod
+    def _context_parallel_group() -> dist.ProcessGroup | None:
+        """The CP group of the active SPMD mesh, found the way the CP kernels
+        find theirs; None when no multi-rank cp axis is active."""
+        mesh = current_spmd_mesh()
+        if mesh is None or "cp" not in (mesh.mesh_dim_names or ()):
+            return None
+        group = mesh.get_group("cp")
+        return group if group.size() > 1 else None
+
     def _exchange_sentinel_counts(
-        self, local: int, vision_embeds: torch.Tensor
+        self, local: int, vision_embeds: torch.Tensor, group: dist.ProcessGroup
     ) -> torch.Tensor:
         """Per-rank vision-placeholder counts across the CP group.
 
         Called whenever CP is on, including on ranks holding no placeholders:
         the collective's participants are decided by the mesh, never by the data.
         """
-        group = self._cp_group
         counts = torch.zeros(
             dist.get_world_size(group), dtype=torch.long, device=vision_embeds.device
         )
@@ -573,7 +585,10 @@ class KimiK3Model(Decoder):
         return counts
 
     def _select_cp_shard(
-        self, vision_embeds: torch.Tensor, counts: torch.Tensor
+        self,
+        vision_embeds: torch.Tensor,
+        counts: torch.Tensor,
+        group: dist.ProcessGroup,
     ) -> torch.Tensor:
         """Keep only the visual features belonging to this CP rank's shard.
 
@@ -595,7 +610,7 @@ class KimiK3Model(Decoder):
                 f"placeholder(s) in total but {num_rows} visual token(s) were "
                 "encoded; the sequence shard and the image batch disagree"
             )
-        rank = dist.get_rank(self._cp_group)
+        rank = dist.get_rank(group)
         start = int(counts[:rank].sum().item())
         local = int(counts[rank].item())
         return vision_embeds[start : start + local]
