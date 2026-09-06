@@ -71,7 +71,7 @@ def my_experiment() -> Controller.Config:
     return Controller.Config(
         model_spec=...,
         rollouter=MyRollouter.Config(),
-        renderer=RendererConfig(...),
+        renderer=Qwen3RendererConfig(enable_thinking=False),
         trainer=PolicyTrainer.Config(...),
         generator=VLLMGenerator.Config(...),
     )
@@ -110,7 +110,7 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch, TorchStore, and Renderers from main:
+1. Install Monarch, TorchStore, and Renderers:
 ```bash
 uv pip install -r torchtitan/experiments/rl/requirements.txt
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"

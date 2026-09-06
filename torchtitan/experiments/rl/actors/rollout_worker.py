@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint
-from torchtitan.experiments.rl.renderer import RendererConfig
+from renderers.configs import BaseRendererConfig
 
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
@@ -36,7 +36,7 @@ class RolloutWorkerActor(Actor):
     async def setup_async(
         self,
         *,
-        renderer_config: RendererConfig,
+        renderer_config: BaseRendererConfig,
         hf_assets_path: str,
     ) -> None:
         await self._worker.setup_async(

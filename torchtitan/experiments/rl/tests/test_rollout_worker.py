@@ -9,6 +9,8 @@
 import asyncio
 from types import SimpleNamespace
 
+from renderers import Qwen3RendererConfig
+
 from torchtitan.experiments.rl.actors.generator import SamplingConfig
 from torchtitan.experiments.rl.environment.token import TokenEnvOutput
 from torchtitan.experiments.rl.rollout import RolloutStatus
@@ -121,8 +123,8 @@ def test_worker_executes_group_without_actor_mesh() -> None:
         )
         worker = _CustomWorker(worker_config)
         await worker.setup_async(
-            renderer_config=_Config("renderer"),
-            hf_assets_path="hf_assets_path",
+            renderer_config=Qwen3RendererConfig(enable_thinking=False),
+            hf_assets_path="tests/assets/tokenizer",
         )
         group = await worker.run_group(
             generate_fn=generate_fn,
@@ -142,7 +144,10 @@ def test_worker_executes_group_without_actor_mesh() -> None:
         assert [rollout.reward for rollout in group.rollouts] == [1.0, 2.0]
         assert [rollout.advantage for rollout in group.rollouts] == [10.0, 20.0]
         assert all(env.closed for env in token_env_config.envs)
-        assert token_env_config.renderers == ["renderer", "renderer"]
+        assert [type(r).__name__ for r in token_env_config.renderers] == [
+            "Qwen3Renderer",
+            "Qwen3Renderer",
+        ]
         assert [call[1]["request_id"] for call in generate_fn.calls] == [
             "group=7/rollout=0/turn=0",
             "group=7/rollout=1/turn=0",
