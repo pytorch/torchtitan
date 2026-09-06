@@ -365,6 +365,7 @@ _GUARDED_CONFIGS = (
     ("deepseek_v4", "deepseek_v4_debugmodel"),
     ("qwen3", "qwen3_debugmodel"),
     ("qwen3_5", "qwen35_debugmodel_moe"),
+    ("qwen3_6", "qwen36_debugmodel_moe"),
     ("qwen3_8", "qwen38_debugmodel_moe"),
     ("gpt_oss", "gpt_oss_debugmodel"),
     ("flux", "flux_debugmodel"),

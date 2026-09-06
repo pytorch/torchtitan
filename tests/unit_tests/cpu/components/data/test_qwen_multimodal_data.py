@@ -23,6 +23,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
 from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
+from torchtitan.models.qwen3_6 import config_registry as qwen36_configs
 from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
 
 
@@ -164,6 +165,10 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
         (qwen35_configs, "qwen35_35b_a3b"),
         (qwen35_configs, "qwen35_122b_a10b"),
         (qwen35_configs, "qwen35_397b_a17b"),
+        (qwen36_configs, "qwen36_debugmodel"),
+        (qwen36_configs, "qwen36_debugmodel_moe"),
+        (qwen36_configs, "qwen36_27b"),
+        (qwen36_configs, "qwen36_35b_a3b"),
         (qwen38_configs, "qwen38_debugmodel"),
         (qwen38_configs, "qwen38_debugmodel_moe"),
         (qwen38_configs, "qwen38_27b"),
