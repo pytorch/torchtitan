@@ -51,6 +51,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -134,6 +135,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             self._validate_cuda_graphs()
+            self._validate_anticipatory_routing()
 
             if (
                 self.parallelism.spmd_backend == "spmd_types"
@@ -238,6 +240,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "SDC replay supports at most one replay when CUDA graphs "
                     "are enabled: set sdc_replayer.num_replays=1 or "
                     "training.disable_cuda_graphs=True."
+                )
+
+        def _validate_anticipatory_routing(self) -> None:
+            if not self.training.anticipatory_routing:
+                return
+            if self.parallelism.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    "Anticipatory routing is not supported with pipeline "
+                    "parallelism. Disable --training.anticipatory_routing or "
+                    "set --parallelism.pipeline_parallel_degree 1."
+                )
+            if not self.training.disable_cuda_graphs:
+                raise ValueError(
+                    "Anticipatory routing is not supported with CUDA graphs. "
+                    "Set --training.disable_cuda_graphs or disable "
+                    "--training.anticipatory_routing."
                 )
 
         def to_dict(self) -> dict[str, Any]:
@@ -615,6 +633,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 },
             )
 
+        # Anticipatory routing state (DeepSeek-V4 technique).
+        # Transient, not checkpointed; regenerates naturally after restart.
+        self._anticipatory_routing_enabled = config.training.anticipatory_routing
+        self._anticipatory_routing_cache: dict[
+            int, tuple[torch.Tensor, ...]
+        ] | None = None
+        self._anticipatory_prefetched_data: list[TrainerBatch] | None = None
+        self._moe_modules: list[MoE] = []
+        if self._anticipatory_routing_enabled:
+            for model_part in self.model_parts:
+                for module in model_part.modules():
+                    if isinstance(module, MoE):
+                        self._moe_modules.append(module)
+            if not self._moe_modules:
+                import warnings
+
+                warnings.warn(
+                    "training.anticipatory_routing is enabled but no MoE "
+                    "layers were found in the model. Disabling.",
+                    stacklevel=1,
+                )
+                self._anticipatory_routing_enabled = False
+            else:
+                logger.info(
+                    f"Anticipatory routing enabled for "
+                    f"{len(self._moe_modules)} MoE layers"
+                )
+
         # build tokenizer
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
@@ -869,7 +915,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # All groups form one optimizer step; each group feeds one fwd-bwd call.
         microbatch_groups: list[list[TrainerBatch]] = []
         local_valid_tokens = 0
-        for _ in range(self.gradient_accumulation_steps):
+
+        # If the previous step's anticipatory forward pass prefetched data for
+        # this step, consume it as the first gradient-accumulation group.
+        prefetched_offset = 0
+        if self._anticipatory_prefetched_data is not None:
+            microbatch_groups.append(self._anticipatory_prefetched_data)
+            for input_dict, labels in self._anticipatory_prefetched_data:
+                local_valid_tokens += input_dict.pop("num_valid_tokens")
+            self._anticipatory_prefetched_data = None
+            prefetched_offset = 1
+
+        for _ in range(self.gradient_accumulation_steps - prefetched_offset):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
@@ -879,6 +936,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
+
+        # Apply cached routing indices from the previous step's anticipatory
+        # forward pass. Each MoE module receives the routing decisions
+        # (topk_scores, topk_expert_ids, scores) computed from the previous
+        # step's parameters, so the backbone uses current theta_t while routing
+        # uses stale theta_{t-1}.
+        if self._anticipatory_routing_cache is not None:
+            for moe in self._moe_modules:
+                moe_id = id(moe)
+                if moe_id in self._anticipatory_routing_cache:
+                    moe.anticipatory_indices = self._anticipatory_routing_cache[moe_id]
+            self._anticipatory_routing_cache = None
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
@@ -988,6 +1057,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.checkpointer.maybe_wait_for_staging()
             self.optimizers.step()
             self.lr_schedulers.step()
+
+        # Anticipatory forward pass: compute routing decisions for the next
+        # step using the just-updated parameters theta_t. The data for the
+        # next step is prefetched here and stored for the next train_step call.
+        if self._anticipatory_routing_enabled:
+            self._run_anticipatory_forward(data_iterator)
 
         # log metrics
         if not should_log:
@@ -1105,6 +1180,70 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def should_continue_training(self) -> bool:
         return self.step < self.config.training.steps
 
+    def _run_anticipatory_forward(self, data_iterator: Iterator[TrainerBatch]) -> None:
+        """Run a forward-only pass to cache routing decisions for the next step.
+
+        Prefetches the next step's first microbatch group, sets all MoE modules
+        to cache-routing mode, runs the model forward (routing decisions are
+        recorded, expert computation is skipped), then stores the cache and
+        prefetched data for the next ``train_step`` call.
+
+        If the data iterator is exhausted, anticipatory routing is disabled
+        for the remainder of training (the next ``train_step`` will raise
+        ``DataloaderExhaustedError`` on its own).
+        """
+        # Prefetch the next step's first microbatch group.
+        try:
+            next_microbatches: list[TrainerBatch] = []
+            for _ in range(self.num_pp_microbatches):
+                input_dict, labels = next(data_iterator)
+                next_microbatches.append((input_dict, labels))
+        except (StopIteration, DataloaderExhaustedError):
+            # Data exhausted; the next train_step will handle this normally.
+            self._anticipatory_routing_enabled = False
+            return
+
+        # Prepare inputs on device (same as train_step's microbatch transfer).
+        for input_dict, labels in next_microbatches:
+            for key, value in input_dict.items():
+                if key == "num_valid_tokens":
+                    # Keep num_valid_tokens for the next step to pop.
+                    continue
+                if isinstance(value, torch.Tensor):
+                    input_dict[key] = value.to(self.device, non_blocking=True)
+
+        # Preprocess the first microbatch for the forward pass.
+        # (Anticipatory routing is disabled for PP, so we always have
+        # a single model part and a single microbatch per PP group.)
+        assert len(next_microbatches) == 1
+        input_dict, labels = next_microbatches[0]
+        labels_device = labels.to(self.device, non_blocking=True)
+        inputs, _, extra_kwargs = cast(
+            BaseModel, self.model_parts[0]
+        ).preprocess_inputs(
+            {**input_dict, "labels": labels_device},
+            parallel_dims=self.parallel_dims,
+            parallelism=self.config.parallelism,
+        )
+
+        # Set all MoE modules to cache-routing mode.
+        cache: dict[int, tuple[torch.Tensor, ...]] = {}
+        for moe in self._moe_modules:
+            moe.anticipatory_cache = cache
+
+        # Forward-only pass: routing decisions are computed and cached,
+        # expert computation is skipped (MoE returns zeros in cache mode).
+        with torch.no_grad(), self.train_context():
+            self.model_parts[0](inputs, **extra_kwargs)
+
+        # Clear cache-routing mode on all MoE modules.
+        for moe in self._moe_modules:
+            moe.anticipatory_cache = None
+
+        # Store for the next train_step.
+        self._anticipatory_routing_cache = cache
+        self._anticipatory_prefetched_data = next_microbatches
+
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step, "ntokens_seen": self.ntokens_seen}
 
@@ -1113,6 +1252,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.ntokens_seen = state_dict["ntokens_seen"]
         if self.sdc_replayer is not None:
             self.sdc_replayer.reset_schedule()
+        # Clear anticipatory routing transient state; the pipeline restarts
+        # naturally (first step after load uses normal routing).
+        self._anticipatory_routing_cache = None
+        self._anticipatory_prefetched_data = None
 
     def close(self) -> None:
         if hasattr(self, "dataloader") and self.dataloader:

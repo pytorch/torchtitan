@@ -29,11 +29,7 @@ from .token_dispatcher import LocalTokenDispatcher
 #   e = num local experts (E / EP, used in token dispatcher for
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, N = routed tokens (T*K),
-#   R = routed tokens assigned to local experts,
-#   O = expert output features, I = expert input features
-#       (roles, not model dims: the _grouped_mm seam takes the expert
-#        weight in its stored (E, O, I) orientation, which is (E, F, D)
-#        for the up/gate projections and (E, D, F) for the down one)
+#   R = routed tokens assigned to local experts
 
 
 class GroupedExperts(Module):
@@ -407,6 +403,17 @@ class MoE(Module):
             persistent=False,
         )
 
+        # Anticipatory routing state (DeepSeek-V4 technique).
+        # These are transient runtime attributes set/cleared by the trainer:
+        #   anticipatory_cache: when set to a dict, forward() records routing
+        #       decisions in it and skips expert computation (cache-routing mode).
+        #   anticipatory_indices: when set, forward() replays these pre-computed
+        #       routing decisions instead of calling the router (replay mode).
+        self.anticipatory_cache: dict[int, tuple[torch.Tensor, ...]] | None = None
+        self.anticipatory_indices: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None
+
     def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         """
         Args:
@@ -423,13 +430,31 @@ class MoE(Module):
         boundary. GroupedExperts operates on local tensors. When EP internally
         sequence-shards tokens across TP, the caller must provide a TP-divisible
         token count.
+
+        Anticipatory routing modes (set by the trainer, not by config):
+
+        - **Normal** (both ``anticipatory_cache`` and ``anticipatory_indices``
+          are ``None``): unchanged behavior.
+        - **Replay** (``anticipatory_indices`` is set): uses pre-computed
+          routing decisions from a previous step instead of calling the router.
+          The indices are consumed (cleared) after use.
+        - **Cache-routing** (``anticipatory_cache`` is a dict): runs the router,
+          stores routing decisions in the cache, and returns a zero tensor
+          without running expert computation. Used during the forward-only
+          anticipatory pass.
         """
-        # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
-        (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            scores_TE,
-        ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
+        if self.anticipatory_indices is not None:
+            # Replay mode: use cached routing from a previous step.
+            topk_scores_TK, topk_expert_ids_TK, scores_TE = self.anticipatory_indices
+            # One-shot: clear after consumption.
+            self.anticipatory_indices = None
+        else:
+            # Normal routing.
+            (
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                scores_TE,
+            ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
 
         # Build a one-hot routing map (T, E) marking the experts each token
         # is routed to. Under TP/SP the router outputs are DTensors sharded on
@@ -441,6 +466,17 @@ class MoE(Module):
             True,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
+
+        # Cache-routing mode: store routing decisions and return early.
+        # The caller (trainer) runs this inside torch.no_grad() during the
+        # forward-only anticipatory pass; no expert computation is needed.
+        if self.anticipatory_cache is not None:
+            self.anticipatory_cache[id(self)] = (
+                topk_scores_TK.detach().clone(),
+                topk_expert_ids_TK.detach().clone(),
+                scores_TE.detach().clone(),
+            )
+            return torch.zeros_like(x_TD)
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
         # and also to count the expert usage.
