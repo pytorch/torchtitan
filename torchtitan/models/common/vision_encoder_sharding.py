@@ -50,7 +50,7 @@ def multimodal_input_sharding(*, include_cp_axis: bool = False) -> dict[str, Spm
 
     The vision tensors are DP-local (``V@DP``) -- each DP rank owns its own
     images -- and TP-invariant (``I@TP``): the model consumes them inside
-    ``multimodal_context`` (a DP-local mesh) and the vision encoder runs per-rank.
+    ``spmd_local_context("dp")`` (a DP-local mesh) and the vision encoder runs per-rank.
     Shared by every VLM decoder (Qwen3.5, Kimi K2.5, Muse Glimmer).
     """
     layout = _vision_activation_placement(include_cp_axis=include_cp_axis)

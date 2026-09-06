@@ -94,6 +94,30 @@ class FaultTolerantTrainer(Trainer):
         num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
+        self.num_pp_microbatches = num_pp_microbatches
+        num_tokens_per_dp_rank = (
+            config.training.num_tokens_per_microbatch_per_dp_rank * num_pp_microbatches
+        )
+
+        # Resolve the global per-step token budget before model configs are
+        # built. Model configs may need the concrete value (for example
+        # aux-loss normalization denominators).
+        num_tokens_per_grad_step = num_tokens_per_dp_rank * batch_degree
+        num_tokens_per_train_step = config.training.num_tokens_per_train_step
+        if num_tokens_per_train_step < 0:
+            num_tokens_per_train_step = num_tokens_per_grad_step
+        if num_tokens_per_train_step % num_tokens_per_grad_step != 0:
+            raise ValueError(
+                "training.num_tokens_per_train_step "
+                f"({num_tokens_per_train_step}) must be divisible by the number "
+                "of tokens processed globally in one gradient accumulation "
+                f"iteration ({num_tokens_per_grad_step})."
+            )
+        self.gradient_accumulation_steps = (
+            num_tokens_per_train_step // num_tokens_per_grad_step
+        )
+        config.training.num_tokens_per_train_step = num_tokens_per_train_step
+
         # build dataloader
         num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
         self.dataloader = config.dataloader.build(
@@ -163,25 +187,6 @@ class FaultTolerantTrainer(Trainer):
 
         self.loss_fn = config.loss.build(
             compile_config=config.compile,
-        )
-
-        self.num_pp_microbatches = num_pp_microbatches
-        num_tokens_per_dp_rank = (
-            config.training.num_tokens_per_microbatch_per_dp_rank
-            * self.num_pp_microbatches
-        )
-        num_tokens_per_train_step = config.training.num_tokens_per_train_step
-        if num_tokens_per_train_step < 0:
-            num_tokens_per_train_step = num_tokens_per_dp_rank * batch_degree
-        if num_tokens_per_train_step % (num_tokens_per_dp_rank * batch_degree) != 0:
-            raise ValueError(
-                "training.num_tokens_per_train_step "
-                f"({num_tokens_per_train_step}) must be divisible by the number "
-                "of tokens processed globally in one gradient accumulation "
-                f"iteration ({num_tokens_per_dp_rank * batch_degree})."
-            )
-        self.gradient_accumulation_steps = num_tokens_per_train_step // (
-            num_tokens_per_dp_rank * batch_degree
         )
 
         # apply parallelisms and initialization

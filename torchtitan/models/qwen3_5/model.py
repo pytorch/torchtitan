@@ -19,6 +19,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     set_current_spmd_mesh,
+    spmd_local_context,
 )
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
@@ -34,7 +35,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
-    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -580,7 +580,7 @@ class Qwen35Model(Decoder):
         positions: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
-        with multimodal_context():
+        with spmd_local_context("dp"):
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,

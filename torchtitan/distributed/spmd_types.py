@@ -25,7 +25,6 @@ from torchtitan.distributed.parallel_dims import (
 )
 from torchtitan.distributed.utils import get_spmd_backend
 
-
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
 # PartitionSpec is immutable, so sharing it across a model deepcopy is safe.
 setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
@@ -34,6 +33,7 @@ __all__ = [
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
     "current_spmd_mesh",
+    "spmd_local_context",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
     "maybe_set_sparse_mesh",
@@ -157,6 +157,26 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
+def spmd_local_context(
+    *local_axes: str,
+) -> contextlib.AbstractContextManager[None]:
+    """Context manager treating the named mesh axes as local axes.
+
+    Local axes retain per-coordinate SPMD semantics during global type
+    checking: each coordinate selects an independent tensor, and only the
+    remaining axes describe that tensor's global sharding.  This is a no-op
+    outside spmd_types and for axes with size 1.
+    """
+    if get_spmd_backend() != "spmd_types":
+        return contextlib.nullcontext()
+    active_axes = tuple(
+        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
+    )
+    if not active_axes:
+        return contextlib.nullcontext()
+    return spmd.set_current_mesh(local_axes=active_axes)
+
+
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
@@ -272,11 +292,15 @@ def _per_axis_types(
 def spmd_validate_redistributions(sharding_config: Any) -> None:
     """Validate that SPMD redistributions fit the current runtime helper.
 
-    ``spmd_redistribute_per_axis`` can issue at most one single-axis
-    collective for a src/dst layout pair. It does not implement multi-axis
-    moves, and it cannot express unshard/reshard reorderings such as
-    ``PartitionSpec((DP, CP)) -> PartitionSpec((CP, DP))`` where per-axis
-    shard types are unchanged but global shard order changes.
+    ``spmd_redistribute_per_axis`` can issue one collective per changed axis.
+    Multi-axis moves are expressible only when every changed axis is a pure
+    reduction (Partial -> Invariant/Replicate), whose sequential all-reduces
+    are order-independent; shard moves and order changes are not supported.
+
+    Note: sequential all-reduces on multiple process groups do not guarantee
+    bitwise-identical results on every rank on all backends (NCCL backend:
+    https://github.com/pytorch/pytorch/issues/171916).  Avoid multi-axis
+    reductions for values that ranks must compare bitwise.
 
     TODO(pianpwk): this is transitional code while ShardingConfig-based
     redistributions are written in src/dst DTensor-style placements.
@@ -312,8 +336,8 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         *,
         name: str,
     ) -> None:
-        """Validate a SPMD redistribution is expressible with one-axis collective."""
-        # 1) Check that only one axis mismatches.
+        """Validate a SPMD redistribution is expressible with per-axis collectives."""
+        # 1) Check the changed axes and the moves allowed for them.
         # Store the changed_axes so we know what to look for in PartitionSpec.
         src_types = _per_axis_types(src)
         dst_types = _per_axis_types(dst)
@@ -329,12 +353,30 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
             if src_types.get(axis_name) != dst_types.get(axis_name)
         ]
         if len(changed_axes) > 1:
-            raise ValueError(
-                f"{name}: SpmdType-based redistribution changes multiple mesh "
-                f"axes ({sorted(str(axis) for axis in changed_axes)}). "
-                "spmd_redistribute_per_axis only supports one single-axis "
-                "redistribution."
-            )
+            # Multi-axis moves are allowed only as pure reductions
+            # (P -> I/R): sequential all-reduces are order-independent.
+            # NCCL does not guarantee bitwise-identical all-reduce results on
+            # every rank across different process groups; see issue 171916.
+            non_reductions = [
+                axis_name
+                for axis_name in changed_axes
+                if not (
+                    src_types.get(axis_name) == spmd.P
+                    and dst_types.get(axis_name) in (spmd.I, spmd.R)
+                )
+            ]
+            if (
+                non_reductions
+                or src.partition_spec is not None
+                or dst.partition_spec is not None
+            ):
+                raise ValueError(
+                    f"{name}: SpmdType-based redistribution changes multiple mesh "
+                    f"axes ({sorted(str(axis) for axis in changed_axes)}). "
+                    "Only pure Partial->Invariant/Replicate multi-axis moves "
+                    "are supported by spmd_redistribute_per_axis."
+                )
+            return
         if changed_axes and (
             src_types[changed_axes[0]] is spmd.V or dst_types[changed_axes[0]] is spmd.V
         ):

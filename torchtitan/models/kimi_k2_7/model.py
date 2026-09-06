@@ -17,7 +17,10 @@ from torch import nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    spmd_local_context,
+)
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
@@ -27,7 +30,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
-    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -229,7 +231,7 @@ class KimiK25Model(DeepSeekV3Model):
         Returns:
             ``(num_tokens, vocab_size)`` logits.
         """
-        with multimodal_context():
+        with spmd_local_context("dp"):
             if self.tok_embeddings is not None:
                 x = self._prepare_multimodal_embeds(
                     tokens,
