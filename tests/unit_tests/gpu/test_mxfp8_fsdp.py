@@ -486,6 +486,90 @@ def test_mxfp8_fsdp_tensor_lifecycle(target):
     )
 
 
+class _NormThenMXFP8Linear(torch.nn.Module):
+    """A norm and an MXFP8 linear in one FSDP group, as a real block has."""
+
+    def __init__(self):
+        super().__init__()
+        self.norm = torch.nn.RMSNorm(128)
+        self.linear = MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            bias=False,
+            inplace_wgrad_accum=True,
+        ).build()
+
+    def forward(self, x):
+        return self.linear(self.norm(x))
+
+
+def _run_inplace_wgrad_accum_grad_dtype(
+    rank: int,
+    world_size: int,
+    port: int,
+) -> None:
+    """Test in-place WGRAD accumulation against FSDP's own accumulator.
+
+    When the gradient dtype and the reduce dtype differ, FSDP moves the
+    gradient off the parameter into ``unsharded_accumulated_grad`` after every
+    microbatch backward, so the in-place path would find nothing to fold into
+    and silently do nothing. The layer refuses that combination instead.
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+
+        x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+        # An FP32 reduce dtype over BF16 gradients is refused up front. FSDP
+        # would move the gradient into its own reduce-dtype accumulator after
+        # every microbatch, leaving the in-place path nothing to fold into.
+        block = _NormThenMXFP8Linear().cuda().bfloat16()
+        fully_shard(
+            block,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+            ),
+        )
+        with pytest.raises(ValueError, match="never a gradient left to accumulate"):
+            block(x).sum().backward()
+
+        # Matching the two makes the option live: the gradient stays on the
+        # parameter across microbatches, in the reduce dtype.
+        block = _NormThenMXFP8Linear().cuda().bfloat16()
+        fully_shard(
+            block,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+            reshard_after_forward=False,
+        )
+        block.set_is_last_backward(False)
+        block.set_reshard_after_backward(False)
+        block.set_requires_gradient_sync(False)
+        block(x).sum().backward()
+        first = block.linear.weight.grad.clone()
+        block(x).sum().backward()
+        torch.cuda.synchronize()
+        assert block.linear.weight.grad.dtype == torch.bfloat16
+        # Same input twice, so the in-place fold must have doubled it.
+        torch.testing.assert_close(
+            block.linear.weight.grad.float(),
+            (first * 2).float(),
+            rtol=2e-2,
+            atol=2e-2,
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 def _run_simple_fsdp_disabled_parametrization(
     rank: int,
     world_size: int,
@@ -538,6 +622,15 @@ def _run_simple_fsdp_disabled_parametrization(
 def test_simple_fsdp_disable_active_parametrization():
     mp.spawn(
         _run_simple_fsdp_disabled_parametrization,
+        args=(2, get_free_port()),
+        nprocs=2,
+        join=True,
+    )
+
+
+def test_mxfp8_inplace_wgrad_accum_grad_dtype():
+    mp.spawn(
+        _run_inplace_wgrad_accum_grad_dtype,
         args=(2, get_free_port()),
         nprocs=2,
         join=True,

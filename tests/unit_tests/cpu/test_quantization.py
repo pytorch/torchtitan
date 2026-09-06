@@ -585,6 +585,48 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
     assert converted.input_activation_format_for_backward == "bf16"
 
 
+def test_mxfp8_converter_forwards_inplace_wgrad_accum(monkeypatch):
+    """The converter is the only path a user has to this option.
+
+    Without forwarding it every converted linear silently takes the default,
+    so the feature would be unreachable outside hand-built configs.
+    """
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+
+    for requested in (False, True):
+        converter = MXFP8LinearConverter(
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=True,
+                inplace_wgrad_accum=requested,
+            )
+        )
+        converted = converter.convert(
+            FeedForward.Config(
+                w1=Linear.Config(in_features=128, out_features=128),
+                w2=Linear.Config(in_features=128, out_features=128),
+                w3=Linear.Config(in_features=128, out_features=128),
+            )
+        )
+        for linear in (converted.w1, converted.w2, converted.w3):
+            assert linear.inplace_wgrad_accum is requested
+
+
+def test_mxfp8_converter_defaults_inplace_wgrad_accum_off(monkeypatch):
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(
+        MXFP8LinearConverter.Config(model_compile_enabled=True)
+    )
+    converted = converter.convert(
+        Linear.Config(in_features=128, out_features=128, bias=False)
+    )
+
+    assert converted.inplace_wgrad_accum is False
+
+
 def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     import torchtitan.components.quantization.mxfp8.converter as converter_mod
 
