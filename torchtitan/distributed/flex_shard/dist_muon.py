@@ -72,6 +72,10 @@ def build_dist_muon(
     batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
     complete matrices. A single 2D matrix without ``BlockShard`` uses
     whole-matrix compute such as ``Owned``.
+    Declaring ``Owned`` on multiple mesh axes assigns the complete compute
+    tensor to one rank in their Cartesian group. The existing packed
+    redistribution gathers the input to that owner and restores the result to
+    every storage holder.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -233,8 +237,8 @@ def _initialize_dist_muon(
         get_fqn=lambda layout: layout.fqn,
         get_storage_dtensor=lambda layout: layout.param,
         requires_redistribution=lambda layout: (not layout.storage_is_compute_ready),
-        get_redistribution_storage_mesh_axis=lambda layout: (
-            layout.redistribution_storage_mesh_axis
+        get_redistribution_storage_mesh_axes=lambda layout: (
+            layout.redistribution_storage_mesh_axes
         ),
     )
     optimizer._initialize_plan(compute_layouts)
@@ -411,8 +415,8 @@ class DistMuon(Optimizer):
                     resolved_compute_layout_signature=(
                         resolved_transition.resolved_compute_layout_signature
                     ),
-                    redistribution_storage_mesh_axis=(
-                        resolved_transition.redistribution_storage_mesh_axis
+                    redistribution_storage_mesh_axes=(
+                        resolved_transition.redistribution_storage_mesh_axes
                     ),
                 )
             )
@@ -897,7 +901,7 @@ class _ParameterComputeLayout:
     compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    redistribution_storage_mesh_axis: int | None
+    redistribution_storage_mesh_axes: tuple[int, ...]
 
     @property
     def storage_is_compute_ready(self) -> bool:
@@ -948,7 +952,7 @@ class _ResolvedStorageToComputeTransition:
     compute_sharding: _ResolvedComputeSharding
     storage_to_compute_transition: _StorageToComputeTransition
     resolved_compute_layout_signature: tuple[Any, ...]
-    redistribution_storage_mesh_axis: int | None = None
+    redistribution_storage_mesh_axes: tuple[int, ...] = ()
 
 
 def _resolve_muon_redistribution_plans(
@@ -1030,10 +1034,16 @@ def _estimate_muon_compute_cost(
     matrix_shape: torch.Size,
     ns_steps: int,
 ) -> int:
-    rows, columns = matrix_shape
+    *batch_shape, rows, columns = matrix_shape
     short_dim, long_dim = sorted((rows, columns))
     # Each NS step has two s^2 * l matmuls and one s^3 matmul.
-    return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
+    return (
+        math.prod(batch_shape)
+        * ns_steps
+        * short_dim
+        * short_dim
+        * (2 * long_dim + short_dim)
+    )
 
 
 def _balance_loads_across_partitions(
@@ -1100,7 +1110,7 @@ def _build_parameter_redistribution_plan(
     group_local_storage_shape, storage_regions = _dtensor_storage_regions(
         compute_layout.param,
         group.participants,
-        required_storage_mesh_axis=(compute_layout.redistribution_storage_mesh_axis),
+        required_storage_mesh_axes=compute_layout.redistribution_storage_mesh_axes,
     )
     compute_sharding = compute_layout.compute_sharding
     if type(compute_sharding) is Owned:
@@ -1371,27 +1381,38 @@ def _validate_shard_order_compute_targets(
             )
 
 
-def _is_supported_orthogonal_dim0_shard_redistribution(
+def _is_supported_preserved_dim0_shard_redistribution(
     *,
     ndim: int,
     compute_view: _MatrixBatchView | None,
     source_storage_placement: object,
     target_compute_sharding: _AxisComputeSharding | None,
     preserved_storage_placement: object,
+    redistribution_axis_precedes_shard_axis: bool,
 ) -> bool:
     if compute_view is not None or ndim != 3:
         return False
     if (
-        type(source_storage_placement) is not Shard
-        or type(target_compute_sharding) is not _StridedShard
+        type(source_storage_placement) not in (Replicate, Shard)
+        or type(target_compute_sharding) not in (Shard, _StridedShard)
         or type(preserved_storage_placement) is not Shard
     ):
         return False
 
-    storage_dim = _normalize_dim(source_storage_placement.dim, ndim)
     compute_dim = _normalize_dim(target_compute_sharding.dim, ndim)
     preserved_dim = _normalize_dim(preserved_storage_placement.dim, ndim)
-    return storage_dim == 1 and compute_dim == preserved_dim == 0
+    if compute_dim != 0 or preserved_dim != 0:
+        return False
+    if type(source_storage_placement) is Replicate:
+        # Split the preserved shard's local matrix batch over replica ranks.
+        # A preceding replica axis needs shard_order to express this order.
+        return type(target_compute_sharding) is (
+            _StridedShard if redistribution_axis_precedes_shard_axis else Shard
+        )
+    return (
+        _normalize_dim(source_storage_placement.dim, ndim) == 1
+        and type(target_compute_sharding) is _StridedShard
+    )
 
 
 def _resolve_storage_to_compute_transition(
@@ -1453,7 +1474,8 @@ def _resolve_storage_to_compute_transition(
     if compute_view is not None:
         if applicable_owned_storage_mesh_axes:
             raise ValueError(
-                f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+                f"Muon parameter {fqn!r} cannot combine Owned with a "
+                "BlockShard matrix-batch view"
             )
         shard_axes = [
             mesh_axis_names[storage_mesh_axis]
@@ -1528,19 +1550,38 @@ def _resolve_storage_to_compute_transition(
     transport_mesh_axes = tuple(
         sorted(set(changed_storage_mesh_axes).union(active_owned_storage_mesh_axes))
     )
+    redistribution_storage_mesh_axis = (
+        transport_mesh_axes[0] if len(transport_mesh_axes) == 1 else None
+    )
+    preserves_dim0_storage_shard = False
     if len(transport_mesh_axes) > 1:
         axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
-        raise NotImplementedError(
-            f"Muon parameter {fqn!r} requires compute redistribution or "
-            f"owned compute on multiple mesh axes {axis_names}; multi-axis "
-            "transport is not implemented"
-        )
-
-    redistribution_storage_mesh_axis = (
-        transport_mesh_axes[0] if transport_mesh_axes else None
-    )
-    uses_supported_orthogonal_shard_redistribution = False
-    if redistribution_storage_mesh_axis is not None:
+        if set(transport_mesh_axes) != set(active_owned_storage_mesh_axes):
+            raise NotImplementedError(
+                f"Muon parameter {fqn!r} mixes owned compute with tensor "
+                f"resharding across mesh axes {axis_names}; mixed multi-axis "
+                "compute layouts are not implemented"
+            )
+        transport_axis_set = set(transport_mesh_axes)
+        for storage_mesh_axis, placement in enumerate(param.placements):
+            if storage_mesh_axis in transport_axis_set:
+                if type(placement) not in (Replicate, Shard):
+                    raise NotImplementedError(
+                        f"Muon parameter {fqn!r} cannot redistribute "
+                        f"{type(placement).__name__} storage on mesh axis "
+                        f"{mesh_axis_names[storage_mesh_axis]!r}"
+                    )
+            elif (
+                param.device_mesh.size(storage_mesh_axis) > 1
+                and type(placement) is not Replicate
+            ):
+                raise NotImplementedError(
+                    f"Muon parameter {fqn!r} cannot use multi-axis owned "
+                    f"compute while storage mesh axis "
+                    f"{mesh_axis_names[storage_mesh_axis]!r} has "
+                    f"non-replicated placement {placement}"
+                )
+    elif redistribution_storage_mesh_axis is not None:
         redistribution_axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
         for storage_mesh_axis, placement in enumerate(param.placements):
             if storage_mesh_axis == redistribution_storage_mesh_axis:
@@ -1567,19 +1608,22 @@ def _resolve_storage_to_compute_transition(
                     )
                 )
                 if (
-                    not uses_supported_orthogonal_shard_redistribution
-                    and _is_supported_orthogonal_dim0_shard_redistribution(
+                    not preserves_dim0_storage_shard
+                    and _is_supported_preserved_dim0_shard_redistribution(
                         ndim=param.ndim,
                         compute_view=compute_view,
                         source_storage_placement=redistribution_storage_placement,
                         target_compute_sharding=redistribution_compute_sharding,
                         preserved_storage_placement=placement,
+                        redistribution_axis_precedes_shard_axis=(
+                            redistribution_storage_mesh_axis < storage_mesh_axis
+                        ),
                     )
                 ):
-                    uses_supported_orthogonal_shard_redistribution = True
+                    preserves_dim0_storage_shard = True
                     continue
                 if (
-                    type(redistribution_storage_placement) is Shard
+                    type(redistribution_storage_placement) in (Replicate, Shard)
                     and type(redistribution_compute_sharding)
                     in (Shard, _StridedShard, BlockShard)
                     and type(placement) is Shard
@@ -1588,13 +1632,15 @@ def _resolve_storage_to_compute_transition(
                         Shard | _StridedShard | BlockShard,
                         redistribution_compute_sharding,
                     )
-                    storage_dim = _normalize_dim(
-                        redistribution_storage_placement.dim, param.ndim
+                    storage_dim = (
+                        _normalize_dim(redistribution_storage_placement.dim, param.ndim)
+                        if type(redistribution_storage_placement) is Shard
+                        else None
                     )
                     target_dim = _normalize_dim(target_compute_shard.dim, param.ndim)
                     preserved_dim = _normalize_dim(placement.dim, param.ndim)
                     if (
-                        storage_dim == 1
+                        (storage_dim == 1 or storage_dim is None)
                         and target_dim == preserved_dim == 0
                         and type(redistribution_compute_sharding) is Shard
                         and redistribution_storage_mesh_axis < storage_mesh_axis
@@ -1610,7 +1656,7 @@ def _resolve_storage_to_compute_transition(
                     raise NotImplementedError(
                         f"Muon parameter {fqn!r} cannot redistribute storage on "
                         f"mesh axis {redistribution_axis_name!r} from "
-                        f"Shard({storage_dim}) to "
+                        f"{redistribution_storage_placement!r} to "
                         f"{redistribution_compute_sharding!r} while "
                         f"preserving Shard({preserved_dim}) storage on mesh axis "
                         f"{mesh_axis_names[storage_mesh_axis]!r}; orthogonal-shard "
@@ -1634,7 +1680,7 @@ def _resolve_storage_to_compute_transition(
     if (
         reordered_axis_names
         and redistribution_storage_mesh_axis is not None
-        and not uses_supported_orthogonal_shard_redistribution
+        and not preserves_dim0_storage_shard
     ):
         raise ValueError(
             f"Muon parameter {fqn!r} has an unsupported shard order on mesh "
@@ -1677,11 +1723,12 @@ def _resolve_storage_to_compute_transition(
 
     resolved_compute_layout_signature = tuple(resolved_target_signature)
     compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
-    if applicable_owned_storage_mesh_axes and (
-        len(global_compute_shape) != 2 or param.ndim != 2
-    ):
-        raise ValueError(
-            f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+    if active_owned_storage_mesh_axes and compute_shard_dims:
+        axis_names = [mesh_axis_names[axis] for axis in transport_mesh_axes]
+        raise NotImplementedError(
+            f"Muon parameter {fqn!r} mixes Owned with tensor sharding on "
+            f"mesh axes {axis_names}; mixed owned/sharded compute is not "
+            "implemented"
         )
     if active_owned_storage_mesh_axes:
         compute_sharding: _ResolvedComputeSharding = Owned()
@@ -1718,7 +1765,7 @@ def _resolve_storage_to_compute_transition(
             type(source_sharding) is not Replicate
             and type(target_sharding) is not BlockShard
             and source_sharding != target_sharding
-            and not uses_supported_orthogonal_shard_redistribution
+            and not preserves_dim0_storage_shard
         ):
             axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
             raise NotImplementedError(
@@ -1727,7 +1774,7 @@ def _resolve_storage_to_compute_transition(
                 f"{axis_name!r}"
             )
 
-    if redistribution_storage_mesh_axis is None:
+    if not transport_mesh_axes:
         return _ResolvedStorageToComputeTransition(
             compute_sharding=compute_sharding,
             storage_to_compute_transition=_NoRedistributionTransition(),
@@ -1738,7 +1785,7 @@ def _resolve_storage_to_compute_transition(
         compute_sharding=compute_sharding,
         storage_to_compute_transition=_RedistributionTransition(),
         resolved_compute_layout_signature=resolved_compute_layout_signature,
-        redistribution_storage_mesh_axis=redistribution_storage_mesh_axis,
+        redistribution_storage_mesh_axes=transport_mesh_axes,
     )
 
 
