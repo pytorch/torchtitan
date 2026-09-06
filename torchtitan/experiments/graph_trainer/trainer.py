@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cudagraph import cudagraph_teardown
+from torchtitan.distributed.cudagraph import cudagraph_teardown, CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -23,6 +23,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
+)
+from torchtitan.experiments.graph_trainer.gradient_accumulation import (
+    finalize_graph_gradient_accumulation,
+    GraphGradientState,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
@@ -124,6 +128,8 @@ class GraphTrainer(Trainer):
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+        self._graph_gradient_state: GraphGradientState | None = None
+        self._validate_inplace_graph_gradient_accumulation_config()
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
@@ -235,6 +241,9 @@ class GraphTrainer(Trainer):
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         maybe_register_blockmask_pytree_node()
+        gradient_state = self._graph_gradient_state
+        if self.config.compile.enable_inplace_graph_gradient_accumulation:
+            gradient_state = self._ensure_graph_gradient_state(model)
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
                 self._load_precompiled_fx_trace(
@@ -251,6 +260,11 @@ class GraphTrainer(Trainer):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
+                        graph_state=(
+                            gradient_state.graph_state
+                            if gradient_state is not None
+                            else None
+                        ),
                         prepare_inputs=self._prepare_trace_inputs,
                         prepare_call_inputs=self._prepare_trace_call_inputs,
                     )(
@@ -280,6 +294,11 @@ class GraphTrainer(Trainer):
                 self._traced_step.gm = remove_parameter_gradient_markers_pass(
                     self._traced_step.gm, self._traced_step.example_inputs
                 )
+                if gradient_state is not None:
+                    self._traced_step.gm = finalize_graph_gradient_accumulation(
+                        self._traced_step.gm,
+                        traced_result=self._traced_step,
+                    )
         with self.train_context():
             precompile_meshes = None
             if (
@@ -295,17 +314,76 @@ class GraphTrainer(Trainer):
                 self._traced_step,
                 module=model,
                 precompile_meshes=precompile_meshes,
+                graph_state=(
+                    gradient_state.graph_state if gradient_state is not None else None
+                ),
             )(
                 inputs,
                 labels,
                 global_valid_tokens,
                 extra_kwargs,
             )
-        loss = outputs[0]
-        grads = outputs[1:]
+        if gradient_state is None:
+            loss = outputs[0]
+            grads = outputs[1:]
+            accumulate_param_grads_(
+                params,
+                grads,
+                clone_grads_to_initialize_param_grad=isinstance(
+                    self._traced_step.gm.forward, CUDAGraphWrapper
+                ),
+            )
+            return loss
 
-        accumulate_param_grads_(params, grads)
-        return loss
+        if len(outputs) != 1:
+            raise RuntimeError(
+                "GraphTrainer in-graph gradient accumulation expected a "
+                f"loss-only output, got {len(outputs)} outputs"
+            )
+        return outputs[0]
+
+    def _ensure_graph_gradient_state(
+        self,
+        model: nn.Module,
+    ) -> GraphGradientState:
+        if self._graph_gradient_state is None:
+            self._graph_gradient_state = GraphGradientState.create(
+                model,
+                self.optimizers,
+            )
+        return self._graph_gradient_state
+
+    def _validate_inplace_graph_gradient_accumulation_config(self) -> None:
+        if not self.config.compile.enable_inplace_graph_gradient_accumulation:
+            return
+        if self.config.compile.mode != "aot_fx_trace":
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation requires "
+                "compile.mode='aot_fx_trace'"
+            )
+        if self.parallel_dims.pp_enabled:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation does not yet "
+                "support pipeline parallelism"
+            )
+        if self.config.compile.precompile_artifact_dir:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation does not yet "
+                "support precompiled artifacts"
+            )
+        if self.config.compile.pass_pipeline in PASS_PIPELINE_REGISTRY:
+            raise ValueError(
+                "GraphTrainer in-graph gradient accumulation does not yet "
+                "support custom pass pipelines"
+            )
+
+    def _zero_grad(self) -> None:
+        if self._graph_gradient_state is None:
+            super()._zero_grad()
+            return
+        self._graph_gradient_state.validate_optimizers(self.optimizers)
+        self.optimizers.zero_grad(set_to_none=False)
+        self._graph_gradient_state.validate_bindings()
 
     def _prepare_trace_inputs(
         self,
@@ -336,6 +414,17 @@ class GraphTrainer(Trainer):
         PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
             self
         )
+        if self.config.compile.enable_inplace_graph_gradient_accumulation:
+            if len(self.model_parts) != 1:
+                raise RuntimeError("in-graph gradient accumulation requires one model")
+            model = self.model_parts[0]
+            gradient_state = self._ensure_graph_gradient_state(model)
+            parameters = tuple(
+                parameter
+                for _, parameter in model.named_parameters(remove_duplicate=False)
+                if parameter.requires_grad
+            )
+            gradient_state.validate_parameters(parameters)
         super().train_step(data_iterator)
 
     def close(self) -> None:

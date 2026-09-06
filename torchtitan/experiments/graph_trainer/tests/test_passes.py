@@ -150,7 +150,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 parallelism=SimpleNamespace(),
             )
 
-        traced_result = SimpleNamespace(state_fqns=[])
+        traced_result = SimpleNamespace(state_fqns=[], graph_state_fqns=())
         with patch(
             "torchtitan.experiments.graph_trainer.common_utils."
             "get_default_transformer_block_buckets",
@@ -3648,7 +3648,11 @@ class TestChunkPasses(TestCase):
     def _compile_config_for_ep_overlap_test(self):
         from types import SimpleNamespace
 
-        traced_result = SimpleNamespace(num_static_inputs=2, state_fqns=[])
+        traced_result = SimpleNamespace(
+            num_static_inputs=2,
+            state_fqns=[],
+            graph_state_fqns=(),
+        )
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(
@@ -3737,6 +3741,17 @@ class TestChunkPasses(TestCase):
         self.assertLess(
             names.index("concretize_ep_chunk_symbolic_shapes_pass"),
             names.index("full_inductor_compilation_pass"),
+        )
+
+    def test_gradient_finalizer_precedes_terminal_inductor_pass(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        traced_result.graph_state_fqns = ("weight",)
+        config.compile.inductor_compilation = "regional"
+
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("finalize_graph_gradient_accumulation"),
+            names.index("regional_inductor_pass"),
         )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
