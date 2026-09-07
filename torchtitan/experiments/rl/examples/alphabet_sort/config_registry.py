@@ -13,6 +13,8 @@ Each function returns a complete ``Controller.Config``, discoverable by
 
 import dataclasses
 
+from renderers import GptOssRendererConfig, Qwen3RendererConfig
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -44,7 +46,7 @@ from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
@@ -98,7 +100,9 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
@@ -160,7 +164,9 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -262,7 +268,9 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="gpt_oss", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=GptOssRendererConfig(reasoning_effort="low")
+        ),
         generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
@@ -330,7 +338,9 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -398,7 +408,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -458,7 +470,9 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -515,7 +529,9 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -583,7 +599,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=8e-4),
@@ -714,7 +732,9 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         # torch.compile and CUDA graph capture; disable both.
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=8e-4),
@@ -782,7 +802,9 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -893,7 +915,9 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=2e-6),
@@ -972,7 +996,9 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -1056,7 +1082,9 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),

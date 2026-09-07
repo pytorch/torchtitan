@@ -161,6 +161,7 @@ class TokenEnv(Configurable):
             parsed = await asyncio.to_thread(
                 self._renderer.parse_response,
                 token_ids=completion.token_ids,
+                tools=self._tools,
             )
         except Exception:
             logger.exception(
