@@ -17,6 +17,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols.module import ModuleDict
 
 from .mhc import HcHead, HcPost, HcPre
 
@@ -39,11 +40,11 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         cfg = config
 
-        self.attention = cfg.attention.build()
+        self.attention = cfg.attention.build(rope_modules=rope_modules)
         self.attention_norm = cfg.attention_norm.build()
         self.ffn_norm = cfg.ffn_norm.build()
         if cfg.moe is not None:
@@ -212,7 +213,8 @@ class DeepSeekV4Model(Decoder):
         self.mtp_layers = torch.nn.ModuleList()
         if cfg.mtp_layers is not None:
             self.mtp_layers = torch.nn.ModuleList(
-                mtp_layer.build() for mtp_layer in cfg.mtp_layers
+                mtp_layer.build(rope_modules=self.rope_modules)
+                for mtp_layer in cfg.mtp_layers
             )
 
     def get_attention_masks(self, positions):

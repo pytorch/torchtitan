@@ -12,6 +12,7 @@ import torch
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
+from torchtitan.protocols.module import ModuleDict
 
 from .model import DeepSeekV4TransformerBlock
 
@@ -33,8 +34,8 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         mtp_norm: RMSNorm.Config
         hc_head: "HcHead.Config"
 
-    def __init__(self, config: Config):
-        super().__init__(config)
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
+        super().__init__(config, rope_modules=rope_modules)
         self.enorm = config.enorm.build()
         self.hnorm = config.hnorm.build()
         self.e_proj = config.e_proj.build()

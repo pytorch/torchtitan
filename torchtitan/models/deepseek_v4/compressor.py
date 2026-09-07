@@ -15,7 +15,7 @@ from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 
 @cache
@@ -47,14 +47,15 @@ class Compressor(Module):
         rope_head_dim: int = 64
         compress_ratio: int = 4
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         cfg = config
         self.head_dim = cfg.head_dim
         self.rope_head_dim = cfg.rope_head_dim
         self.compress_ratio = cfg.compress_ratio
         self.overlap = cfg.compress_ratio == 4
-        self.rope = cfg.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
         self.wkv = cfg.wkv.build()
         self.wgate = cfg.wgate.build()
@@ -130,18 +131,19 @@ class Indexer(Module):
         index_head_dim: int = 128
         rope_head_dim: int = 64
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         cfg = config
         self.num_index_heads = cfg.num_index_heads
         self.head_dim = cfg.index_head_dim
         self.rope_head_dim = cfg.rope_head_dim
         self.softmax_scale = cfg.index_head_dim**-0.5
-        self.rope = cfg.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
-        self.compressor = cfg.compressor.build()
+        self.compressor = cfg.compressor.build(rope_modules=rope_modules)
 
     @staticmethod
     def _rotate_activation(x):
