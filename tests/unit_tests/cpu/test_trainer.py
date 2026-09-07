@@ -509,3 +509,101 @@ def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
 
     assert runner is fwd_bwd
     warning.assert_called_once()
+
+
+class _RecordingFSDPPart:
+    def __init__(self) -> None:
+        self.requires_all_reduce_calls: list[bool] = []
+
+    def set_requires_all_reduce(self, flag: bool, *, recurse: bool = True) -> None:
+        assert recurse is True
+        self.requires_all_reduce_calls.append(flag)
+
+    def parameters(self):
+        return iter(())
+
+
+def _run_train_step_recording_all_reduce(
+    *,
+    dp_replicate_enabled: bool,
+    gradient_accumulation_steps: int,
+    disable_cuda_graphs: bool,
+) -> list[bool]:
+    part = _RecordingFSDPPart()
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(
+                    disable_cuda_graphs=disable_cuda_graphs,
+                    max_norm=1.0,
+                ),
+            ),
+            optimizers=MagicMock(),
+            lr_schedulers=SimpleNamespace(get_metrics=lambda: {}, step=MagicMock()),
+            parallel_dims=SimpleNamespace(
+                dp_enabled=False,
+                pp_enabled=False,
+                dp_cp_enabled=False,
+                ep_enabled=False,
+                dp_replicate_enabled=dp_replicate_enabled,
+                get_optional_mesh=lambda name: None,
+            ),
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            num_pp_microbatches=1,
+            device=torch.device("cpu"),
+            forward_backward_step=MagicMock(return_value=torch.tensor(1.0)),
+            sdc_replayer=None,
+            model_parts=[part],
+            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
+            metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
+            step=1,
+            ntokens_seen=0,
+        ),
+    )
+    with patch(
+        "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        return_value=torch.tensor(1.0),
+    ):
+        Trainer.train_step(
+            trainer,
+            iter([_batch() for _ in range(gradient_accumulation_steps)]),
+        )
+    return part.requires_all_reduce_calls
+
+
+def test_hsdp_skips_replicate_all_reduce_until_last_accum_group():
+    flags = _run_train_step_recording_all_reduce(
+        dp_replicate_enabled=True,
+        gradient_accumulation_steps=3,
+        disable_cuda_graphs=True,
+    )
+    assert flags == [False, False, True]
+
+
+@pytest.mark.parametrize("disable_cuda_graphs", [True, False])
+def test_hsdp_keeps_all_reduce_on_single_accum_group(disable_cuda_graphs: bool):
+    flags = _run_train_step_recording_all_reduce(
+        dp_replicate_enabled=True,
+        gradient_accumulation_steps=1,
+        disable_cuda_graphs=disable_cuda_graphs,
+    )
+    assert flags == [True]
+
+
+def test_pure_fsdp_does_not_toggle_requires_all_reduce():
+    flags = _run_train_step_recording_all_reduce(
+        dp_replicate_enabled=False,
+        gradient_accumulation_steps=3,
+        disable_cuda_graphs=True,
+    )
+    assert flags == []
+
+
+def test_hsdp_does_not_toggle_requires_all_reduce_under_cuda_graphs():
+    flags = _run_train_step_recording_all_reduce(
+        dp_replicate_enabled=True,
+        gradient_accumulation_steps=3,
+        disable_cuda_graphs=False,
+    )
+    assert flags == []
