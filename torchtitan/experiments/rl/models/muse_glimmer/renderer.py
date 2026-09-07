@@ -46,7 +46,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 from renderers import Renderer
@@ -119,8 +119,29 @@ class MuseGlimmerRendererConfig(RendererConfig):
     """The library-wide bridge policy override (`renderers.BaseRendererConfig.thinking_retention`).
     ``None`` keeps the template's implied policy; ``"tool_cycle"`` re-renders at a new user query."""
 
+    def __post_init__(self) -> None:
+        # A dataclass does not validate values; these knobs change bridging and reward
+        # scoring with nothing visible in the rendered prompt, so check them here.
+        for name in ("reasoning_strength", "knowledge_cutoff", "current_date"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(
+                    f"{name} must be str | None, got {type(value).__name__}"
+                )
+        for name in ("retain_reasoning_in_history", "answer_from_reasoning_fallback"):
+            value = getattr(self, name)
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be bool, got {type(value).__name__}")
+        if self.thinking_retention not in (None, "tool_cycle", "all"):
+            raise ValueError(
+                "thinking_retention must be None, 'tool_cycle' or 'all', "
+                f"got {self.thinking_retention!r}"
+            )
+
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
-        return MuseGlimmerRenderer(RendererTokenizerWrapper(tokenizer), self)
+        # Snapshot the config, as `Configurable.Config.build` does, so later edits to the
+        # recipe object cannot desynchronize full renders from bridging.
+        return MuseGlimmerRenderer(RendererTokenizerWrapper(tokenizer), replace(self))
 
 
 # Muse Glimmer special tokens. The ids are checked against the tokenizer in __init__

@@ -228,6 +228,31 @@ def _renderer(tokenizer, **overrides):
     return MuseGlimmerRenderer(tokenizer, MuseGlimmerRendererConfig(**overrides))
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"thinking_retention": "everything"}, ValueError),
+        ({"retain_reasoning_in_history": "false"}, TypeError),
+        ({"answer_from_reasoning_fallback": 1}, TypeError),
+        ({"reasoning_strength": 123}, TypeError),
+    ],
+)
+def test_config_rejects_invalid_values(kwargs, error):
+    with pytest.raises(error):
+        MuseGlimmerRendererConfig(**kwargs)
+
+
+def test_build_snapshots_config():
+    path = os.environ.get("MUSE_GLIMMER_TOKENIZER", DEFAULT_TOKENIZER)
+    if not os.path.isdir(path):
+        pytest.skip("HuggingFaceTokenizer needs a local tokenizer directory")
+    config = MuseGlimmerRendererConfig(retain_reasoning_in_history=True)
+    renderer = config.build(tokenizer=HuggingFaceTokenizer(tokenizer_path=path))
+    config.retain_reasoning_in_history = False
+    assert renderer._config.retain_reasoning_in_history is True
+    assert renderer.effective_thinking_retention == "all"
+
+
 def test_config_build_matches_hf_tokenizer_path(tokenizer):
     path = os.environ.get("MUSE_GLIMMER_TOKENIZER", DEFAULT_TOKENIZER)
     if not os.path.isdir(path):
