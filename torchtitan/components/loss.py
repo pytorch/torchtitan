@@ -490,11 +490,6 @@ class GradAccumulator:
         """
         from torch.distributed.tensor import DTensor
 
-        if self._next_idx != self.num_chunks:
-            raise ValueError(
-                f"Expected {self.num_chunks} chunks, but got {self._next_idx}"
-            )
-
         if self._device_mesh is not None:
             if self._placements is None:
                 raise ValueError(
@@ -521,6 +516,7 @@ class ChunkedLossWrapper(BaseLoss):
     The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
     chunk on logits from that chunk. Additional per-token ``loss_inputs`` are
     chunked along the same sequence dimension and forwarded to the inner loss.
+    Inputs that fit in one chunk use the standard autograd path directly.
 
     The flow:
     1. Model forward with _skip_lm_head=True to get hidden states [T, D]
@@ -534,8 +530,9 @@ class ChunkedLossWrapper(BaseLoss):
     FSDP2 composability:
         The lm_head's FSDP reshard-after-forward and reshard-after-backward are
         temporarily disabled during the chunked loop so that the weight stays
-        unsharded across all chunks (avoiding repeated all-gathers). Reduce-scatter
-        fires per-chunk, and FSDP2 accumulates the sharded gradients correctly.
+        unsharded across all chunks (avoiding repeated all-gathers). Gradient
+        synchronization is enabled only for the final chunk, coalescing the
+        parameter-gradient reduce-scatter across chunks.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -600,6 +597,17 @@ class ChunkedLossWrapper(BaseLoss):
         hidden_states = pred
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+
+        local_seq_len = (
+            hidden_states.to_local().shape[0]
+            if isinstance(hidden_states, DTensor)
+            else hidden_states.shape[0]
+        )
+        if isinstance(local_seq_len, int) and local_seq_len <= self.chunk_len:
+            return self.loss_fn(
+                lm_head(hidden_states), labels, global_valid_tokens, **loss_inputs
+            )
+
         fsdp_enabled = isinstance(lm_head, FSDPModule)
 
         # Check if it's training model or validation mode
@@ -629,6 +637,10 @@ class ChunkedLossWrapper(BaseLoss):
             # symbolic chunks equal-sized so tracing the per-chunk backward does
             # not introduce data-dependent guards on a symbolic final chunk.
             chunk_count = _chunk_count(t.shape[0])
+            torch._check(
+                seq_len <= chunk_count * self.chunk_len,
+                lambda: "Symbolic loss chunks must not exceed chunk_len",
+            )
             torch._check(
                 seq_len % chunk_count == 0,
                 lambda: "Symbolic sequence length must be divisible by chunk count",

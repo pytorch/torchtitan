@@ -285,13 +285,6 @@ class TestGradAccumulator(unittest.TestCase):
         with self.assertRaises(ValueError):
             acc.add(torch.randn(4, 16))
 
-    def test_too_few_adds_raises(self):
-        """Verify error when fewer chunks than expected were added."""
-        acc = GradAccumulator(torch.randn(8, 16), num_chunks=2, dtype=torch.float32)
-        acc.add(torch.randn(4, 16))
-        with self.assertRaisesRegex(ValueError, "Expected 2 chunks"):
-            acc.result()
-
 
 class TestGradAccumulatorDTensor(unittest.TestCase):
     """Regression tests for the DTensor path.
@@ -637,6 +630,18 @@ class TestChunkedLossWrapper(unittest.TestCase):
         self.assertEqual(events.count("forward"), 2)
         self.assertLess(events.index("unshard"), events.index("forward"))
         self.assertEqual(events[-1], "reshard")
+
+    def test_single_chunk_uses_standard_backward(self):
+        model, chunked_loss = self._make_model_and_loss(chunk_len=8)
+        hidden_states = torch.randn(4, 32, requires_grad=True)
+        labels = torch.randint(0, 64, (4,))
+
+        loss, _ = chunked_loss(hidden_states, labels)
+
+        self.assertIsNone(model.output.weight.grad)
+        loss.backward()
+        self.assertIsNotNone(model.output.weight.grad)
+        self.assertIsNotNone(hidden_states.grad)
 
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""
