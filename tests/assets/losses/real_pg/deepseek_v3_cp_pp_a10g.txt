@@ -1,6 +1,6 @@
 # config: deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4
 # ngpu: 8
-# parallelism: FSDP=2, CP=2, PP=2, EP=4
+# parallelism: FSDP=2, CP=2, EP=4, PP=2
 # step loss grad_norm
 1 8.122316360473633 3.6256673336029053
 2 6.290348529815674 4.3436808586120605
