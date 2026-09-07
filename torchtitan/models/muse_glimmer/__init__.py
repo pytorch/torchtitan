@@ -178,16 +178,14 @@ def _build_muse_glimmer_attention(
             param_init=_depth_init(layer_id),
         ),
         qk_norm=_scaleless_norm(head_dim, _NORM_EPS),
-        use_rope=_layer_use_rope(layer_id, n_layers),
         inner_attention=inner_attention,
-        # Every layer (incl. NoPE) carries a rope config so the base Decoder's
-        # max_context_length discovery/resize works uniformly; NoPE layers
-        # simply never apply it (guarded by use_rope in Attention.forward).
         rope=ComplexRoPE.Config(
             dim=head_dim,
             max_context_length=max_context_length,
             theta=_ROPE_THETA,
-        ),
+        )
+        if _layer_use_rope(layer_id, n_layers)
+        else None,
         scale_query_by=_SCALE_QUERY_NUMERATOR / math.sqrt(head_dim),
         o_gate=Linear.Config(
             in_features=dim,

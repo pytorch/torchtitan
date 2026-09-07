@@ -191,7 +191,7 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
-    rope: RoPE.Config,
+    rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
@@ -199,6 +199,9 @@ def make_gqa_config(
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config.
+
+    ``rope=None`` builds a NoPE layer (no positional encoding); see
+    :class:`GQAttention`.
 
     ``tp_gemm_backend`` selects which implementation runs the QKV and output
     projections. ``"default"`` leaves the TP collectives to the framework, either
@@ -213,7 +216,7 @@ def make_gqa_config(
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    rope = dataclasses.replace(rope)
+    rope = dataclasses.replace(rope) if rope is not None else None
 
     # The backend picks the classes; everything below builds the same shapes into
     # whichever was chosen.

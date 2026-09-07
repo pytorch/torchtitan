@@ -867,6 +867,11 @@ class GQAttention(BaseAttention):
     The QKV projection strategy is determined by the ``qkv_linear`` config field:
     use :class:`QKVLinear` for three independent projections, or
     :class:`FusedQKVLinear` for a single fused projection.
+
+    ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
+    the inner attention unrotated, and positional information reaches the layer
+    only through the attention mask. Interleaved RoPE/NoPE models (iRoPE) set it
+    per layer.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -879,7 +884,7 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         inner_attention: Module.Config
-        rope: RoPE.Config
+        rope: RoPE.Config | None
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
@@ -908,7 +913,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build()
+        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -940,7 +945,8 @@ class GQAttention(BaseAttention):
             xk_THK = self.k_norm(xk_THK)
 
         # Apply rotary embeddings
-        xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+        if self.rope is not None:
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
         out_THV = self.inner_attention(
             xq_THK,
