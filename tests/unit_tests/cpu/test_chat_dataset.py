@@ -98,6 +98,28 @@ def _build_rows(max_context_length):
     )
 
 
+def _legacy_single_turn_labels(tokenizer, messages):
+    """Reproduce the original single-turn mask: labels[:max(prompt_len-1, 0)]."""
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    prompt_text = tokenizer.apply_chat_template(
+        messages[:1], add_generation_prompt=True
+    )
+    prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+    labels = np.asarray(full_tokens[1:], dtype=np.int64)
+    labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
+    return np.asarray(full_tokens[:-1], dtype=np.int64), labels
+
+
+def _encode_chat_prefix(tokenizer, messages, *, add_generation_prompt=False):
+    text = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=add_generation_prompt
+    )
+    return tokenizer.encode(text, add_bos=True, add_eos=False)
+
+
 def _build_dataloader(max_context_length=128, world_size=1, rank=0):
     config = GrainDataLoader.Config(
         dataset=FirstFitPackingConfig(
@@ -238,30 +260,138 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
 
 
 class TestChatDatasetMessageValidation(unittest.TestCase):
-    """Non-[user, assistant] messages raise ValueError."""
+    """Non-alternating user/assistant conversations raise ValueError."""
 
     def test_invalid_messages(self):
         invalid_messages = (
-            [
-                {"role": "system", "content": "You are helpful."},
-                {"role": "assistant", "content": "OK"},
-            ],
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "user", "content": "hello again"},
-            ],
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello"},
-                {"role": "user", "content": "bye"},
-            ],
+            (
+                [
+                    {"role": "system", "content": "You are helpful."},
+                    {"role": "assistant", "content": "OK"},
+                ],
+                r"messages\[0\] role 'user'",
+            ),
+            (
+                [
+                    {"role": "user", "content": "hi"},
+                    {"role": "user", "content": "hello again"},
+                ],
+                r"messages\[1\] role 'assistant'",
+            ),
+            (
+                [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "hello"},
+                    {"role": "user", "content": "bye"},
+                ],
+                "even-length",
+            ),
         )
-        for messages in invalid_messages:
-            with self.subTest(messages=messages), self.assertRaises(ValueError):
+        for messages, pattern in invalid_messages:
+            with self.subTest(messages=messages), self.assertRaisesRegex(
+                ValueError, pattern
+            ):
                 processor = _build_processor(
                     messages_fn=lambda _sample, value=messages: value
                 )
                 processor({}, np.random.default_rng(0))
+
+
+class TestChatDatasetPrefixValidation(unittest.TestCase):
+    """Prompt tokens must be an exact prefix of the full conversation tokens."""
+
+    def test_single_turn_labels_match_legacy_formula(self):
+        sample = _load_dataset()[0]
+        messages = _process_sample(sample)
+        sequence = _build_processor()(sample, np.random.default_rng(0))
+        expected_input_ids, expected_labels = _legacy_single_turn_labels(
+            _load_tokenizer(), messages
+        )
+
+        np.testing.assert_array_equal(sequence.input_ids, expected_input_ids)
+        np.testing.assert_array_equal(sequence.labels, expected_labels)
+
+    def test_prefix_mismatch_raises(self):
+        processor = _build_processor()
+        original_encode = processor._tokenizer.encode
+        call_count = 0
+
+        def mismatched_encode(*args, **kwargs):
+            nonlocal call_count
+            tokens = original_encode(*args, **kwargs)
+            call_count += 1
+            if call_count == 2:
+                return tokens + [0]
+            return tokens
+
+        processor._tokenizer.encode = mismatched_encode
+        with self.assertRaisesRegex(ValueError, "exact prefix"):
+            processor(_load_dataset()[0], np.random.default_rng(0))
+
+
+class TestChatDatasetMultiTurn(unittest.TestCase):
+    """Even-length user/assistant conversations mask only user-turn prompts."""
+
+    _FOUR_TURN = (
+        {"role": "user", "content": "What is 2 + 3?"},
+        {"role": "assistant", "content": "5"},
+        {"role": "user", "content": "Add 4 more."},
+        {"role": "assistant", "content": "9"},
+    )
+
+    def test_four_message_masks_user_spans_only(self):
+        messages = list(self._FOUR_TURN)
+        processor = _build_processor(messages_fn=lambda _sample: messages)
+        sequence = processor({}, np.random.default_rng(0))
+        tokenizer = _load_tokenizer()
+
+        first_prompt = _encode_chat_prefix(
+            tokenizer, messages[:1], add_generation_prompt=True
+        )
+        first_turn = _encode_chat_prefix(tokenizer, messages[:2])
+        second_prompt = _encode_chat_prefix(
+            tokenizer, messages[:3], add_generation_prompt=True
+        )
+
+        labels = sequence.labels
+        self.assertTrue((labels[: len(first_prompt) - 1] == IGNORE_INDEX).all())
+        self.assertTrue(
+            (labels[len(first_prompt) - 1 : len(first_turn) - 1] != IGNORE_INDEX).all()
+        )
+        self.assertTrue(
+            (labels[len(first_turn) - 1 : len(second_prompt) - 1] == IGNORE_INDEX).all()
+        )
+        self.assertTrue((labels[len(second_prompt) - 1 :] != IGNORE_INDEX).all())
+
+    def test_odd_length_raises(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+        ]
+        processor = _build_processor(messages_fn=lambda _sample: messages)
+        with self.assertRaisesRegex(ValueError, "even-length"):
+            processor({}, np.random.default_rng(0))
+
+    def test_starts_with_assistant_raises(self):
+        messages = [
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "hi"},
+        ]
+        processor = _build_processor(messages_fn=lambda _sample: messages)
+        with self.assertRaisesRegex(ValueError, r"messages\[0\] role 'user'"):
+            processor({}, np.random.default_rng(0))
+
+    def test_two_assistants_in_a_row_raises(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "assistant", "content": "again"},
+            {"role": "user", "content": "bye"},
+        ]
+        processor = _build_processor(messages_fn=lambda _sample: messages)
+        with self.assertRaisesRegex(ValueError, r"messages\[2\] role 'user'"):
+            processor({}, np.random.default_rng(0))
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):

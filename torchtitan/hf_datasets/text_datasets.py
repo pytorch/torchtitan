@@ -58,8 +58,25 @@ class TextProcessor(SampleProcessor):
         )
 
 
+def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> None:
+    """Raise if prompt_tokens is not an exact prefix of full_tokens."""
+    if full_tokens[: len(prompt_tokens)] != prompt_tokens:
+        raise ValueError(
+            "Prompt tokens are not an exact prefix of the full conversation tokens"
+        )
+
+
+def _mask_prompt_labels(labels: np.ndarray, prompt_len: int, *, start: int = 0) -> None:
+    """Ignore shifted labels for prompt tokens in [start, prompt_len).
+
+    labels[i] is full_tokens[i + 1], so the single-turn formula
+    labels[:max(prompt_len - 1, 0)] is the start=0 case.
+    """
+    labels[max(start - 1, 0) : max(prompt_len - 1, 0)] = IGNORE_INDEX
+
+
 class ChatProcessor(SampleProcessor):
-    """Tokenizes one single-turn chat sample and masks prompt labels."""
+    """Tokenizes an alternating user/assistant conversation and masks prompt labels."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
@@ -81,30 +98,39 @@ class ChatProcessor(SampleProcessor):
 
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
-        """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO(data-sft-multiturn): Extend validation and loss masking before
-        # accepting multi-turn conversations.
-        if len(messages) != 2:
+        """Validate even-length user/assistant alternation starting with user."""
+        if len(messages) < 2 or len(messages) % 2 != 0:
             raise ValueError(
-                f"Expected single-turn [user, assistant], got {len(messages)} messages"
+                "Expected an even-length alternating user/assistant "
+                f"conversation, got {len(messages)} messages"
             )
-        if messages[0]["role"] != "user":
-            raise ValueError(
-                f"First message must be 'user', got '{messages[0]['role']}'"
-            )
-        if messages[1]["role"] != "assistant":
-            raise ValueError(
-                f"Second message must be 'assistant', got '{messages[1]['role']}'"
-            )
+        for index, message in enumerate(messages):
+            expected_role = "user" if index % 2 == 0 else "assistant"
+            role = message["role"]
+            if role != expected_role:
+                raise ValueError(
+                    f"Expected messages[{index}] role '{expected_role}', got '{role}'"
+                )
+
+    def _encode_chat_messages(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        add_generation_prompt: bool = False,
+    ) -> list[int]:
+        text = self._tokenizer.apply_chat_template(
+            messages, add_generation_prompt=add_generation_prompt
+        )
+        return self._tokenizer.encode(text, add_bos=True, add_eos=False)
 
     def _tokenize_sample(self, sample: dict[str, Any]) -> TextSequence | None:
-        """Tokenize a single-turn sample and mask prompt labels.
+        """Tokenize a chat conversation and mask user-turn prompt labels.
 
         Returns None if the sample exceeds `seq_len`, avoiding
         training on truncated responses.
 
-        Uses incremental prefix re-tokenization to find the prompt/response
-        token boundary, avoiding BPE merge errors.
+        Each user turn is re-tokenized with add_generation_prompt=True so the
+        prompt/response boundary is taken from an exact token prefix.
         """
         messages = self._messages_fn(sample)
         self._validate_messages(messages)
@@ -130,20 +156,20 @@ class ChatProcessor(SampleProcessor):
             )
             return None
 
-        # Find prompt/response boundary by tokenizing just the user message
-        # with add_generation_prompt=True.
-        prompt_text = self._tokenizer.apply_chat_template(
-            messages[:1], add_generation_prompt=True
-        )
-        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        # TODO(data-chat-loss-boundary): Validate prompt tokens are an exact prefix
-        # of full-conversation tokens before masking on prompt_len.
-        prompt_len = len(prompt_tokens)
-
         tokens = np.asarray(full_tokens, dtype=np.int64)
         input_ids = tokens[:-1]
         labels = tokens[1:].copy()
-        labels[: max(prompt_len - 1, 0)] = IGNORE_INDEX
+        for turn in range(0, len(messages), 2):
+            prompt_tokens = self._encode_chat_messages(
+                messages[: turn + 1], add_generation_prompt=True
+            )
+            _require_token_prefix(full_tokens, prompt_tokens)
+            start = 0
+            if turn > 0:
+                previous_tokens = self._encode_chat_messages(messages[:turn])
+                _require_token_prefix(full_tokens, previous_tokens)
+                start = len(previous_tokens)
+            _mask_prompt_labels(labels, len(prompt_tokens), start=start)
         return TextSequence(
             input_ids=input_ids,
             labels=labels,
