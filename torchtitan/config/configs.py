@@ -269,6 +269,13 @@ class ParallelismConfig:
                 "context_parallel_load_balancer cannot be an empty string. "
                 "Use None to disable load balancing."
             )
+        allowed = frozenset({None, "headtail", "ptrr"})
+        if self.context_parallel_load_balancer not in allowed:
+            raise ValueError(
+                "parallelism.context_parallel_load_balancer must be one of: "
+                f"None, 'headtail', 'ptrr' "
+                f"(got {self.context_parallel_load_balancer!r})"
+            )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
             or (
