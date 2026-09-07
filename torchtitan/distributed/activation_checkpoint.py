@@ -14,6 +14,7 @@ from typing import Annotated, cast
 import torch
 import torch._functorch.config
 import torch.nn as nn
+import torch_remat as remat
 import tyro
 from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -25,6 +26,7 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import Configurable
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
 
@@ -292,6 +294,82 @@ class SelectiveAC(ActivationCheckpointing):
         )
 
 
+# TODO: Migrate the existing AC implementations to RegionAC and keep RegionAC
+# as the single activation-checkpointing implementation.
+class RegionAC(ActivationCheckpointing):
+    """Retain model-declared regions and recompute the rest of each block.
+
+    Models must declare compatible regions and provide an explicit save policy
+    before selecting this activation-checkpointing implementation. See
+    ``docs/remat.md`` for configuration and model-integration guidance.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationCheckpointing.Config):
+        save_regions: list[str]
+        """
+        Qualified save-region glob patterns, relative to a transformer block.
+        Region names are defined at the corresponding ``torch_remat.region``
+        call sites in model code. Everything outside a retained region is
+        recomputed.
+
+        NB: Save-region names are relative to a transformer block, so the same
+        policy applies to every transformer block. Per-block remat policies are
+        not currently supported.
+        """
+
+        preserve_rng_state: bool = False
+        """
+        Must remain false. torch_remat requires explicit RecomputeStateHooks for
+        random state that can advance inside retained regions.
+        """
+
+        def __post_init__(self) -> None:
+            if self.preserve_rng_state:
+                raise ValueError(
+                    "RegionAC does not support preserve_rng_state=True. Register a "
+                    "torch_remat RecomputeStateHook for random state used in retained "
+                    "regions."
+                )
+            if self.debug:
+                raise ValueError(
+                    "RegionAC does not support the activation checkpoint debug option."
+                )
+
+    def _wrap_block(
+        self, module: nn.Module, *, base_fqn: str | None = None
+    ) -> nn.Module:
+        config = cast("RegionAC.Config", self.config)
+        checkpoint_region_name = base_fqn or type(module).__name__
+        checkpointed_forward = remat.checkpoint(
+            region_name=checkpoint_region_name,
+            determinism_check=config.determinism_check,
+            preserve_rng_state=False,
+        )(module.forward)
+        module.forward = checkpointed_forward
+        return module
+
+    def apply(self, model: nn.Module) -> None:
+        config = cast("RegionAC.Config", self.config)
+        layers = model.get_submodule("layers")
+        transformer_blocks = list(layers.named_children())
+        if not transformer_blocks:
+            logger.info("RegionAC found no transformer blocks in this model part")
+            return
+
+        # TODO: Validate unmatched patterns once validation can account for save
+        # regions across all pipeline stages instead of only this model part.
+        for layer_id, transformer_block in transformer_blocks:
+            assert isinstance(transformer_block, Module)
+            transformer_block.configure_remat_regions(config.save_regions)
+            self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
+        logger.info(
+            "Applied RegionAC to %d transformer blocks. Save patterns: %s",
+            len(transformer_blocks),
+            config.save_regions or "none",
+        )
+
+
 class MemoryBudgetAC(ActivationCheckpointing):
     """Let the compiler partitioner trade compute for memory via a memory budget.
 
@@ -340,6 +418,7 @@ class MemoryBudgetAC(ActivationCheckpointing):
 # every nested Config class is named "Config" and would otherwise collide.
 ActivationCheckpointingConfig = (
     Annotated[SelectiveAC.Config, tyro.conf.subcommand("selective")]
+    | Annotated[RegionAC.Config, tyro.conf.subcommand("region")]
     | Annotated[FullAC.Config, tyro.conf.subcommand("full")]
     | Annotated[MemoryBudgetAC.Config, tyro.conf.subcommand("memory-budget")]
     | Annotated[None, tyro.conf.subcommand("none")]
