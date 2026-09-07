@@ -33,6 +33,7 @@ def parallelize_kimi_k3(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ) -> nn.Module:
     """Apply FSDP2 to the Kimi K3 decoder and vision encoder."""
 
@@ -66,6 +67,18 @@ def parallelize_kimi_k3(
         # needs GB200-class hardware.
         model.parallelize(parallel_dims)
 
+    if ac_config is not None:
+        ac_policy = ac_config.build(dump_folder=dump_folder)
+        ac_policy.apply(model)
+        if model.vision_encoder is not None:
+            ac_policy.apply(model.vision_encoder)
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
+
     if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
@@ -84,12 +97,6 @@ def parallelize_kimi_k3(
                 else ["efsdp"]
             )
             edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
-
-    if ac_config is not None:
-        ac_policy = ac_config.build(dump_folder=dump_folder)
-        ac_policy.apply(model)
-        if model.vision_encoder is not None:
-            ac_policy.apply(model.vision_encoder)
 
     vision_encoder = model.vision_encoder
     if vision_encoder is not None:
