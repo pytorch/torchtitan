@@ -15,6 +15,7 @@ from torchtitan.models.common.attention import BaseAttention, FlexAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.protocols.module import ModuleDict
 
 from .compressor import Compressor, Indexer
 
@@ -393,7 +394,7 @@ class Attention(BaseAttention):
         compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         cfg = config
         self.n_heads = cfg.n_heads
@@ -407,7 +408,8 @@ class Attention(BaseAttention):
         self.softmax_scale = cfg.head_dim**-0.5
         self.layer_id = cfg.layer_id
         self.n_layers = cfg.n_layers
-        self.rope = cfg.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
         # Build all sub-modules from their configs.
         self.wq_a = cfg.wq_a.build()
@@ -420,11 +422,11 @@ class Attention(BaseAttention):
         self.attn_sink = cfg.attn_sink.build()
 
         if cfg.compressor is not None:
-            self.compressor = cfg.compressor.build()
+            self.compressor = cfg.compressor.build(rope_modules=rope_modules)
         if cfg.indexer is not None:
-            self.indexer = cfg.indexer.build()
+            self.indexer = cfg.indexer.build(rope_modules=rope_modules)
         if cfg.compressor_128 is not None:
-            self.compressor_128 = cfg.compressor_128.build()
+            self.compressor_128 = cfg.compressor_128.build(rope_modules=rope_modules)
 
         self.inner_attention = cfg.inner_attention.build()
 

@@ -26,7 +26,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.protocols.module import ModuleList
+from torchtitan.protocols.module import ModuleDict, ModuleList
 
 
 def roll_mtp_sequence(
@@ -120,9 +120,9 @@ class MTPTransformerBlock(TransformerBlock):
         eh_proj: Linear.Config
         mtp_norm: RMSNorm.Config
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.enorm = config.enorm.build()
@@ -211,14 +211,21 @@ class MTPDecoder(Decoder):
             self.mtp_layers = None
             return
 
-        self.mtp_layers = ModuleList()
         for layer_config in config.mtp_layers:
             if not isinstance(layer_config, MTPTransformerBlock.Config):
                 raise ValueError(
                     "MTPDecoder requires Config.mtp_layers to contain "
                     "MTPTransformerBlock.Config instances."
                 )
-            self.mtp_layers.append(layer_config.build())
+            rope_config = getattr(layer_config.attention, "rope")
+            key = rope_config.rope_key()
+            if key not in self.rope_modules:
+                self.rope_modules[key] = rope_config.build()
+        self.mtp_layers = ModuleList()
+        for layer_config in config.mtp_layers:
+            self.mtp_layers.append(
+                layer_config.build(rope_modules=self.rope_modules)
+            )
 
     def forward(
         self,

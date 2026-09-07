@@ -46,7 +46,7 @@ from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan.tools.utils import round_up
 
 
@@ -869,6 +869,8 @@ class GQAttention(BaseAttention):
     :class:`FusedQKVLinear` for a single fused projection.
     """
 
+    rope: RoPE
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -896,7 +898,7 @@ class GQAttention(BaseAttention):
                     f"n_kv_heads ({n_kv_heads})"
                 )
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         self.n_heads = config.n_heads
         self.n_kv_heads = (
@@ -908,7 +910,8 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()

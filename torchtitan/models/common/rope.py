@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, fields
 from typing import Literal
 
 import spmd_types as spmd
@@ -89,6 +90,8 @@ class RoPE(Module):
     cosine/sine caches.
     """
 
+    cache: torch.Tensor
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -106,6 +109,80 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         truncate: bool = True
+
+        def rope_key(self) -> str:
+            """Return the stable, descriptive key for this RoPE implementation."""
+
+            def format_value(value: object) -> str:
+                if value is None:
+                    text = "none"
+                elif isinstance(value, bool):
+                    text = "true" if value else "false"
+                elif isinstance(value, float):
+                    text = format(value, ".17g")
+                elif isinstance(value, (list, tuple)):
+                    text = "-".join(format_value(item) for item in value)
+                else:
+                    text = str(value)
+                return re.sub(r"[^A-Za-z0-9_-]", "p", text)
+
+            owner = self._owner
+            owner_name = owner.__name__ if owner is not None else type(self).__name__
+            parts = [owner_name]
+            common_fields = {"dim", "max_context_length", "theta", "scaling"}
+            scaling_fields = {
+                "llama": {
+                    "scaling_factor",
+                    "low_freq_factor",
+                    "high_freq_factor",
+                    "original_max_position_embeddings",
+                },
+                "yarn": {
+                    "rope_factor",
+                    "beta_fast",
+                    "beta_slow",
+                    "original_seq_len",
+                    "truncate",
+                },
+            }.get(self.scaling, set())
+            key_names = {
+                "dim": "d",
+                "max_context_length": "ctx",
+                "scaling_factor": "sf",
+                "low_freq_factor": "lf",
+                "high_freq_factor": "hf",
+                "original_max_position_embeddings": "orig",
+                "rope_factor": "rf",
+                "beta_fast": "bf",
+                "beta_slow": "bs",
+                "original_seq_len": "orig",
+                "truncate": "trunc",
+            }
+            for config_field in fields(self):
+                if config_field.name in {"param_init", "sharding_config"}:
+                    continue
+                if (
+                    config_field.name not in common_fields
+                    and config_field.name not in scaling_fields
+                    and config_field.name
+                    in {
+                        "scaling_factor",
+                        "low_freq_factor",
+                        "high_freq_factor",
+                        "original_max_position_embeddings",
+                        "rope_factor",
+                        "beta_fast",
+                        "beta_slow",
+                        "original_seq_len",
+                        "truncate",
+                    }
+                ):
+                    continue
+                value = format_value(getattr(self, config_field.name))
+                name = key_names.get(config_field.name, config_field.name)
+                separator = "" if config_field.name in common_fields - {"scaling"} else "_"
+                parts.append(f"{name}{separator}{value}")
+            return "_".join(parts)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -173,13 +250,13 @@ class RoPE(Module):
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
             # After ``to_empty()``, the existing cache records the target device.
             # Recompute there when the caller does not pass an explicit buffer device.
             buffer_device = self.cache.device
         with torch.device(buffer_device):
-            self.cache = self._precompute_cache()
+            cache = self._precompute_cache()
+            self.register_buffer("cache", cache, persistent=False)
 
 
 class ComplexRoPE(RoPE):

@@ -36,7 +36,11 @@ from .nn_modules import (
     RMSNorm,
     SiLU,
 )
-from .rope import ComplexRoPE, CosSinRoPE, RoPE
+from .rope import (
+    ComplexRoPE,
+    CosSinRoPE,
+    RoPE,
+)
 
 __all__ = [
     "Conv1d",

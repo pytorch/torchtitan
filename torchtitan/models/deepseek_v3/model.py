@@ -26,7 +26,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
-from torchtitan.protocols.module import Module
+from torchtitan.protocols.module import Module, ModuleDict
 
 
 class Attention(BaseAttention):
@@ -35,6 +35,8 @@ class Attention(BaseAttention):
 
     This is DeepSeek V3-specific and NOT shared with other models.
     """
+
+    rope: RoPE
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
@@ -57,7 +59,7 @@ class Attention(BaseAttention):
         inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
         mscale: float = 1.0
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
         self.dim = config.dim
         self.n_heads = config.n_heads
@@ -92,7 +94,8 @@ class Attention(BaseAttention):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.inner_attention = config.inner_attention.build()
-        self.rope = config.rope.build()
+        # Keep the canonical module registered only under Decoder.rope_modules.
+        object.__setattr__(self, "rope", rope_modules[config.rope.rope_key()])
 
     def forward(
         self,
@@ -164,9 +167,9 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         pass
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
 

@@ -17,6 +17,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols.module import ModuleDict
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -34,10 +35,10 @@ class Qwen3TransformerBlock(TransformerBlock):
     class Config(TransformerBlock.Config):
         pass
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, rope_modules: ModuleDict):
         super().__init__()
 
-        self.attention = config.attention.build()
+        self.attention = config.attention.build(rope_modules=rope_modules)
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
+from torch.nn.attention.flex_attention import BlockMask, _mask_mod_signature, and_masks
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -18,13 +18,13 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    create_attention_mask,
-    create_varlen_metadata_for_document,
     FlexAttention,
-    get_causal_mask_mod,
-    get_efficient_causal_mask_mod_for_packed_document,
     ScaledDotProductAttention,
     VarlenAttention,
+    create_attention_mask,
+    create_varlen_metadata_for_document,
+    get_causal_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -216,12 +216,27 @@ class Decoder(BaseModel):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-
         self.tok_embeddings = config.tok_embeddings.build()
+
+        self.rope_modules = ModuleDict()
+        for layer_config in config.layers:
+            attention_config = getattr(layer_config, "attention", None)
+            rope_config = getattr(attention_config, "rope", None)
+            if rope_config is None:
+                continue
+            key = rope_config.rope_key()
+            if key not in self.rope_modules:
+                self.rope_modules[key] = rope_config.build()
 
         self.layers = ModuleDict()
         for i, layer_config in enumerate(config.layers):
-            self.layers[str(i)] = layer_config.build()
+            attention_config = getattr(layer_config, "attention", None)
+            rope_config = getattr(attention_config, "rope", None)
+            if rope_config is None:
+                layer = layer_config.build()
+            else:
+                layer = layer_config.build(rope_modules=self.rope_modules)
+            self.layers[str(i)] = layer
 
         self.norm = config.norm.build()
         self.lm_head = config.lm_head.build()
