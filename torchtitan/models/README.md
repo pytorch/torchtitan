@@ -37,8 +37,8 @@ The folder should be organized as follows
     - `torch.compile`
     - FSDP /  HSDP
     - NOTE: currently CP support for language models is enabled via a context manager in `torchtitan/train.py`. Ideally no extra work is needed to enable CP.
-- `pipeline.py` (optional if model size is small)
-  - apply PP
+- Pipeline parallelism (optional if model size is small)
+  - Do not add a per-model `pipeline.py`. Point `ModelSpec.pipelining_fn` at the shared [`pipeline_llm`](/torchtitan/distributed/pipeline_parallel.py) helper in `torchtitan/distributed/pipeline_parallel.py` (`pipeline_vlm` for VLMs).
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: Model.Config]`.
   - Define `model_registry(flavor)` to return a [`ModelSpec`](/torchtitan/protocols/model_spec.py), consisting of
