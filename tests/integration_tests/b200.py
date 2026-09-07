@@ -18,4 +18,16 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             test_name="kimi_k3_mm_fsdp",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_mm_cp2],
+            test_descr="Kimi K3 multimodal context parallelism",
+            test_name="kimi_k3_mm_cp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_mm_ulysses_cp2],
+            test_descr="Kimi K3 multimodal Ulysses context parallelism",
+            test_name="kimi_k3_mm_ulysses_cp",
+            ngpu=2,
+        ),
     ]
