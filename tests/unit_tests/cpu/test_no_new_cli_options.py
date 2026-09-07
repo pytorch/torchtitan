@@ -119,7 +119,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "loss.loss_fn.global_vocab_size",
         "loss.loss_fn.mtp_scale",
         "loss.mtp_scale",
-        "loss.num_chunks",
+        "loss.chunk_len",
         "lr_scheduler.decay_ratio",
         "lr_scheduler.decay_type",
         "lr_scheduler.min_lr_factor",

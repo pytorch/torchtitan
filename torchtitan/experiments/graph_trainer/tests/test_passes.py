@@ -3884,7 +3884,7 @@ class TestChunkPasses(TestCase):
         torch.manual_seed(42)
         num_tokens, dim, vocab_size = 64, 4, 8
         lm_head = torch.nn.Linear(dim, vocab_size, bias=False)
-        loss_fn = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=8))
+        loss_fn = ChunkedLossWrapper(ChunkedLossWrapper.Config(chunk_len=8))
         loss_fn.lm_head = lm_head
 
         hidden_states = torch.randn(num_tokens, dim, requires_grad=True)
