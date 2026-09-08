@@ -67,7 +67,7 @@ class _RematRegion:
         self._forward_owner = owner
         self._forward = owner.__dict__.get("forward")
         registered_regions = owner.__dict__.get("_registered_remat_regions", ())
-        setattr(
+        type.__setattr__(
             owner,
             "_registered_remat_regions",
             (*registered_regions, self),
@@ -128,7 +128,7 @@ class Module(nn.Module, Configurable):
                 f"Remat region {region.local_name!r} is declared on "
                 f"{region._forward_owner.__name__}, which does not implement forward"
             )
-        if getattr(type(self), "forward") is not region._forward:
+        if inspect.getattr_static(type(self), "forward") is not region._forward:
             raise ValueError(
                 f"Remat region {region.local_name!r} is not registered on "
                 f"{type(self).__name__}.forward"
