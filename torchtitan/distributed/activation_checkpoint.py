@@ -318,6 +318,9 @@ class RegionAC(ActivationCheckpointing):
         not currently supported.
         """
 
+        log_available_regions: bool = False
+        """Log available save regions grouped by block type and layer IDs."""
+
         preserve_rng_state: bool = False
         """
         Must remain false. torch_remat requires explicit RecomputeStateHooks for
@@ -362,19 +365,22 @@ class RegionAC(ActivationCheckpointing):
             assert isinstance(transformer_block, Module)
             region_blocks.append((layer_id, transformer_block))
 
-        block_groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
-        for layer_id, transformer_block in region_blocks:
-            available_regions = tuple(transformer_block.available_remat_save_regions())
-            group = (type(transformer_block).__name__, available_regions)
-            block_groups.setdefault(group, []).append(layer_id)
+        if config.log_available_regions:
+            block_groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+            for layer_id, transformer_block in region_blocks:
+                available_regions = tuple(
+                    transformer_block.available_remat_save_regions()
+                )
+                group = (type(transformer_block).__name__, available_regions)
+                block_groups.setdefault(group, []).append(layer_id)
 
-        for (block_type, available_regions), layer_ids in block_groups.items():
-            logger.info(
-                "RegionAC available save regions for %s layers %s: %s",
-                block_type,
-                layer_ids,
-                list(available_regions) or "none",
-            )
+            for (block_type, available_regions), layer_ids in block_groups.items():
+                logger.info(
+                    "RegionAC available save regions for %s layers %s: %s",
+                    block_type,
+                    layer_ids,
+                    list(available_regions) or "none",
+                )
 
         # TODO: Validate unmatched patterns once validation can account for save
         # regions across all pipeline stages instead of only this model part.

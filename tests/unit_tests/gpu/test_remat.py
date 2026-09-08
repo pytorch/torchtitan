@@ -144,7 +144,9 @@ class TestRematRegions(unittest.TestCase):
         state_keys = list(model.state_dict())
 
         with self.assertLogs(level="INFO") as logs:
-            RegionAC.Config(save_regions=["attention.*"]).build().apply(model)
+            RegionAC.Config(
+                save_regions=["attention.*"], log_available_regions=True
+            ).build().apply(model)
 
         self.assertEqual(list(model.state_dict()), state_keys)
         self.assertIn(
@@ -180,7 +182,9 @@ class TestRematRegions(unittest.TestCase):
         model.layers["1"] = _SecondBlock()
 
         with self.assertLogs(level="INFO") as logs:
-            RegionAC.Config(save_regions=[]).build().apply(model)
+            RegionAC.Config(save_regions=[], log_available_regions=True).build().apply(
+                model
+            )
 
         output = "\n".join(logs.output)
         self.assertIn(
@@ -193,6 +197,14 @@ class TestRematRegions(unittest.TestCase):
             "['second']",
             output,
         )
+
+    def test_available_regions_are_not_logged_by_default(self):
+        with self.assertLogs(level="INFO") as logs:
+            RegionAC.Config(save_regions=[]).build().apply(
+                _RematModel(_AttentionBlock())
+            )
+
+        self.assertNotIn("available save regions", "\n".join(logs.output))
 
     def test_attention_region_catalog_matches_forward(self):
         block = _AttentionBlock()

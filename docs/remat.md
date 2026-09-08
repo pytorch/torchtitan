@@ -32,7 +32,8 @@ RegionAC.Config(
     save_regions=[
         "attention.qkv",
         "attention.wo",
-    ]
+    ],
+    log_available_regions=True,
 )
 ```
 
@@ -40,10 +41,10 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
-When RegionAC is applied, TorchTitan groups transformer blocks with the same
-type and region catalog, then logs their layer IDs and available save-region
-names. Regions can also be inspected programmatically before applying
-RegionAC:
+With `log_available_regions=True`, TorchTitan groups transformer blocks with
+the same type and region catalog, then logs their layer IDs and available
+save-region names. Regions can also be inspected programmatically before
+applying RegionAC:
 
 ```python
 model.layers["0"].available_remat_save_regions()
