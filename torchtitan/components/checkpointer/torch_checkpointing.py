@@ -63,10 +63,12 @@ from .base import (
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
 _DEFAULT_BARRIER_TIMEOUT_SEC = 600
+_DEFAULT_ITEM_SPEC = ItemSpec(requires_copy=False)
 
 # Index the HF consolidation writes at the root of a final export; the
 # backend names it after the checkpoint item it consolidated.
 _HF_INDEX_FILE_NAME = f"{MODEL}.safetensors.index.json"
+_HF_SINGLE_FILE_NAME = f"{MODEL}.safetensors"
 
 # Logger the backend emits its checkpoint events and metrics on.
 CHECKPOINTING_LOGGER_NAME = "torch_checkpointing"
@@ -181,6 +183,7 @@ def _default_backend_config(
     *,
     storage_config: StorageConfig | None = None,
     items: dict[str, ItemSpec] | None = None,
+    default: ItemSpec | None = _DEFAULT_ITEM_SPEC,
     subprocess_init_fn: Callable[..., None] | None = None,
     subprocess_init_args: tuple[Any, ...] = (),
     pre_finalize_callback: Callable[[str, EventLogger], None] | None = None,
@@ -196,7 +199,7 @@ def _default_backend_config(
             subprocess_init_fn = _init_subprocess_logging
     return BackendCheckpointManager.Config(
         items=_item_specs() if items is None else items,
-        default=ItemSpec(requires_copy=False),
+        default=default,
         save=save_config,
         storage_config=storage_config,
         subprocess_init_fn=subprocess_init_fn,
@@ -331,14 +334,25 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        if from_hf:
+        if from_quantized:
             raise ValueError(
-                "TorchCheckpointingManager does not yet support loading "
-                "Hugging Face checkpoints."
+                "TorchCheckpointingManager does not support loading "
+                "quantized Hugging Face checkpoints."
             )
-        if not self._is_valid_checkpoint(checkpoint_id):
+        if from_hf and self.sd_adapter is None:
             raise ValueError(
-                f"Checkpoint {checkpoint_id!r} is not a native "
+                "checkpoint.initial_load_in_hf is True, but sd_adapter "
+                "is not provided."
+            )
+
+        is_valid_checkpoint = (
+            self._is_hf_checkpoint(checkpoint_id)
+            if from_hf
+            else self._is_resumable_checkpoint(checkpoint_id)
+        )
+        if not is_valid_checkpoint:
+            raise ValueError(
+                f"Checkpoint {checkpoint_id!r} is not a supported "
                 "torch_checkpointing checkpoint."
             )
         # strict: the backend defaults to skipping anything the checkpoint does
@@ -347,19 +361,49 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # exclude_from_loading is applied by _states_to_load, so anything still
         # in `states` here is genuinely required.
         state_dict = _stateful_to_state_dict(states)
-        loaded = self._manager.load(
-            checkpoint_id,
-            into=state_dict,
-            strict=True,
-        )
-        for key, target in states.items():
-            if isinstance(target, Stateful):
-                target.load_state_dict(state_dict[key])
-            elif loaded[key] is not target:
-                raise TypeError(
-                    f"Cannot restore non-Stateful checkpoint state {key!r} of type "
-                    f"{type(target).__name__}"
+        if from_hf:
+            assert self.sd_adapter is not None
+            hf_state = self.sd_adapter.to_hf(state_dict[MODEL])
+            model_spec = self._manager_config.items[MODEL]
+            hf_model_spec = ItemSpec(
+                requires_copy=model_spec.requires_copy,
+                layout=model_spec.layout,
+                # DefaultResharder reads safetensors sources directly, so the
+                # HF load needs no dedicated resharder. Mirrors the HF save
+                # path, which derives its spec the same way.
+                resharder=model_spec.resharder,
+                required=model_spec.required,
+            )
+            hf_config = _default_backend_config(
+                _sync_save_config(use_barrier=False),
+                storage_config=self._manager_config.storage_config,
+                items={MODEL: hf_model_spec},
+                default=None,
+            )
+            hf_manager = hf_config.build()
+            try:
+                hf_manager.load(
+                    checkpoint_id,
+                    into={MODEL: hf_state},
+                    strict=True,
                 )
+            finally:
+                hf_manager.close()
+            states[MODEL].load_state_dict(self.sd_adapter.from_hf(hf_state))
+        else:
+            loaded = self._manager.load(
+                checkpoint_id,
+                into=state_dict,
+                strict=True,
+            )
+            for key, target in states.items():
+                if isinstance(target, Stateful):
+                    target.load_state_dict(state_dict[key])
+                elif loaded[key] is not target:
+                    raise TypeError(
+                        f"Cannot restore non-Stateful checkpoint state {key!r} of type "
+                        f"{type(target).__name__}"
+                    )
 
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         should_save = self._should_save(curr_step, last_step)
@@ -401,6 +445,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
 
+    def _is_hf_checkpoint(self, checkpoint_dir: str) -> bool:
+        return self._storage.isfile(
+            filesystem.join(checkpoint_dir, _HF_INDEX_FILE_NAME)
+        ) or self._storage.isfile(filesystem.join(checkpoint_dir, _HF_SINGLE_FILE_NAME))
+
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         # Either published layout counts as valid:
         #
@@ -415,8 +464,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         #
         # Without the HF shape, a finished export looks abandoned and
         # retention deletes it on the next run.
-        return self._is_resumable_checkpoint(checkpoint_dir) or self._storage.isfile(
-            filesystem.join(checkpoint_dir, _HF_INDEX_FILE_NAME)
+        return self._is_resumable_checkpoint(checkpoint_dir) or self._is_hf_checkpoint(
+            checkpoint_dir
         )
 
     def _maybe_wait_for_staging(self) -> None:
