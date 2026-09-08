@@ -5,16 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-)
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
@@ -85,7 +82,7 @@ def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="./assets/hf/gemma-4-e2b",
+        hf_assets_path="/mnt/powerscale/models/google/gemma-4-e2b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -120,7 +117,7 @@ def gemma4_e4b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="./assets/hf/gemma-4-e4b",
+        hf_assets_path="/mnt/powerscale/models/google/gemma-4-e4b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -155,7 +152,7 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="./assets/hf/gemma-4-12b",
+        hf_assets_path="/mnt/powerscale/models/google/gemma-4-12B",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -219,7 +216,7 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="./assets/hf/gemma-4-26b-a4b",
+        hf_assets_path="/mnt/powerscale/models/google/gemma-4-26b-a4b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -257,7 +254,7 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="./assets/hf/gemma-4-31b",
+        hf_assets_path="/mnt/powerscale/models/google/gemma-4-31b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,

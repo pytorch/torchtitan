@@ -11,13 +11,17 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
+    colwise_config,
     dense_activation_placement,
+    dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
+    ShardingConfig,
 )
 
 if TYPE_CHECKING:
@@ -58,19 +62,53 @@ def _set_gemma4_layer_sharding(
     """
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
+    layer_cfg.post_attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
+    layer_cfg.post_ffn_norm.sharding_config = norm
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
-    set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
+    qkv = layer_cfg.attention.qkv_linear
+    if hasattr(qkv, "wq"):
+        qkv.wq.sharding_config = colwise_config()
+    if hasattr(qkv, "wk"):
+        qkv.wk.sharding_config = colwise_config()
+    if hasattr(qkv, "wv") and qkv.wv is not None:
+        qkv.wv.sharding_config = colwise_config()
+    layer_cfg.attention.wo.sharding_config = rowwise_config(enable_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
-    assert layer_cfg.feed_forward is not None
-    set_dense_ffn_sharding(
-        layer_cfg.feed_forward,
-        attn_x_layout=attn_x_layout,
-        enable_sp=enable_sp,
-    )
+    # Shard qk_norm if present
+    qk_norm = getattr(layer_cfg.attention, "qk_norm", None)
+    if qk_norm is not None:
+        head_layout = attention_activation_placement()
+        qk_norm.sharding_config = ShardingConfig(
+            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+            in_src_shardings={"input": head_layout},
+            in_dst_shardings={"input": head_layout},
+            out_src_shardings=head_layout,
+            out_dst_shardings=head_layout,
+        )
+
+    # Shard v_norm if present
+    if (
+        hasattr(layer_cfg.attention, "v_norm")
+        and layer_cfg.attention.v_norm is not None
+    ):
+        head_layout = attention_activation_placement()
+        layer_cfg.attention.v_norm.sharding_config = ShardingConfig(
+            in_src_shardings={"input": head_layout},
+            in_dst_shardings={"input": head_layout},
+            out_src_shardings=head_layout,
+            out_dst_shardings=head_layout,
+        )
+
+    if layer_cfg.feed_forward is not None:
+        set_dense_ffn_sharding(
+            layer_cfg.feed_forward,
+            attn_x_layout=attn_x_layout,
+            enable_sp=enable_sp,
+        )
