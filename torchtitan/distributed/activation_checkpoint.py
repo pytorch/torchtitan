@@ -9,6 +9,7 @@
 
 import os
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from typing import Annotated, cast
 
 import torch
@@ -361,30 +362,42 @@ class RegionAC(ActivationCheckpointing):
             return
 
         region_blocks = []
+        available_regions = []
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            region_blocks.append((layer_id, transformer_block))
+            block_regions = tuple(transformer_block.available_remat_save_regions())
+            region_blocks.append((layer_id, transformer_block, block_regions))
+            available_regions.extend(block_regions)
+
+        available_regions = list(dict.fromkeys(available_regions))
+        unmatched_patterns = [
+            pattern
+            for pattern in config.save_regions
+            if not any(fnmatch(region, pattern) for region in available_regions)
+        ]
+        if unmatched_patterns:
+            raise ValueError(
+                "RegionAC save-region patterns did not match any available "
+                f"regions: {unmatched_patterns}. Available regions: "
+                f"{available_regions or 'none'}. Check save_regions for typos "
+                "and use names relative to a transformer block."
+            )
 
         if config.log_available_regions:
             block_groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
-            for layer_id, transformer_block in region_blocks:
-                available_regions = tuple(
-                    transformer_block.available_remat_save_regions()
-                )
-                group = (type(transformer_block).__name__, available_regions)
+            for layer_id, transformer_block, block_regions in region_blocks:
+                group = (type(transformer_block).__name__, block_regions)
                 block_groups.setdefault(group, []).append(layer_id)
 
-            for (block_type, available_regions), layer_ids in block_groups.items():
+            for (block_type, block_regions), layer_ids in block_groups.items():
                 logger.info(
                     "RegionAC available save regions for %s layers %s: %s",
                     block_type,
                     layer_ids,
-                    list(available_regions) or "none",
+                    list(block_regions) or "none",
                 )
 
-        # TODO: Validate unmatched patterns once validation can account for save
-        # regions across all pipeline stages instead of only this model part.
-        for layer_id, transformer_block in region_blocks:
+        for layer_id, transformer_block, _ in region_blocks:
             transformer_block.configure_remat_regions(config.save_regions)
             self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
         logger.info(
