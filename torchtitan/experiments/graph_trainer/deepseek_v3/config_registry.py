@@ -196,6 +196,8 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mlperf_16gpu() -> (
     config.dataloader.dataset = ConcatThenSplitPackingConfig(
         dataset=DATASETS["c4_test"]
     )
+    config.dataloader.shuffle = False
+    config.dataloader.repeat = True
 
     parallelism = config.parallelism
     parallelism.data_parallel_replicate_degree = 1
@@ -333,6 +335,8 @@ def _graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_mlperf_spmd(
     config.dataloader.dataset = ConcatThenSplitPackingConfig(
         dataset=DATASETS["c4_test"]
     )
+    config.dataloader.shuffle = False
+    config.dataloader.repeat = True
 
     parallelism = config.parallelism
     parallelism.data_parallel_replicate_degree = 1

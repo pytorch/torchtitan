@@ -258,6 +258,8 @@ class DistMoeGraphTrainerConfigTest(unittest.TestCase):
         self.assertEqual(1, config.parallelism.pipeline_parallel_degree)
         self.assertEqual(64, config.parallelism.expert_parallel_degree)
         self.assertIs(config.dataloader.dataset.dataset, DATASETS["c4_test"])
+        self.assertFalse(config.dataloader.shuffle)
+        self.assertTrue(config.dataloader.repeat)
         attentions = [
             attention for _, attention, _, _ in config.traverse(VarlenAttention.Config)
         ]
@@ -298,6 +300,8 @@ class DistMoeGraphTrainerConfigTest(unittest.TestCase):
         self.assertEqual(4, config.parallelism.expert_parallel_degree)
         self.assertEqual("never", config.parallelism.fsdp_reshard_after_forward)
         self.assertIs(config.dataloader.dataset.dataset, DATASETS["c4_test"])
+        self.assertFalse(config.dataloader.shuffle)
+        self.assertTrue(config.dataloader.repeat)
         self.assertEqual(
             16,
             config.training.num_tokens_per_train_step
@@ -377,6 +381,8 @@ class DistMoeGraphTrainerConfigTest(unittest.TestCase):
         self.assertEqual(1, config.parallelism.pipeline_parallel_degree)
         self.assertEqual(64, config.parallelism.expert_parallel_degree)
         self.assertIs(config.dataloader.dataset.dataset, DATASETS["c4_test"])
+        self.assertFalse(config.dataloader.shuffle)
+        self.assertTrue(config.dataloader.repeat)
         data_parallel_degree = (
             config.parallelism.data_parallel_replicate_degree
             * config.parallelism.data_parallel_shard_degree
