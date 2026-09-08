@@ -276,6 +276,55 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
+def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_671b(seq_len=seq_len)
+    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
+    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
+    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
+    # build time, so use the plain deepseek_v3_671b config there.
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "671B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        converters=[
+            Float8LinearConverter.Config(
+                filter_fqns=["lm_head", "router.gate"],
+                model_compile_enabled=model_compile_enabled,
+            ),
+            Float8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled
+            ),
+        ],
+    )
+    return config
+
+
+# -----------------------------------------------------------------------------
+# Perf maxxing
+# -----------------------------------------------------------------------------
+
+
+def deepseek_v3_debugmodel_mxfp8_fsdp8_pp2_ep8() -> Trainer.Config:
+    """Debug model for lower-cost multi-node scale validation."""
+    config = deepseek_v3_debugmodel_mxfp8(seq_len=2048)
+    config.parallelism.data_parallel_replicate_degree = 1
+    config.parallelism.data_parallel_shard_degree = 8
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.tensor_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.expert_parallel_degree = 8
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.compile.enable = True
+    config.compile.components = ["loss"]
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v3_671b_pp4_ep32() -> Trainer.Config:
     config = deepseek_v3_671b()
 
@@ -329,30 +378,4 @@ def deepseek_v3_671b_pp4_ep32_mxfp8() -> Trainer.Config:
         ],
     )
 
-    return config
-
-
-def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
-    config = deepseek_v3_671b(seq_len=seq_len)
-    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
-    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
-    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
-    # build time, so use the plain deepseek_v3_671b config there.
-    model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
-    )
-    config.model_spec = model_registry(
-        "671B",
-        seq_len=seq_len,
-        attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head", "router.gate"],
-                model_compile_enabled=model_compile_enabled,
-            ),
-            Float8GroupedExpertsConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
-        ],
-    )
     return config

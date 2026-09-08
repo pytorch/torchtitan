@@ -21,9 +21,15 @@ set -euo pipefail
 mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
 head_node=${nodes[0]}
 
+RUN_ID=${RUN_ID:-"${SLURM_JOB_ID}"}
+OUTPUT_DIR=${OUTPUT_DIR:-"outputs/${RUN_ID}"}
+NPROC_PER_NODE=${NPROC_PER_NODE:-"gpu"}
+
+mkdir -p "${OUTPUT_DIR}"
+
 # debugging flags (optional)
-export NCCL_DEBUG=WARN
-export PYTHONFAULTHANDLER=1
+export NCCL_DEBUG=${NCCL_DEBUG:-"WARN"}
+export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-"1"}
 # optional debug settings
 # export NCCL_DEBUG=INFO
 # NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV
@@ -33,15 +39,21 @@ export PYTHONFAULTHANDLER=1
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 
+if [[ "${TORCHTITAN_COLLECT_ENVIRONMENT:-0}" == "1" ]]; then
+    python3 scripts/collect_environment.py \
+        --output "${OUTPUT_DIR}/environment.json"
+fi
+
 # "gpu" launches one worker for each GPU that Slurm makes visible to the task.
+# Set NPROC_PER_NODE to an integer when a job intentionally uses fewer workers.
 srun --kill-on-bad-exit=1 \
-    torchrun \
+    python3 -m torch.distributed.run \
     --nnodes "${SLURM_NNODES}" \
-    --nproc-per-node gpu \
+    --nproc-per-node "${NPROC_PER_NODE}" \
     --rdzv-id "${SLURM_JOB_ID}" \
     --rdzv-backend c10d \
     --rdzv-endpoint "${head_node}:29500" \
     -m torchtitan.train \
     --module "${MODULE}" \
     --config "${CONFIG}" \
-    "$@"
+    "$@" 2>&1 | tee "${OUTPUT_DIR}/training.log"

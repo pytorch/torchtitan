@@ -198,6 +198,16 @@ MODULE=llama3 CONFIG=llama3_8b sbatch \
 Pass cluster-specific options such as `--partition`, `--account`, and `--qos`
 to `sbatch` when your Slurm cluster requires them.
 
+The launcher accepts these optional environment variables:
+
+- `OUTPUT_DIR` and `RUN_ID` select the artifact location.
+- `NPROC_PER_NODE` can use fewer workers than the visible GPUs.
+
+The launcher writes `training.log` into the selected output directory. For
+extended scale tests, the runner also asks it to record `environment.json` on a
+compute node before training and ensures that `resolved_config.json` is saved
+for the run.
+
 ## Citation
 
 We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.
