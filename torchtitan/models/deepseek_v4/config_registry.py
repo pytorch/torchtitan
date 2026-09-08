@@ -10,6 +10,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
@@ -187,3 +188,50 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
             interval=100,
         ),
     )
+
+
+def deepseek_v4_pro_64xgb300(seq_len: int | None = None) -> Trainer.Config:
+    """`deepseek_v4_pro` made to fit on 64x GB300 (16 nodes x 4 GPUs).
+
+    Derived from the stock ``deepseek_v4_pro`` so the delta stays auditable;
+    the model itself is untouched. Three changes, each forced by a measured
+    constraint rather than by taste:
+
+    1. ``training.dtype = "bfloat16"``. This is the change that makes the model
+       fit at all, and no amount of parallelism substitutes for it. Sharding
+       divides the model state, it does not shrink it: `pro` is 1.573 T
+       parameters, and torchtitan's default ``training.dtype="float32"`` costs
+       16 B/param (fp32 shard + fp32 grad + two fp32 AdamW moments) = 25.17 TB.
+       Spread perfectly over all 64 GPUs that is 393 GB/GPU against 298 GB of
+       HBM -- 132 % of the machine before a single activation. Full bf16 is
+       8 B/param = 12.58 TB = 196.6 GB/GPU, leaving ~101 GB/GPU of headroom.
+       ``mixed_precision_param`` is already bfloat16, so this only drops the
+       extra fp32 master copy, exactly as documented on the field.
+
+    2. ``expert_parallel_degree = 64``. Stock is 1, which leaves all 384
+       experts of a layer to FSDP: one all-gather would materialize
+       384 x 3 x 7168 x 3072 x 2 B = 50.7 GB for a single layer, more with
+       prefetch, which does not survive a 101 GB budget. At EP=64 each rank
+       owns 384/64 = 6 whole experts, so the expert stack is never all-gathered
+       and only token dispatch crosses the wire. EP must divide
+       ``dp_shard * cp * tp`` (= 64 here), and 64 | 384, so the mesh is legal.
+
+    3. ``activation_checkpoint = FullAC``. Stock is ``None``. 61 blocks of
+       dim 7168 with 128 heads x 512 head_dim cannot keep their forward
+       activations in what is left after the weights. FullAC (rather than the
+       SelectiveAC that upstream's ``deepseek_v3_671b`` uses) because the
+       headroom here is far tighter than that recipe assumes.
+
+    ``disable_cuda_graphs`` follows upstream's own ``deepseek_v3_671b`` recipe.
+    Everything else -- optimizer, LR schedule, loss, dataloader, compile
+    settings, batch shape -- is inherited from stock ``deepseek_v4_pro``.
+
+    Note: bf16 AdamW moments are fine for a throughput baseline but are not a
+    convergence-grade choice for a real 1.573 T pretrain.
+    """
+    config = deepseek_v4_pro(seq_len=seq_len)
+    config.training.dtype = "bfloat16"
+    config.training.disable_cuda_graphs = True
+    config.parallelism = ParallelismConfig(expert_parallel_degree=64)
+    config.activation_checkpoint = FullAC.Config()
+    return config

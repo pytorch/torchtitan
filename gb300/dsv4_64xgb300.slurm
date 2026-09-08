@@ -16,7 +16,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=144
 #SBATCH --partition=all
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --output=/mnt/dgxc/runs/dsv4-%j.out
 set -uo pipefail
 
