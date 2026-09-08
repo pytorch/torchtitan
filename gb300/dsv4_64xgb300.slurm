@@ -22,7 +22,7 @@
 set -uo pipefail
 
 WORKTREE=${WORKTREE:-/mnt/dgxc/worktrees/dsv4-pro}
-VENV=${VENV:-/mnt/dgxc/venvs/dsv4}
+VENV=${VENV:-/mnt/dgxc/venvs/dsv4n}
 CONFIG=${CONFIG:-deepseek_v4_pro_64xgb300}
 STEPS=${STEPS:-50}
 TAG=${TAG:-$CONFIG}
