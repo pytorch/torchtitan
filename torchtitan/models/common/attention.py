@@ -875,6 +875,10 @@ class GQAttention(BaseAttention):
     per layer.
     """
 
+    qkv_region = Module.register_remat_region("qkv")
+    inner_attention_region = Module.register_remat_region("inner_attention")
+    wo_region = Module.register_remat_region("wo")
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -939,8 +943,8 @@ class GQAttention(BaseAttention):
     ) -> torch.Tensor:
         xq_THK, xk_THK, xv_THV = remat.region(
             self.qkv_linear,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
+            self.remat_region_name(self.qkv_region),
+            recompute=self.remat_should_recompute(self.qkv_region),
         )(x_TD)
         remat.recompute_needs_tensor(xq_THK, xk_THK, xv_THV)
 
@@ -956,8 +960,8 @@ class GQAttention(BaseAttention):
 
         out_THV = remat.region(
             self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
+            self.remat_region_name(self.inner_attention_region),
+            recompute=self.remat_should_recompute(self.inner_attention_region),
         )(
             xq_THK,
             xk_THK,
@@ -971,8 +975,8 @@ class GQAttention(BaseAttention):
         out_TD = out_THV.view(out_THV.shape[0], -1)
         out_TD = remat.region(
             self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
+            self.remat_region_name(self.wo_region),
+            recompute=self.remat_should_recompute(self.wo_region),
         )(out_TD)
         remat.recompute_needs_tensor(out_TD)
         return out_TD

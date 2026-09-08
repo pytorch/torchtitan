@@ -66,7 +66,7 @@ class _CountingGQAttention(GQAttention):
         self.n_kv_heads = 1
         self.head_dim = 4
         self.enable_gqa = False
-        self.rope = _CountingOp(_identity_rope)
+        self.rope = _CountingOp(_identity_rope)  # pyrefly: ignore [bad-assignment]
         self.qkv_linear = _CountingOp(_qkv_projection)
         self.wo = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
         self.inner_attention = _CountingOp(_inner_attention)
@@ -108,6 +108,13 @@ def _run_forward_backward(
     return output.detach(), input_BD.grad.detach().clone(), parameter_grads
 
 
+def _trace_region_names(forward: Callable[[], Any]) -> list[str]:
+    """Return the remat region names reached by one forward."""
+    with remat.collect_trace() as trace:
+        forward()
+    return [entry.name for entry in trace.entries]
+
+
 class TestRematRegions(unittest.TestCase):
     def test_save_regions_config_is_required(self):
         save_regions_field = next(
@@ -136,9 +143,100 @@ class TestRematRegions(unittest.TestCase):
             model = model_registry("debugmodel").model.build()
         state_keys = list(model.state_dict())
 
-        RegionAC.Config(save_regions=["attention.*"]).build().apply(model)
+        with self.assertLogs(level="INFO") as logs:
+            RegionAC.Config(save_regions=["attention.*"]).build().apply(model)
 
         self.assertEqual(list(model.state_dict()), state_keys)
+        self.assertIn(
+            "RegionAC available save regions for Llama3TransformerBlock layers",
+            "\n".join(logs.output),
+        )
+        self.assertIn(
+            "['attention.qkv', 'attention.inner_attention', 'attention.wo']",
+            "\n".join(logs.output),
+        )
+
+    def test_attention_regions_are_discoverable(self):
+        block = _AttentionBlock()
+        self.assertEqual(
+            block.available_remat_save_regions(),
+            ["attention.qkv", "attention.inner_attention", "attention.wo"],
+        )
+
+    def test_available_regions_are_grouped_by_block_type(self):
+        class _FirstBlock(Module):
+            first_region = Module.register_remat_region("first")
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        class _SecondBlock(Module):
+            second_region = Module.register_remat_region("second")
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        model = _RematModel(_FirstBlock())
+        model.layers["1"] = _SecondBlock()
+
+        with self.assertLogs(level="INFO") as logs:
+            RegionAC.Config(save_regions=[]).build().apply(model)
+
+        output = "\n".join(logs.output)
+        self.assertIn(
+            "RegionAC available save regions for _FirstBlock layers ['0']: "
+            "['first']",
+            output,
+        )
+        self.assertIn(
+            "RegionAC available save regions for _SecondBlock layers ['1']: "
+            "['second']",
+            output,
+        )
+
+    def test_attention_region_catalog_matches_forward(self):
+        block = _AttentionBlock()
+        model = _RematModel(block)
+        RegionAC.Config(save_regions=[]).build().apply(model)
+        self.assertEqual(
+            _trace_region_names(lambda: model(torch.randn(3, 4))),
+            block.available_remat_save_regions(),
+        )
+
+    def test_overridden_forward_does_not_inherit_regions(self):
+        class _OverriddenAttention(_CountingGQAttention):
+            def forward(
+                self,
+                x_TD: torch.Tensor,
+                attention_masks,
+                positions: torch.Tensor | None = None,
+            ) -> torch.Tensor:
+                return x_TD
+
+        overridden_attention = _OverriddenAttention()
+        self.assertEqual(overridden_attention.available_remat_save_regions(), [])
+        with self.assertRaisesRegex(ValueError, "is not registered"):
+            overridden_attention.remat_region_name(overridden_attention.qkv_region)
+
+    def test_invalid_region_declarations_error(self):
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            Module.register_remat_region("")
+
+        class _DuplicateRegions(Module):
+            first_region = Module.register_remat_region("duplicate")
+            second_region = Module.register_remat_region("duplicate")
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        with self.assertRaisesRegex(ValueError, "declares duplicate remat regions"):
+            _DuplicateRegions().available_remat_save_regions()
+
+        unregistered_region = Module.register_remat_region("unregistered")
+        with self.assertRaisesRegex(
+            ValueError, "must be assigned as a class attribute"
+        ):
+            _CountingGQAttention().remat_region_name(unregistered_region)
 
     def test_attention_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
