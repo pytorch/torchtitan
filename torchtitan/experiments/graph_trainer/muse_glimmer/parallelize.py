@@ -11,7 +11,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_module_fqns,
     apply_simple_fsdp,
 )
-from torchtitan.experiments.graph_trainer.compile import apply_compile
+from graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 from .model import GraphTrainerMuseGlimmerModel
