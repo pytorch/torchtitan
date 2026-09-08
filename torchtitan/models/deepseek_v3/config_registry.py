@@ -276,6 +276,62 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
+def deepseek_v3_671b_pp4_ep32() -> Trainer.Config:
+    config = deepseek_v3_671b()
+
+    # Each DP lane processes 64 sequences per optimizer step as 64 pipeline
+    # microbatches containing one 4096-token sequence each. Across 64 DP lanes,
+    # this gives a global batch of 4096 sequences.
+    config.training.num_tokens_per_microbatch_per_dp_rank = 4096
+    config.training.num_tokens_per_train_step = 4096 * 4096
+    config.training.max_context_length = 4096
+
+    config.training.dtype = "float32"
+    config.training.mixed_precision_param = "bfloat16"
+    config.training.mixed_precision_reduce = "float32"
+
+    # DP64 with EP32 gives an expert FSDP degree of 2.
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=-1,
+        fsdp_reshard_after_forward="never",
+        tensor_parallel_degree=1,
+        enable_sequence_parallel=False,
+        context_parallel_degree=1,
+        pipeline_parallel_degree=4,
+        pipeline_parallel_layers_per_stage=4,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        num_pp_microbatches=64,
+        expert_parallel_degree=32,
+    )
+
+    config.compile = CompileConfig(
+        enable=True,
+        components=["model", "loss"],
+    )
+
+    return config
+
+
+def deepseek_v3_671b_pp4_ep32_mxfp8() -> Trainer.Config:
+    config = deepseek_v3_671b_pp4_ep32()
+    config.model_spec = model_registry(
+        "671B",
+        attn_backend="flex",
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=True,
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=True,
+                pad_multiple=128,
+            ),
+        ],
+    )
+
+    return config
+
+
 def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
     config = deepseek_v3_671b(seq_len=seq_len)
     # Quantize the dense Linear layers and the MoE expert grouped GEMMs to

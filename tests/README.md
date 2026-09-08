@@ -123,7 +123,74 @@ hardware-specific workflows.
   marker. The 1-GPU lane selects `not multi_gpu`, while the multi-GPU lane
   selects `multi_gpu` from the same GPU directory.
 
-## Running Tests
+## Extended multi-node tests on the GB300 Slurm cluster
+
+Use the GB300 Slurm cluster for changes that require more GPUs than the regular
+CI lanes provide. Slurm schedules the job but does not install or package its
+Python dependencies.
+
+### Set up the environment
+
+Create the virtual environment on shared storage that is visible from every
+compute node. Install GB300/SM103-compatible PyTorch and TorchAO builds in the
+environment, then install TorchTitan and its dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install -e .
+```
+
+Activate the environment before calling `sbatch`; `--export=ALL` passes that
+environment to the compute nodes.
+
+### Launch a run
+
+For example, the `deepseek_v3_671b_pp4_ep32_mxfp8` configuration uses PP 4,
+VPP 4, DP 64, EP 32, expert FSDP 2, and MXFP8. It requires 256 GPUs, or 64
+four-GPU GB300 nodes.
+
+The `g3` partition, `faircw-pytorch-access` account, `g3_lowest` QoS, and
+`--segment` option are CoreWeave-specific. The other `sbatch` options are
+standard Slurm options, although their values below match the CoreWeave GB300
+node shape and this model topology:
+
+The tested NCCL 2.30.7 build requires `NCCL_RAS_ENABLE=0` at this scale. With
+RAS enabled, its background thread can segfault in `rasOutAppend`, causing the
+remaining ranks to report secondary NCCL connection errors. This setting only
+disables NCCL's reliability, availability, and serviceability monitoring; it
+does not disable NCCL collectives or asynchronous error handling.
+
+```bash
+NCCL_RAS_ENABLE=0 \
+MODULE=deepseek_v3 \
+CONFIG=deepseek_v3_671b_pp4_ep32_mxfp8 \
+sbatch \
+    --export=ALL \
+    --job-name=deepseek671b-ep32-mxfp8-smoke \
+    --partition=g3 \
+    --account=faircw-pytorch-access \
+    --qos=g3_lowest \
+    --segment=16 \
+    --nodes=64 \
+    --ntasks-per-node=1 \
+    --gpus-per-node=4 \
+    --cpus-per-task=128 \
+    --exclusive \
+    multinode_trainer.slurm \
+    --training.steps 1 \
+    --debug.moe-force-load-balance
+```
+
+`--segment=16` is a CoreWeave scheduler extension that places each 16-node
+segment within one NVL72 network domain. Omit it on clusters that do not
+provide this option.
+
+One step is sufficient for a smoke test. Use at least 10 steps for performance
+measurements, and do not use `--debug.moe-force-load-balance` for real training.
+
+## Running Tests Locally
 
 ### Prerequisites
 
