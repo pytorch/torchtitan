@@ -400,7 +400,6 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in self.states:
                 self.states[MODEL].load_state_dict(state_dict)
 
-    @sl.log_trace_span("checkpoint_save")
     @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
@@ -494,7 +493,6 @@ class CheckpointManager(BaseCheckpointManager):
         )
         return True
 
-    @sl.log_trace_span("checkpoint_load")
     @torch.no_grad()
     def _load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.
