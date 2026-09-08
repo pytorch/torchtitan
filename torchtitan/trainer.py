@@ -924,6 +924,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     global_valid_tokens=global_valid_tokens,
                 )
 
+            # HSDP replicate all-reduce is a no-op until the last accum group.
+            # Do not toggle under CUDA graphs when accum > 1: the graph is
+            # captured on the first group and replayed for later groups.
+            if getattr(self.parallel_dims, "dp_replicate_enabled", False) and (
+                self.gradient_accumulation_steps == 1
+                or self.config.training.disable_cuda_graphs
+            ):
+                is_last = fwd_bwd_index == self.gradient_accumulation_steps - 1
+                for part in self.model_parts:
+                    part.set_requires_all_reduce(  # pyrefly: ignore[not-callable]
+                        is_last
+                    )
+
             if self.sdc_replayer is not None and fwd_bwd_index == 0:
                 # Only the step's first gradient-accumulation group is
                 # replay-checked; under PP one group is a complete pipeline
