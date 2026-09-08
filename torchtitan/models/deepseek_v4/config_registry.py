@@ -192,10 +192,18 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
 
 
 _GB300_FLEX_KERNEL_OPTIONS = {
+    # Forward tile.
     "BLOCK_M": 32,
     "BLOCK_N": 32,
     "num_stages": 1,
     "num_warps": 4,
+    # Backward tiles. BLOCK_M/BLOCK_N govern only the forward kernel, so
+    # without these the backward autotunes freely and hard-crashes the GPU
+    # with "CUDA error: unspecified launch failure" at head_dim=512.
+    "BLOCK_M1": 16,
+    "BLOCK_N1": 32,
+    "BLOCK_M2": 32,
+    "BLOCK_N2": 16,
 }
 
 
@@ -250,10 +258,16 @@ def deepseek_v4_pro_64xgb300(seq_len: int | None = None) -> Trainer.Config:
     # "No valid triton configs. OutOfMemoryError: out of resource:
     # triton_flex_attention Required: 294912 Hardware limit: 232448".
     #
-    # Measured on one GB300 at D=512 with a causal block mask: every larger
+    # Measured on one GB300 at D=512 with a block mask: every larger forward
     # tile fails (64x64, 64x32 and 128x32 all raise NoValidChoicesError or a
     # launch failure, with or without num_stages=1), and 32x32 fails unless
-    # num_stages and num_warps are pinned too. This is the only tile that runs.
+    # num_stages and num_warps are pinned too.
+    #
+    # The backward needs its own tiles. Measured at this model's real shape
+    # (H=128, D=512, Q=4096, KV=5121 -- KV is longer than Q because of
+    # index_topk=1024 and the compressed paths), the forward compiles fine
+    # with the tile above while the backward dies with "CUDA error:
+    # unspecified launch failure"; pinning BLOCK_M1/N1/M2/N2 fixes it.
     # torchtitan's FlexAttention docstring names this the intended workflow:
     # autotune once, then set kernel_options explicitly.
     #
