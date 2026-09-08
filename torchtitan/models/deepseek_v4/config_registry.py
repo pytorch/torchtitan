@@ -12,6 +12,7 @@ from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -190,6 +191,14 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
+_GB300_FLEX_KERNEL_OPTIONS = {
+    "BLOCK_M": 32,
+    "BLOCK_N": 32,
+    "num_stages": 1,
+    "num_warps": 4,
+}
+
+
 def deepseek_v4_pro_64xgb300(seq_len: int | None = None) -> Trainer.Config:
     """`deepseek_v4_pro` made to fit on 64x GB300 (16 nodes x 4 GPUs).
 
@@ -234,4 +243,27 @@ def deepseek_v4_pro_64xgb300(seq_len: int | None = None) -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     config.parallelism = ParallelismConfig(expert_parallel_degree=64)
     config.activation_checkpoint = FullAC.Config()
+
+    # Pin the FlexAttention Triton tile. `pro` has head_dim=512, and on GB300
+    # (232448 B of shared memory per block) Inductor finds no valid Triton
+    # config for the default autotune sweep -- the first forward dies with
+    # "No valid triton configs. OutOfMemoryError: out of resource:
+    # triton_flex_attention Required: 294912 Hardware limit: 232448".
+    #
+    # Measured on one GB300 at D=512 with a causal block mask: every larger
+    # tile fails (64x64, 64x32 and 128x32 all raise NoValidChoicesError or a
+    # launch failure, with or without num_stages=1), and 32x32 fails unless
+    # num_stages and num_warps are pinned too. This is the only tile that runs.
+    # torchtitan's FlexAttention docstring names this the intended workflow:
+    # autotune once, then set kernel_options explicitly.
+    #
+    # This is a correctness requirement, not a tuning choice -- without it the
+    # model cannot execute a forward pass on this hardware. It is also small
+    # enough to cost attention throughput, so revisit if a future PyTorch
+    # lowers the shared-memory demand at head_dim=512.
+    for layer in config.model_spec.model.layers:
+        attention = getattr(layer, "attention", None)
+        inner = getattr(attention, "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.kernel_options = dict(_GB300_FLEX_KERNEL_OPTIONS)
     return config
