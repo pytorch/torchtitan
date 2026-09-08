@@ -309,14 +309,17 @@ class RegionAC(ActivationCheckpointing):
         save_regions: list[str]
         """
         Qualified save-region glob patterns, relative to a transformer block.
-        Region names are defined at the corresponding ``torch_remat.region``
-        call sites in model code. Everything outside a retained region is
-        recomputed.
+        Region names are declared by model code and used at the corresponding
+        ``torch_remat.region`` call sites. Everything outside a retained region
+        is recomputed.
 
         NB: Save-region names are relative to a transformer block, so the same
         policy applies to every transformer block. Per-block remat policies are
         not currently supported.
         """
+
+        log_available_regions: bool = False
+        """Log available save regions grouped by block type and layer IDs."""
 
         preserve_rng_state: bool = False
         """
@@ -357,10 +360,31 @@ class RegionAC(ActivationCheckpointing):
             logger.info("RegionAC found no transformer blocks in this model part")
             return
 
-        # TODO: Validate unmatched patterns once validation can account for save
-        # regions across all pipeline stages instead of only this model part.
+        region_blocks = []
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
+            region_blocks.append((layer_id, transformer_block))
+
+        if config.log_available_regions:
+            block_groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+            for layer_id, transformer_block in region_blocks:
+                available_regions = tuple(
+                    transformer_block.available_remat_save_regions()
+                )
+                group = (type(transformer_block).__name__, available_regions)
+                block_groups.setdefault(group, []).append(layer_id)
+
+            for (block_type, available_regions), layer_ids in block_groups.items():
+                logger.info(
+                    "RegionAC available save regions for %s layers %s: %s",
+                    block_type,
+                    layer_ids,
+                    list(available_regions) or "none",
+                )
+
+        # TODO: Validate unmatched patterns once validation can account for save
+        # regions across all pipeline stages instead of only this model part.
+        for layer_id, transformer_block in region_blocks:
             transformer_block.configure_remat_regions(config.save_regions)
             self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
         logger.info(
