@@ -380,7 +380,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(len(mock_save.call_args_list), 3)
         manager.close()
 
-    @mock.patch("torchtitan.components.checkpointer.dcp.logger")
+    @mock.patch("torchtitan.components.checkpointer.base.logger")
     def test_load_returns_false_when_no_checkpoint_folder(self, mock_logger):
         cfg = self.trainer_config.checkpoint
         cfg.folder = "nonexistent"
@@ -1166,10 +1166,10 @@ class TestFindLoadStepRemote(unittest.TestCase):
         manager._storage = _FilesystemCheckpointStorage()
         return manager
 
-    def test_returns_max_valid_step(self):
+    def test_returns_latest_resumable_step(self):
         self._write(f"{self.root}/step-10/.metadata")
         self._write(f"{self.root}/step-20/.metadata")
-        # step-30 has no core metadata -> not a valid checkpoint.
+        # step-30 has no core metadata, so it cannot be resumed.
         self._write(f"{self.root}/step-30/some_shard")
         # Complete directories outside the canonical naming scheme must be ignored.
         self._write(f"{self.root}/step-40.backup/.metadata")
@@ -1179,10 +1179,18 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
         self.assertEqual(self._manager()._find_load_step(folder=self.root), 20)
 
-    def test_step_zero_is_valid(self):
+    def test_step_zero_is_resumable(self):
         self._write(f"{self.root}/step-0/.metadata")
 
         self.assertEqual(self._manager()._find_load_step(folder=self.root), 0)
+
+    def test_skips_hf_only_export_when_selecting_resume_step(self):
+        self._write(f"{self.root}/step-10/.metadata")
+        self._write(f"{self.root}/step-20/model.safetensors.index.json")
+        manager = self._manager()
+
+        self.assertTrue(manager._is_valid_checkpoint(f"{self.root}/step-20"))
+        self.assertEqual(manager._find_load_step(folder=self.root), 10)
 
     def test_missing_folder_returns_negative_one(self):
         self.assertEqual(self._manager()._find_load_step(folder=self.root), -1)
@@ -1327,7 +1335,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
 
 class TestSharedDiscoveryAndRetention(unittest.TestCase):
     """_find_load_step and _purge_stale_checkpoints live on the base; each
-    manager supplies only _is_valid_checkpoint."""
+    manager supplies its resumable and completed-checkpoint predicates."""
 
     def _manager(self, *, keep_latest_k: int, entries: list[str]):
         manager = CheckpointManager.__new__(CheckpointManager)
