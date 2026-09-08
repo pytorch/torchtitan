@@ -59,13 +59,13 @@ controlled:
 
 ```python
 class Attention(Module):
-    qkv_region = Module.register_remat_region("qkv")
+    qkv_remat_handle = Module.register_remat_region("qkv")
 
     def forward(self, x):
         q, k, v = remat.region(
             self.qkv_linear,
-            self.remat_region_name(self.qkv_region),
-            recompute=self.remat_should_recompute(self.qkv_region),
+            self.remat_region_name(self.qkv_remat_handle),
+            recompute=self.remat_should_recompute(self.qkv_remat_handle),
         )(x)
 ```
 
@@ -87,8 +87,8 @@ A complete call site with an explicit recomputation dependency looks like:
 ```python
 q, k, v = remat.region(
     self.qkv_linear,
-    self.remat_region_name(self.qkv_region),
-    recompute=self.remat_should_recompute(self.qkv_region),
+    self.remat_region_name(self.qkv_remat_handle),
+    recompute=self.remat_should_recompute(self.qkv_remat_handle),
 )(x)
 remat.recompute_needs_tensor(q, k, v)
 q, k = self.rope(q, k, positions)

@@ -228,7 +228,9 @@ class TestRematRegions(unittest.TestCase):
         overridden_attention = _OverriddenAttention()
         self.assertEqual(overridden_attention.available_remat_save_regions(), [])
         with self.assertRaisesRegex(ValueError, "is not registered"):
-            overridden_attention.remat_region_name(overridden_attention.qkv_region)
+            overridden_attention.remat_region_name(
+                overridden_attention.qkv_remat_handle
+            )
 
     def test_invalid_region_declarations_error(self):
         with self.assertRaisesRegex(ValueError, "must not be empty"):
