@@ -40,23 +40,58 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
-## Adding regions to model code
-
-Model code defines a region at the operation being controlled:
+When RegionAC is applied, TorchTitan groups transformer blocks with the same
+type and region catalog, then logs their layer IDs and available save-region
+names. Regions can also be inspected programmatically before applying
+RegionAC:
 
 ```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
-)(x)
+model.layers["0"].available_remat_save_regions()
+# ["attention.qkv", "attention.inner_attention", "attention.wo"]
 ```
+
+## Adding regions to model code
+
+Model code registers a region handle as a class attribute on the class that
+implements `forward`, then uses that same handle at the operation being
+controlled:
+
+```python
+class Attention(Module):
+    qkv_remat_region = Module.register_remat_region("qkv")
+
+    def forward(self, x):
+        q, k, v = remat.region(
+            self.qkv_linear,
+            self.remat_region_name(self.qkv_remat_region),
+            recompute=self.remat_should_recompute(self.qkv_remat_region),
+        )(x)
+```
+
+The handle is the single source of truth for the local name. Assigning it as a
+class attribute performs the registration; creating one inside `__init__` or
+`forward` is invalid. RegionAC discovers available names from these handles,
+and `forward` uses the same objects when it calls `remat.region`. A subclass
+that inherits `forward` also inherits its regions. A subclass that replaces
+`forward` must declare the regions used by its replacement implementation.
 
 `RegionAC` configures each module with its name relative to the transformer
 block and the user's save patterns. The helpers above therefore resolve `qkv`
 to a qualified name such as `attention.qkv` and select whether it is saved or
 recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
 change execution.
+
+A complete call site with an explicit recomputation dependency looks like:
+
+```python
+q, k, v = remat.region(
+    self.qkv_linear,
+    self.remat_region_name(self.qkv_remat_region),
+    recompute=self.remat_should_recompute(self.qkv_remat_region),
+)(x)
+remat.recompute_needs_tensor(q, k, v)
+q, k = self.rope(q, k, positions)
+```
 
 ## Declaring recomputation dependencies
 
@@ -66,17 +101,8 @@ when the output is consumed by an explicit
 `remat.region(..., recompute=True)`.
 
 If the consumer is not inside such a region, call
-`remat.recompute_needs_tensor(...)` immediately before the output is consumed:
-
-```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
-)(x)
-remat.recompute_needs_tensor(q, k, v)
-q, k = self.rope(q, k, positions)
-```
+`remat.recompute_needs_tensor(...)` immediately before the output is consumed,
+as shown above.
 
 Without this marker, a tensor required by ordinary recomputed operations may
 not be retained. For the initial TorchTitan integration, model code
