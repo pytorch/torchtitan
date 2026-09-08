@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -51,7 +52,24 @@ class FeedForward(Module):
         self.w3 = config.w3.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        w1_out = remat.region(
+            self.w1,
+            self.remat_region_name("w1"),
+            recompute=self.remat_should_recompute("w1"),
+        )(x)
+        w3_out = remat.region(
+            self.w3,
+            self.remat_region_name("w3"),
+            recompute=self.remat_should_recompute("w3"),
+        )(x)
+        remat.recompute_needs_tensor(w1_out, w3_out)
+        out = remat.region(
+            self.w2,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(F.silu(w1_out) * w3_out)
+        remat.recompute_needs_tensor(out)
+        return out
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -72,4 +90,10 @@ class SigmoidGatedFeedForward(FeedForward):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = super().forward(x)
-        return torch.sigmoid(self.gate(x)) * out
+        gate_out = remat.region(
+            self.gate,
+            self.remat_region_name("gate"),
+            recompute=self.remat_should_recompute("gate"),
+        )(x)
+        remat.recompute_needs_tensor(gate_out)
+        return torch.sigmoid(gate_out) * out

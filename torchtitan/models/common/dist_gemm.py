@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch_remat as remat
 
 from torchtitan.distributed.linear import (
     AllGatherLinear,
@@ -211,24 +212,49 @@ class DistGEMMFeedForward(FeedForward):
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_unfused()
-            return super().forward(x)
-
-        h1, h3 = AllGatherLinearMulti.apply(
-            x,
-            self.w1.weight,
-            self.w3.weight,
-            tp_group,
-            tp_group.group_name,
-        )
+            h1, h3 = remat.region(
+                self._unfused_w13,
+                self.remat_region_name("w13"),
+                recompute=self.remat_should_recompute("w13"),
+            )(x)
+        else:
+            h1, h3 = remat.region(
+                AllGatherLinearMulti.apply,
+                self.remat_region_name("w13"),
+                recompute=self.remat_should_recompute("w13"),
+            )(
+                x,
+                self.w1.weight,
+                self.w3.weight,
+                tp_group,
+                tp_group.group_name,
+            )
+        remat.recompute_needs_tensor(h1, h3)
         # Elementwise on feature-sharded activations: no collective.
         h = F.silu(h1) * h3
-        return LinearReduceScatter.apply(
-            h,
-            self.w2.weight,
-            self.w2.bias,
-            tp_group,
-            tp_group.group_name,
-        )
+        if tp_group is None:
+            out = remat.region(
+                self.w2,
+                self.remat_region_name("w2"),
+                recompute=self.remat_should_recompute("w2"),
+            )(h)
+        else:
+            out = remat.region(
+                LinearReduceScatter.apply,
+                self.remat_region_name("w2"),
+                recompute=self.remat_should_recompute("w2"),
+            )(
+                h,
+                self.w2.weight,
+                self.w2.bias,
+                tp_group,
+                tp_group.group_name,
+            )
+        remat.recompute_needs_tensor(out)
+        return out
+
+    def _unfused_w13(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.w1(x), self.w3(x)
 
 
 __all__ = [
