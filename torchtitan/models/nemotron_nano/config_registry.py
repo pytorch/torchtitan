@@ -5,22 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.data import (
-    ConcatThenSplitPackingConfig,
-    GrainDataLoader,
-)
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC, FullAC
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+
 
 def nemotron_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
@@ -59,6 +57,7 @@ def nemotron_debugmodel() -> Trainer.Config:
             ),
         ),
     )
+
 
 def nemotron_4b() -> Trainer.Config:
     model_spec = model_registry("4B")

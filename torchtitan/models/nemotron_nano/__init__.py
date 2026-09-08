@@ -75,7 +75,8 @@ def _build_nemotron_layers(
     rope: RoPE.Config,
     num_experts: int,
     top_k_experts: int,
-    mamba_state_dim: int,
+    mamba_num_heads: int,
+    mamba_head_dim: int,
     mamba_conv_dim: int,
     n_kv_heads: int | None = None,
     fuse_qkv: bool = True,
@@ -89,11 +90,12 @@ def _build_nemotron_layers(
         layers.append(
             NemotronTransformerBlock.Config(
                 is_mamba_block=is_mamba,
-                mamba_state_dim=mamba_state_dim,
+                mamba_num_heads=mamba_num_heads,
+                mamba_head_dim=mamba_head_dim,
                 mamba_conv_dim=mamba_conv_dim,
                 mamba_input_projection=Linear.Config(
                     in_features=dim,
-                    out_features=mamba_conv_dim,
+                    out_features=mamba_conv_dim * 2,
                     param_init=_LINEAR_INIT,
                 )
                 if is_mamba
@@ -191,7 +193,8 @@ def _debugmodel(
             ),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
-            mamba_state_dim=16,
+            mamba_num_heads=4,
+            mamba_head_dim=64,
             mamba_conv_dim=256,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
@@ -212,14 +215,16 @@ def _4b(
     vocab_size = 262144
     num_experts = 32
     top_k_experts = 4
-    mamba_state_dim = 16
+    mamba_num_heads = 32
+    mamba_head_dim = 64
     mamba_conv_dim = 2048
     return Nemotron3NanoModel.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
         top_k_experts=top_k_experts,
-        mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
         mamba_conv_dim=mamba_conv_dim,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
@@ -245,7 +250,8 @@ def _4b(
             ),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
-            mamba_state_dim=mamba_state_dim,
+            mamba_num_heads=mamba_num_heads,
+            mamba_head_dim=mamba_head_dim,
             mamba_conv_dim=mamba_conv_dim,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
@@ -266,14 +272,16 @@ def _31b(
     vocab_size = 262144
     num_experts = 128
     top_k_experts = 6
-    mamba_state_dim = 16
+    mamba_num_heads = 64
+    mamba_head_dim = 64
     mamba_conv_dim = 4096
     return Nemotron3NanoModel.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
         top_k_experts=top_k_experts,
-        mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
         mamba_conv_dim=mamba_conv_dim,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
@@ -299,7 +307,8 @@ def _31b(
             ),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
-            mamba_state_dim=mamba_state_dim,
+            mamba_num_heads=mamba_num_heads,
+            mamba_head_dim=mamba_head_dim,
             mamba_conv_dim=mamba_conv_dim,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
@@ -320,14 +329,16 @@ def _120b(
     vocab_size = 262144
     num_experts = 128
     top_k_experts = 8
-    mamba_state_dim = 16
+    mamba_num_heads = 96
+    mamba_head_dim = 64
     mamba_conv_dim = 6144
     return Nemotron3NanoModel.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
         top_k_experts=top_k_experts,
-        mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
         mamba_conv_dim=mamba_conv_dim,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
@@ -353,7 +364,8 @@ def _120b(
             ),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
-            mamba_state_dim=mamba_state_dim,
+            mamba_num_heads=mamba_num_heads,
+            mamba_head_dim=mamba_head_dim,
             mamba_conv_dim=mamba_conv_dim,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
@@ -374,14 +386,16 @@ def _550b(
     vocab_size = 262144
     num_experts = 256
     top_k_experts = 8
-    mamba_state_dim = 16
+    mamba_num_heads = 128
+    mamba_head_dim = 64
     mamba_conv_dim = 8192
     return Nemotron3NanoModel.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
         top_k_experts=top_k_experts,
-        mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
         mamba_conv_dim=mamba_conv_dim,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
@@ -407,7 +421,8 @@ def _550b(
             ),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
-            mamba_state_dim=mamba_state_dim,
+            mamba_num_heads=mamba_num_heads,
+            mamba_head_dim=mamba_head_dim,
             mamba_conv_dim=mamba_conv_dim,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,

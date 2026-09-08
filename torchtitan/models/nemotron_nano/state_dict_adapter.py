@@ -19,10 +19,10 @@ from .model import Nemotron3NanoModel
 
 class NemotronStateDictAdapter(StateDictAdapter):
     """Adapter for converting Nemotron-3 Nano checkpoints between HF and TorchTitan formats.
-    
+
     Handles both Mamba layers (simplified) and Transformer layers with MoE routing.
     """
-    
+
     def __init__(
         self,
         model_config: Nemotron3NanoModel.Config,

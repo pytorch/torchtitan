@@ -18,11 +18,9 @@ from torchtitan.experiments.rl.examples.dapo_math import (
     DapoMathDataset,
     DapoMathEnv,
     DapoMathSample,
+    data as math_data,
     RewardMathVerify,
     score_math_response,
-)
-from torchtitan.experiments.rl.examples.dapo_math import (
-    data as math_data,
 )
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.experiments.rl.types import RolloutTurnID
