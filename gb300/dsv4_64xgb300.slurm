@@ -8,6 +8,7 @@
 # needs (no NVSwitch, 4 IB HCAs per node) and a worktree/PYTHONPATH guard.
 #
 # Usage:
+#   sbatch gb300/dsv4_64xgb300.slurm                      # deepseek_v4_pro_64xgb300
 #   CONFIG=deepseek_v4_flash sbatch gb300/dsv4_64xgb300.slurm
 #
 #SBATCH --job-name=dsv4_64
@@ -22,8 +23,8 @@ set -uo pipefail
 
 WORKTREE=${WORKTREE:-/mnt/dgxc/worktrees/dsv4-pro}
 VENV=${VENV:-/mnt/dgxc/venvs/dsv4}
-CONFIG=${CONFIG:?set CONFIG=<name from deepseek_v4/config_registry.py>}
-STEPS=${STEPS:-10}
+CONFIG=${CONFIG:-deepseek_v4_pro_64xgb300}
+STEPS=${STEPS:-50}
 TAG=${TAG:-$CONFIG}
 
 cd "$WORKTREE"
