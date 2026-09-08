@@ -40,6 +40,27 @@ from torchtitan.distributed.utils import (
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
+class _RematRegion:
+    """A discoverable region declared on the class that implements ``forward``."""
+
+    __slots__ = ("local_name", "_forward", "_forward_owner")
+
+    def __init__(self, local_name: str) -> None:
+        self.local_name = local_name
+        self._forward: Callable[..., Any] | None = None
+        self._forward_owner: type | None = None
+
+    def __set_name__(self, owner: type, attribute_name: str) -> None:
+        self._forward_owner = owner
+        self._forward = owner.__dict__.get("forward")
+        registered_regions = owner.__dict__.get("_registered_remat_regions", ())
+        setattr(
+            owner,
+            "_registered_remat_regions",
+            (*registered_regions, self),
+        )
+
+
 class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
@@ -60,15 +81,70 @@ class Module(nn.Module, Configurable):
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
 
-    def remat_region_name(self, local_name: str) -> str:
-        """Return a region's configured qualified name or its local name."""
-        if self._remat_module_fqn:
-            return f"{self._remat_module_fqn}.{local_name}"
-        return local_name
+    @staticmethod
+    def register_remat_region(local_name: str) -> _RematRegion:
+        """Return a region handle to assign alongside a module's ``forward``."""
+        if not local_name:
+            raise ValueError("A remat region name must not be empty")
+        return _RematRegion(local_name)
 
-    def remat_should_recompute(self, local_name: str) -> bool:
+    @classmethod
+    def _local_remat_regions(cls) -> tuple[_RematRegion, ...]:
+        """Return remat regions declared by the active ``forward`` class."""
+        # An overridden forward does not inherit regions that only its base
+        # implementation calls. Its class must declare its own region handles.
+        forward_owner = next(base for base in cls.__mro__ if "forward" in base.__dict__)
+        regions = forward_owner.__dict__.get("_registered_remat_regions", ())
+        region_names = [region.local_name for region in regions]
+        if len(region_names) != len(set(region_names)):
+            raise ValueError(
+                f"{forward_owner.__name__}.forward declares duplicate remat regions: "
+                f"{region_names}"
+            )
+        return regions
+
+    def _validate_remat_region(self, region: _RematRegion) -> None:
+        """Validate that ``region`` belongs to this instance's active forward."""
+        if region._forward_owner is None:
+            raise ValueError(
+                f"Remat region {region.local_name!r} must be assigned as a class "
+                "attribute on the class that implements forward"
+            )
+        if region._forward is None:
+            raise ValueError(
+                f"Remat region {region.local_name!r} is declared on "
+                f"{region._forward_owner.__name__}, which does not implement forward"
+            )
+        if getattr(type(self), "forward") is not region._forward:
+            raise ValueError(
+                f"Remat region {region.local_name!r} is not registered on "
+                f"{type(self).__name__}.forward"
+            )
+
+    def available_remat_save_regions(self) -> list[str]:
+        """Return qualified save-region names from this module tree."""
+        region_names = []
+        for module_fqn, module in self.named_modules():
+            if not isinstance(module, Module):
+                continue
+            for region in module._local_remat_regions():
+                region_names.append(
+                    f"{module_fqn}.{region.local_name}"
+                    if module_fqn
+                    else region.local_name
+                )
+        return region_names
+
+    def remat_region_name(self, region: _RematRegion) -> str:
+        """Return a region's configured qualified name or its local name."""
+        self._validate_remat_region(region)
+        if self._remat_module_fqn:
+            return f"{self._remat_module_fqn}.{region.local_name}"
+        return region.local_name
+
+    def remat_should_recompute(self, region: _RematRegion) -> bool:
         """Return whether a region should be recomputed during backward."""
-        qualified_name = self.remat_region_name(local_name)
+        qualified_name = self.remat_region_name(region)
         return not any(
             fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
         )
@@ -79,9 +155,9 @@ class Module(nn.Module, Configurable):
     ) -> None:
         """Configure remat region names and save patterns in this module tree.
 
-        Region names are qualified relative to this module. Model code supplies
-        each local region name when it calls ``remat_region_name`` and
-        ``remat_should_recompute``.
+        Region names are qualified relative to this module. Model code declares
+        each region on the class that implements its ``forward`` and passes the
+        same handle to ``remat_region_name`` and ``remat_should_recompute``.
         """
         configured_patterns = tuple(save_patterns)
         for module_fqn, module in self.named_modules():
