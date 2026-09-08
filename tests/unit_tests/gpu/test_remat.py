@@ -206,6 +206,19 @@ class TestRematRegions(unittest.TestCase):
 
         self.assertNotIn("available save regions", "\n".join(logs.output))
 
+    def test_unmatched_save_region_patterns_error(self):
+        for save_regions in (
+            ["attention.qvk"],
+            ["attention.qkv", "attention.qvk"],
+        ):
+            with self.subTest(save_regions=save_regions), self.assertRaisesRegex(
+                ValueError,
+                "attention.qvk.*Available regions.*attention.qkv",
+            ):
+                RegionAC.Config(save_regions=save_regions).build().apply(
+                    _RematModel(_AttentionBlock())
+                )
+
     def test_attention_region_catalog_matches_forward(self):
         block = _AttentionBlock()
         model = _RematModel(block)
