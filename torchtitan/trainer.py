@@ -933,7 +933,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             ):
                 is_last = fwd_bwd_index == self.gradient_accumulation_steps - 1
                 for part in self.model_parts:
-                    part.set_requires_all_reduce(is_last)
+                    part.set_requires_all_reduce(  # pyrefly: ignore[not-callable]
+                        is_last
+                    )
 
             if self.sdc_replayer is not None and fwd_bwd_index == 0:
                 # Only the step's first gradient-accumulation group is
