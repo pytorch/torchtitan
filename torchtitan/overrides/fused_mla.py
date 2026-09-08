@@ -46,13 +46,22 @@ The implementation differs from Megatron Core in several important ways:
   wraps local results back into DTensors.
 * Flattened offsets use 64-bit arithmetic because the traced 671B local tensors
   exceed 2**31 elements.
+* Each head's rope tail is addressed as one contiguous tile and de-interleaved
+  in registers. Addressing the adjacent complex pairs as two stride-2 accesses
+  over the same bytes prevents vectorization: on Triton 3.8 that emits 32
+  scalar 2-byte accesses per program where the tile form emits 4 16-byte
+  vector accesses. The Q kernel is 1.77x faster for it on GB300 at the 671B
+  shape; the K and KV-backward kernels are already bandwidth-bound on their
+  contiguous nope/value copies and do not measurably change.
 * Every Triton launch is exposed as a stable ``torch.library`` custom operator,
   so GraphTrainer's fake-tensor ``make_fx`` trace keeps the fused boundaries.
 
 The override keeps the stock Attention parameters and state-dict layout.  It
 only replaces the Q/KV layout boundary around ComplexRoPE:
 
-* Q RoPE is applied in place to the positional tail of the Q projection.
+* Q RoPE rotates the positional tail of the Q projection into a new tensor.
+  The backward rotates its gradient in place, which is safe because
+  once_differentiable runs it outside the autograd graph.
 * K RoPE, head expansion, and final K materialization are one Triton kernel.
 * V remains a view of the packed KV projection (no extra forward copy).
 * KV backward packs dK-nope and dV while reducing/inverse-rotating dK-pos.
@@ -81,16 +90,87 @@ __all__ = [
     "fused_mla_kv",
 ]
 
+# Autotuned rather than fixed: the best pair tracks head count. At 128 heads
+# any tile from 16 up is within a few percent; at 16 heads one warp beats four
+# by ~1.2x on the KV backward. Wider grids were no faster at either count and
+# tuned 2.4x slower -- an 8-wide tile alone unrolls the KV backward's
+# tl.static_range head loop 16 times.
+_AUTOTUNE_CONFIGS = [
+    triton.Config({"BLOCK_H": block_h}, num_warps=num_warps)
+    for block_h in (16, 32, 64, 128)
+    for num_warps in (1, 4)
+]
 
+# Tuning key: the geometry that changes the best tile. Token count does not --
+# the best config was stable from 4k to 32k tokens -- so runs with a varying
+# microbatch reuse one tuning result instead of re-benchmarking.
+_AUTOTUNE_KEY = ["N_HEADS", "Q_NOPE_DIM", "ROPE_DIM"]
+
+# COPY_NOPE is deliberately NOT in the key, so the in-place and functional
+# variants share one tuning result. That keeps them bitwise identical to each
+# other, which a fixed key could not guarantee: different tiles contract FMAs
+# differently. The functional variant is bandwidth bound and nearly flat across
+# tiles (8% spread), so the shared choice costs the in-place variant a few
+# microseconds at most.
+
+
+def _deterministic_default(block_h: int, num_warps: int):
+    """Build an ``early_config_prune`` that pins one config under determinism.
+
+    Autotuning picks by benchmark, and benchmarks are noisy, so a tuned run is
+    not reproducible. That matters more than usual here: these kernels compute
+    ``q_even * cos - q_odd * sin``, and which of the two products is folded
+    into the FMA rather than rounded on its own depends on the tile, so two
+    tiles disagree in the last ulp wherever the products cancel. Returning a
+    single config makes Triton skip benchmarking entirely.
+
+    ``torchtitan/distributed/utils.py`` disables FlexAttention's autotuning
+    under determinism for the same reason.
+
+    Args:
+        block_h: Head tile to pin.
+        num_warps: Warp count to pin.
+
+    Returns:
+        A prune function for ``prune_configs_by``.
+    """
+
+    def prune(configs, named_args, **kwargs):
+        if not torch.are_deterministic_algorithms_enabled():
+            return configs
+        return [triton.Config({"BLOCK_H": block_h}, num_warps=num_warps)]
+
+    return prune
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS,
+    key=_AUTOTUNE_KEY,
+    # Tuned for the production 128-head shape. One config serves both the
+    # in-place and functional variants, so this minimizes their sum: the
+    # functional forward is nearly flat across tiles (59.6-65.3us) while the
+    # in-place backward is not (14.2-20.2us), so the backward decides.
+    prune_configs_by={"early_config_prune": _deterministic_default(128, 4)},
+    # The in-place caller passes the same tensor as q and q_out, and the
+    # autotuner runs each candidate against the same buffer. Without this,
+    # every trial after the first would rotate already-rotated data and the
+    # chosen config would be benchmarked (and the caller's tensor left) wrong.
+    restore_value=["q"],
+)
 @triton.jit
 def _fused_q_rope_kernel(
     q,
+    q_out,
     rope_cache,
     positions,
     Q_STRIDE_B: tl.constexpr,
     Q_STRIDE_L: tl.constexpr,
     Q_STRIDE_H: tl.constexpr,
     Q_STRIDE_D: tl.constexpr,
+    QO_STRIDE_B: tl.constexpr,
+    QO_STRIDE_L: tl.constexpr,
+    QO_STRIDE_H: tl.constexpr,
+    QO_STRIDE_D: tl.constexpr,
     CACHE_STRIDE_M: tl.constexpr,
     CACHE_STRIDE_P: tl.constexpr,
     CACHE_STRIDE_R: tl.constexpr,
@@ -98,44 +178,62 @@ def _fused_q_rope_kernel(
     POS_STRIDE_L: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     N_HEADS: tl.constexpr,
-    NUM_HEAD_BLOCKS: tl.constexpr,
     Q_NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_PAIRS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
     INVERSE: tl.constexpr,
+    COPY_NOPE: tl.constexpr,
 ) -> None:
+    # Derived here rather than passed in: BLOCK_H is chosen by the autotuner,
+    # so the host cannot know the block count when it builds the launch.
+    num_head_blocks: tl.constexpr = (N_HEADS + BLOCK_H - 1) // BLOCK_H
     # Production DeepSeek shapes exceed 2**31 elements, so every flattened
     # tensor index must be promoted before multiplying by a stride.
     program = tl.program_id(0).to(tl.int64)
-    head_block = program % NUM_HEAD_BLOCKS
-    token = program // NUM_HEAD_BLOCKS
+    head_block = program % num_head_blocks
+    token = program // num_head_blocks
     seq = token % SEQ_LEN
     batch = token // SEQ_LEN
 
     head = head_block * BLOCK_H + tl.arange(0, BLOCK_H)[:, None]
     pair = tl.arange(0, BLOCK_PAIRS)[None, :]
+    # Each head's rope tail is ROPE_DIM contiguous elements. Address it as one
+    # tile and de-interleave the adjacent pairs in registers: two stride-2
+    # accesses over the same bytes defeat vectorization, so each transaction
+    # would carry half the useful bytes.
+    lane = tl.arange(0, 2 * BLOCK_PAIRS)[None, :]
     head_mask = head < N_HEADS
     pair_mask = pair < ROPE_DIM // 2
-    mask = head_mask & pair_mask
+    lane_mask = head_mask & (lane < ROPE_DIM)
     position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
 
-    q_base = (
-        batch * Q_STRIDE_B
-        + seq * Q_STRIDE_L
-        + head * Q_STRIDE_H
-        + Q_NOPE_DIM * Q_STRIDE_D
+    q_head = batch * Q_STRIDE_B + seq * Q_STRIDE_L + head * Q_STRIDE_H
+    qo_head = batch * QO_STRIDE_B + seq * QO_STRIDE_L + head * QO_STRIDE_H
+    q_base = q_head + Q_NOPE_DIM * Q_STRIDE_D
+    qo_base = qo_head + Q_NOPE_DIM * QO_STRIDE_D
+
+    if COPY_NOPE:
+        # Only the functional variant needs this: the kernel writes just the
+        # positional tail, so a distinct output has to receive the untouched
+        # nope half too. Doing it here rather than as a separate slice-assign
+        # keeps the copy contiguous per head and inside the pass that already
+        # has this head addressed.
+        dim = tl.arange(0, BLOCK_D)[None, :]
+        nope_mask = head_mask & (dim < Q_NOPE_DIM)
+        tl.store(
+            q_out + qo_head + dim * QO_STRIDE_D,
+            tl.load(q + q_head + dim * Q_STRIDE_D, mask=nope_mask, other=0.0),
+            mask=nope_mask,
+        )
+    q_pairs = tl.reshape(
+        tl.load(q + q_base + lane * Q_STRIDE_D, mask=lane_mask, other=0.0),
+        (BLOCK_H, BLOCK_PAIRS, 2),
     )
-    q_even = tl.load(
-        q + q_base + (2 * pair) * Q_STRIDE_D,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    q_odd = tl.load(
-        q + q_base + (2 * pair + 1) * Q_STRIDE_D,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
+    q_even, q_odd = tl.split(q_pairs)
+    q_even = q_even.to(tl.float32)
+    q_odd = q_odd.to(tl.float32)
 
     cache_base = position * CACHE_STRIDE_M + pair * CACHE_STRIDE_P
     cos = tl.load(
@@ -157,17 +255,19 @@ def _fused_q_rope_kernel(
         out_odd = q_even * sin + q_odd * cos
 
     tl.store(
-        q + q_base + (2 * pair) * Q_STRIDE_D,
-        out_even,
-        mask=mask,
-    )
-    tl.store(
-        q + q_base + (2 * pair + 1) * Q_STRIDE_D,
-        out_odd,
-        mask=mask,
+        q_out + qo_base + lane * QO_STRIDE_D,
+        tl.reshape(tl.join(out_even, out_odd), (BLOCK_H, 2 * BLOCK_PAIRS)),
+        mask=lane_mask,
     )
 
 
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS,
+    key=_AUTOTUNE_KEY,
+    # Flat across tiles at 128 heads (51.3-51.7us for everything except
+    # 128/1); this ties the fastest and is also best at low head counts.
+    prune_configs_by={"early_config_prune": _deterministic_default(32, 4)},
+)
 @triton.jit
 def _fused_k_rope_kernel(
     kv,
@@ -193,16 +293,16 @@ def _fused_k_rope_kernel(
     K_STRIDE_D: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     N_HEADS: tl.constexpr,
-    NUM_HEAD_BLOCKS: tl.constexpr,
     Q_NOPE_DIM: tl.constexpr,
     ROPE_DIM: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_PAIRS: tl.constexpr,
 ) -> None:
+    num_head_blocks: tl.constexpr = (N_HEADS + BLOCK_H - 1) // BLOCK_H
     program = tl.program_id(0).to(tl.int64)
-    head_block = program % NUM_HEAD_BLOCKS
-    token = program // NUM_HEAD_BLOCKS
+    head_block = program % num_head_blocks
+    token = program // num_head_blocks
     seq = token % SEQ_LEN
     batch = token // SEQ_LEN
 
@@ -224,17 +324,18 @@ def _fused_k_rope_kernel(
     # FP32 complex multiply in a separate program for every head.
     pair = tl.arange(0, BLOCK_PAIRS)
     pair_mask = pair < ROPE_DIM // 2
+    # Load and store the rope tail as one contiguous tile; see the comment in
+    # _fused_q_rope_kernel.
+    lane = tl.arange(0, 2 * BLOCK_PAIRS)
+    lane_mask = lane < ROPE_DIM
     kpe_base = batch * KPE_STRIDE_B + seq * KPE_STRIDE_L
-    kpe_even = tl.load(
-        k_pe + kpe_base + (2 * pair) * KPE_STRIDE_D,
-        mask=pair_mask,
-        other=0.0,
-    ).to(tl.float32)
-    kpe_odd = tl.load(
-        k_pe + kpe_base + (2 * pair + 1) * KPE_STRIDE_D,
-        mask=pair_mask,
-        other=0.0,
-    ).to(tl.float32)
+    kpe_pairs = tl.reshape(
+        tl.load(k_pe + kpe_base + lane * KPE_STRIDE_D, mask=lane_mask, other=0.0),
+        (BLOCK_PAIRS, 2),
+    )
+    kpe_even, kpe_odd = tl.split(kpe_pairs)
+    kpe_even = kpe_even.to(tl.float32)
+    kpe_odd = kpe_odd.to(tl.float32)
 
     position = tl.load(positions + batch * POS_STRIDE_B + seq * POS_STRIDE_L)
     cache_base = position * CACHE_STRIDE_M + pair * CACHE_STRIDE_P
@@ -252,19 +353,23 @@ def _fused_k_rope_kernel(
     out_odd = kpe_even * sin + kpe_odd * cos
 
     rope_base = k_base + Q_NOPE_DIM * K_STRIDE_D
-    rope_mask = head_mask & pair_mask[None, :]
+    rope_mask = head_mask & lane_mask[None, :]
     tl.store(
-        k + rope_base + (2 * pair[None, :]) * K_STRIDE_D,
-        out_even[None, :],
-        mask=rope_mask,
-    )
-    tl.store(
-        k + rope_base + (2 * pair[None, :] + 1) * K_STRIDE_D,
-        out_odd[None, :],
+        k + rope_base + lane[None, :] * K_STRIDE_D,
+        tl.reshape(tl.join(out_even, out_odd), (2 * BLOCK_PAIRS,))[None, :],
         mask=rope_mask,
     )
 
 
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS,
+    key=_AUTOTUNE_KEY,
+    # Fastest measured at the production 128-head shape (89.4us, against
+    # 92.5 for the next-best tile). This is the one kernel where that costs
+    # low-head-count shapes: at 16 heads a single warp would be ~18% faster,
+    # since four leave the tile underoccupied.
+    prune_configs_by={"early_config_prune": _deterministic_default(128, 4)},
+)
 @triton.jit
 def _fused_kv_backward_kernel(
     grad_k,
@@ -309,7 +414,9 @@ def _fused_kv_backward_kernel(
     batch = token // SEQ_LEN
 
     dim = tl.arange(0, BLOCK_D)[None, :]
-    pair = tl.arange(0, BLOCK_PAIRS)[None, :]
+    # Load and store the rope tail as one contiguous tile; see the comment in
+    # _fused_q_rope_kernel.
+    lane = tl.arange(0, 2 * BLOCK_PAIRS)[None, :]
     grad_pos_even = tl.zeros((BLOCK_PAIRS,), dtype=tl.float32)
     grad_pos_odd = tl.zeros((BLOCK_PAIRS,), dtype=tl.float32)
 
@@ -345,19 +452,18 @@ def _fused_kv_backward_kernel(
             mask=value_mask,
         )
 
-        pair_mask = head_mask & (pair < ROPE_DIM // 2)
-        grad_even = tl.load(
-            grad_k + gk_base + (Q_NOPE_DIM + 2 * pair) * GK_STRIDE_D,
-            mask=pair_mask,
-            other=0.0,
-        ).to(tl.float32)
-        grad_odd = tl.load(
-            grad_k + gk_base + (Q_NOPE_DIM + 2 * pair + 1) * GK_STRIDE_D,
-            mask=pair_mask,
-            other=0.0,
-        ).to(tl.float32)
-        grad_pos_even += tl.sum(grad_even, axis=0)
-        grad_pos_odd += tl.sum(grad_odd, axis=0)
+        lane_mask = head_mask & (lane < ROPE_DIM)
+        grad_pairs = tl.reshape(
+            tl.load(
+                grad_k + gk_base + (Q_NOPE_DIM + lane) * GK_STRIDE_D,
+                mask=lane_mask,
+                other=0.0,
+            ),
+            (BLOCK_H, BLOCK_PAIRS, 2),
+        )
+        grad_even, grad_odd = tl.split(grad_pairs)
+        grad_pos_even += tl.sum(grad_even.to(tl.float32), axis=0)
+        grad_pos_odd += tl.sum(grad_odd.to(tl.float32), axis=0)
 
     # Stock expand-backward materializes the head reduction in the input dtype
     # before ComplexRoPE backward upcasts it. Preserve that rounding boundary.
@@ -386,15 +492,69 @@ def _fused_kv_backward_kernel(
     out_odd = grad_pos_odd * cos - grad_pos_even * sin
 
     gkpe_base = batch * GKPE_STRIDE_B + seq * GKPE_STRIDE_L
+    lane_1d = tl.arange(0, 2 * BLOCK_PAIRS)
     tl.store(
-        grad_k_pe + gkpe_base + (2 * pair_1d) * GKPE_STRIDE_D,
-        out_even,
-        mask=pair_mask_1d,
+        grad_k_pe + gkpe_base + lane_1d * GKPE_STRIDE_D,
+        tl.reshape(tl.join(out_even, out_odd), (2 * BLOCK_PAIRS,)),
+        mask=lane_1d < ROPE_DIM,
     )
-    tl.store(
-        grad_k_pe + gkpe_base + (2 * pair_1d + 1) * GKPE_STRIDE_D,
-        out_odd,
-        mask=pair_mask_1d,
+
+
+def _launch_q_rope(
+    q: torch.Tensor,
+    q_out: torch.Tensor,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
+    q_nope_dim: int,
+    inverse: bool,
+    copy_nope: bool,
+) -> None:
+    """Rotate Q's positional tail from ``q`` into ``q_out``.
+
+    Passing the same tensor as both rotates in place: the kernel then loads
+    and stores identical addresses, so the in-place and functional variants
+    share one kernel body and produce bit-identical results.
+
+    Args:
+        q: Query tensor shaped ``(B, L, H, D)``.
+        q_out: Destination with the same shape; may alias ``q``.
+        rope_cache_real: Real view of the complex rotary cache.
+        positions: Token positions shaped ``(B, L)``.
+        q_nope_dim: Non-positional dimensions per head, not rotated.
+        inverse: Rotate by the conjugate, for the backward pass.
+        copy_nope: Also copy the non-positional half into ``q_out``. Required
+            when ``q_out`` does not alias ``q``.
+    """
+    batch, seq_len, n_heads, q_head_dim = q.shape
+    rope_dim = q_head_dim - q_nope_dim
+    _fused_q_rope_kernel[
+        lambda meta: (batch * seq_len * triton.cdiv(n_heads, meta["BLOCK_H"]),)
+    ](
+        q,
+        q_out,
+        rope_cache_real,
+        positions,
+        Q_STRIDE_B=q.stride(0),
+        Q_STRIDE_L=q.stride(1),
+        Q_STRIDE_H=q.stride(2),
+        Q_STRIDE_D=q.stride(3),
+        QO_STRIDE_B=q_out.stride(0),
+        QO_STRIDE_L=q_out.stride(1),
+        QO_STRIDE_H=q_out.stride(2),
+        QO_STRIDE_D=q_out.stride(3),
+        CACHE_STRIDE_M=rope_cache_real.stride(0),
+        CACHE_STRIDE_P=rope_cache_real.stride(1),
+        CACHE_STRIDE_R=rope_cache_real.stride(2),
+        POS_STRIDE_B=positions.stride(0),
+        POS_STRIDE_L=positions.stride(1),
+        SEQ_LEN=seq_len,
+        N_HEADS=n_heads,
+        Q_NOPE_DIM=q_nope_dim,
+        ROPE_DIM=rope_dim,
+        BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
+        BLOCK_D=triton.next_power_of_2(q_nope_dim),
+        INVERSE=inverse,
+        COPY_NOPE=copy_nope,
     )
 
 
@@ -411,37 +571,55 @@ def _fused_mla_q_rope_op(
     q_nope_dim: int,
     inverse: bool,
 ) -> torch.Tensor:
-    batch, seq_len, n_heads, q_head_dim = q.shape
-    rope_dim = q_head_dim - q_nope_dim
-    # Tuned on GB300 for DeepSeek-V3 671B: B=16, L=4096, H=128. A wide head
-    # tile amortizes position/cache loads without making four warps register-bound.
-    block_h = min(64, triton.next_power_of_2(n_heads))
-    num_head_blocks = triton.cdiv(n_heads, block_h)
-    block_pairs = triton.next_power_of_2(rope_dim // 2)
-    _fused_q_rope_kernel[(batch * seq_len * num_head_blocks,)](
-        q,
-        rope_cache_real,
-        positions,
-        Q_STRIDE_B=q.stride(0),
-        Q_STRIDE_L=q.stride(1),
-        Q_STRIDE_H=q.stride(2),
-        Q_STRIDE_D=q.stride(3),
-        CACHE_STRIDE_M=rope_cache_real.stride(0),
-        CACHE_STRIDE_P=rope_cache_real.stride(1),
-        CACHE_STRIDE_R=rope_cache_real.stride(2),
-        POS_STRIDE_B=positions.stride(0),
-        POS_STRIDE_L=positions.stride(1),
-        SEQ_LEN=seq_len,
-        N_HEADS=n_heads,
-        NUM_HEAD_BLOCKS=num_head_blocks,
-        Q_NOPE_DIM=q_nope_dim,
-        ROPE_DIM=rope_dim,
-        BLOCK_H=block_h,
-        BLOCK_PAIRS=block_pairs,
-        INVERSE=inverse,
-        num_warps=4,
-    )
+    _launch_q_rope(q, q, rope_cache_real, positions, q_nope_dim, inverse, False)
     return q
+
+
+@torch.library.custom_op(
+    "torchtitan::fused_mla_q_rope",
+    mutates_args=(),
+    device_types="cuda",
+)
+def _fused_mla_q_rope_out_op(
+    q: torch.Tensor,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
+    q_nope_dim: int,
+    inverse: bool,
+) -> torch.Tensor:
+    """Rotate Q's positional tail into a new tensor, leaving ``q`` intact.
+
+    Callers that must not mutate their input need this: rotating the query
+    projection in place forces ``ctx.mark_dirty``, which both trips selective
+    activation checkpointing when it has cached that projection and makes
+    autograd record a ``CopySlices`` that copies the whole projection in
+    backward.
+
+    Args:
+        q: Query tensor shaped ``(B, L, H, D)``.
+        rope_cache_real: Real view of the complex rotary cache.
+        positions: Token positions shaped ``(B, L)``.
+        q_nope_dim: Non-positional dimensions per head.
+        inverse: Rotate by the conjugate, for the backward pass.
+
+    Returns:
+        A new tensor with the positional tail rotated and the non-positional
+        head dimensions copied through unchanged.
+    """
+    out = torch.empty_like(q)
+    _launch_q_rope(q, out, rope_cache_real, positions, q_nope_dim, inverse, True)
+    return out
+
+
+@_fused_mla_q_rope_out_op.register_fake
+def _fused_mla_q_rope_out_op_fake(
+    q: torch.Tensor,
+    rope_cache_real: torch.Tensor,
+    positions: torch.Tensor,
+    q_nope_dim: int,
+    inverse: bool,
+) -> torch.Tensor:
+    return torch.empty_like(q)
 
 
 @torch.library.custom_op(
@@ -463,11 +641,9 @@ def _fused_mla_k_rope_op(
         dtype=kv.dtype,
         device=kv.device,
     )
-    # This kernel also materializes Q-nope-sized data per head, so its smaller
-    # tile gives better memory-level parallelism than the Q-only RoPE kernel.
-    block_h = min(16, triton.next_power_of_2(n_heads))
-    num_head_blocks = triton.cdiv(n_heads, block_h)
-    _fused_k_rope_kernel[(batch * seq_len * num_head_blocks,)](
+    _fused_k_rope_kernel[
+        lambda meta: (batch * seq_len * triton.cdiv(n_heads, meta["BLOCK_H"]),)
+    ](
         kv,
         k_pe,
         rope_cache_real,
@@ -491,13 +667,10 @@ def _fused_mla_k_rope_op(
         K_STRIDE_D=k.stride(3),
         SEQ_LEN=seq_len,
         N_HEADS=n_heads,
-        NUM_HEAD_BLOCKS=num_head_blocks,
         Q_NOPE_DIM=q_nope_dim,
         ROPE_DIM=rope_dim,
-        BLOCK_H=block_h,
         BLOCK_D=triton.next_power_of_2(q_nope_dim),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
-        num_warps=4,
     )
     return k
 
@@ -542,8 +715,6 @@ def _fused_mla_kv_backward_op(
         dtype=grad_k.dtype,
         device=grad_k.device,
     )
-    # Reduce more heads per program to amortize the shared positional gradient.
-    block_h = min(64, triton.next_power_of_2(n_heads))
     _fused_kv_backward_kernel[(batch * seq_len,)](
         grad_k,
         grad_v,
@@ -576,12 +747,10 @@ def _fused_mla_kv_backward_op(
         Q_NOPE_DIM=q_nope_dim,
         ROPE_DIM=rope_dim,
         V_DIM=v_dim,
-        BLOCK_H=block_h,
         BLOCK_D=triton.next_power_of_2(max(q_nope_dim, v_dim)),
         BLOCK_PAIRS=triton.next_power_of_2(rope_dim // 2),
         ROUND_BF16_SUM=grad_k.dtype == torch.bfloat16,
         ROUND_FP16_SUM=grad_k.dtype == torch.float16,
-        num_warps=4,
     )
     return grad_kv, grad_k_pe
 
@@ -635,16 +804,20 @@ class _FusedMLAQ(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
-        ctx.mark_dirty(q)
-        q_local = _to_local_for_mutation(q)
-        _fused_mla_q_rope_op(
+        # Deliberately out of place. Attention.forward hands us a view of the
+        # query projection, so rotating in place would need ctx.mark_dirty and
+        # autograd would then record a CopySlices whose backward materializes
+        # the entire projection -- five full-size copies at the 671B shape.
+        # See docs/pytorch-performance-pitfalls.md.
+        q_local = _to_local(q)
+        out_local = _fused_mla_q_rope_out_op(
             q_local,
             rope_cache_real,
             positions,
             q_nope_dim,
             False,
         )
-        return q
+        return _from_local(out_local, q)
 
     @staticmethod
     @torch.autograd.function.once_differentiable
@@ -769,7 +942,18 @@ def fused_mla_q(
     positions: torch.Tensor | None,
     q_nope_dim: int,
 ) -> torch.Tensor:
-    """Apply ComplexRoPE in place to Q's positional tail."""
+    """Apply ComplexRoPE to Q's positional tail, leaving ``q`` unchanged.
+
+    Args:
+        q: Query projection shaped ``(B, L, H, D)``.
+        rope_cache: Complex-valued rotary cache.
+        positions: Optional token positions for each batch row.
+        q_nope_dim: Non-positional dimensions in each query head.
+
+    Returns:
+        A new tensor holding the non-positional dimensions unchanged and the
+        positional ones rotated.
+    """
     q_local = _to_local(q)
     cache_local = _to_local(rope_cache)
     positions_local = _resolve_positions(positions, q_local)

@@ -9,6 +9,7 @@ import unittest
 from typing import cast
 
 import torch
+import triton
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.testing._internal.common_utils import (
@@ -19,12 +20,82 @@ from torch.testing._internal.common_utils import (
 from torchtitan.config import apply_overrides, OverrideConfig
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+from torchtitan.models.deepseek_v3.config_registry import (
+    deepseek_v3_debugmodel,
+    enable_fused_mla,
+)
 from torchtitan.models.deepseek_v3.model import Attention, DeepSeekV3Model
-from torchtitan.overrides.fused_mla import fused_mla_kv, fused_mla_q, FusedMLAAttention
+from torchtitan.overrides.fused_mla import (
+    _fused_k_rope_kernel,
+    _fused_kv_backward_kernel,
+    _fused_q_rope_kernel,
+    fused_mla_kv,
+    fused_mla_q,
+    FusedMLAAttention,
+)
 
 
 class TestFusedMLAOverrideConfig(unittest.TestCase):
+    def test_all_kernels_are_autotuned_over_head_geometry(self):
+        """Launch configuration is tuned per shape, not hard-coded."""
+        for kernel in (
+            _fused_q_rope_kernel,
+            _fused_k_rope_kernel,
+            _fused_kv_backward_kernel,
+        ):
+            self.assertIsInstance(kernel, triton.runtime.Autotuner)
+            self.assertEqual(kernel.keys[:3], ["N_HEADS", "Q_NOPE_DIM", "ROPE_DIM"])
+            self.assertGreater(len(kernel.configs), 1)
+        # COPY_NOPE must stay out of the key so both Q variants share one
+        # tuning result and therefore agree bitwise.
+        self.assertNotIn("COPY_NOPE", _fused_q_rope_kernel.keys)
+
+    def test_deterministic_mode_pins_one_config_and_skips_tuning(self):
+        """Determinism must not depend on which config a benchmark picked."""
+        kernels = (
+            _fused_q_rope_kernel,
+            _fused_k_rope_kernel,
+            _fused_kv_backward_kernel,
+        )
+        was_enabled = torch.are_deterministic_algorithms_enabled()
+        self.addCleanup(torch.use_deterministic_algorithms, was_enabled)
+
+        torch.use_deterministic_algorithms(True)
+        for kernel in kernels:
+            self.assertIsNotNone(kernel.early_config_prune)
+            # Exactly one config makes Triton skip benchmarking outright.
+            self.assertEqual(len(kernel.early_config_prune(kernel.configs, {})), 1)
+
+        torch.use_deterministic_algorithms(False)
+        for kernel in kernels:
+            self.assertEqual(
+                len(kernel.early_config_prune(kernel.configs, {})),
+                len(kernel.configs),
+            )
+        # The Q kernel rotates its input in place, so the autotuner has to
+        # restore it between candidate runs or every trial past the first
+        # measures (and leaves behind) doubly rotated data.
+        self.assertEqual(_fused_q_rope_kernel.restore_value, ["q"])
+
+    def test_enable_fused_mla_appends_the_override_once(self):
+        config = deepseek_v3_debugmodel(seq_len=2048)
+        enable_fused_mla(config)
+        self.assertEqual(
+            config.override.imports, ["torchtitan.overrides.fused_mla.fused_mla"]
+        )
+        # Enabling twice is a recipe bug, not something to silently absorb.
+        with self.assertRaises(AssertionError):
+            enable_fused_mla(config)
+
+        model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
+        apply_overrides(config.override, config)
+        self.assertTrue(
+            all(
+                isinstance(layer.attention, FusedMLAAttention.Config)
+                for layer in model_config.layers
+            )
+        )
+
     def test_override_replaces_all_debug_attention_configs(self):
         config = deepseek_v3_debugmodel(seq_len=2048)
         model_spec = config.model_spec
@@ -152,7 +223,10 @@ class TestFusedMLANumerics(unittest.TestCase):
         )
         reference_q = torch.cat([q_nope, q_pos], dim=-1)
 
-        self.assertEqual(fused_q.data_ptr(), q_storage.data_ptr())
+        # Out of place on purpose: mutating the projection would need
+        # ctx.mark_dirty and cost a CopySlices copy of it in backward.
+        self.assertNotEqual(fused_q.data_ptr(), q_storage.data_ptr())
+        self.assert_dtype_close(q_storage, q_source, dtype, exact=True)
         self.assert_dtype_close(
             fused_q[..., : self.q_nope_dim],
             reference_q[..., : self.q_nope_dim],
@@ -175,6 +249,39 @@ class TestFusedMLANumerics(unittest.TestCase):
             exact=True,
         )
         self.assert_dtype_close(fused_grad, reference_grad, dtype)
+
+    @parametrize("dtype", [torch.bfloat16, torch.float32])
+    @parametrize("inverse", [False, True])
+    def test_functional_q_rope_matches_in_place(
+        self, dtype: torch.dtype, inverse: bool
+    ):
+        """The two variants share a kernel, so they must agree bit for bit."""
+        torch.manual_seed(42)
+        q = torch.randn(
+            1,
+            self.num_tokens,
+            self.n_heads,
+            self.q_nope_dim + self.rope_dim,
+            device=self.positions.device,
+            dtype=dtype,
+        )
+        cache_real = torch.view_as_real(self.rope.cache).contiguous()
+        positions = self.positions.unsqueeze(0).contiguous()
+
+        source = q.clone()
+        rotated = torch.ops.torchtitan.fused_mla_q_rope.default(
+            source, cache_real, positions, self.q_nope_dim, inverse
+        )
+        in_place = q.clone()
+        torch.ops.torchtitan.fused_mla_q_rope_.default(
+            in_place, cache_real, positions, self.q_nope_dim, inverse
+        )
+
+        self.assertNotEqual(rotated.data_ptr(), source.data_ptr())
+        # The functional variant must leave its input alone, which is the
+        # whole reason it exists.
+        self.assert_dtype_close(source, q, dtype, exact=True)
+        self.assert_dtype_close(rotated, in_place, dtype, exact=True)
 
     @parametrize("dtype", [torch.bfloat16, torch.float32])
     def test_q_sum_backward_matches_eager(self, dtype: torch.dtype):
@@ -374,9 +481,13 @@ class TestFusedMLANumerics(unittest.TestCase):
             grad_v,
         )
         targets = [node.target for node in graph.graph.nodes]
+        # Forward rotates out of place; only the backward, which runs outside
+        # the autograd graph, still rotates its gradient in place.
         self.assertEqual(
-            targets.count(torch.ops.torchtitan.fused_mla_q_rope_.default),
-            2,
+            targets.count(torch.ops.torchtitan.fused_mla_q_rope.default), 1
+        )
+        self.assertEqual(
+            targets.count(torch.ops.torchtitan.fused_mla_q_rope_.default), 1
         )
         self.assertIn(torch.ops.torchtitan.fused_mla_k_rope.default, targets)
         self.assertIn(torch.ops.torchtitan.fused_mla_kv_backward.default, targets)
