@@ -23,11 +23,11 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     annotate_module_fqns,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+from graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
-from torchtitan.experiments.graph_trainer.passes import (
+from graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
 )

@@ -33,14 +33,14 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_keys
-from torchtitan.experiments.graph_trainer.memory_policy import (
+from graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
-from torchtitan.experiments.graph_trainer.precompile import (
+from graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
     _register_coor_ops,
 )
-from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
@@ -200,8 +200,8 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
-    from torchtitan.experiments.graph_trainer.precompile import (
+    from graph_trainer.make_fx_tracer import minimal_fx_tracer
+    from graph_trainer.precompile import (
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
         precompile_fx_trace_save,
@@ -269,7 +269,7 @@ def _precompile_aot_fx_trace(
 
     maybe_register_blockmask_pytree_node()
 
-    from torchtitan.experiments.graph_trainer.registry import (
+    from graph_trainer.registry import (
         TRACE_CALL_INPUT_PREPARERS,
         TRACE_INPUT_PREPARERS,
     )
@@ -312,7 +312,7 @@ def _precompile_aot_fx_trace(
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
     # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.passes import (
+    from graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,
     )

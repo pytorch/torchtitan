@@ -42,7 +42,7 @@ from torchtitan.experiments.graph_trainer.deepseek_v3 import (
 from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
     annotate_deepseekv3,
 )
-from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+from graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
@@ -242,21 +242,21 @@ class BitwiseDeterministicBase(unittest.TestCase):
         the loaded artifact — identical to what happens during
         torchrun training with --compile.precompile_artifact_dir.
         """
-        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+        from graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
             run_traced,
         )
-        from torchtitan.experiments.graph_trainer.passes import (
+        from graph_trainer.passes import (
             apply_graph_passes,
             compile_time_passes,
             construct_default_graph_passes,
         )
-        from torchtitan.experiments.graph_trainer.precompile import (
+        from graph_trainer.precompile import (
             flatten_runtime_inputs,
             precompile_fx_trace_load,
             precompile_fx_trace_save,
         )
-        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+        from graph_trainer.storage import DiskStorageAdapter
         from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)

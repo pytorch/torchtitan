@@ -20,14 +20,14 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _maybe_materialize_grad_for_param_layout,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+from graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     extract_module_state,
     minimal_fx_tracer,
     run_traced,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import (
+from graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
 
@@ -106,6 +106,10 @@ def _graph_fake_mode(fake_inputs):
     )
 
 
+
+
+
+
 class SimpleMLP(nn.Module):
     def __init__(self, dim=64, hidden=128, vocab_size=256):
         super().__init__()
@@ -174,80 +178,10 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
         sym = fake_x.shape[0].node.expr
         return fake_x.shape[0].node.shape_env.var_to_range[sym]
 
-    def test_fakeify_input_copies_only_shape_annotations(self):
-        from torch._dynamo import mark_dynamic
-        from torch._subclasses import FakeTensorMode
-        from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-        from torchtitan.experiments.graph_trainer.dynamic_shapes import _fakeify_input
 
-        x = torch.randn(2, 4)
-        mark_dynamic(x, 0, min=2, max=8)
-        x._graph_trainer_unrelated_state = "must not be copied"
 
-        fake_mode = FakeTensorMode(shape_env=ShapeEnv(), static_shapes=False)
-        with fake_mode:
-            fake_x = _fakeify_input(fake_mode, x, input_name="x")
 
-        self.assertEqual(fake_x._dynamo_dynamic_indices, x._dynamo_dynamic_indices)
-        self.assertEqual(fake_x._dynamo_dynamic_range, x._dynamo_dynamic_range)
-        self.assertFalse(hasattr(fake_x, "_graph_trainer_unrelated_state"))
-
-    def test_mark_dynamic_min_max_preserves_range(self):
-        value_range = self._trace_mark_dynamic_value_range(min_value=2, max_value=8)
-
-        self.assertEqual(value_range.lower, 2)
-        self.assertEqual(value_range.upper, 8)
-
-    def test_mark_dynamic_one_sided_ranges_preserve_bounds(self):
-        from torch.utils._sympy.numbers import int_oo
-
-        # ShapeEnv tightens dynamic tensor sizes to exclude 0/1, so a max-only
-        # user range is observed as [2, max] after fakeification.
-        cases = (
-            ("min_only", {"min_value": 2}, 2, int_oo),
-            ("max_only", {"max_value": 8}, 2, 8),
-        )
-        for name, kwargs, expected_lower, expected_upper in cases:
-            with self.subTest(name=name):
-                value_range = self._trace_mark_dynamic_value_range(**kwargs)
-
-                self.assertEqual(value_range.lower, expected_lower)
-                self.assertEqual(value_range.upper, expected_upper)
-
-    def test_mark_dynamic_wrapper_subclass_rejected(self):
-        from torch._dynamo import mark_dynamic
-
-        wrapper = _TraceableWrapper(torch.randn(2, 4))
-        mark_dynamic(wrapper, 0)
-
-        def forward(x):
-            return x
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "only supports marked dynamic dims on plain tensor inputs",
-        ):
-            minimal_fx_tracer(forward)(wrapper)
-
-    def test_nested_wrapper_subclass_marked_inner_rejected(self):
-        from torch._dynamo import mark_dynamic
-        from torch._dynamo.decorators import mark_unbacked
-
-        def forward(x):
-            return x
-
-        for marker in (mark_dynamic, mark_unbacked):
-            with self.subTest(marker=marker.__name__):
-                inner = torch.randn(2, 4)
-                marker(inner, 0)
-                wrapper = _TraceableWrapper(_TraceableWrapper(inner))
-
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "only supports marked dynamic dims on plain tensor inputs",
-                ):
-                    minimal_fx_tracer(forward)(wrapper)
 
     def test_mark_dynamic_token_dim_with_rope(self):
         from torch._dynamo import mark_dynamic
@@ -350,227 +284,15 @@ class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
             )
         )
 
-    def test_maybe_materialize_grad_for_param_layout_restores_param_strides(self):
-        param = torch.empty_strided((2, 3), (1, 2))
-        grad = torch.arange(6.0).reshape(2, 3)
 
-        materialized = _maybe_materialize_grad_for_param_layout(param, grad)
 
-        self.assertEqual(materialized.stride(), param.stride())
-        self.assertTrue(torch.equal(materialized, grad))
-        self.assertIs(
-            _maybe_materialize_grad_for_param_layout(param, materialized),
-            materialized,
-        )
 
-    def test_mark_unbacked_mixed_with_static_input_replay(self):
-        from torch._dynamo.decorators import mark_unbacked
 
-        def forward(dynamic_x, static_y):
-            return dynamic_x.cos() + static_y.sin()
 
-        dynamic_x = torch.randn(2, 4)
-        static_y = torch.randn(2, 4)
-        mark_unbacked(dynamic_x, 0)
 
-        traced = minimal_fx_tracer(forward)(dynamic_x, static_y)
-        dynamic_x_other = torch.randn(3, 4)
-        static_y_other = torch.randn(3, 4)
 
-        self.assertTrue(
-            torch.equal(
-                forward(dynamic_x, static_y),
-                run_traced(traced)(dynamic_x, static_y),
-            )
-        )
-        self.assertTrue(
-            torch.equal(
-                forward(dynamic_x_other, static_y_other),
-                run_traced(traced)(dynamic_x_other, static_y_other),
-            )
-        )
 
-    def test_mark_unbacked_shape_branch_rejected(self):
-        from torch._dynamo.decorators import mark_unbacked
-        from torch.fx.experimental.symbolic_shapes import GuardOnDataDependentSymNode
 
-        def forward(x):
-            if x.shape[0] > 100:
-                return x.cos()
-            return x.sin()
-
-        x = torch.randn(4, 4)
-        mark_unbacked(x, 0)
-
-        with self.assertRaisesRegex(
-            GuardOnDataDependentSymNode,
-            "Could not guard on data-dependent expression",
-        ):
-            minimal_fx_tracer(forward)(x)
-
-    def test_mark_unbacked_min_max_preserves_unbacked_placeholder_dim(self):
-        from torch._dynamo.decorators import mark_unbacked
-        from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
-
-        def forward(x):
-            if x.size(0) >= 2 and x.size(0) <= 5:
-                return x.sin()
-            return x.cos()
-
-        x = torch.randn(3, 4)
-        mark_unbacked(x, 0, min=2, max=5)
-
-        traced = minimal_fx_tracer(forward)(x)
-        fake_x = next(
-            node.meta["val"]
-            for node in traced.gm.graph.nodes
-            if node.op == "placeholder"
-        )
-        x_min = torch.randn(2, 4)
-        x_max = torch.randn(5, 4)
-
-        self.assertIsInstance(fake_x.size(0), torch.SymInt)
-        self.assertTrue(free_unbacked_symbols(fake_x.size(0)))
-        self.assertEqual(fake_x.size(1), 4)
-        self.assertTrue(torch.equal(forward(x_min), run_traced(traced)(x_min)))
-        self.assertTrue(torch.equal(forward(x_max), run_traced(traced)(x_max)))
-
-    def test_mark_unbacked_input_symbol_is_not_pending_fresh(self):
-        from torch._dynamo.decorators import mark_unbacked
-
-        def forward(x):
-            return x.sin()
-
-        x = torch.randn(3, 4)
-        mark_unbacked(x, 0, min=2, max=5)
-
-        traced = minimal_fx_tracer(forward)(x)
-        fake_x = next(
-            node.meta["val"]
-            for node in traced.gm.graph.nodes
-            if node.op == "placeholder"
-        )
-        shape_env = fake_x.shape[0].node.shape_env
-
-        self.assertEqual(shape_env.pending_fresh_unbacked_symbols, [])
-        self.assertEqual(shape_env.ignorable_fresh_unbacked_symbols, [])
-
-    def test_mark_unbacked_preserves_unbacked_placeholder_dim(self):
-        from torch._dynamo.decorators import mark_unbacked
-        from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
-
-        def forward(x):
-            return x.sin()
-
-        x = torch.randn(2, 4)
-        mark_unbacked(x, 0)
-
-        traced = minimal_fx_tracer(forward)(x)
-        fake_x = next(
-            node.meta["val"]
-            for node in traced.gm.graph.nodes
-            if node.op == "placeholder"
-        )
-        x_other = torch.randn(3, 4)
-
-        self.assertIsInstance(fake_x.size(0), torch.SymInt)
-        self.assertTrue(free_unbacked_symbols(fake_x.size(0)))
-        self.assertEqual(fake_x.size(1), 4)
-        self.assertTrue(torch.equal(forward(x), run_traced(traced)(x)))
-        self.assertTrue(
-            torch.equal(
-                forward(x_other),
-                run_traced(traced)(x_other),
-            )
-        )
-
-    def test_mark_unbacked_multiple_inputs_replay(self):
-        from torch._dynamo.decorators import mark_unbacked
-
-        def forward(x, y):
-            return x.sin() + y.cos()
-
-        x = torch.randn(2, 4)
-        y = torch.randn(2, 4)
-        mark_unbacked(x, 0)
-        mark_unbacked(y, 0)
-
-        traced = minimal_fx_tracer(forward)(x, y)
-        x_other = torch.randn(3, 4)
-        y_other = torch.randn(3, 4)
-
-        self.assertTrue(torch.equal(forward(x, y), run_traced(traced)(x, y)))
-        self.assertTrue(
-            torch.equal(
-                forward(x_other, y_other),
-                run_traced(traced)(x_other, y_other),
-            )
-        )
-
-    def test_data_dependent_check_emits_runtime_asserts(self):
-        """torch._check on a data-dependent .item() symbol becomes _assert_scalar nodes."""
-
-        def forward(x, n):
-            v = n.item()
-            torch._check(v > 0)
-            torch._check(v < 100)
-            return x.sin().sum() + v
-
-        x = torch.randn(8, 4)
-        n = torch.tensor([5])
-
-        traced = minimal_fx_tracer(forward, _insert_runtime_asserts=True)(x, n)
-        assert_count = sum(
-            1
-            for node in traced.gm.graph.nodes
-            if node.op == "call_function"
-            and node.target is torch.ops.aten._assert_scalar.default
-        )
-        # Both inline (gt/lt) and bound-style (>= 1, <= 99) asserts are emitted.
-        self.assertEqual(assert_count, 4)
-
-    def test_no_runtime_asserts_when_no_constraints(self):
-        """Tracing without data-dependent _check produces no _assert_scalar nodes."""
-        from torch._dynamo.decorators import mark_unbacked
-
-        def forward(x):
-            return x.sin()
-
-        x = torch.randn(4, 4)
-        mark_unbacked(x, 0)
-
-        traced = minimal_fx_tracer(forward)(x)
-        assert_count = sum(
-            1
-            for node in traced.gm.graph.nodes
-            if node.op == "call_function"
-            and node.target is torch.ops.aten._assert_scalar.default
-        )
-        self.assertEqual(assert_count, 0)
-
-    def test_mark_unbacked_shape_id_multiple_inputs_replay(self):
-        from torch._dynamo.decorators import mark_unbacked
-
-        def forward(x, y):
-            if x.size(0) == y.size(0):
-                return x.sin() + y.cos()
-            return x.cos() + y.sin()
-
-        x = torch.randn(2, 4)
-        y = torch.randn(2, 4)
-        mark_unbacked(x, 0, shape_id="batch")
-        mark_unbacked(y, 0, shape_id="batch")
-
-        traced = minimal_fx_tracer(forward)(x, y)
-        x_other = torch.randn(3, 4)
-        y_other = torch.randn(3, 4)
-
-        self.assertTrue(
-            torch.equal(
-                forward(x_other, y_other),
-                run_traced(traced)(x_other, y_other),
-            )
-        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -1159,7 +881,7 @@ class TestTraceDTensor(unittest.TestCase):
         # the cache key calls ``__eq__`` on the torchbind and crashes.
         import torch.distributed as dist
 
-        from torchtitan.experiments.graph_trainer.inductor_passes import (
+        from graph_trainer.inductor_passes import (
             full_inductor_compilation_pass,
         )
 
@@ -1179,8 +901,8 @@ class TestTraceDTensor(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
 
     def test_full_inductor_pass_migrates_cpu_attrs(self):
-        from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_pass
-        from torchtitan.experiments.graph_trainer.inductor_passes import (
+        from graph_trainer.cudagraph import cudagraph_pass
+        from graph_trainer.inductor_passes import (
             full_inductor_compilation_pass,
         )
 

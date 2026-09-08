@@ -12,12 +12,12 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_moe_ep_regions,
     apply_simple_fsdp,
 )
-from torchtitan.experiments.graph_trainer.compile import apply_compile
+from graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
-from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
+from graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
 

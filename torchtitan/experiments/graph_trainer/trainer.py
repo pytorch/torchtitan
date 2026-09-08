@@ -24,26 +24,26 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
 )
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+from graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.memory_policy import (
+from graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
-from torchtitan.experiments.graph_trainer.passes import (
+from graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
 )
-from torchtitan.experiments.graph_trainer.registry import (
+from graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
-from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+from graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
 from torchtitan.observability import structured_logger as sl
@@ -186,14 +186,14 @@ class GraphTrainer(Trainer):
         runtime_args: tuple[Any, ...],
     ) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""
-        from torchtitan.experiments.graph_trainer.precompile import (
+        from graph_trainer.precompile import (
             _FX_TRACE_ARTIFACT_KEY,
             compute_config_fingerprint,
             flatten_runtime_inputs,
             get_spmd_precompile_meshes,
             precompile_fx_trace_load,
         )
-        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+        from graph_trainer.storage import DiskStorageAdapter
 
         compile_config = self.config.compile
         storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
@@ -286,7 +286,7 @@ class GraphTrainer(Trainer):
                 self.config.compile.precompile_artifact_dir
                 and self.config.parallelism.spmd_backend == "spmd_types"
             ):
-                from torchtitan.experiments.graph_trainer.precompile import (
+                from graph_trainer.precompile import (
                     get_spmd_precompile_meshes,
                 )
 

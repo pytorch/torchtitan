@@ -26,7 +26,7 @@ from torchtitan.experiments.graph_trainer.autoparallel_api import (
     AutoParallelGraph,
     AutoParallelModelOutput,
 )
-from torchtitan.experiments.graph_trainer.compile import apply_compile
+from graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     validate_autoparallel_config,

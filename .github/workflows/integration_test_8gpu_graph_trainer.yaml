@@ -5,11 +5,13 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
+      - 'pyproject.toml'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
+      - 'pyproject.toml'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
   schedule:
     # Runs every 12 hours

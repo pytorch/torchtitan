@@ -24,14 +24,14 @@ from torchtitan.distributed.pipeline_parallel import (
     _split_module,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+from graph_trainer.graph_pp.graph_builder import (
     GraphTrainerStageGraphProvider,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+from graph_trainer.graph_pp.runner import (
     GraphPipelineRuntime,
     register_graph_pp_schedule,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
+from graph_trainer.graph_pp.stage import GraphPipelineStage
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
