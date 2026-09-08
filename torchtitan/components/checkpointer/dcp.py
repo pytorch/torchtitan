@@ -443,6 +443,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
         states = self._flattened_model_states_sd()
+        async_save_started_at: float | None = None
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
@@ -456,6 +457,7 @@ class CheckpointManager(BaseCheckpointManager):
                     )
                 )
 
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -469,6 +471,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         elif self.async_mode == AsyncMode.ASYNC:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -487,6 +490,18 @@ class CheckpointManager(BaseCheckpointManager):
                 enable_garbage_collection=True,
             )
 
+        if async_save_started_at is not None:
+            assert self.save_future is not None
+            self.save_future.add_done_callback(
+                lambda _: sl.log_trace_scalar(
+                    {
+                        "train.checkpoint_write.native_dcp.execute.async_total.latency_ms": (
+                            time.monotonic() - async_save_started_at
+                        )
+                        * 1000
+                    }
+                )
+            )
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
             f"{time.monotonic() - begin:.2f} seconds."
@@ -655,11 +670,12 @@ class CheckpointManager(BaseCheckpointManager):
                 "self.save_future is not None, but self.async_mode is DISABLED."
             )
 
-        # Narrowing for the type checker: maybe_wait_for_saving only dispatches
-        # here when save_future is set.
-        assert self.save_future is not None
-        self.save_future.result()
+        # Clear before awaiting so a failed save is not retried by a later
+        # close() or __del__ call.
+        save_future = self.save_future
+        assert save_future is not None
         self.save_future = None
+        save_future.result()
 
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         return self._storage.isfile(filesystem.join(checkpoint_dir, ".metadata")) or (
