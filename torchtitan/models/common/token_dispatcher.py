@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1183,14 +1184,22 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
         return combined_TD
 
 
+def _iter_moe_configs(model_config: Any) -> Iterator[Any]:
+    """Yield every MoE config in a model, including auxiliary model branches."""
+    # ``model_config.layers`` is not the complete model tree for architectures
+    # with auxiliary blocks (for example, DeepSeek V4's ``mtp_layers``).
+    # Traverse the complete config tree so every MoE dispatcher receives the
+    # runtime configuration it needs before the model is built.
+    from torchtitan.models.common.moe import MoE
+
+    yield from (moe_cfg for _, moe_cfg, _, _ in model_config.traverse(MoE.Config))
+
+
 def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     """Validate and fill EP token dispatcher configs from runtime config."""
     parallelism = config.parallelism
     dispatcher_cfgs = []
-    for layer_cfg in model_config.layers:
-        moe_cfg = getattr(layer_cfg, "moe", None)
-        if moe_cfg is None:
-            continue
+    for moe_cfg in _iter_moe_configs(model_config):
         token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
         if not isinstance(
             token_dispatcher_cfg,
