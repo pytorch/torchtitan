@@ -62,7 +62,8 @@ class FeedForward(Module):
             self.remat_region_name("w3"),
             recompute=self.remat_should_recompute("w3"),
         )(x)
-        remat.recompute_needs_tensor(w1_out, w3_out)
+        remat.recompute_needs_tensor(w1_out)
+        remat.recompute_needs_tensor(w3_out)
         out = remat.region(
             self.w2,
             self.remat_region_name("w2"),
