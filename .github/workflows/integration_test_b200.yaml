@@ -41,8 +41,7 @@ jobs:
         run: |
           set -eux
 
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends git
+          bash .ci/docker/common/install_base.sh
 
           uv venv --python 3.12
           source .venv/bin/activate
