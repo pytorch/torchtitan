@@ -77,6 +77,12 @@ def validate_fake_pg_compatibility(
     # that interaction is fixed. Issue #4149.
     if "varlen_attn+per_op_sac" in test.test_name:
         incompatibilities.append("FSDP + selective AC under spmd_types")
+    # TODO: DeepSeek V4 sequence-parallel collectives return activations that
+    # alias their inputs under Fake PG, corrupting a saved-for-backward tensor
+    # and exploding grad_norm at step 1. The config trains cleanly on a real PG,
+    # so keep it there until the Fake PG collective aliasing is fixed.
+    if "deepseek_v4_fsdp+tp+ep" in test.test_name:
+        incompatibilities.append("DeepSeek V4 sequence parallel under Fake PG")
 
     if incompatibilities and not test.use_real_pg:
         reasons = ", ".join(dict.fromkeys(incompatibilities))

@@ -125,13 +125,15 @@ def test_models_select_fake_and_real_pg_cases() -> None:
 
     assert {
         "deepseek_v3_fsdp+ep",
-        "deepseek_v4_fsdp+tp+ep",
         "qwen3_moe_fsdp+tp+cp+ep_param_groups",
         "kimi_k2_5_muon_fsdp+ep",
         "muse_glimmer_text_fsdp",
         "muse_glimmer_mm_fsdp+tp+sp",
     } <= fake_pg_model_tests
-    assert {"deepseek_v3_fsdp+cp+pp+ep"} <= real_pg_model_tests
+    assert {
+        "deepseek_v3_fsdp+cp+pp+ep",
+        "deepseek_v4_fsdp+tp+ep",
+    } <= real_pg_model_tests
 
 
 def test_flux_fake_pg_filters_real_collective_cases() -> None:

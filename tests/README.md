@@ -82,14 +82,17 @@ and uses its fixed initialization path.
   Real-PG results are not bitwise deterministic, so the case provides
   end-to-end coverage only.
 - DeepSeek V4 FSDP 2 x TP 2, EP 2 is end-to-end coverage only and does
-  not have a numerical golden.
+  not have a numerical golden. It runs on a real PG only (`use_real_pg=True`):
+  under Fake PG its sequence-parallel collectives return activations that alias
+  their inputs, corrupting a saved-for-backward tensor and exploding grad_norm
+  at step 1. The same config trains cleanly on a real 4-GPU PG.
 
 | A10G model | Topology (Fake-PG and Real-PG) |
 | --- | --- |
 | Llama 3 | FSDP 2 x TP 2 x CP 2 |
 | Llama 3 SFT | FSDP 2 |
 | DeepSeek V3 | FSDP 8, EP 8 |
-| DeepSeek V4 | FSDP 2 x TP 2, EP 2 |
+| DeepSeek V4 | FSDP 2 x TP 2, EP 2 (Real-PG only) |
 | GPT-OSS | FSDP 4 x TP 2, EP 4 |
 | Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 |
 | Muse Glimmer text | FSDP 8 |
