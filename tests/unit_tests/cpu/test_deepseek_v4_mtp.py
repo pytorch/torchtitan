@@ -61,6 +61,18 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
                 ].partition_spec,
                 hc_activation_spec,
             )
+            self.assertEqual(
+                model_config.layers[0]
+                .hc_attn_pre.sharding_config.in_src_shardings["x"]
+                .partition_spec,
+                hc_activation_spec,
+            )
+            self.assertEqual(
+                model_config.hc_head.sharding_config.in_src_shardings[
+                    "x"
+                ].partition_spec,
+                hc_activation_spec,
+            )
 
 
 if __name__ == "__main__":

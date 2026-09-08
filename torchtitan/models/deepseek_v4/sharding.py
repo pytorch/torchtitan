@@ -236,7 +236,7 @@ def set_deepseek_v4_layer_sharding(
     hc_branch_layout = (
         hc_head_input_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+        else hc_head_input_placement(enable_sp=False)
     )
     hc_dense_layout = (
         dense_sequence_parallel_placement()
@@ -330,7 +330,7 @@ def set_deepseek_v4_sharding_config(
     hc_head_input = (
         hc_head_input_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+        else hc_head_input_placement(enable_sp=False)
     )
     hc_head_output = (
         dense_sequence_parallel_placement()
