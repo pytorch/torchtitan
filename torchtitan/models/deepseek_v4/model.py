@@ -17,6 +17,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
 
@@ -209,9 +210,9 @@ class DeepSeekV4Model(Decoder):
         self.n_main_layers = cfg.n_layers
 
         self.hc_head = cfg.hc_head.build()
-        self.mtp_layers = torch.nn.ModuleList()
+        self.mtp_layers = ModuleList()
         if cfg.mtp_layers is not None:
-            self.mtp_layers = torch.nn.ModuleList(
+            self.mtp_layers = ModuleList(
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
