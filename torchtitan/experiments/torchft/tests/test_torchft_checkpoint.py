@@ -210,6 +210,36 @@ class TestFTCheckpointManager(unittest.TestCase):
             self.assertIs(False, bystander.save(curr_step=5))
             bystander.close()
 
+    def test_load_restores_ft_checkpoint_before_main_checkpoint(self):
+        manager = self._manager(participating_rank=0)
+        checkpoint_id = manager._create_checkpoint_id(5)
+        os.makedirs(checkpoint_id)
+        open(os.path.join(checkpoint_id, ".metadata"), "w").close()
+        calls = []
+
+        with mock.patch.object(
+            manager,
+            "_ft_load",
+            side_effect=lambda: calls.append("ft"),
+        ), mock.patch.object(
+            manager,
+            "_load_checkpoint",
+            side_effect=lambda *_args, **_kwargs: calls.append("main"),
+        ):
+            self.assertTrue(manager.load())
+
+        self.assertEqual(["ft", "main"], calls)
+        manager.close()
+
+    def test_disabled_load_does_not_restore_ft_checkpoint(self):
+        manager = TorchFTCheckpointManager.__new__(TorchFTCheckpointManager)
+        manager.enable = False
+
+        with mock.patch.object(manager, "_ft_load") as ft_load:
+            self.assertFalse(manager.load())
+
+        ft_load.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
