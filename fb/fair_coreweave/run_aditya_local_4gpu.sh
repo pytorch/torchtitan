@@ -19,13 +19,14 @@ runtime_manifest_sha256=bd6172f58eb609f2f6b77064c07faf35e711e1aa1272d7162e46bae6
 steps=10
 deterministic=0
 tensorboard=0
+profile=0
 dry_run=0
 preflight_only=0
 run_name=""
 
 usage() {
   echo "usage: $0 [--runtime-root PATH] [--overlay-root PATH] [--steps N]" >&2
-  echo "          [--run-name NAME] [--deterministic] [--tensorboard]" >&2
+  echo "          [--run-name NAME] [--deterministic] [--tensorboard] [--profile]" >&2
   echo "          [--preflight-only] [--dry-run]" >&2
 }
 
@@ -53,6 +54,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --tensorboard)
       tensorboard=1
+      shift
+      ;;
+    --profile)
+      profile=1
       shift
       ;;
     --dry-run)
@@ -110,6 +115,9 @@ if [ -z "$run_name" ]; then
   if [ "$tensorboard" -eq 1 ]; then
     suffix="$suffix-tensorboard"
   fi
+  if [ "$profile" -eq 1 ]; then
+    suffix="$suffix-profile"
+  fi
   run_name="github-dsv3-16b-fsdp4-ep4-ga16-$suffix-$(date +%Y%m%d%H%M%S)"
 fi
 
@@ -157,6 +165,16 @@ debug=(--debug.seed 42)
 if [ "$deterministic" -eq 1 ]; then
   debug+=(--debug.deterministic)
 fi
+profiler=(--profiler.no-enable-profiling)
+if [ "$profile" -eq 1 ]; then
+  profiler=(
+    --profiler.enable-profiling
+    --profiler.profile-freq 10
+    --profiler.profiler-warmup 3
+    --profiler.profiler-active 1
+    --profiler.profiler-repeat 1
+  )
+fi
 
 train=(
   "${python[@]}" -u -m torchtitan.train
@@ -193,7 +211,7 @@ train=(
   --comm.trace-buf-size 0
   "${debug[@]}"
   --debug.no-print-config
-  --profiler.no-enable-profiling
+  "${profiler[@]}"
   activation-checkpoint:none
 )
 command=(
