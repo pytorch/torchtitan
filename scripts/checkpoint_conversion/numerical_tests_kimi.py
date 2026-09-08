@@ -10,7 +10,7 @@ Runs the released HF Kimi-VL (``trust_remote_code``) and torchtitan in ONE
 process on the same text+image prompt and compares last-token logits. torchtitan
 does its OWN Kimi image processing (``process_image`` + ``vision_to_patches``,
 raster order), so the full pipeline is exercised (preprocessing + vision +
-projector + scatter + DeepSeek-V3 text tower), not just the forward.
+projector + gather + DeepSeek-V3 text tower), not just the forward.
 
 The released remote code targets transformers ~4.50.x and does NOT import on 5.x,
 so run this in an env with ``transformers==4.50.3`` + ``tiktoken`` + ``blobfile``.
@@ -46,6 +46,7 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.models.common.attention import ScaledDotProductAttention
+from torchtitan.models.common.multimodal import build_vision_bank_indices
 from torchtitan.models.kimi_k2_7 import model_registry
 from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -139,18 +140,18 @@ def _force_hf_routing(model, expert_indices, device):
         if not getattr(layer, "moe_enabled", False) or int(key) not in expert_indices:
             continue
         ids = expert_indices[int(key)]
-        ids = ids.view(1, ids.shape[0], ids.shape[-1]).to(device)  # (1, L, K)
+        ids = ids.to(device)
         router = layer.moe.router
         orig = router.forward
 
-        def forced_forward(x_BLD, expert_bias_E=None, _r=router, _o=orig, _ids=ids):
+        def forced_forward(x, expert_bias_E=None, _r=router, _o=orig, _ids=ids):
             # Reuse the real score computation; override only the selection.
-            _, _, scores_BLE = _o(x_BLD, expert_bias_E)
-            topk = scores_BLE.gather(dim=-1, index=_ids)
+            _, _, scores = _o(x, expert_bias_E)
+            topk = scores.gather(dim=-1, index=_ids)
             if _r.route_norm:
                 topk = topk / (topk.sum(dim=-1, keepdim=True) + 1e-20)
             topk = topk * _r.route_scale
-            return topk, _ids, scores_BLE
+            return topk, _ids, scores
 
         router.forward = forced_forward
         forced += 1
@@ -203,12 +204,15 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
         merge_size=_MERGE_SIZE,
         patch_order="raster",
     )
-    pixel_values = patches.unsqueeze(0).to(device=device, dtype=vision_dtype)
+    pixel_values = patches.to(device=device, dtype=vision_dtype)
     grid_thw = grid.unsqueeze(0).to(device)
-    tokens = ref["input_ids"].to(device)
+    tokens = ref["input_ids"].reshape(-1).to(device)
+    vision_bank_indices = build_vision_bank_indices(
+        tokens, placeholder_id=_MEDIA_TOKEN_ID
+    )
 
     # Sanity: titan's grid must yield the same vision-token count as HF produced
-    # (the placeholder run in input_ids), else the scatter compares different seqs.
+    # (the placeholder run in input_ids), else fusion compares different seqs.
     n_titan = ((grid_thw[0, 1] // _MERGE_SIZE) * (grid_thw[0, 2] // _MERGE_SIZE)).item()
     n_placeholders = (tokens == _MEDIA_TOKEN_ID).sum().item()
     print(
@@ -221,14 +225,14 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
         f"{n_placeholders} placeholders -- preprocessing grids differ"
     )
 
-    # Localize: titan's vision features (projector output) vs HF's, pre-scatter.
+    # Localize: titan's vision features (projector output) vs HF's, pre-fusion.
     tt_feats = model.vision_encoder(pixel_values, grid_thw=grid_thw)
     ref_feats = ref["vision_features"].float().reshape(-1, tt_feats.shape[-1])
     tt_feats = tt_feats.float().cpu().reshape(-1, tt_feats.shape[-1])
     vcos = F.cosine_similarity(ref_feats.flatten(), tt_feats.flatten(), dim=0).item()
     vmax = (ref_feats - tt_feats).abs().max().item()
     print(
-        f"vision features (pre-scatter): shape={tuple(tt_feats.shape)}  "
+        f"vision features (pre-fusion): shape={tuple(tt_feats.shape)}  "
         f"cos={vcos:.6f}  max_diff={vmax:.3e}"
     )
 
@@ -236,9 +240,9 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
         tokens,
         pixel_values=pixel_values,
         grid_thw=grid_thw,
-        special_tokens={"image_id": _MEDIA_TOKEN_ID, "video_id": _MEDIA_TOKEN_ID},
+        vision_bank_indices_T=vision_bank_indices,
     )
-    return logits[:, -1, :].float().cpu().squeeze()
+    return logits[-1, :].float().cpu().squeeze()
 
 
 def compare(ref_logits, tt_logits) -> bool:

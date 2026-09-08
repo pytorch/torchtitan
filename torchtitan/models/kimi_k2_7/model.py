@@ -8,10 +8,12 @@
 https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b0638a0/python/sglang/srt/models/kimi_k25.py
 """
 
+# Tensor dimensions: T = text tokens, X = input patches, V = vision tokens,
+# D = hidden size, P = flattened patch size, N = media items.
+
 from dataclasses import dataclass
 from typing import Any, cast
 
-import spmd_types as spmd
 import torch
 from torch import nn
 
@@ -24,11 +26,14 @@ from torchtitan.models.common.attention import (
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    token_id_placement,
+)
 from torchtitan.models.common.multimodal import (
-    get_vision_positions,
+    build_vision_bank_indices,
+    gather_vision_embeds,
     multimodal_context,
-    scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.deepseek_v3.model import (
@@ -49,7 +54,7 @@ class KimiK25Model(DeepSeekV3Model):
           |
           +-- tok_embeddings(tokens)               -> text embeddings
           +-- vision_encoder(pixels)               -> packed vision features
-          +-- scatter at vision placeholder runs   -> multimodal embeddings
+          +-- gather by vision-bank indices        -> multimodal embeddings
           +-- decoder layers (MLA + MoE)           -> hidden states
           +-- norm -> lm_head                      -> logits
     """
@@ -117,13 +122,34 @@ class KimiK25Model(DeepSeekV3Model):
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        pixel_values = batch.get("pixel_values")
+        grid_thw = batch.get("grid_thw")
+        pixel_values_videos = batch.get("pixel_values_videos")
+        grid_thw_videos = batch.get("grid_thw_videos")
+        special_tokens = batch.pop("special_tokens", None)
+
+        if self.tok_embeddings is not None:
+            placeholder_id = None
+            if pixel_values is not None and grid_thw is not None:
+                placeholder_id = special_tokens["image_id"]
+            elif pixel_values_videos is not None and grid_thw_videos is not None:
+                placeholder_id = special_tokens["video_id"]
+            if placeholder_id is not None:
+                batch["vision_bank_indices_T"] = build_vision_bank_indices(
+                    batch["input"], placeholder_id=placeholder_id
+                )
+
         positions = batch.get("positions", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
                 batch["attention_masks"] = self.get_attention_masks(positions=positions)
 
-        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        input_sharding = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(include_cp_axis=True),
+            "vision_bank_indices_T": token_id_placement(),
+        }
         if parallel_dims.cp_enabled:
             batch = prepare_context_parallel_input(
                 batch,
@@ -141,24 +167,15 @@ class KimiK25Model(DeepSeekV3Model):
 
     def _prepare_multimodal_embeds(
         self,
-        tokens: torch.Tensor,
+        h_TD: torch.Tensor,
         *,
         pixel_values: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        special_tokens: dict[str, int],
+        vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Embed tokens, run the vision encoder, scatter features into text.
-
-        With kimi's single unified placeholder, a one-modality batch's runs map
-        to visual items in order. Mixing images and videos in one batch is not
-        yet supported (see the TODO below).
-        """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
-
+        """Encode one media stream and gather it into token embeddings."""
         modalities = []
         if pixel_values is not None and grid_thw is not None:
             modalities.append((pixel_values, grid_thw))
@@ -166,36 +183,20 @@ class KimiK25Model(DeepSeekV3Model):
             modalities.append((pixel_values_videos, grid_thw_videos))
 
         if not modalities:
-            return inputs_embeds
-        # TODO: support mixed image+video batches. Upstream fix: when
-        # image_id == video_id, emit one document-ordered vision stream so the
-        # runs stay modality-agnostic and this branch goes away.
+            return h_TD
         assert len(modalities) == 1, "mixed image+video batches not yet supported"
-        pixels, grid = modalities[0]
-        # A non-empty modalities list means a multimodal run, so the vision
-        # encoder is present (text-only configs never populate pixels).
+        pixels_XP, grid_N3 = modalities[0]
+
         assert self.vision_encoder is not None
+        assert vision_bank_indices_T is not None
 
-        placeholder_id = special_tokens["image_id"]
-        assert placeholder_id == special_tokens["video_id"]
-
-        # Patches arrive float32; match the encoder's compute dtype for the matmul.
-        pixels = pixels.to(self.vision_encoder.patch_embed.weight.dtype)
-        vision_embeds = self.vision_encoder(pixels, grid_thw=grid)
-        # MoonViT collapses time (temporal pooling) and merges 2x2 spatially, so
-        # the token count is (h/kh)*(w/kw), independent of t.
-        kh, kw = self.vision_encoder.merge_kernel_size
-        num_tokens_per_item = (grid[:, 1] // kh) * (grid[:, 2] // kw)
-        vision_positions = get_vision_positions(
-            tokens, num_tokens_per_item, placeholder_id
+        pixels_XP = pixels_XP.to(self.vision_encoder.patch_embed.weight.dtype)
+        vision_bank_VD = self.vision_encoder(pixels_XP, grid_thw=grid_N3)
+        return gather_vision_embeds(
+            h_TD,
+            vision_bank_VD=vision_bank_VD,
+            vision_bank_indices_T=vision_bank_indices_T,
         )
-        if vision_positions:
-            inputs_embeds = scatter_vision_embeds(
-                inputs_embeds,
-                vision_embeds=vision_embeds,
-                vision_positions=vision_positions,
-            )
-        return inputs_embeds
 
     def forward(  # pyrefly: ignore [bad-override]
         self,
@@ -205,7 +206,7 @@ class KimiK25Model(DeepSeekV3Model):
         grid_thw: torch.Tensor | None = None,
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        special_tokens: dict[str, int] | None = None,
+        vision_bank_indices_T: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ):
@@ -221,36 +222,32 @@ class KimiK25Model(DeepSeekV3Model):
             pixel_values_videos: Packed video patches, or None (mixing with
                 ``pixel_values`` in one batch is not yet supported).
             grid_thw_videos: (num_videos, 3) patch counts per video.
-            special_tokens: tokenizer-resolved ``image_id``/``video_id``;
-                required for image/video batches, None for text-only.
+            vision_bank_indices_T: Packed vision-bank row for each placeholder
+                token, or -1 for text tokens.
             attention_masks: Decoder attention masks.
             positions: Per-token position IDs for packed sequences.
 
         Returns:
             ``(num_tokens, vocab_size)`` logits.
         """
-        with multimodal_context():
-            if self.tok_embeddings is not None:
-                x = self._prepare_multimodal_embeds(
-                    tokens,
+        if self.tok_embeddings is not None:
+            h_TD = self.tok_embeddings(tokens)
+            with multimodal_context():
+                h_TD = self._prepare_multimodal_embeds(
+                    h_TD,
                     pixel_values=pixel_values,
                     grid_thw=grid_thw,
                     pixel_values_videos=pixel_values_videos,
                     grid_thw_videos=grid_thw_videos,
-                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                    vision_bank_indices_T=vision_bank_indices_T,
                 )
-            else:
-                x = tokens
-
-        if spmd.is_type_checking():
-            # The scatter restores a token-aligned tensor, so text-model DP
-            # resumes as global batch sharding after the multimodal region.
-            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+        else:
+            h_TD = tokens
 
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions)
+            h_TD = layer(h_TD, attention_masks, positions)
 
-        x = self.norm(x) if self.norm is not None else x
+        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
         if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+            return h_TD
+        return self.lm_head(h_TD) if self.lm_head is not None else h_TD

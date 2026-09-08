@@ -11,7 +11,7 @@ from unittest import mock
 
 import pytest
 import torch
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -37,6 +37,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
 
 
 pytestmark = pytest.mark.multi_gpu
+_DENSE_STORAGE_AXIS_NAMES = ("dp_shard", "dp_shard_cp")
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -51,17 +52,33 @@ class TestDistMuon(DTensorTestBase):
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        self._assert_matches_plain_muon_across_flat_checkpoint(mesh)
+
+    @with_comms
+    def test_accepts_flattened_dense_fsdp_axis(self):
+        storage_mesh = init_device_mesh(
+            self.device_type,
+            (1, self.world_size),
+            mesh_dim_names=("dp_shard", "cp"),
+        )
+        mesh = storage_mesh["dp_shard", "cp"]._flatten("dp_shard_cp")
+        self._assert_matches_plain_muon_across_flat_checkpoint(mesh)
+
+    def _assert_matches_plain_muon_across_flat_checkpoint(
+        self,
+        mesh: DeviceMesh,
+    ) -> None:
         lr = 0.03
         num_matrices = 3
         matrix_rows = 4
         # Two storage shards each own six rows, so their boundary splits the
         # middle four-row matrix and exercises overshard redistribution.
         weight_decay = 0.2
-        mesh = init_device_mesh(
-            self.device_type,
-            (self.world_size,),
-            mesh_dim_names=("dp_shard",),
-        )
         device = torch.device(self.device_type, self.rank)
 
         def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
@@ -86,15 +103,17 @@ class TestDistMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "dp_shard": Owned(),
+                            axis_name: Owned()
+                            for axis_name in _DENSE_STORAGE_AXIS_NAMES
                         },
                     ),
                     local_blocks_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "dp_shard": BlockShard(
+                            axis_name: BlockShard(
                                 dim=0,
                                 block_size=matrix_rows,
                             )
+                            for axis_name in _DENSE_STORAGE_AXIS_NAMES
                         },
                     ),
                 },
@@ -291,6 +310,10 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
                         shardings_by_mesh_axis={
+                            **{
+                                axis_name: Shard(0)
+                                for axis_name in _DENSE_STORAGE_AXIS_NAMES
+                            },
                             "efsdp": Shard(0),
                             "ep": Shard(0),
                         },
