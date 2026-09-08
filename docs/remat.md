@@ -38,8 +38,10 @@ RegionAC.Config(
 ```
 
 The same policy currently applies to every transformer block. Wildcards such
-as `attention.*` are supported. Unmatched patterns are currently ignored;
-validation must eventually account for regions across all pipeline stages.
+as `attention.*` are supported. Every pattern must match at least one available
+region. RegionAC raises an error for unmatched patterns so typos, incorrectly
+qualified names, and stale configurations do not silently change the policy.
+An empty list is valid and recomputes every region.
 
 With `log_available_regions=True`, TorchTitan groups transformer blocks with
 the same type and region catalog, then logs their layer IDs and available
