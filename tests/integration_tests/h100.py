@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torchtitan_recipes.tests.h100 as recipes
-from torchtitan.models.llama3.config_registry import llama3_debugmodel_float8
 
 from tests.integration_tests import OverrideDefinitions
 
@@ -23,7 +22,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             test_name="2d_asynctp_compile",
         ),
         OverrideDefinitions(
-            configs=[llama3_debugmodel_float8],
+            configs=[recipes.llama3_debugmodel_float8_h100],
             test_descr="Float8 test",
             test_name="float8",
         ),

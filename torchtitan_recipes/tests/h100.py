@@ -39,6 +39,10 @@ def llama3_debugmodel_fsdp_symm_mem() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_float8_h100() -> Trainer.Config:
+    return llama3_debugmodel_float8(seq_len=2048)
+
+
 def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
     config = llama3_debugmodel_float8(seq_len=2048)
     config.compile.enable = True
