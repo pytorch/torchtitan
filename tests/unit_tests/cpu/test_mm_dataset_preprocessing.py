@@ -198,9 +198,7 @@ _IMAGE_TOKEN_GEOM = dict(
 
 
 def _synthetic_rgb_image(height=64, width=64) -> Image.Image:
-    return Image.fromarray(
-        (torch.rand(height, width, 3) * 255).to(torch.uint8).numpy()
-    )
+    return Image.fromarray((torch.rand(height, width, 3) * 255).to(torch.uint8).numpy())
 
 
 def _process_synthetic_image(*, temporal_patch_size: int):
