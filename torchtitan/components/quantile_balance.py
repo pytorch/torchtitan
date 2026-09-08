@@ -219,10 +219,12 @@ def expert_loads(
 #     across gradient-accumulation micro-batches is just addition, and one
 #     all-reduce over the loss mesh covers the sharded token axes.
 #   * solved bias -- the update OVERWRITES ``expert_bias_E`` instead of adding
-#     to it. Core's optimizer hook still applies its sign-rule delta first;
-#     overwriting makes that delta irrelevant rather than fighting it, and
-#     keeping core's hook registered is what keeps the buffer allocated and the
-#     per-expert token counts zeroed each step.
+#     to it. The qb flavor installs this registration as the model spec's
+#     ``post_optimizer_build_fn``, the slot core's sign-rule registration
+#     occupies by default, so under the flavor core's hook is not registered
+#     at all: the solve is the only writer of the bias. ``expert_bias_E`` is
+#     allocated by the MoE itself (``load_balance_coeff`` set), and this step
+#     zeroes ``tokens_per_expert_E`` in core's hook's place.
 
 
 class QuantileBalancer:
@@ -301,9 +303,9 @@ class QuantileBalancer:
                 # DTensor while expert_bias_E is unwrapped just below -- the two
                 # met in topk_with_cutoff's add and every tp cell died. Measured
                 # at dp2/tp2: scores are DTensor(Replicate), so every rank holds
-                # every token and to_local is exact here. That stops being true
-                # once EP shards the tokens, and the histogram would then have to
-                # reduce over the axis they are sharded on.
+                # every token and to_local is exact here. The router's tokens are
+                # sharded over dp_shard x cp only (EP shards the experts, not the
+                # router's inputs), which is the loss mesh the step reduces over.
                 if isinstance(scores_BLE, DTensor):
                     scores_BLE = scores_BLE.to_local()
                 scores_TE = scores_BLE.detach().reshape(-1, scores_BLE.size(-1))
@@ -372,6 +374,12 @@ class QuantileBalancer:
         # buffer on every pass to stay branch-free under recompute.
         for counts in self._counts.values():
             counts.zero_()
+        # Core's hook is not registered under this flavor, so its per-step
+        # reset of the MoE's own token counter falls to this step.
+        for moe in self._moes.values():
+            counter = getattr(moe, "tokens_per_expert_E", None)
+            if isinstance(counter, torch.Tensor):
+                counter.zero_()
         self._armed = False
 
     def remove(self) -> None:
@@ -385,8 +393,9 @@ def register_quantile_balancing(
 ) -> QuantileBalancer:
     """``post_optimizer_build_fn`` that replaces the sign rule with QB.
 
-    Registered AFTER core's ``register_moe_load_balancing_hook`` equivalent, so
-    the solved bias is the last write each step.
+    Installed in the model spec's ``post_optimizer_build_fn`` slot, where core's
+    ``register_moe_load_balancing_hook`` sits by default: the trainer calls one
+    such function, so the sign-rule hook is not registered under this flavor.
     """
     loss_mesh = parallel_dims.get_optional_mesh("loss")
     balancer = QuantileBalancer(
