@@ -103,8 +103,7 @@ class TestIsSafeURL:
     @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.socket.getaddrinfo")
     def test_ipv6_resolved_safe(self, mock_getaddrinfo):
         mock_getaddrinfo.return_value = [
-            (socket.AF_INET6, None, None, None,
-             ("2001:4860:4860::8888", 0, 0, 0)),
+            (socket.AF_INET6, None, None, None, ("2001:4860:4860::8888", 0, 0, 0)),
         ]
         assert _is_safe_url("https://example.com/image.png")
 
@@ -137,6 +136,7 @@ class TestFetchURLSafe:
         session.get.side_effect = [redirect_resp, final_resp]
 
         from torchtitan.hf_datasets.multimodal.utils.image import _fetch_url_safe
+
         content = _fetch_url_safe("https://example.com/img.png")
         assert content == b"image-bytes"
         assert session.get.call_count == 2
@@ -162,6 +162,7 @@ class TestFetchURLSafe:
         session.get.return_value = redirect_resp
 
         from torchtitan.hf_datasets.multimodal.utils.image import _fetch_url_safe
+
         with pytest.raises(ValueError, match="Blocked redirect"):
             _fetch_url_safe("https://safe.example.com/img.png")
 
@@ -188,6 +189,7 @@ class TestFetchURLSafe:
         session.get.return_value = redirect_resp
 
         from torchtitan.hf_datasets.multimodal.utils.image import _fetch_url_safe
+
         _fetch_url_safe("https://example.com/img.png")
         # First call is the initial request, then up to 10 redirect hops
         assert session.get.call_count == 11

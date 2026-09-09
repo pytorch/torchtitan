@@ -63,8 +63,8 @@ def _is_safe_url(url: str) -> bool:
             return False
         addrinfo = socket.getaddrinfo(hostname, None)
         resolved_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-        for family, _, _, _, sockaddr in addrinfo:
-            ip = ipaddress.ip_address(socket.inet_ntop(family, sockaddr[4]))
+        for _, _, _, _, sockaddr in addrinfo:
+            ip = ipaddress.ip_address(sockaddr[0])
             resolved_ips.append(ip)
         if not resolved_ips:
             return False
