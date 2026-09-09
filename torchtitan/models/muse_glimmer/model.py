@@ -21,12 +21,12 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -56,8 +56,9 @@ def _window_mask_key(window_size: int | None) -> str:
 class RMSGainCenterNorm(RMSNorm):
     """RMSNorm whose effective scale is ``weight + gain_center``.
 
-    The learnable ``weight`` is initialized to 0 so the norm starts centered
-    on ``gain_center`` (1.0 for pre/post norms, 0.0 for the final output norm).
+    Pre/post norms initialize ``weight`` to 0 with ``gain_center=1.0``.
+    The final output norm initializes ``weight`` to 1 with ``gain_center=0.0``,
+    so all of these norms start with unit effective scale.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -84,11 +85,6 @@ class Attention(GQAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
-        # Muse Glimmer-specific per-layer iRoPE flag: the shared GQAttention always
-        # applies RoPE, so Muse Glimmer carries its own flag and guards the call in
-        # forward (NoPE layers still build a rope module so max_context_length
-        # discovery/resize in the base Decoder works uniformly).
-        use_rope: bool = True
         scale_query_by: float
         o_gate: Linear.Config | None = None
         # None = global attention (no sliding window) for this layer.
@@ -104,7 +100,6 @@ class Attention(GQAttention):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.use_rope: bool = config.use_rope
         self.scale_query_by: float = config.scale_query_by
         self.window_size: int | None = config.window_size
         self.o_gate: Linear | None = None
@@ -128,7 +123,7 @@ class Attention(GQAttention):
             xk = self.k_norm(xk)
 
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
-        if self.use_rope:
+        if self.rope is not None:
             xq, xk = self.rope(xq, xk, positions)
 
         # Select this layer's mask by its window ("global" key = full attention).
@@ -368,11 +363,6 @@ class MuseGlimmerModel(Decoder):
         parallelism: ParallelismConfig,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         from .sharding import vision_bank_indices_placement
 
         batch: dict[str, Any] = dict(input_dict)
@@ -413,7 +403,9 @@ class MuseGlimmerModel(Decoder):
         positions = batch.get("positions", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
                 batch["attention_masks"] = self.get_attention_masks(positions=positions)
 
         input_sharding = {
@@ -424,12 +416,8 @@ class MuseGlimmerModel(Decoder):
             enable_sp=parallelism.enable_sequence_parallel
         )
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            batch = self._cp_shard_inputs(
+                batch, input_sharding, parallel_dims, parallelism
             )
         if parallelism.spmd_backend == "spmd_types":
             if (
@@ -543,11 +531,11 @@ class MuseGlimmerModel(Decoder):
         # Varlen carries each layer's sliding window in its own kernel arg (baked at
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
-        if isinstance(inner_attn, VarlenAttention.Config):
+        if isinstance(inner_attn, VarlenInnerAttention.Config):
             return create_varlen_metadata_for_document(positions)
-        if not isinstance(inner_attn, FlexAttention.Config):
+        if not isinstance(inner_attn, FlexInnerAttention.Config):
             raise TypeError(
-                "Muse Glimmer requires FlexAttention or VarlenAttention for "
+                "Muse Glimmer requires FlexInnerAttention or VarlenInnerAttention for "
                 f"sliding-window masks, got {type(inner_attn).__name__}"
             )
 

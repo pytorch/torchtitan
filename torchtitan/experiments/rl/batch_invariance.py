@@ -7,7 +7,7 @@
 """Batch-invariance helpers for bitwise trainer/generator numerics parity.
 
 Groups the pieces that make the vLLM generator match the trainer op-for-op under
-batch-invariant mode: a model-config converter that pins FlexAttention kernel
+batch-invariant mode: a model-config converter that pins FlexInnerAttention kernel
 options, plus two runtime patches (bmm and the v2 logprob kernel).
 """
 
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.protocols.model import ModelConfigConverter
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
     """Pin flex attention kernel options for batch-invariant mode.
 
     Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
-    FlexAttention layers.
+    FlexInnerAttention layers.
 
     BACKEND=TRITON is to avoid flex_decode kernel.
     """
@@ -47,7 +47,7 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
     def convert(self, model_config):
         for layer_cfg in model_config.layers:
             inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexAttention.Config):
+            if isinstance(inner, FlexInnerAttention.Config):
                 inner.kernel_options["BACKEND"] = "TRITON"
                 inner.kernel_options["BLOCK_M"] = self._BLOCK_M
                 inner.kernel_options["BLOCK_N"] = self._BLOCK_N

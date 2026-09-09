@@ -96,6 +96,7 @@ async def _setup(
     host = _ControllerHost(worker_mesh)
     monkeypatch.setattr(rollouter_module, "this_host", lambda: host)
     await rollouter.setup_async(
+        tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
     )
@@ -110,6 +111,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         rollouter = _rollouter_without_datasets()
 
         await rollouter.setup_async(
+            tokenizer_config="tokenizer_config",
             renderer_config="renderer_config",
             hf_assets_path="hf_assets_path",
         )
@@ -125,6 +127,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         }
         assert worker_mesh.actor_mesh.setup_async.calls == [
             {
+                "tokenizer_config": "tokenizer_config",
                 "renderer_config": "renderer_config",
                 "hf_assets_path": "hf_assets_path",
             }

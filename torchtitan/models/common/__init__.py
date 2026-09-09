@@ -8,7 +8,7 @@ from .attention import (
     BaseQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     FusedQKVLinear,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -16,15 +16,16 @@ from .attention import (
     get_fixed_block_mask_mod,
     get_sliding_window_mask_mod,
     GQAttention,
+    InnerAttention,
     QKVLinear,
-    ScaledDotProductAttention,
-    VarlenAttention,
+    ScaledDotProductInnerAttention,
+    VarlenInnerAttention,
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, ScaledBiasRowwiseLinear
+from .linear import Linear, RouterGateLinear, ScaledBiasRowwiseLinear
 from .moe import MoE
 from .nn_modules import (
     Conv1d,
@@ -49,7 +50,7 @@ __all__ = [
     "Embedding",
     "FeedForward",
     "SigmoidGatedFeedForward",
-    "FlexAttention",
+    "FlexInnerAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",
     "GELU",
@@ -61,17 +62,19 @@ __all__ = [
     "GQAttention",
     "GroupNorm",
     "Identity",
+    "InnerAttention",
     "LayerNorm",
     "Linear",
     "MoE",
     "QKVLinear",
     "RMSNorm",
     "RoPE",
+    "RouterGateLinear",
     "ScaledBiasRowwiseLinear",
-    "ScaledDotProductAttention",
+    "ScaledDotProductInnerAttention",
     "SiLU",
     "TransformerBlock",
-    "VarlenAttention",
+    "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",
 ]

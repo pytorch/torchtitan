@@ -12,18 +12,18 @@ from typing import ClassVar
 
 from torchtitan.protocols.module import Module
 
-__all__ = ["ModelTransform", "retype_node"]
+__all__ = ["ModelConfigTransform", "retype_node"]
 
 
-class ModelTransform(ABC):
+class ModelConfigTransform(ABC):
     """A feature that rewrites a completed model config tree.
 
     ``run_after`` declares ordering. ``conflicts_with`` declares incompatible
     transforms. Validation belongs in ``Trainer.Config.__post_init__``.
     """
 
-    run_after: ClassVar[tuple[type["ModelTransform"], ...]] = ()
-    conflicts_with: ClassVar[tuple[type["ModelTransform"], ...]] = ()
+    run_after: ClassVar[tuple[type["ModelConfigTransform"], ...]] = ()
+    conflicts_with: ClassVar[tuple[type["ModelConfigTransform"], ...]] = ()
 
     @abstractmethod
     def transform(self, model: Module.Config) -> Module.Config:
@@ -37,11 +37,11 @@ class ModelTransform(ABC):
 def retype_node(
     existing: Module.Config,
     replacement: type[Module],
-    **overrides: object,
+    **updates: object,
 ) -> Module.Config:
     """Build ``replacement``'s config from ``existing``, keeping its fields.
 
-    Overrides set fields defined by the replacement config. Requiring
+    Updates set fields defined by the replacement config. Requiring
     inheritance preserves wrappers added by earlier transforms.
     """
     if not issubclass(replacement.Config, type(existing)):
@@ -49,6 +49,13 @@ def retype_node(
             f"{replacement.__qualname__}.Config must inherit "
             f"{type(existing).__qualname__}."
         )
+    replacement_fields = {f.name for f in fields(replacement.Config) if f.init}
+    unknown_fields = updates.keys() - replacement_fields
+    if unknown_fields:
+        names = ", ".join(sorted(unknown_fields))
+        raise ValueError(
+            f"{replacement.__qualname__}.Config has no init field: {names}."
+        )
     values = {f.name: getattr(existing, f.name) for f in fields(existing)}
-    values.update(overrides)
+    values.update(updates)
     return replacement.Config(**values)

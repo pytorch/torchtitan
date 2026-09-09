@@ -3,4 +3,4 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie
 portpicker
-git+https://github.com/PrimeIntellect-ai/renderers.git@main
+renderers==0.1.11

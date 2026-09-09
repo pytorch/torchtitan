@@ -6,7 +6,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -35,7 +35,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -259,35 +259,18 @@ class PolicyTrainer(Actor, Configurable):
             Model with random-initialized weights.
         """
 
-        from torchtitan.models.common.attention import VarlenAttention
+        from torchtitan.models.common.attention import VarlenInnerAttention
 
         attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
             attention_backend,
-            (VarlenAttention.Config, FlexAttention.Config),
+            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
         # Fill sharding configs on the config BEFORE build via the
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
-
-        # Check if the requested context exceeds the model context length.
-        max_context_length = model_spec.model.max_context_length
-        seq_len = config.training.max_context_length
-        if seq_len > max_context_length:
-            raise ValueError(
-                f"Training sequence length {seq_len} exceeds "
-                f"attention RoPE maximum supported sequence "
-                f"length {max_context_length}."
-            )
-
-        for layer_cfg in model_spec.model.layers:
-            attention_cfg = getattr(layer_cfg, "attention", None)
-            if attention_cfg is not None:
-                attention_cfg.rope = replace(
-                    attention_cfg.rope, max_context_length=seq_len
-                )
 
         # Apply this trainer's config overrides after update_from_config (which
         # sets the sharding configs the override factories read) and before build

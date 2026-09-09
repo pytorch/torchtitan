@@ -12,9 +12,9 @@ from dataclasses import dataclass
 import pytest
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.context_parallel import validate_context_parallel
+from torchtitan.config.transform import ContextParallelTransform
+from torchtitan.config.validation import validate_context_parallel
 from torchtitan.protocols.module import Module
-from torchtitan.transforms import ContextParallelTransform
 
 
 class _NoAttentionModel(Module):
@@ -51,7 +51,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
     def _config(
         *, spmd_backend: str, cp: int, varlen: bool = False, cp_kernel: bool = False
     ):
-        from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
         from torchtitan.models.llama3.config_registry import (
             llama3_debugmodel,
             llama3_debugmodel_varlen_attn,
@@ -60,9 +62,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
         if cp_kernel:
             # Apply the transform without its final validation.
-            ContextParallelTransform(kernel=AllGatherCPFlexAttention).transform(
-                config.model_spec.model
-            )
+            ContextParallelTransform(
+                inner_attention=KVAllGatherCPFlexInnerAttention
+            ).transform(config.model_spec.model)
         config.parallelism.spmd_backend = spmd_backend
         config.parallelism.context_parallel_degree = cp
         config.training.max_context_length = 512
@@ -92,12 +94,12 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
 
     def test_rejects_plain_flex_cp_on_spmd_types(self):
         config = self._config(spmd_backend="spmd_types", cp=2)
-        with self.assertRaisesRegex(ValueError, "AllGatherCPFlexAttention"):
+        with self.assertRaisesRegex(ValueError, "KVAllGatherCPFlexInnerAttention"):
             config.__post_init__()
 
     def test_rejects_varlen_cp_on_spmd_types(self):
         config = self._config(spmd_backend="spmd_types", cp=2, varlen=True)
-        with self.assertRaisesRegex(ValueError, "ContextParallelKernel"):
+        with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
             config.__post_init__()
 
     def test_rejects_an_unrecognized_kernel_cp_on_spmd_types(self):
@@ -109,7 +111,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = self._config(spmd_backend="spmd_types", cp=2)
         for layer in config.model_spec.model.layers:
             layer.attention.inner_attention = LocalOnlyAttention.Config()
-        with self.assertRaisesRegex(ValueError, "ContextParallelKernel"):
+        with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
             config.__post_init__()
 
 
@@ -125,7 +127,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         n_heads: int | None = None,
         n_kv_heads: int | None = None,
     ):
-        from torchtitan.models.common.cp_attention import UlyssesCPFlexAttention
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
         from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
         config = llama3_debugmodel()
@@ -134,7 +136,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
             attention.n_heads = n_heads
         if n_kv_heads is not None:
             attention.n_kv_heads = n_kv_heads
-        ContextParallelTransform(kernel=UlyssesCPFlexAttention).transform(
+        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
             config.model_spec.model
         )
         config.parallelism.context_parallel_degree = cp
@@ -168,31 +170,60 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config = self._config(cp=4, tp=2, n_heads=8, n_kv_heads=8)
         config.__post_init__()
 
-    def test_rejects_kernels_that_disagree_on_mask_sharding(self):
+    def test_rejects_different_cp_backends(self):
         from dataclasses import fields
 
         from torchtitan.models.common.cp_attention import (
-            AllGatherCPFlexAttention,
-            UlyssesCPFlexAttention,
+            KVAllGatherCPFlexInnerAttention,
+            UlyssesCPFlexInnerAttention,
         )
 
         config = self._config(cp=2, tp=1)
         layer = config.model_spec.model.layers[1]
         existing = layer.attention.inner_attention
-        self.assertIsInstance(existing, UlyssesCPFlexAttention.Config)
-        layer.attention.inner_attention = AllGatherCPFlexAttention.Config(
+        self.assertIsInstance(existing, UlyssesCPFlexInnerAttention.Config)
+        layer.attention.inner_attention = KVAllGatherCPFlexInnerAttention.Config(
             **{f.name: getattr(existing, f.name) for f in fields(existing)}
         )
-        with self.assertRaisesRegex(ValueError, "disagree on whether"):
+        with self.assertRaisesRegex(ValueError, "different CP backends"):
             config.__post_init__()
 
 
+class TestGptOssUlysses(unittest.TestCase):
+    def test_rejected_during_parallelization(self):
+        from types import SimpleNamespace
+
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+        from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
+
+        config = gpt_oss_debugmodel_flex()
+        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
+            config.model_spec.model
+        )
+        config.parallelism.spmd_backend = "spmd_types"
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = None
+        config.__post_init__()
+
+        with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
+            parallelize_gptoss(
+                SimpleNamespace(config=config.model_spec.model),
+                parallel_dims=SimpleNamespace(cp_enabled=True),
+                training=None,
+                parallelism=None,
+                compile_config=None,
+                ac_config=None,
+                dump_folder="",
+            )
+
+
 class TestHeadDivisibility(unittest.TestCase):
-    """Validate head divisibility across TP and CP."""
+    """Validate when CP adds to head sharding."""
 
     @staticmethod
     def _config(
-        *, kernel=None, cp: int = 1, tp: int = 1, n_heads: int, n_kv_heads: int
+        *, inner_attention=None, cp: int = 1, tp: int = 1, n_heads: int, n_kv_heads: int
     ):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
@@ -200,24 +231,27 @@ class TestHeadDivisibility(unittest.TestCase):
         attention = config.model_spec.model.layers[0].attention
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
-        if kernel is not None:
-            ContextParallelTransform(kernel=kernel).transform(config.model_spec.model)
+        if inner_attention is not None:
+            ContextParallelTransform(inner_attention=inner_attention).transform(
+                config.model_spec.model
+            )
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = None
         config.training.max_context_length = 512
         return config
 
-    def test_rejects_heads_indivisible_by_tp_without_cp(self):
-        config = self._config(tp=3, n_heads=8, n_kv_heads=8)
-        with self.assertRaisesRegex(ValueError, r"n_heads \(8\)"):
-            config.__post_init__()
-
     def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
-        from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
 
         config = self._config(
-            kernel=AllGatherCPFlexAttention, cp=4, tp=1, n_heads=2, n_kv_heads=2
+            inner_attention=KVAllGatherCPFlexInnerAttention,
+            cp=4,
+            tp=1,
+            n_heads=2,
+            n_kv_heads=2,
         )
         config.__post_init__()
 

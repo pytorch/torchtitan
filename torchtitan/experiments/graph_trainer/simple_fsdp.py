@@ -5,13 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import sys
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import count
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from spmd_types.types import partition_spec_get_shard
 from torch.distributed._tensor import (
     distribute_tensor,
     DTensor,
@@ -24,6 +27,11 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
+from torchtitan.components.quantization._fsdp_tensor import (
+    _ShardedFSDPTensor,
+    _UnshardedFSDPTensor,
+)
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.module import Module
 
 _active_parametrization = True
@@ -43,6 +51,65 @@ def disable_active_parametrization() -> Generator[None, None, None]:
 class MixedPrecisionPolicy:
     param_dtype: torch.dtype | None = None
     reduce_dtype: torch.dtype | None = None
+
+
+"""
+[Note: SimpleFSDP and spmd_types]
+
+Under spmd_types backend, SimpleFSDP differs slightly under model-parallel (TP/EP).
+Params arrive as annotated plain tensors, pre-sharded in module.parallelize,
+instead of DTensors.
+
+`data_parallel()` first performs full-mesh DTensor translation & FSDP shards,
+so rest-time params match DTensor backend (mesh is FSDP + TP), this is mostly
+so DCP integration / grad norm impl remains the same.
+
+In pre-forward (ReplicateComputation.forward), we additionally handle any BWD reductions
+FSDP is expected to do, as the sharding annotations (R/I@TP for SP on/off) are assuming
+FSDP does its job (R FWD <-> P BWD assumes FSDP redistributes to I).
+We lookup parameter typing on non-FSDP axes, and `convert(I->R)` in pre-forward
+(P->I all-reduce in post-backward) if annotated as R.
+For other types: I is no-op, S(i) is sharded at rest, P is banned in titan for now.
+"""
+
+
+def _prepare_spmd_parameter_for_fsdp(
+    tensor: torch.Tensor,
+    param_name: str,
+    non_dp_mesh: DeviceMesh | None,
+) -> tuple[torch.Tensor, dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType]]:
+    """Prepare an SPMD-annotated parameter for SimpleFSDP.
+
+    For the spmd_types backend, record the parameter's model-parallel axis types
+    for ReplicateComputation and restore its DTensor wrapper on ``non_dp_mesh``.
+    """
+    non_dp_mesh_types = {}
+    if non_dp_mesh is None:
+        return tensor, non_dp_mesh_types
+
+    if not spmd.has_local_type(tensor):
+        raise ValueError(
+            f"Parameter {param_name!r} must have an SPMD type before "
+            "applying SimpleFSDP with a non-DP mesh."
+        )
+    assert non_dp_mesh.mesh_dim_names is not None
+    local_type = spmd.get_local_type(tensor)
+    partition_spec = spmd.get_partition_spec(tensor)
+    for axis_name in non_dp_mesh.mesh_dim_names:
+        axis = spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))
+        non_dp_mesh_types[axis] = (
+            partition_spec_get_shard(partition_spec, axis) or local_type[axis]
+        )
+    placements = tuple(
+        spmd.spmd_type_to_dtensor_placement(
+            non_dp_mesh_types[spmd.MeshAxis.of(non_dp_mesh.get_group(axis_name))]
+        )
+        for axis_name in non_dp_mesh.mesh_dim_names
+    )
+    return (
+        DTensor.from_local(tensor, non_dp_mesh, placements, run_check=False),
+        non_dp_mesh_types,
+    )
 
 
 def _distribute_dtensor(
@@ -127,13 +194,13 @@ def _distribute_dtensor(
     )
 
 
-# Cache of (original_class, param_names) -> wrapper class, so all instances
-# of the same module type share one SimpleFSDP class for torch.compile reuse.
-_wrap_class_cache: dict[tuple[type, frozenset[str]], type] = {}
+_wrap_class_id = count()
 
 
 def _register_parametrization(
-    module: nn.Module, param_names: list[str], parametrization: nn.Module
+    module: nn.Module,
+    param_names: list[str],
+    parametrization_init: Callable[[str], nn.Module],
 ) -> None:
     """
     It works with state_dict without incurring parametrization calls because
@@ -142,26 +209,61 @@ def _register_parametrization(
     TODO: In checkpoint saving/loading, avoid parametrization calls when calling
     get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
-    param_name_to_property = {
-        param_name: property(
-            lambda self, pn=param_name: parametrization(self._parameters[pn])
+    param_name_to_property = {}
+    for param_name in param_names:
+        parametrization = parametrization_init(param_name)
+        param_name_to_property[param_name] = property(
+            lambda self, pn=param_name, p=parametrization: p(self._parameters[pn])
         )
-        for param_name in param_names
-    }
-    cache_key = (module.__class__, frozenset(param_names))
-    if cache_key in _wrap_class_cache:
-        module_cls = _wrap_class_cache[cache_key]
-    else:
-        module_cls = type(
-            f"SimpleFSDP{module.__class__.__name__}",
-            (module.__class__,),
-            param_name_to_property,
-        )
-        # Expose the dynamically created class as a real, importable symbol
-        # so that pickle/GraphPickler can resolve it during serialization.
-        sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
-        _wrap_class_cache[cache_key] = module_cls
+    module_cls = type(
+        f"SimpleFSDP{module.__class__.__name__}_{next(_wrap_class_id)}",
+        (module.__class__,),
+        param_name_to_property,
+    )
+    # Expose the dynamically created class as a real, importable symbol
+    # so that pickle/GraphPickler can resolve it during serialization.
+    sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
     module.__class__ = module_cls
+
+
+class _BuildUnshardedTensorFunction(torch.autograd.Function):
+    """Own the gradient edge for an unsharded tensor built outside FSDP2.
+
+    FSDP2 creates this edge internally for its post-all-gather output.
+    GraphTrainer's SimpleFSDP reconstructs the unsharded weight itself and so
+    has no such edge, and this routes its logical tensor gradient straight
+    back through the high-precision gather.
+
+    Lives here, with its only user, rather than beside the FSDP2 edge it
+    mirrors. ``forward`` does the same two steps ``fsdp_post_all_gather`` does
+    on its first unshard -- quantize, then wrap.
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(ctx, weight: torch.Tensor, wrapper: _ShardedFSDPTensor):
+        del ctx
+        # Unreachable today, so this is an invariant rather than a fallback:
+        # replicate_compute returns a plain local tensor under spmd_types, only
+        # partial_dtensor composed with TP or EP re-wraps it on the
+        # non-data-parallel mesh, and MXFP8Linear.Config.build rejects that
+        # backend outright. The two guards sit in different files, so assert
+        # here: a future format subclassing _ShardedFSDPTensor without that
+        # rejection should fail loudly rather than silently quantize a
+        # DTensor's local shard.
+        assert not isinstance(weight, DTensor), (
+            "unsharded tensor received a DTensor, so a format on this "
+            "lifecycle reached the partial_dtensor backend without rejecting "
+            "it; see MXFP8Linear.Config.build"
+        )
+        with torch.no_grad():
+            return _UnshardedFSDPTensor(weight, wrapper._build_operands(weight))
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_weight: torch.Tensor):
+        del ctx
+        return grad_weight, None
 
 
 class ReplicateComputation(Module):
@@ -171,6 +273,7 @@ class ReplicateComputation(Module):
         param_sharding: tuple[Placement, ...],
         mode: str,
         mp_policy: MixedPrecisionPolicy | None,
+        non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType] | None = None,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -183,6 +286,13 @@ class ReplicateComputation(Module):
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
+
+        # non_dp_mesh_types stores local type for non-FSDP (model-parallel) axes
+        # (e.g. TP on dense, EP on sparse), so SimpleFSDP handles any TP/EP grad
+        # reductions it's responsible for.
+        if get_spmd_backend() == "spmd_types":
+            assert non_dp_mesh_types is not None
+        self.non_dp_mesh_types = non_dp_mesh_types
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -219,9 +329,25 @@ class ReplicateComputation(Module):
             )
             non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
 
-            output = DTensor.from_local(
-                replicated_local_tensor, non_dp_mesh, non_dp_placements
-            )
+            if self.non_dp_mesh_types is not None:
+                output = replicated_local_tensor
+                for axis, axis_type in self.non_dp_mesh_types.items():
+                    if axis_type is spmd.R:
+                        # handle any BWD all-reduces on non-FSDP-axes that FSDP is responsible for.
+                        # e.g. TP RMSNorm w/ SP on, is annotated as spmd.R, we add P->I in BWD.
+                        # if SP off, annotation is spmd.I, no effect.
+                        output = spmd.convert(
+                            output,
+                            axis,
+                            src=spmd.I,
+                            dst=spmd.R,
+                            op_dtype=self.param_dtype,
+                            backward_options={"op_dtype": self.reduce_dtype},
+                        )
+            else:
+                output = DTensor.from_local(
+                    replicated_local_tensor, non_dp_mesh, non_dp_placements
+                )
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
                 placements=self.compute_placements,
@@ -246,8 +372,31 @@ class ReplicateComputation(Module):
         if not _active_parametrization:
             return x
 
-        output = self.replicate_compute(x)
-        return output
+        unsharded_weight = self.replicate_compute(x)
+        # Which operands to build is determined by the tensor subclass on the
+        # *sharded* parameter, and replicate_compute does not preserve it: its
+        # return value is a plain local tensor under spmd_types. Its input is
+        # not -- ``x`` is the sharded parameter, still a DTensor, because
+        # data_parallel translates parameters to full-mesh DTensors before
+        # this runs (replicate_compute reads ``x._spec`` on entry for the same
+        # reason). So take the subclass from ``x`` and the values from the
+        # return value. A parameter with no operands passes straight through,
+        # so this costs nothing when nothing is quantized.
+        #
+        # Read the local tensor directly rather than through ``to_local``:
+        # only the subclass type is wanted, so the autograd edge and the extra
+        # traced node that ``to_local`` adds would both be dead weight.
+        source = x._local_tensor
+        if isinstance(source, _UnshardedFSDPTensor):
+            raise RuntimeError(
+                "The data parallel parametrization received an already-"
+                "unsharded weight. FSDP2 builds the unsharded tensor in "
+                "fsdp_post_all_gather and owns its gradient edge, so building "
+                "one here as well would quantize the weight a second time."
+            )
+        if not isinstance(source, _ShardedFSDPTensor):
+            return unsharded_weight
+        return _BuildUnshardedTensorFunction.apply(unsharded_weight, source)
 
 
 def data_parallel(
@@ -256,7 +405,12 @@ def data_parallel(
     mode: str = "replicate",
     mp_policy: MixedPrecisionPolicy | None = None,
     shard_dim: int = 0,
+    # Model-parallel (TP/EP) mesh used to construct DTensor parameters on the
+    # full mesh.
+    # TODO: Unify this with device_mesh as a global data- and model-parallel mesh.
+    non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
+    """Shard ``model`` and install the data-parallel parametrization."""
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -280,8 +434,17 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        param_non_dp_mesh_types = {}
+
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                if get_spmd_backend() == "spmd_types":
+                    p, non_dp_mesh_types = _prepare_spmd_parameter_for_fsdp(
+                        p,
+                        p_name,
+                        non_dp_mesh,
+                    )
+                    param_non_dp_mesh_types[p_name] = non_dp_mesh_types
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
@@ -309,11 +472,16 @@ def data_parallel(
         _register_parametrization(
             mod,
             list(params_dict.keys()),
-            ReplicateComputation(
-                device_mesh,
-                param_sharding,
-                mode,
+            lambda param_name: ReplicateComputation(
+                device_mesh=device_mesh,
+                param_sharding=param_sharding,
+                mode=mode,
                 mp_policy=mp_policy,
+                non_dp_mesh_types=(
+                    param_non_dp_mesh_types.get(param_name, {})
+                    if get_spmd_backend() == "spmd_types"
+                    else None
+                ),
             ),
         )
     return model

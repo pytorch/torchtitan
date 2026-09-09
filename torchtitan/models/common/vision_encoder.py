@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Shared model-agnostic ViT building blocks for VLM vision encoders: a
-block-diagonal FlexAttention mask helper and the pre-norm transformer block
+block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 (attention + MLP) over token-major visual patches.
 
 RoPE differs per model, so each encoder passes it through the block to the
@@ -27,7 +27,7 @@ import torch
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import FlexAttention, local_head_split
+from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
 
@@ -44,7 +44,7 @@ def create_block_diagonal_mask(
     total_tokens: int,
     device: torch.device,
 ) -> BlockMask:
-    """Create a FlexAttention mask over contiguous packed segments."""
+    """Create a FlexInnerAttention mask over contiguous packed segments."""
     segment_ids = torch.repeat_interleave(
         torch.arange(segment_lengths.shape[0], device=device, dtype=torch.int32),
         segment_lengths.to(device=device, dtype=torch.int32),
@@ -88,7 +88,7 @@ class VisionMLP(Module):
 
 
 class VisionAttention(Module):
-    """Multi-head self-attention with FlexAttention over visual patches.
+    """Multi-head self-attention with FlexInnerAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
     applied via the injected ``rope_apply`` callable so this class is reused
@@ -103,7 +103,9 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+        inner_attention: Module.Config = field(
+            default_factory=FlexInnerAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()

@@ -9,9 +9,9 @@
 See ``torchtitan/experiments/rl/observability/metrics/README.md`` for setup and
 the exported metric definitions.
 
-The logger stays inert unless:
-  - ``OTEL_METRICS_EXPORTER`` is set to ``jsonl``; or
-  - ``OTEL_METRICS_EXPORTER`` is set to ``otlp`` and an OTLP endpoint is set.
+``VLLMGenerator`` registers the logger only when its TorchTitan config explicitly
+enables it. If logger is enabled, ``OTEL_METRICS_EXPORTER`` will be used to select
+the exporter.
 """
 
 from __future__ import annotations
@@ -176,16 +176,10 @@ class VllmOtelStatLogger(Configurable, StatLoggerBase):
 
         configured_exporter = os.environ.get("OTEL_METRICS_EXPORTER", "none")
         exporter_kind = configured_exporter.strip().lower()
-        if exporter_kind == "none":
-            logger.info(
-                "VllmOtelStatLogger inactive: set OTEL_METRICS_EXPORTER to "
-                "jsonl or otlp if you want to record vLLM metrics"
-            )
-            return
         if exporter_kind not in ("jsonl", "otlp"):
             raise ValueError(
                 "unsupported OTEL_METRICS_EXPORTER="
-                f"{configured_exporter!r}; expected one of: jsonl, none, otlp"
+                f"{configured_exporter!r}; expected one of: jsonl, otlp"
             )
         if os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() == "true":
             logger.warning(

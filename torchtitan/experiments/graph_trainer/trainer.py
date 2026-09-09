@@ -11,6 +11,7 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
@@ -179,11 +180,17 @@ class GraphTrainer(Trainer):
             extra_kwargs,
         )
 
-    def _load_precompiled_fx_trace(self, model: nn.Module) -> None:
+    def _load_precompiled_fx_trace(
+        self,
+        model: nn.Module,
+        runtime_args: tuple[Any, ...],
+    ) -> None:
         """Load a precompiled aot_fx_trace artifact from disk."""
         from torchtitan.experiments.graph_trainer.precompile import (
             _FX_TRACE_ARTIFACT_KEY,
             compute_config_fingerprint,
+            flatten_runtime_inputs,
+            get_spmd_precompile_meshes,
             precompile_fx_trace_load,
         )
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
@@ -201,10 +208,21 @@ class GraphTrainer(Trainer):
         config_fingerprint = compute_config_fingerprint(
             model, compile_config, self.parallel_dims
         )
+        precompile_meshes = (
+            get_spmd_precompile_meshes(self.parallel_dims)
+            if self.config.parallelism.spmd_backend == "spmd_types"
+            else None
+        )
 
         self._traced_step = precompile_fx_trace_load(
             storage,
             expected_fingerprint=config_fingerprint,
+            example_inputs=flatten_runtime_inputs(
+                model,
+                runtime_args,
+                {},
+                precompile_meshes=precompile_meshes,
+            ),
         )
 
     def _make_fx_forward_backward_step(
@@ -219,10 +237,17 @@ class GraphTrainer(Trainer):
         maybe_register_blockmask_pytree_node()
         if self._traced_step is None:
             if self.config.compile.precompile_artifact_dir:
-                self._load_precompiled_fx_trace(model)
+                self._load_precompiled_fx_trace(
+                    model,
+                    (inputs, labels, global_valid_tokens, extra_kwargs),
+                )
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
-                with self.train_context(), log_timer("minimal_fx_tracer"):
+                trace_context = dist_utils.get_spmd_context(
+                    parallel_dims=self.parallel_dims,
+                    spmd_typechecking=False,
+                )
+                with trace_context(), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
@@ -256,7 +281,21 @@ class GraphTrainer(Trainer):
                     self._traced_step.gm, self._traced_step.example_inputs
                 )
         with self.train_context():
-            outputs = run_traced(self._traced_step, module=model)(
+            precompile_meshes = None
+            if (
+                self.config.compile.precompile_artifact_dir
+                and self.config.parallelism.spmd_backend == "spmd_types"
+            ):
+                from torchtitan.experiments.graph_trainer.precompile import (
+                    get_spmd_precompile_meshes,
+                )
+
+                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+            outputs = run_traced(
+                self._traced_step,
+                module=model,
+                precompile_meshes=precompile_meshes,
+            )(
                 inputs,
                 labels,
                 global_valid_tokens,
