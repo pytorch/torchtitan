@@ -50,10 +50,8 @@ class KimiFeedForward(FeedForward):
         self.beta = config.beta
         self.linear_beta = config.linear_beta
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(
-            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
-        )
+    def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:
+        return _situ_glu(gate_TF, up_TF, self.beta, self.linear_beta)
 
 
 class KimiGroupedExperts(GroupedExperts):

@@ -140,10 +140,10 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 set_gqa_attention_sharding(attn, enable_sp=False)
 
     def test_bias_on_w1_w3_is_rejected(self):
-        """A bias must fail at config time, not silently fall back to stock.
+        """A bias must fail at config time, not silently disable dist-GEMM.
 
-        The fused all-gather takes no per-weight bias. Accepting the config and
-        quietly running the unfused FFN would look exactly like the feature
+        The dist-GEMM path does not support bias. Accepting the config and
+        quietly running the standard FFN would look exactly like the feature
         working.
         """
         from torchtitan.models.common.linear import Linear
@@ -247,10 +247,10 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
 class TestFusedFeedForwardNumerics(DTensorTestBase):
-    """The fused FFN must match the stock one under TP+SP.
+    """The dist-GEMM FFN must match the standard one under TP+SP.
 
     Proves the fused path actually runs (a silent fallback would still match, so
-    the weights are sharded per rank -- the stock module could not consume them)
+    the weights are sharded per rank -- the standard module could not consume them)
     and that the flat token layout is preserved through both collectives.
     """
 
@@ -259,7 +259,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         return 2
 
     @with_comms
-    def test_matches_stock_feed_forward(self):
+    def test_matches_standard_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.config_utils import make_ffn_config
 
@@ -269,7 +269,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         init = {"weight": torch.nn.init.zeros_}
 
         torch.manual_seed(0)
-        stock = (
+        standard = (
             make_ffn_config(
                 dim=dim, hidden_dim=hidden, w1_param_init=init, w2w3_param_init=init
             )
@@ -289,24 +289,21 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         )
 
         with torch.no_grad():
-            for m in (stock, fused):
-                for w in (m.w1.weight, m.w2.weight, m.w3.weight):
+            for m in (standard, fused):
+                for w in (m.w13.weight, m.w2.weight):
                     torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                     w.copy_(torch.randn_like(w) * 0.1)
 
         x = torch.randn(num_tokens, dim, device=dev)
-        ref = stock(x)
+        ref = standard(x)
 
-        # shard the fused module's weights: w1/w3 colwise, w2 rowwise
+        # Shard the fused module's weights: w13 colwise, w2 rowwise.
         with torch.no_grad():
-            fused.w1.weight = torch.nn.Parameter(
-                stock.w1.weight.chunk(R, 0)[self.rank].contiguous()
-            )
-            fused.w3.weight = torch.nn.Parameter(
-                stock.w3.weight.chunk(R, 0)[self.rank].contiguous()
+            fused.w13.weight = torch.nn.Parameter(
+                standard.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
-                stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
+                standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
@@ -326,10 +323,10 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
 class TestFusedSwigluOverlapNumerics(DTensorTestBase):
-    """The fused-``w13`` FFN with TP overlap must match the stock FFN under TP+SP.
+    """The Triton-activation FFN with TP overlap must match native SwiGLU.
 
     Same argument as TestFusedFeedForwardNumerics: the weights are sharded per
-    rank, so a silent fallback to an unfused path could not consume them. Lives
+    rank, so a silent fallback to the standard path could not consume them. Lives
     here rather than in test_fused_swiglu.py, which is CPU-only by design.
     """
 
@@ -338,7 +335,7 @@ class TestFusedSwigluOverlapNumerics(DTensorTestBase):
         return 2
 
     @with_comms
-    def test_matches_stock_feed_forward(self):
+    def test_matches_native_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.config_utils import make_ffn_config
         from torchtitan.overrides.fused_swiglu import (
@@ -361,36 +358,28 @@ class TestFusedSwigluOverlapNumerics(DTensorTestBase):
             )
 
         torch.manual_seed(0)
-        stock = make().build().to(dev)
+        native = make().build().to(dev)
         fused = (
             dist_gemm_fused_swiglu(make(tp_gemm_backend="dist_gemm")).build().to(dev)
         )
         self.assertIsInstance(fused, DistGEMMFusedSwiGLU)
 
         with torch.no_grad():
-            for w in (stock.w1.weight, stock.w2.weight, stock.w3.weight):
+            for w in (native.w13.weight, native.w2.weight):
                 torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                 w.copy_(torch.randn_like(w) * 0.1)
 
         x = torch.randn(num_tokens, dim, device=dev)
-        ref = stock(x)
+        ref = native(x)
 
         # w13.weight is (2 * hidden/R, dim), with this rank's interleaved
         # colwise slice of both halves.
         with torch.no_grad():
             fused.w13.weight = torch.nn.Parameter(
-                torch.stack(
-                    [
-                        stock.w1.weight.chunk(R, 0)[self.rank],
-                        stock.w3.weight.chunk(R, 0)[self.rank],
-                    ],
-                    dim=1,
-                )
-                .flatten(0, 1)
-                .contiguous()
+                native.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
-                stock.w2.weight.chunk(R, 1)[self.rank].contiguous()
+                native.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))

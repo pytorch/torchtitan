@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 import spmd_types as spmd
@@ -13,11 +14,19 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    _merge_linear_configs,
+    _register_merged_linear_builder,
+    Linear,
+)
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
+
+# Shape suffix legend for merged output projections:
+#   T = token dimensions, F = one logical output dimension,
+#   N = number of merged logical projections
 
 
 def _lora_adapter_sharding(
@@ -55,7 +64,81 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
+_merged_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
+
+
+def _get_merged_lora_cls(parent_cls: type) -> type:
+    """Return a fused-output Linear with independent logical LoRA adapters.
+
+    A single adapter over the merged outputs would couple the ranks of the
+    logical w1 and w3 updates. Keeping one adapter pair per slice preserves the
+    behavior of targeting either projection independently while the frozen base
+    weight still uses one physical GEMM.
+    """
+    if parent_cls in _merged_lora_class_cache:
+        return _merged_lora_class_cache[parent_cls]
+
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
+
+    class MergedLoRALinear(parent_cls):  # type: ignore[valid-type, misc]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            logical_output_slices: tuple[tuple[str, int], ...]
+            lora_specs: tuple[tuple[str, int, float, ShardingConfig | None], ...]
+
+        def __init__(self, config: Config) -> None:
+            super().__init__(config)
+            for param in nn.Module.parameters(self, recurse=False):
+                param.requires_grad_(False)
+
+            self.logical_output_slices = config.logical_output_slices
+            self.lora_a = nn.ModuleDict()
+            self.lora_b = nn.ModuleDict()
+            self._lora_scaling = {}
+            for name, rank, alpha, base_sharding in config.lora_specs:
+                output_size = dict(config.logical_output_slices)[name]
+                lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(base_sharding)
+                self.lora_a[name] = Linear.Config(
+                    in_features=config.in_features,
+                    out_features=rank,
+                    bias=False,
+                    sharding_config=lora_a_sharding,
+                    param_init={
+                        "weight": lambda weight: nn.init.kaiming_uniform_(
+                            weight, a=math.sqrt(5)
+                        ),
+                    },
+                ).build()
+                self.lora_b[name] = Linear.Config(
+                    in_features=rank,
+                    out_features=output_size,
+                    bias=False,
+                    sharding_config=lora_b_sharding,
+                    param_init={"weight": nn.init.zeros_},
+                ).build()
+                self._lora_scaling[name] = alpha / rank
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            base_out_TFN = (
+                super()
+                .forward(input)
+                .unflatten(-1, (-1, len(self.logical_output_slices)))
+            )
+            logical_outputs_TF = list(base_out_TFN.unbind(-1))
+            for index, (name, _) in enumerate(self.logical_output_slices):
+                if name in self.lora_a:
+                    lora_out_TF = self.lora_b[name](self.lora_a[name](input))
+                    logical_outputs_TF[index] = (
+                        logical_outputs_TF[index]
+                        + self._lora_scaling[name] * lora_out_TF
+                    )
+            return torch.stack(logical_outputs_TF, dim=-1).flatten(-2)
+
+    MergedLoRALinear.__name__ = f"MergedLoRA{parent_cls.__name__}"
+    MergedLoRALinear.__qualname__ = f"MergedLoRA{parent_cls.__name__}"
+    _merged_lora_class_cache[parent_cls] = MergedLoRALinear
+    return MergedLoRALinear
 
 
 def _get_lora_cls(parent_cls: type) -> type:
@@ -109,6 +192,63 @@ def _get_lora_cls(parent_cls: type) -> type:
     LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
     _lora_class_cache[parent_cls] = LoRALinear
+
+    def build_merged_lora_linear(
+        logical_configs: tuple[tuple[str, Linear.Config], ...],
+        param_init: dict[str, Callable] | None,
+    ) -> Linear:
+        base_configs = []
+        lora_specs = []
+        parent_field_names = {
+            field.name for field in fields(parent_config_cls) if field.init
+        }
+        for name, config in logical_configs:
+            if not isinstance(config, parent_config_cls):
+                raise ValueError(
+                    "Cannot fuse LoRA projections backed by different Linear "
+                    f"implementations: {name} uses {type(config).__name__}."
+                )
+            base_configs.append(
+                (
+                    name,
+                    parent_config_cls(
+                        **{
+                            field_name: getattr(config, field_name)
+                            for field_name in parent_field_names
+                        }
+                    ),
+                )
+            )
+            if isinstance(config, LoRALinear.Config):
+                lora_specs.append(
+                    (
+                        name,
+                        config.rank,
+                        config.alpha,
+                        config.sharding_config,
+                    )
+                )
+
+        merged_base_config = _merge_linear_configs(
+            tuple(base_configs),
+            param_init,
+            config_type=parent_config_cls,
+        )
+        merged_lora_cls = _get_merged_lora_cls(parent_cls)
+        merged_config_cls = merged_lora_cls.Config  # pyrefly: ignore[missing-attribute]
+        return merged_config_cls(
+            **{
+                field.name: getattr(merged_base_config, field.name)
+                for field in fields(parent_config_cls)
+                if field.init
+            },
+            logical_output_slices=tuple(
+                (name, config.out_features) for name, config in logical_configs
+            ),
+            lora_specs=tuple(lora_specs),
+        ).build()
+
+    _register_merged_linear_builder(LoRALinear.Config, build_merged_lora_linear)
     return LoRALinear
 
 

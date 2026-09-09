@@ -13,7 +13,8 @@
   from ``Configurable.Config``.
 """
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, fields
 
 import spmd_types as spmd
 import torch
@@ -43,6 +44,107 @@ class Linear(nn.Linear, Module):
             config.out_features,
             bias=config.bias,
         )
+
+
+_MergedLinearBuilder = Callable[
+    [tuple[tuple[str, Linear.Config], ...], dict[str, Callable] | None], Linear
+]
+_merged_linear_builders: dict[type[Linear.Config], _MergedLinearBuilder] = {}
+
+
+def _register_merged_linear_builder(
+    config_type: type[Linear.Config], builder: _MergedLinearBuilder
+) -> None:
+    """Register how a transformed Linear config participates in one GEMM.
+
+    Most converters can use the default merge below because both logical
+    projections become the same Linear implementation. LoRA registers a custom
+    builder because its adapters must remain independent logical projections.
+    """
+    _merged_linear_builders[config_type] = builder
+
+
+def _merge_linear_configs(
+    logical_configs: tuple[tuple[str, Linear.Config], ...],
+    param_init: dict[str, Callable] | None,
+    *,
+    config_type: type[Linear.Config] | None = None,
+) -> Linear.Config:
+    """Merge compatible logical output projections into one Linear config.
+
+    Every option except output size and initialization must match so the result
+    can be represented by one physical GEMM without changing either projection's
+    requested behavior.
+    """
+    if not logical_configs:
+        raise ValueError("At least one logical Linear config is required")
+
+    first_name, first_config = logical_configs[0]
+    merged_config_type = config_type or type(first_config)
+    comparable_fields = {
+        field.name
+        for field in fields(merged_config_type)
+        if field.init and field.name not in ("out_features", "param_init")
+    }
+
+    for logical_name, config in logical_configs:
+        compatible_type = (
+            isinstance(config, merged_config_type)
+            if config_type is not None
+            else type(config) is merged_config_type
+        )
+        if not compatible_type:
+            raise ValueError(
+                "Cannot fuse logical Linear projections with different "
+                f"implementations: {first_name} uses {type(first_config).__name__}, "
+                f"but {logical_name} uses {type(config).__name__}."
+            )
+        for field_name in comparable_fields:
+            if getattr(config, field_name) != getattr(first_config, field_name):
+                raise ValueError(
+                    "Cannot fuse logical Linear projections with different "
+                    f"{field_name}: {first_name} and {logical_name}."
+                )
+
+    config_kwargs = {
+        field.name: getattr(first_config, field.name)
+        for field in fields(merged_config_type)
+        if field.init
+    }
+    config_kwargs["out_features"] = sum(
+        config.out_features for _, config in logical_configs
+    )
+    config_kwargs["param_init"] = param_init
+    return merged_config_type(**config_kwargs)
+
+
+def _build_merged_linear(
+    logical_configs: tuple[tuple[str, Linear.Config], ...],
+    param_init: dict[str, Callable] | None,
+) -> Linear:
+    """Build one physical Linear while retaining its logical output slices.
+
+    ``_logical_output_slices`` lets checkpoint and serving integrations recover
+    the logical projection names even though ``named_parameters()`` sees only the
+    merged module.
+    """
+    builders = {
+        builder
+        for _, config in logical_configs
+        if (builder := _merged_linear_builders.get(type(config))) is not None
+    }
+    if len(builders) > 1:
+        raise ValueError("Logical Linear projections require incompatible mergers")
+
+    if builders:
+        merged = next(iter(builders))(logical_configs, param_init)
+    else:
+        merged = _merge_linear_configs(logical_configs, param_init).build()
+
+    merged._logical_output_slices = tuple(  # pyrefly: ignore[bad-argument-type]
+        (name, config.out_features) for name, config in logical_configs
+    )
+    return merged
 
 
 @spmd.register_local_autograd_function
