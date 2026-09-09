@@ -27,8 +27,8 @@ _DIM = 16
 _HIDDEN = 32
 _E = 4
 
-# fused_swiglu registers both the dense-FFN and routed-experts (fused_grouped_experts)
-# overrides; each is activated by its own module.function target.
+# fused_swiglu registers Triton activation overrides for both the dense FFN and
+# routed experts; each is activated by its own module.function target.
 _FUSED_SWIGLU = (
     "torchtitan.overrides.fused_swiglu.fused_swiglu",
     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
