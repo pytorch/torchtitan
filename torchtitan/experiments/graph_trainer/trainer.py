@@ -29,7 +29,6 @@ from torchtitan.experiments.graph_trainer.gradient_accumulation import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
-    run_traced,
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
@@ -47,6 +46,7 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
 )
+from torchtitan.experiments.graph_trainer.runner import GraphRunner
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
@@ -145,6 +145,8 @@ class GraphTrainer(Trainer):
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
+        self._graph_runner: GraphRunner | None = None
+        self._trainable_params: tuple[torch.Tensor, ...] | None = None
         self._graph_gradient_state: GraphGradientState | None = None
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
@@ -192,11 +194,7 @@ class GraphTrainer(Trainer):
             )
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
-        params = [
-            p
-            for _, p in model.named_parameters(remove_duplicate=False)
-            if p.requires_grad
-        ]
+        params = self._get_trainable_parameters(model)
         return self._make_fx_forward_backward_step(
             model,
             inputs,
@@ -257,7 +255,7 @@ class GraphTrainer(Trainer):
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor,
-        params: list[torch.Tensor],
+        params: tuple[torch.Tensor, ...],
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         maybe_register_blockmask_pytree_node()
@@ -316,8 +314,9 @@ class GraphTrainer(Trainer):
                 compile_config=self.config.compile,
                 respect_disable_passes=self.config.compile.enable_passes,
             )
-        with self.train_context():
-            precompile_meshes = None
+        assert self._traced_step is not None
+        if self._graph_runner is None:
+            runtime_meshes = ()
             if (
                 self.config.compile.precompile_artifact_dir
                 and self.config.parallelism.spmd_backend == "spmd_types"
@@ -326,15 +325,17 @@ class GraphTrainer(Trainer):
                     get_spmd_precompile_meshes,
                 )
 
-                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
-            outputs = run_traced(
+                runtime_meshes = tuple(get_spmd_precompile_meshes(self.parallel_dims))
+            self._graph_runner = GraphRunner(
                 self._traced_step,
                 module=model,
-                precompile_meshes=precompile_meshes,
                 graph_state=(
                     gradient_state.graph_state if gradient_state is not None else None
                 ),
-            )(
+                runtime_meshes=runtime_meshes,
+            )
+        with self.train_context():
+            outputs = self._graph_runner(
                 inputs,
                 labels,
                 global_valid_tokens,
@@ -369,6 +370,22 @@ class GraphTrainer(Trainer):
                 self.optimizers,
             )
         return self._graph_gradient_state
+
+    def _get_trainable_parameters(
+        self,
+        model: nn.Module,
+    ) -> tuple[torch.Tensor, ...]:
+        if self._graph_gradient_state is not None:
+            return self._graph_gradient_state.parameters
+        if self._trainable_params is None:
+            # remove_duplicate=False preserves duplicate parameter entries from
+            # weight tying (for example, shared embedding/output weights).
+            self._trainable_params = tuple(
+                parameter
+                for _, parameter in model.named_parameters(remove_duplicate=False)
+                if parameter.requires_grad
+            )
+        return self._trainable_params
 
     def _validate_inplace_graph_gradient_accumulation_config(self) -> None:
         if not self.config.compile.enable_inplace_graph_gradient_accumulation:
@@ -435,6 +452,9 @@ class GraphTrainer(Trainer):
             self._pinned_pool_ctx = None
 
         super().close()
+
+        self._graph_runner = None
+        self._trainable_params = None
 
         # See Note [explicit cudagraph teardown] in cudagraph.py
         cudagraph_teardown()

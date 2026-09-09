@@ -101,6 +101,8 @@ def build_minimal_trainer(
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
+        trainer._graph_runner = None
+        trainer._trainable_params = None
         trainer._graph_gradient_state = None
     else:
         trainer.config = SimpleNamespace(

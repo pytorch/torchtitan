@@ -232,9 +232,8 @@ class GraphGradientState:
             raise RuntimeError(
                 "GraphTrainer gradient-state names or order changed after tracing"
             )
-        for fqn, parameter, buffer, storage_key in zip(
+        for fqn, buffer, storage_key in zip(
             self.parameter_fqns,
-            self.parameters,
             self.buffers,
             self.buffer_storage_keys,
             strict=True,
