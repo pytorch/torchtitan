@@ -263,8 +263,6 @@ class DSV4FlexAttention(FlexAttention):
         kv = kv.expand(-1, q.size(1), -1)
 
         block_mask = attention_masks
-        if block_mask is None:
-            block_mask = self.build_block_mask(seqlen=seqlen, device=q.device)
 
         def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
             return torch.where(kv_idx == sink_idx, attn_sink[h], score)
