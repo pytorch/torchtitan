@@ -346,7 +346,7 @@ def _dist_muon_optimizer(
         "eps": 1e-8,
         "weight_decay": 0.1,
     }
-    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    expert_projections = ("w13", "w2_EDF")
 
     def compute_shardings_for_layer(
         layer_id: int,
@@ -432,11 +432,11 @@ def _dist_muon_optimizer(
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
         rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
-        r"feed_forward\.w[123]\.weight|"
+        r"feed_forward\.(?:w13|w2)\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
         # SVD-entropy gain over AdamW is larger than for other matrix groups.
         r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.w[123]\.weight"
+        r"moe\.shared_experts\.(?:w13|w2)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(

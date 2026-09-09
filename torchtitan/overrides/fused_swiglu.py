@@ -13,13 +13,12 @@ one physical ``w13`` linear. ``fused_swiglu`` only replaces the torch-native
 SiLU and multiply operations with a Triton kernel.
 
 ``dist_gemm_fused_swiglu`` preserves the dist-GEMM collective overlap while
-using the same Triton activation. ``fused_grouped_experts`` fuses both the
-grouped-expert projections and activation because the default grouped-expert
-implementation still stores separate ``w1`` and ``w3`` parameters.
+using the same Triton activation. ``fused_grouped_experts`` similarly replaces
+the grouped experts' torch-native SiLU and multiply with the Triton operation;
+their gate and up projection is already fused by default.
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
@@ -33,7 +32,6 @@ from torchtitan.config import derive, override
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
     "DistGEMMFusedSwiGLU",
@@ -333,33 +331,6 @@ silu_and_mul_op.register_autograd(
 )
 
 
-def _make_fused_gate_up_init(
-    gate_init: Callable,
-    up_init: Callable,
-    *,
-    gate_up_axis: int,
-) -> Callable:
-    """Build an initializer for a fused gate/up weight from per-half initializers.
-
-    The fused weight has a size-2 ``gate_up_axis`` (index 0 = gate / stock w1,
-    index 1 = up / stock w3). Each half is initialized with its own initializer
-    because the gate and up projections differ (e.g. up shares w2's depth-scaled
-    init), so initializing the whole tensor at once would mis-init the up half.
-    Used by the grouped FusedGroupedExperts ``(E, F, 2, D)`` override and by
-    the logical 3D view of the dense fused linear weight.
-    """
-
-    def _init(t: torch.Tensor) -> None:
-        gate_idx: list[int | slice] = [slice(None)] * t.ndim
-        up_idx: list[int | slice] = [slice(None)] * t.ndim
-        gate_idx[gate_up_axis] = 0
-        up_idx[gate_up_axis] = 1
-        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
-        up_init(t[tuple(up_idx)])  # up (stock w3)
-
-    return _init
-
-
 def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     """``silu(gate) * up`` via the fused ``torchtitan::silu_and_mul`` op."""
     if isinstance(gate, DTensor):
@@ -447,127 +418,27 @@ def dist_gemm_fused_swiglu(
 
 
 class FusedGroupedExperts(GroupedExperts):
-    """Routed experts (grouped GEMM) with the gate and up projections fused.
-
-    ``w13`` has shape ``(num_experts, hidden_dim, 2, dim)``: ``w13[:, :, 0]`` is
-    the gate (original ``w1_EFD``) and ``w13[:, :, 1]`` the up (original ``w3_EFD``). A
-    single grouped GEMM computes both projections; the fused
-    ``torchtitan::silu_and_mul`` op forms the activation (skipping inactive
-    capacity-padding rows via grouped_mm offsets). The down projection
-    ``w2_EDF`` is reused as-is.
-
-    The explicit ``2`` axis stays unsharded and matches the logical
-    ``(hidden_dim, 2, dim)`` view used by dense FusedSwiGLU. TP shards
-    ``hidden_dim`` (dim 1) and EP shards the expert axis (dim 0), so each rank
-    keeps matching gate/up slices. Checkpoints save original ``w1_EFD`` /
-    ``w3_EFD`` separately.
-    """
+    """GroupedExperts using the fused Triton SiLU-and-multiply operation."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
         pass
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-
-        # delete separate w1/w3 and fuse
-        del self.w1_EFD
-        del self.w3_EFD
-        self.w13 = torch.nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, 2, config.dim)
-        )
-
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
-
-    def forward(
+    def _activation(
         self,
-        x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        gate_RF: torch.Tensor,
+        up_RF: torch.Tensor,
+        offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w13, DTensor):
-            w13 = self.w13.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-        else:
-            w13 = self.w13
-            w2_EDF = self.w2_EDF
-
-        E, F, _, D = w13.shape
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-
-        # The fused parameter stores gate and up interleaved as (E, F, 2, D);
-        # the grouped GEMM consumes them as one (E, 2F, D) expert weight.
-        w13_E_2F_D = w13.bfloat16().reshape(E, F * 2, D)
-        gate_up_R2F = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w13_E_2F_D, offs=offsets_E
-        )
-        gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
-        h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Save fused as ``w1_EFD`` / ``w3_EFD`` on save."""
-        w13 = state_dict.pop(f"{prefix}w13")
-        state_dict[f"{prefix}w1_EFD"] = w13[:, :, 0, :].contiguous()
-        state_dict[f"{prefix}w3_EFD"] = w13[:, :, 1, :].contiguous()
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Combine separate ``w1_EFD`` / ``w3_EFD`` back into the fused ``w13`` on load."""
-        w1_key, w3_key = f"{prefix}w1_EFD", f"{prefix}w3_EFD"
-        if w1_key in state_dict and w3_key in state_dict:
-            state_dict[f"{prefix}w13"] = torch.stack(
-                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
-            )
-
-
-def _fuse_w13_grouped_experts_param_init(param_init: dict | None) -> dict | None:
-    """Remap ``w1_EFD`` / ``w3_EFD`` initializers onto the fused ``w13``.
-
-    Other entries (e.g. ``w2_EDF``) are kept as-is.
-    """
-    if param_init is None:
-        return None
-    w1_init = param_init.get("w1_EFD")
-    w3_init = param_init.get("w3_EFD")
-    fused = {k: v for k, v in param_init.items() if k not in ("w1_EFD", "w3_EFD")}
-    if w1_init is not None and w3_init is not None:
-        fused["w13"] = _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=2)
-    return fused or None
-
-
-def _fuse_w13_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
-    """Replace the ``w1_EFD`` / ``w3_EFD`` state shardings with one for ``w13``.
-
-    ``w13`` (E, F, 2, D) shards on the same axes as ``w1_EFD`` (E, F, D): EP on
-    dim 0 (expert) and TP on dim 1 (hidden); the ``2`` axis (dim 2) stays
-    unsharded. Everything else (``w2_EDF``, local_map, in/out shardings) is kept.
-    """
-    state = dict(base.state_shardings)
-    w1_layout = state.pop("w1_EFD")
-    state.pop("w3_EFD")
-    state["w13"] = w1_layout
-    return replace(base, state_shardings=state)
+        return silu_and_mul_op(gate_RF, up_RF, offsets_E)
 
 
 @override(
     target=GroupedExperts.Config,
-    description="Fuse routed-experts gate+up into one weight; fused SiLU-and-mul.",
+    exact=True,
+    description="Fuse routed-experts SiLU and multiply operations with Triton.",
 )
 def fused_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
-    # Remap w1_EFD/w3_EFD param-init and state shardings onto the fused w13.
-    # Idempotent: return cfg unchanged if it is not a stock GroupedExperts.Config
-    # (already fused, or a subclass like GptOssGroupedExperts).
-    if type(cfg) is not GroupedExperts.Config:
-        return cfg
-
-    param_init = _fuse_w13_grouped_experts_param_init(cfg.param_init)
-    fused = derive(cfg, FusedGroupedExperts.Config, param_init=param_init)
-    base = cfg.sharding_config
-    if base is not None:
-        fused.sharding_config = _fuse_w13_grouped_experts_sharding(base)
-    return fused
+    return derive(cfg, FusedGroupedExperts.Config)
