@@ -26,3 +26,24 @@ def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
     config = llama3_debugmodel_mxfp8()
     config.parallelism.data_parallel_shard_degree = 2
     return config
+
+
+def graph_trainer_llama3_debugmodel_mxfp8_fsdp2_pp2() -> Trainer.Config:
+    from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+        graph_trainer_llama3_debugmodel_mxfp8,
+    )
+
+    config = graph_trainer_llama3_debugmodel_mxfp8()
+    config.compile.disable_passes = ["cudagraph_pass"]
+    config.compile.enable_fsdp_dense_region_overlap = True
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return config

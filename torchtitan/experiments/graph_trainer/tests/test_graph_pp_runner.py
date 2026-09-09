@@ -39,6 +39,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
     _compile_graph_pp_module,
     _execute_graph_module,
     GraphTrainerStageGraphProvider,
+    GraphTrainerStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _validate_graph_pp_config,
@@ -810,6 +811,33 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(len(actual_values), len(expected_values))
         for actual, expected in zip(actual_values, expected_values, strict=True):
             self.assertIs(actual, expected)
+
+    def test_forward_remaps_inputs_after_unshard_collapses_flat_params(self) -> None:
+        graphs = GraphTrainerStageGraphs(
+            modules=types.SimpleNamespace(unshard=object()),
+            meta=types.SimpleNamespace(
+                num_flat_param_values=2,
+                num_fw_param_inputs=1,
+                fwd_input_names=("unsharded_weight", "x"),
+                fwd_flat_input_indices=(2,),
+                is_last_stage=False,
+            ),
+        )
+        unsharded_weight = object()
+        x = torch.randn(2, 4)
+
+        forward_args = graphs._forward_args(
+            (x,),
+            {},
+            None,
+            {},
+            unsharded_param_values=[unsharded_weight],
+            flat_buffer_values=[],
+            runtime_validate=True,
+        )
+
+        self.assertIs(forward_args[0], unsharded_weight)
+        self.assertIs(forward_args[1], x)
 
     def test_stage_trace_preserves_buffers_and_forward_keeps_mutations(self) -> None:
         class BufferCountingStage(nn.Module):

@@ -35,6 +35,7 @@ from collections.abc import Callable
 
 import torch
 
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
@@ -71,6 +72,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
     get_fsdp_param_module_order,
     get_transformer_block_bucket_counts,
+    get_transformer_block_layer_ids,
     joint_transformer_block_bucketing_reordering_pass,
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
@@ -328,6 +330,10 @@ def compile_time_passes(
         enable_fsdp_dense_region_overlap = False
 
     if enable_fsdp_dense_region_overlap:
+        require_backward_all_gathers = get_fsdp_reshard_after_forward_policy(
+            config.parallelism.fsdp_reshard_after_forward,
+            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+        )
         # Move FSDP comm launches into neighboring transformer dense regions.
         # This is useful both as an EP-overlap companion and as a standalone
         # FSDP scheduling ablation, so it is controlled by its explicit flag.
@@ -340,6 +346,11 @@ def compile_time_passes(
                     module_bucket_plans,
                     n_layers=n_layers,
                 ),
+                local_layer_ids=get_transformer_block_layer_ids(
+                    traced_result.state_fqns,
+                    n_layers=n_layers,
+                ),
+                require_backward_all_gathers=require_backward_all_gathers,
                 strict=True,
             )
         )
