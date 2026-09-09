@@ -10,7 +10,9 @@ from torchtitan.config.transform import apply_transforms, ContextParallelTransfo
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.muse_glimmer import model_registry
 from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_30b
 from torchtitan.protocols.module import Module
 from torchtitan.trainer import Trainer
@@ -48,4 +50,19 @@ def muse_glimmer_30b_ulysses_cp2() -> Trainer.Config:
         cp_degree=2,
         # Ulysses does not support token reordering.
         load_balancer=None,
+    )
+
+
+def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
+    """Muse Glimmer 30B with varlen Ulysses CP degree 2.
+
+    The model has two KV heads, which limits Ulysses CP to degree 2.
+    """
+    config = muse_glimmer_30b()
+    config.model_spec = model_registry("30B", attn_backend="varlen")
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )

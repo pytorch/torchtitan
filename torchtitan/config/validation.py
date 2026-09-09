@@ -23,7 +23,7 @@ def validate_context_parallel(
     """Validate the CP backend and each inner attention."""
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
-        UlyssesCPFlexInnerAttention,
+        UlyssesCPInnerAttention,
     )
 
     cp = parallelism.context_parallel_degree
@@ -67,7 +67,7 @@ def validate_context_parallel(
         # TODO(fegin): it seems to be cleaner if we move this logic to each
         # backend class definition. We need to revisit a good strategy to
         # define "where" should a validation implementation lives.
-        if issubclass(cp_attention, UlyssesCPFlexInnerAttention):
+        if issubclass(cp_attention, UlyssesCPInnerAttention):
             if parallelism.context_parallel_load_balancer is not None:
                 raise ValueError(
                     f"{fqn}.inner_attention uses {cp_attention.__qualname__}, so "

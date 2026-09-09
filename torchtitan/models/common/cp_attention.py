@@ -22,7 +22,7 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
 
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 __all__ = [
     "CPInnerAttention",
     "KVAllGatherCPFlexInnerAttention",
+    "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
+    "UlyssesCPVarlenInnerAttention",
 ]
 
 _SEQ_DIM = 0
@@ -107,12 +109,8 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
-    """Run FlexInnerAttention with sequence-to-head all-to-all redistribution."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
-        pass
+class UlyssesCPInnerAttention(CPInnerAttention):
+    """Move CP sharding between the token and head dimensions."""
 
     @classmethod
     def cp_shard(
@@ -164,6 +162,24 @@ class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
             self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)
             for x in (q_THK, k_THK, v_THV)
         )
+        # The concrete subclass provides the attention implementation.
+        # pyrefly: ignore [missing-attribute]
         out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
         return self._reshard(out_THV, cp_group, src=_HEAD_DIM, dst=_SEQ_DIM)
+
+
+class UlyssesCPFlexInnerAttention(UlyssesCPInnerAttention, FlexInnerAttention):
+    """FlexInnerAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexInnerAttention.Config):
+        pass
+
+
+class UlyssesCPVarlenInnerAttention(UlyssesCPInnerAttention, VarlenInnerAttention):
+    """VarlenInnerAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenInnerAttention.Config):
+        pass

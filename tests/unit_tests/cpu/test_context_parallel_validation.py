@@ -190,15 +190,13 @@ class TestUlyssesConfigValidation(unittest.TestCase):
 
 
 class TestGptOssUlysses(unittest.TestCase):
-    def test_rejected_during_parallelization(self):
+    def _parallelize(self, config_factory, inner_attention):
         from types import SimpleNamespace
 
-        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
-        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
         from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
 
-        config = gpt_oss_debugmodel_flex()
-        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
+        config = config_factory()
+        ContextParallelTransform(inner_attention=inner_attention).transform(
             config.model_spec.model
         )
         config.parallelism.spmd_backend = "spmd_types"
@@ -216,6 +214,18 @@ class TestGptOssUlysses(unittest.TestCase):
                 ac_config=None,
                 dump_folder="",
             )
+
+    def test_rejects_flex(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+
+        self._parallelize(gpt_oss_debugmodel_flex, UlyssesCPFlexInnerAttention)
+
+    def test_rejects_varlen(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel
+
+        self._parallelize(gpt_oss_debugmodel, UlyssesCPVarlenInnerAttention)
 
 
 class TestHeadDivisibility(unittest.TestCase):

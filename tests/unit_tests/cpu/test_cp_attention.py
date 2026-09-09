@@ -17,12 +17,13 @@ import torch.distributed as dist
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     CPInnerAttention,
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 
 
@@ -275,6 +276,24 @@ class TestUlysses(unittest.TestCase):
         self.assertEqual(2, group.size())
         self.assertEqual(spmd.S(1), src)
         self.assertEqual(spmd.S(0), dst)
+
+
+class TestUlyssesVarlen(unittest.TestCase):
+    def test_is_still_a_varlen_kernel(self):
+        self.assertIsInstance(
+            UlyssesCPVarlenInnerAttention.Config(), VarlenInnerAttention.Config
+        )
+
+    def test_uses_shared_input_sharding(self):
+        self.assertIs(
+            UlyssesCPVarlenInnerAttention.cp_shard.__func__,
+            UlyssesCPFlexInnerAttention.cp_shard.__func__,
+        )
+
+    def test_uses_shared_ulysses_forward(self):
+        self.assertIs(
+            UlyssesCPVarlenInnerAttention.forward, UlyssesCPFlexInnerAttention.forward
+        )
 
 
 if __name__ == "__main__":
