@@ -22,7 +22,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 _dense_param_rep = dense_param_placement(tp=spmd.R)
 _act_shard0_tp_rep = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
@@ -79,17 +79,10 @@ def hc_mix_sequence_parallel_placement():
 def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
     query_states = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    partial_activation = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
-
     input_shardings = {
         "q": query_states,
         "swa_k": replicated_activation,
     }
-    grad_placements = [
-        query_states,
-        partial_activation,
-    ]
-
     compress_ratio = getattr(inner_attention_cfg, "compress_ratio", 1)
     if compress_ratio == 4:
         input_shardings.update(
@@ -101,15 +94,6 @@ def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
                 "attn_sink": _attn_sink_placement,
             }
         )
-        grad_placements.extend(
-            [
-                partial_activation,
-                replicated_activation,
-                replicated_activation,
-                replicated_activation,
-                _attn_sink_placement,
-            ]
-        )
     elif compress_ratio > 1:
         input_shardings.update(
             {
@@ -117,17 +101,15 @@ def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
                 "attn_sink": _attn_sink_placement,
             }
         )
-        grad_placements.extend([partial_activation, _attn_sink_placement])
     else:
         input_shardings["attn_sink"] = _attn_sink_placement
-        grad_placements.append(_attn_sink_placement)
 
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings=input_shardings,
         in_dst_shardings=dict(input_shardings),
         out_src_shardings=query_states,
         out_dst_shardings=query_states,
-        local_map=LocalMapConfig(in_grad_placements=tuple(grad_placements)),
+        local_spmd=True,
     )
 
 

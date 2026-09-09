@@ -247,7 +247,7 @@ class VisionRotaryEmbedding(Module):
         )
         if spmd.is_type_checking():
             seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
-        return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
+        return torch.outer(seq, self.inv_freq)
 
 
 class PatchMerger(Module):

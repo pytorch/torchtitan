@@ -111,14 +111,13 @@ def local_head_split(
     dp_shard_dim: int = 0,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    use_spmd = spmd.is_type_checking()
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     with spmd.local():
-        if use_spmd:
+        if spmd.is_type_checking():
             spmd.assert_type(t, input_type)
         out = t.view(*t.shape[:-1], -1, head_dim)
-        if use_spmd:
+        if spmd.is_type_checking():
             spmd.assert_type(out, output_type)
     return out
 
@@ -151,7 +150,7 @@ class VarlenAttention(Module):
         ):
             activate_flash_attention_impl(flash_attention_impl)
 
-    def forward(
+    def forward(  # pyrefly: ignore[bad-override]
         self,
         q_THK: torch.Tensor,
         k_THK: torch.Tensor,
@@ -755,7 +754,7 @@ class FusedQKVLinear(BaseQKVLinear):
         )
         * 3
     )
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]

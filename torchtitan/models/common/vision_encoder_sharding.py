@@ -145,7 +145,7 @@ def vision_scaled_bias_rowwise_config(
             "weight": _vision_state_placement(
                 tp=spmd.S(1), include_cp_axis=include_cp_axis
             ),
-            "bias": _vision_state_placement(tp=spmd.R, include_cp_axis=include_cp_axis),
+            "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
         },
         in_src_shardings={
             "input": input_layout,

@@ -116,27 +116,20 @@ class RouterGateLinear(Linear):
 
 
 class ScaledBiasRowwiseLinear(Linear):
-    """
-    Rowwise linear whose local bias contribution is scaled by TP degree.
-    TODO(pianpwk): the local SPMD typechecker should support the TP-axis
-    input:V, weight:V, bias:P case. Decomposing to input @ weight -> P, then
-    P + P should pass.
-    """
+    """Rowwise linear whose invariant bias contributes once across TP."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         pass
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.tp_degree = 1
-
-    def parallelize(self, parallel_dims) -> None:
-        self.tp_degree = parallel_dims.tp
-        super().parallelize(parallel_dims)
-
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        bias = self.bias / self.tp_degree
+        bias = spmd.convert(
+            self.bias,
+            "tp",
+            src=spmd.I,
+            dst=spmd.P,
+            expert_mode=True,
+        )
         return F.linear(input, self.weight, bias)
 
 

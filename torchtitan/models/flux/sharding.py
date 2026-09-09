@@ -36,13 +36,16 @@ def flux_activation_placement(
 def set_flux_inner_attention_local_spmd(inner_attention_cfg) -> None:
     q_layout = flux_activation_placement(cp=spmd.S(1))
     kv_dst_layout = flux_activation_placement(cp=spmd.R)
+    input_shardings = {
+        "q_BLHK": q_layout,
+        "k_BLHK": kv_dst_layout,
+        "v_BLHV": kv_dst_layout,
+    }
     inner_attention_cfg.sharding_config = ShardingConfig(
-        in_shardings={
-            "q_BLHK": q_layout,
-            "k_BLHK": kv_dst_layout,
-            "v_BLHV": kv_dst_layout,
-        },
-        out_shardings=q_layout,
+        in_src_shardings=input_shardings,
+        in_dst_shardings=dict(input_shardings),
+        out_src_shardings=q_layout,
+        out_dst_shardings=q_layout,
         local_spmd=True,
     )
 

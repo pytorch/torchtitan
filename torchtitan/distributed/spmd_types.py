@@ -37,7 +37,6 @@ __all__ = [
     "spmd_axes",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
-    "sp_enabled",
     "spmd_dense_mesh",
     "spmd_mesh_group",
     "spmd_sparse_mesh",
@@ -111,17 +110,10 @@ def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
-    enable_sp: bool,
 ) -> None:
-    """Register the SPMD meshes and sequence-parallel state."""
+    """Register the SPMD meshes for dense and sparse runtime regions."""
     _MESH_TLS.dense_mesh = dense_mesh
     _MESH_TLS.sparse_mesh = sparse_mesh
-    _MESH_TLS.enable_sp = enable_sp
-
-
-def sp_enabled() -> bool:
-    """Return whether sequence parallelism is enabled in this runtime context."""
-    return getattr(_MESH_TLS, "enable_sp", False)
 
 
 def spmd_dense_mesh() -> DeviceMesh:

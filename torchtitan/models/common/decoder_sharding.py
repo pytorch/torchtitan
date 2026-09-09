@@ -132,7 +132,7 @@ def colwise_config() -> ShardingConfig:
 
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
-    RowwiseParallel: weight S(1), bias R (no-op if bias absent).
+    RowwiseParallel: weight S(1), bias I (no-op if bias absent).
     Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
     """
     out_dst = (
@@ -143,7 +143,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.I),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=out_dst,

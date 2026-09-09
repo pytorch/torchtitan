@@ -59,6 +59,8 @@ def parallelize_autoparallel_llama(
     if parallel_dims.pp_enabled:
         raise ValueError("AutoParallel Llama3 does not support PP yet")
 
+    # CP is rejected above, so the former flattened ``fsdp = dp_shard * cp``
+    # axis maps exactly to ``dp_shard`` here.
     dense_names = ["dp_replicate", "dp_shard", "tp"]
     dense_names = [
         name

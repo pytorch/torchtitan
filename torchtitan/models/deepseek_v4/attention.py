@@ -10,7 +10,6 @@ import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import BaseAttention, FlexAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -20,7 +19,7 @@ from .compressor import Compressor, Indexer
 
 
 def _assert_spmd_attention_type(tensor, *, tp):
-    if get_spmd_backend() == "spmd_types":
+    if spmd.is_type_checking():
         spmd.assert_type(
             tensor,
             {"dp": spmd.S(0), "cp": spmd.S(1), "tp": tp},
@@ -496,7 +495,7 @@ class Attention(BaseAttention):
             o = o.view(num_tokens, n_local_groups, -1)
             _assert_spmd_attention_type(o, tp=spmd.S(1))
             wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     wo_a,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.S(0)},
