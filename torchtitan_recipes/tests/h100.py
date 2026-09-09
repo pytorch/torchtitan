@@ -20,7 +20,7 @@ from torchtitan.trainer import Trainer
 
 
 def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.compile.enable = True
     config.parallelism.tensor_parallel_degree = 2
     config.compile.enable_async_tensor_parallel = True
@@ -28,19 +28,19 @@ def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
 
 
 def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
-    config = llama3_debugmodel_dist_gemm()
+    config = llama3_debugmodel_dist_gemm(seq_len=2048)
     config.parallelism.tensor_parallel_degree = 2
     return config
 
 
 def llama3_debugmodel_fsdp_symm_mem() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.parallelism.enable_fsdp_symm_mem = True
     return config
 
 
 def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
-    config = llama3_debugmodel_float8()
+    config = llama3_debugmodel_float8(seq_len=2048)
     config.compile.enable = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -53,7 +53,7 @@ def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
 
 
 def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
-    config = llama3_debugmodel_float8()
+    config = llama3_debugmodel_float8(seq_len=2048)
     config.compile.enable = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
@@ -66,7 +66,7 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
         deepseek_v3_debugmodel_minimal_async_ep,
     )
 
-    config = deepseek_v3_debugmodel_minimal_async_ep()
+    config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
     config.compile.enable = False
     # TODO: Drop this once the H100 suite is migrated to the spmd_types backend.
     config.parallelism.spmd_backend = "spmd_types"
@@ -79,7 +79,7 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
 
 
 def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
-    config = deepseek_v3_debugmodel_hybridep()
+    config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
     config.compile.enable = True
@@ -90,7 +90,7 @@ def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
 def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
 
-    config = qwen3_moe_deepep()
+    config = qwen3_moe_deepep(seq_len=512)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
     return config

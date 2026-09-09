@@ -10,6 +10,7 @@ import contextlib
 import inspect
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from typing import Any
 
 import spmd_types as spmd
@@ -54,6 +55,40 @@ class Module(nn.Module, Configurable):
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
+    # RegionAC replaces these defaults on every Module in a checkpointed block.
+    # Outside an enclosing torch_remat checkpoint, they do not affect execution.
+    _remat_module_fqn: str = ""
+    _remat_save_patterns: tuple[str, ...] = ()
+
+    def remat_region_name(self, local_name: str) -> str:
+        """Return a region's configured qualified name or its local name."""
+        if self._remat_module_fqn:
+            return f"{self._remat_module_fqn}.{local_name}"
+        return local_name
+
+    def remat_should_recompute(self, local_name: str) -> bool:
+        """Return whether a region should be recomputed during backward."""
+        qualified_name = self.remat_region_name(local_name)
+        return not any(
+            fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
+        )
+
+    def configure_remat_regions(
+        self,
+        save_patterns: list[str],
+    ) -> None:
+        """Configure remat region names and save patterns in this module tree.
+
+        Region names are qualified relative to this module. Model code supplies
+        each local region name when it calls ``remat_region_name`` and
+        ``remat_should_recompute``.
+        """
+        configured_patterns = tuple(save_patterns)
+        for module_fqn, module in self.named_modules():
+            if not isinstance(module, Module):
+                continue
+            module._remat_module_fqn = module_fqn
+            module._remat_save_patterns = configured_patterns
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

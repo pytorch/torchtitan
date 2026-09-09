@@ -27,7 +27,7 @@ from spmd_types import SpmdType
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import LocalMapConfig
 from torchtitan.tools.logging import logger
@@ -301,6 +301,11 @@ class NVFP4LinearConverter(QuantizationConverter):
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
+                if isinstance(config, RouterGateLinear.Config):
+                    raise ValueError(
+                        f"NVFP4 quantization does not support router gate {fqn!r}; "
+                        "exclude it with fqns."
+                    )
                 new_config = NVFP4Linear.Config(
                     in_features=config.in_features,
                     out_features=config.out_features,

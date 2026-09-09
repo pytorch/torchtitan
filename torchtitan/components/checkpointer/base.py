@@ -14,15 +14,16 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import tyro
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Configurable
+from torchtitan.config import Configurable, Function
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
 
@@ -74,15 +75,16 @@ def purge_thread(
 def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Whether ``a`` and ``b`` are backed by the same storage.
 
-    For ``DTensor`` the local shard's storage is compared via ``_local_tensor``
-    rather than ``to_local()``, which is autograd-aware; this is a read-only
-    identity check on the local storage.
+    For ``DTensor`` the local shard is compared via ``_local_tensor`` rather
+    than ``to_local()``, which is autograd-aware. The dispatcher-level alias
+    check also supports wrapper subclasses without directly accessible storage.
     """
     if isinstance(a, DTensor):
         a = a._local_tensor
     if isinstance(b, DTensor):
         b = b._local_tensor
-    return a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+    # pyrefly: ignore [missing-attribute]
+    return torch._C._is_alias_of(a, b)
 
 
 class ModelWrapper(Stateful):
@@ -196,10 +198,14 @@ class BaseCheckpointManager(Configurable, ABC):
     """
 
     enable: bool
+    load_only: bool
+    interval: int
+    enable_first_step_checkpoint: bool
     staging_future: Future | None
     save_future: Future | None
     folder: str
     keep_latest_k: int
+    purge_exempt: Callable[[int], bool] | None = None
     purge_thread: threading.Thread | None
     purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
@@ -227,7 +233,7 @@ class BaseCheckpointManager(Configurable, ABC):
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
-        if not self.enable or getattr(self, "staging_future", None) is None:
+        if not self.enable:
             return
         self._maybe_wait_for_staging()
 
@@ -238,9 +244,11 @@ class BaseCheckpointManager(Configurable, ABC):
         # raised before assigning ``enable``.
         if not getattr(self, "enable", False):
             return
-        self.maybe_wait_for_staging()
-        self.maybe_wait_for_saving()
-        self._close()
+        try:
+            self.maybe_wait_for_staging()
+            self.maybe_wait_for_saving()
+        finally:
+            self._close()
 
     def maybe_wait_for_saving(self) -> None:
         """Block until the last asynchronous save completes.
@@ -255,6 +263,23 @@ class BaseCheckpointManager(Configurable, ABC):
     @abstractmethod
     def _wait_for_saving(self) -> None:
         """Await ``save_future`` and clear it. Only called when it is set."""
+
+    # Policies shared by every manager. These depend only on config fields that
+    # BaseCheckpointManager.Config declares, not on how a backend reads or
+    # writes bytes, so they live here rather than once per backend.
+
+    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
+        """Whether ``curr_step`` is a checkpointing step."""
+        if not self.enable or self.load_only:
+            return False
+        if curr_step == 1 and self.enable_first_step_checkpoint:
+            return True
+        return last_step or curr_step % self.interval == 0
+
+    def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
+        """Standardized checkpoint path, e.g. ``checkpoints/step-100``."""
+        folder = folder or self.folder
+        return filesystem.join(folder, f"step-{step}")
 
     @abstractmethod
     def _load(self, step: int = -1) -> bool:
@@ -279,6 +304,10 @@ class BaseCheckpointManager(Configurable, ABC):
             and dist.get_rank() == 0
             and self._storage.isdir(self.folder)
         )
+
+    def _is_purge_exempt(self, step: int) -> bool:
+        """Whether the configured exemption protects ``step`` from deletion."""
+        return self.purge_exempt is not None and self.purge_exempt(step)
 
     def _parse_step(self, dirname: str) -> int | None:
         """Parse a canonical ``step-N`` checkpoint directory name."""
@@ -322,24 +351,61 @@ class BaseCheckpointManager(Configurable, ABC):
                 valid_steps.append(step)
         return max(valid_steps) if valid_steps else -1
 
-    def _purge_stale_checkpoints(self) -> None:
-        """Delete the checkpoints beyond the ``keep_latest_k`` most recent."""
-        if not self._should_purge():
-            return
+    def _purge_stale_checkpoints(
+        self,
+        *,
+        saving_step: int,
+        staging_dir_prefix: str | None = None,
+    ) -> None:
+        """Delete abandoned entries and reserve one retained slot for this save."""
+        if self._should_purge():
+            saving_dirnames = {f"step-{saving_step}"}
+            if staging_dir_prefix:
+                saving_dirnames.add(f"{staging_dir_prefix}step-{saving_step}")
 
-        discovered: list[tuple[int, str]] = []
-        for filename in self._storage.listdir(self.folder):
-            step = self._parse_step(filename)
-            if step is None:
-                continue
-            checkpoint_id = filesystem.join(self.folder, filename)
-            if self._is_valid_checkpoint(checkpoint_id):
-                discovered.append((step, checkpoint_id))
+            staging_pattern = (
+                re.compile(rf"{re.escape(staging_dir_prefix)}step-(0|[1-9]\d*)")
+                if staging_dir_prefix
+                else None
+            )
+            checkpoints: list[tuple[int, str]] = []
+            abandoned: list[str] = []
 
-        discovered.sort()
-        for _, path in discovered[: -self.keep_latest_k]:
-            assert self.purge_thread is not None
-            self.purge_queue.put(path)
+            for dirname in self._storage.listdir(self.folder):
+                if dirname in saving_dirnames:
+                    continue
+
+                checkpoint_dir = filesystem.join(self.folder, dirname)
+                # torch_checkpointing uses this pattern for staging directories.
+                if staging_pattern and staging_pattern.fullmatch(dirname):
+                    abandoned.append(checkpoint_dir)
+                    continue
+
+                step = self._parse_step(dirname)
+                if step is None:
+                    continue
+                if self._is_valid_checkpoint(checkpoint_dir):
+                    checkpoints.append((step, checkpoint_dir))
+                else:
+                    abandoned.append(checkpoint_dir)
+
+            checkpoints.sort()
+            num_to_keep = self.keep_latest_k - 1
+            num_to_purge = max(0, len(checkpoints) - num_to_keep)
+            for step, checkpoint_dir in checkpoints[:num_to_purge]:
+                if self._is_purge_exempt(step):
+                    logger.info(
+                        "Checkpointer is preserving checkpoint %s outside "
+                        "keep_latest_k.",
+                        checkpoint_dir,
+                    )
+                    continue
+                assert self.purge_thread is not None
+                self.purge_queue.put(checkpoint_dir)
+
+            for checkpoint_dir in abandoned:
+                assert self.purge_thread is not None
+                self.purge_queue.put(checkpoint_dir)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -377,6 +443,9 @@ class BaseCheckpointManager(Configurable, ABC):
 
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
+
+        purge_exempt: Annotated[Function.Config | None, tyro.conf.Suppress] = None
+        """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1
         """Load the checkpoint at the specified step. If -1, load the latest

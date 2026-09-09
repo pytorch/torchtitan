@@ -65,7 +65,8 @@ _LAYER0_ANCHORS = (
 
 
 def _build_debugmodel() -> Llama3Model:
-    config = llama3_configs["debugmodel"](attn_backend="flex")
+    build_config, max_context_length = llama3_configs["debugmodel"]
+    config = build_config(attn_backend="flex", seq_len=max_context_length)
     model = Llama3Model(config)
     model.init_states()
     return model
@@ -222,6 +223,32 @@ class TestStateDictKeys(unittest.TestCase):
                 )
             else:
                 self.assertEqual(v1, v2, f"value mismatch at {key}")
+
+    def test_init_optim_state_materializes_missing_state(self) -> None:
+        initialized = torch.nn.Parameter(torch.ones(1))
+        missing = torch.nn.Parameter(torch.ones(1))
+        optim = torch.optim.AdamW([initialized, missing])
+        initialized.grad = torch.ones_like(initialized)
+        optim.step()
+        saved_grad = initialized.grad
+        saved_params = [param.detach().clone() for param in (initialized, missing)]
+        saved_lr = optim.param_groups[0]["lr"]
+        saved_state = {
+            key: value.clone() for key, value in optim.state[initialized].items()
+        }
+
+        init_optim_state(optim)
+
+        self.assertIs(initialized.grad, saved_grad)
+        self.assertIsNone(missing.grad)
+        for key, value in saved_state.items():
+            self.assertTrue(torch.equal(optim.state[initialized][key], value))
+        self.assertEqual(optim.state[missing]["step"].item(), 0)
+        self.assertEqual(optim.state[missing]["exp_avg"].count_nonzero().item(), 0)
+        self.assertEqual(optim.state[missing]["exp_avg_sq"].count_nonzero().item(), 0)
+        for param, value in zip((initialized, missing), saved_params):
+            self.assertTrue(torch.equal(param, value))
+        self.assertEqual(optim.param_groups[0]["lr"], saved_lr)
 
 
 if __name__ == "__main__":

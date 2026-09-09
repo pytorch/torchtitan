@@ -290,7 +290,7 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        vision_encoder: Qwen35VisionEncoder.Config
+        vision_encoder: Qwen35VisionEncoder.Config | None = None
 
         def update_from_config(
             self,
@@ -364,8 +364,14 @@ class Qwen35Model(Decoder):
     def __init__(self, config: Config):
         super().__init__(config)
 
-        self.vision_encoder = config.vision_encoder.build()
-        self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+        self.vision_encoder = (
+            config.vision_encoder.build() if config.vision_encoder is not None else None
+        )
+        self.spatial_merge_size = (
+            config.vision_encoder.spatial_merge_size
+            if config.vision_encoder is not None
+            else None
+        )
 
     def preprocess_inputs(
         self,
@@ -455,17 +461,10 @@ class Qwen35Model(Decoder):
         first_token = torch.arange(positions.shape[0], device=positions.device) == 0
         sequence_starts = ((positions == 0) & followed_by_one) | first_token
         sequence_positions = torch.where(sequence_starts, 0, 1)
-        deltanet_metadata = create_varlen_metadata_for_document(
-            sequence_positions,
-            include_host_offsets=True,
-        )
-        if (
-            deltanet_metadata.cu_seq_q_host is not None
-            and len(deltanet_metadata.cu_seq_q_host) == 2
-            and not (
-                attn_config is not None
-                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
-            )
+        deltanet_metadata = create_varlen_metadata_for_document(sequence_positions)
+        if deltanet_metadata.cu_seq_q.numel() == 2 and not (
+            attn_config is not None
+            and isinstance(attn_config.inner_attention, VarlenAttention.Config)
         ):
             deltanet_metadata = None
 
@@ -498,6 +497,8 @@ class Qwen35Model(Decoder):
             vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
             num_tokens_per_item: (num_items,) actual token count per item
         """
+        if self.vision_encoder is None:
+            raise ValueError("Vision inputs were provided without a vision encoder.")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 

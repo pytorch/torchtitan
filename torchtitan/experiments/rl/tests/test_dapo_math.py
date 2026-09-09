@@ -18,9 +18,11 @@ from torchtitan.experiments.rl.examples.dapo_math import (
     DapoMathDataset,
     DapoMathEnv,
     DapoMathSample,
-    data as math_data,
     RewardMathVerify,
     score_math_response,
+)
+from torchtitan.experiments.rl.examples.dapo_math import (
+    data as math_data,
 )
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.experiments.rl.types import RolloutTurnID
@@ -30,14 +32,17 @@ def _dapo_rows() -> list[dict]:
     return [
         {
             "source_prompt": [{"role": "user", "content": "problem 1"}],
+            "prompt": "problem 1",
             "ground_truth": "34",
         },
         {
             "source_prompt": [{"role": "user", "content": "problem 2"}],
+            "prompt": "problem 2",
             "ground_truth": "113",
         },
         {
             "source_prompt": [{"role": "user", "content": "problem 3"}],
+            "prompt": "problem 3",
             "ground_truth": "7",
         },
     ]
@@ -55,6 +60,7 @@ def test_dapo_dataset_is_deterministic_and_resumable(monkeypatch) -> None:
     resumed = config.build()
     resumed.load_state_dict(checkpoint)
     assert [next(resumed) for _ in range(3)] == expected
+    assert all(r"Answer: \boxed{" in sample.prompt for sample in expected)
 
 
 def test_aime_dataset_combines_both_subsets(monkeypatch) -> None:
@@ -69,6 +75,7 @@ def test_aime_dataset_combines_both_subsets(monkeypatch) -> None:
     assert [sample.ground_truth for sample in samples] == [r"42^\circ", r"\boxed{42}"]
     assert "AIME2025-I question" in samples[0].prompt
     assert "AIME2025-II question" in samples[1].prompt
+    assert all(r"Answer: \boxed{" in sample.prompt for sample in samples)
 
 
 def test_aime_dataset_restarts_after_configured_num_samples(monkeypatch) -> None:
@@ -108,20 +115,32 @@ def _rollout(response: str) -> Rollout:
     )
 
 
-def test_math_verifier_requires_an_answer_marker() -> None:
-    assert score_math_response("work\nAnswer: $34$", "34") == 1.0
-    assert score_math_response(r"work\n\boxed{34}", "34") == 1.0
+def test_math_verifier_requires_a_boxed_answer() -> None:
+    assert score_math_response(r"work\nAnswer: \boxed{34}", "34") == 1.0
+    assert score_math_response(r"work\n\boxed{\frac{68}{2}}", "34") == 1.0
+    assert score_math_response("work\nAnswer: $34$", "34") == 0.0
+    assert score_math_response("work\nAnswer: 34", "34") == 0.0
     assert score_math_response("work mentions 34", "34") == 0.0
+
+
+def test_math_verifier_uses_the_last_boxed_answer() -> None:
+    response = r"Work: \boxed{2003^{2002^{2001}}}" "\n" r"Answer: \boxed{34}"
+    assert score_math_response(response, "34") == 1.0
+
+
+def test_math_verifier_rejects_unboxed_large_intermediate_expression() -> None:
+    response = r"Work: \[2003^{2002^{2001}}\]" "\n" r"Final: \[Answer: 009\]"
+    assert score_math_response(response, "241") == 0.0
 
 
 def test_math_verifier_works_in_rollout_worker_thread() -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
-        result = executor.submit(score_math_response, "work\nAnswer: $34$", "34")
+        result = executor.submit(score_math_response, r"work\nAnswer: \boxed{34}", "34")
         assert result.result() == 1.0
 
 
 def test_reward_handles_equivalent_latex_and_units() -> None:
     reward = RewardMathVerify.Config().build()
     sample = DapoMathSample(prompt="problem", ground_truth=r"336^\circ")
-    assert asyncio.run(reward(_rollout("work\nAnswer: $336$"), sample)) == 1.0
-    assert asyncio.run(reward(_rollout("work\nAnswer: $335$"), sample)) == 0.0
+    assert asyncio.run(reward(_rollout(r"work\nAnswer: \boxed{336}"), sample)) == 1.0
+    assert asyncio.run(reward(_rollout(r"work\nAnswer: \boxed{335}"), sample)) == 0.0
