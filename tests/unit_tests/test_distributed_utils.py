@@ -39,6 +39,36 @@ def test_fake_pg_rejects_out_of_range_rank(
         init_distributed(CommConfig(mode="fake_backend"))
 
 
+def test_neighbor_p2p_eagerly_binds_default_nccl_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TORCHTITAN_PIPELINE_NEIGHBOR_P2P", "1")
+    local_device = torch.device("cuda", 2)
+    with (
+        patch.object(dist_utils.torch.distributed, "is_initialized", return_value=False),
+        patch.object(dist_utils.torch.distributed, "init_process_group") as init_pg,
+        patch.object(dist_utils.torch.distributed, "get_world_size", return_value=8),
+        patch.object(dist_utils, "get_local_device", return_value=local_device),
+    ):
+        assert init_distributed(CommConfig(trace_buf_size=0)) == 8
+
+    assert init_pg.call_args.kwargs["device_id"] == local_device
+
+
+def test_default_distributed_init_remains_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TORCHTITAN_PIPELINE_NEIGHBOR_P2P", raising=False)
+    with (
+        patch.object(dist_utils.torch.distributed, "is_initialized", return_value=False),
+        patch.object(dist_utils.torch.distributed, "init_process_group") as init_pg,
+        patch.object(dist_utils.torch.distributed, "get_world_size", return_value=8),
+    ):
+        assert init_distributed(CommConfig(trace_buf_size=0)) == 8
+
+    assert init_pg.call_args.kwargs["device_id"] is None
+
+
 def test_dist_sum_tensor_keeps_local_result_as_tensor():
     value = torch.tensor(3, dtype=torch.int64)
 
