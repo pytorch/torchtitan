@@ -13,13 +13,14 @@ from dataclasses import dataclass, fields
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 
 from torchtitan.models.common.cp_attention import (
-    AllGatherCPFlexAttention,
-    UlyssesCPFlexAttention,
-    UlyssesCPVarlenAttention,
+    KVAllGatherCPFlexInnerAttention,
+    UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
@@ -32,7 +33,6 @@ from torchtitan.models.llama3.config_registry import (
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
-from torchtitan.transforms import apply_transforms, ContextParallelTransform
 
 from . import _use_spmd_types
 
@@ -99,7 +99,7 @@ class SDCReplayMismatchTrainer(Trainer):
 
 
 def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
-    base_config = deepseek_v3_debugmodel()
+    base_config = deepseek_v3_debugmodel(seq_len=2048)
     config = SDCReplayMismatchTrainer.Config(
         **{
             config_field.name: getattr(base_config, config_field.name)
@@ -118,7 +118,7 @@ def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
 
 
 def llama3_debugmodel_sdc_replay_cudagraph() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
     config.training.steps = 3
@@ -127,7 +127,7 @@ def llama3_debugmodel_sdc_replay_cudagraph() -> Trainer.Config:
 
 
 def llama3_debugmodel_default() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.profiler.enable_profiling = True
     config.metrics.enable_tensorboard = True
@@ -135,7 +135,7 @@ def llama3_debugmodel_default() -> Trainer.Config:
 
 
 def llama3_debugmodel_compile() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.compile.enable = True
     return config
@@ -148,14 +148,14 @@ def llama3_debugmodel_compile_sac_op() -> Trainer.Config:
 
 
 def llama3_debugmodel_tp2() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.tensor_parallel_degree = 2
     return config
 
 
 def llama3_debugmodel_ce_loss_tp2() -> Trainer.Config:
-    config = llama3_debugmodel_ce_loss()
+    config = llama3_debugmodel_ce_loss(seq_len=2048)
     # Non-chunked CE loss does not pass SPMD type checking yet.
     _use_spmd_types(config, typechecking=False)
     config.parallelism.tensor_parallel_degree = 2
@@ -181,7 +181,7 @@ def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:
 
 
 def llama3_debugmodel_full_checkpoint_save() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.checkpoint.enable = True
     return config
@@ -237,25 +237,23 @@ def llama3_debugmodel_pp2_1f1b() -> Trainer.Config:
     every dense SPMD axis to size 1 trips DTensor's rejection of a Shard
     placement on a degenerate axis.
     """
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
 def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -266,7 +264,7 @@ def llama3_debugmodel_fsdp2_pp2_1f1b_layers_per_stage() -> Trainer.Config:
 
 
 def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
@@ -278,7 +276,7 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.checkpoint.enable = True
     config.parallelism.pipeline_parallel_degree = 2
@@ -297,7 +295,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
@@ -311,7 +309,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
 
 def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
     """PP-only; see ``llama3_debugmodel_pp2_1f1b`` for why type checking is off."""
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 4
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
@@ -333,7 +331,7 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
@@ -344,7 +342,7 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "PipelineScheduleMulti"
@@ -358,14 +356,14 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
 
 
 def llama3_debugmodel_optimizer_bf16_states() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.optimizer.implementation = "fused_opt_states_bf16"
     return config
 
 
 def llama3_debugmodel_ddp4() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 4
@@ -373,7 +371,7 @@ def llama3_debugmodel_ddp4() -> Trainer.Config:
 
 
 def llama3_debugmodel_hsdp2x2() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
@@ -381,12 +379,12 @@ def llama3_debugmodel_hsdp2x2() -> Trainer.Config:
 
 
 def llama3_debugmodel_cp4() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.context_parallel_degree = 4
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
 
 
@@ -399,7 +397,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=UlyssesCPFlexAttention)],
+        [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
     )
 
 
@@ -413,7 +411,7 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=UlyssesCPVarlenAttention)],
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )
 
 
@@ -424,25 +422,25 @@ def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
 
 
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
 
 
@@ -451,7 +449,7 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
 
 
@@ -462,14 +460,14 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_fsdp_reshard_always() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.parallelism.fsdp_reshard_after_forward = "always"
     return config
 
 
 def llama3_debugmodel_optional_checkpoint_save() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.checkpoint.enable = True
     return config
@@ -490,7 +488,7 @@ def llama3_debugmodel_optional_checkpoint_load_tp2() -> Trainer.Config:
 
 def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     """Two gradient accumulation steps on 2 GPUs."""
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 65536
@@ -498,7 +496,7 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
 
 
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.validator.enable = True
     config.parallelism.tensor_parallel_degree = 2
@@ -509,12 +507,12 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
 
 
 def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.override.imports = ["torchtitan.overrides.fused_swiglu.fused_swiglu"]
     config.parallelism.tensor_parallel_degree = 2
@@ -522,7 +520,7 @@ def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
 
 
 def deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
+    config = deepseek_v3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.override.imports = [
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
@@ -535,7 +533,7 @@ def deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4() -> Trainer.Config:
 
 
 def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
-    config = llama3_debugmodel_varlen_attn()
+    config = llama3_debugmodel_varlen_attn(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
@@ -544,7 +542,7 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
 
 
 def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel_float8_emulate_lora()
+    config = llama3_debugmodel_float8_emulate_lora(seq_len=2048)
     _use_spmd_types(config, typechecking=False)
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
@@ -555,13 +553,13 @@ def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_sft() -> Trainer.Config:
-    config = sft_debugmodel()
+    config = sft_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     return config
 
 
 def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     _use_spmd_types(config, typechecking=True)
     config.checkpoint.enable = True
     config.checkpoint.create_seed_checkpoint = True

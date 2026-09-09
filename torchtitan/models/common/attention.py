@@ -19,6 +19,7 @@ from typing import Any, ClassVar, NamedTuple
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -51,13 +52,14 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
-    "FlexAttention",
     "BaseQKVLinear",
+    "FlexInnerAttention",
     "FusedQKVLinear",
     "GQAttention",
+    "InnerAttention",
     "QKVLinear",
-    "ScaledDotProductAttention",
-    "VarlenAttention",
+    "ScaledDotProductInnerAttention",
+    "VarlenInnerAttention",
     "VarlenMetadata",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
@@ -80,7 +82,6 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
-    cu_seq_q_host: tuple[int, ...] | None = None
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
@@ -124,9 +125,17 @@ def local_head_split(
     return out
 
 
-class VarlenAttention(Module):
+class InnerAttention(Module):
+    """Base class for attention kernels used by outer attention modules."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        pass
+
+
+class VarlenInnerAttention(InnerAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
         window_size: tuple[int, int] = (-1, 0)
         """ window_size=(left, right) controls the attention window relative to each
             query position. 'left' is how many tokens before the query to attend to,
@@ -220,11 +229,11 @@ class VarlenAttention(Module):
         return out_transform(out_THV, lse_TH)
 
 
-class FlexAttention(Module):
+class FlexInnerAttention(InnerAttention):
     """Inner attention using ``flex_attention`` with torch.compile.
 
     Query/key inputs use ``[T, H, K]`` and value inputs use ``[T, H, V]``.
-    The FlexAttention kernel requires a batch dimension, so inputs are adapted
+    The FlexInnerAttention kernel requires a batch dimension, so inputs are adapted
     to ``[1, H, T, K]`` and ``[1, H, T, V]`` only at the kernel boundary.
 
     Note:
@@ -233,7 +242,7 @@ class FlexAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
@@ -289,7 +298,7 @@ class FlexAttention(Module):
         return_aux: AuxRequest,
         kernel_options: dict,
     ):
-        """Run compiled FlexAttention outside SPMD typechecking.
+        """Run compiled FlexInnerAttention outside SPMD typechecking.
 
         Compiled regions are not currently compatible with SPMD typechecking, so
         the opaque kernel output is re-typed at the boundary instead of
@@ -301,7 +310,7 @@ class FlexAttention(Module):
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
-            out, aux = FlexAttention._compiled_flex_attn(
+            out, aux = FlexInnerAttention._compiled_flex_attn(
                 q,
                 k,
                 v,
@@ -353,13 +362,13 @@ class FlexAttention(Module):
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
-        #    `FlexAttention._compiled_flex_attn` is correct.
+        #    `FlexInnerAttention._compiled_flex_attn` is correct.
         # Mark the flex region so that, when the enclosing model is compiled with
         # a non-inductor backend, regional_inductor scoops just this region into
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
-        with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out_1HTV, aux = FlexAttention.compiled_flex_attn(
+        with maybe_regional_inductor(FlexInnerAttention.inductor_configs):
+            out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
                 q_1HTK,
                 k_1HTK,
                 v_1HTV,
@@ -380,7 +389,7 @@ class FlexAttention(Module):
 
 # TODO: Verify whether SDPA support can be removed without losing performance
 # after folding: https://github.com/pytorch/torchtitan/pull/4218#pullrequestreview-4977638012
-class ScaledDotProductAttention(Module):
+class ScaledDotProductInnerAttention(InnerAttention):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
     ``forward()`` adapts Q/K from ``(B, L, H, K)`` to ``(B, H, L, K)`` and V
@@ -393,14 +402,14 @@ class ScaledDotProductAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         pass
 
     sdpa_backends: list[SDPBackend] = []
 
     def __init__(self, config: Config) -> None:
         if config is None:
-            config = ScaledDotProductAttention.Config()
+            config = ScaledDotProductInnerAttention.Config()
         super().__init__()
         if not self.sdpa_backends:
             self.sdpa_backends = [
@@ -423,7 +432,7 @@ class ScaledDotProductAttention(Module):
     ) -> torch.Tensor:
         if attention_masks is not None:
             raise ValueError(
-                "ScaledDotProductAttention does not support attention_masks; it "
+                "ScaledDotProductInnerAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
         q_BHLK, k_BHLK, v_BHLV = (
@@ -592,8 +601,6 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
-    *,
-    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -603,8 +610,6 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
-        include_host_offsets: Also materialize cumulative sequence offsets as
-            host metadata for kernels that need it.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -625,24 +630,7 @@ def create_varlen_metadata_for_document(
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
     seq_lengths = torch.diff(packed_cu_seqlens)
 
-    max_seqlen: int
-    packed_cu_seqlens_host = None
-    if include_host_offsets:
-        packed_cu_seqlens_host = tuple(
-            int(offset) for offset in packed_cu_seqlens.tolist()
-        )
-        max_seqlen = max(
-            (
-                end - start
-                for start, end in zip(
-                    packed_cu_seqlens_host[:-1],
-                    packed_cu_seqlens_host[1:],
-                    strict=False,
-                )
-            ),
-            default=0,
-        )
-    elif seq_lengths.numel() > 0:
+    if seq_lengths.numel() > 0:
         # device to host sync but only done once per model forward
         max_seqlen = int(seq_lengths.max().item())
     else:
@@ -653,7 +641,6 @@ def create_varlen_metadata_for_document(
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
-        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 
@@ -890,6 +877,11 @@ class GQAttention(BaseAttention):
     The QKV projection strategy is determined by the ``qkv_linear`` config field:
     use :class:`QKVLinear` for three independent projections, or
     :class:`FusedQKVLinear` for a single fused projection.
+
+    ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
+    the inner attention unrotated, and positional information reaches the layer
+    only through the attention mask. Interleaved RoPE/NoPE models (iRoPE) set it
+    per layer.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -902,7 +894,7 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         inner_attention: Module.Config
-        rope: RoPE.Config
+        rope: RoPE.Config | None
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
@@ -931,7 +923,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build()
+        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -954,7 +946,12 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+        xq_THK, xk_THK, xv_THV = remat.region(
+            self.qkv_linear,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
+        remat.recompute_needs_tensor(xq_THK, xk_THK, xv_THV)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -963,15 +960,28 @@ class GQAttention(BaseAttention):
             xk_THK = self.k_norm(xk_THK)
 
         # Apply rotary embeddings
-        xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+        if self.rope is not None:
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq_THK,
             xk_THK,
             xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        return self.wo(out_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD

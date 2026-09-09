@@ -1,9 +1,10 @@
-# Model transforms
+# Model config transforms
 
-A model transform rewrites a complete model config tree. `model_registry`
+A model config transform rewrites a complete model config tree. `model_registry`
 builds the base model before transforms run.
 
-Transforms are optional. Users may build configs with their own utilities.
+Transforms are one supported way to build and maintain configs. They are
+optional, and users may build recipes with their own utilities.
 
 ## Using transforms
 
@@ -15,7 +16,7 @@ config.parallelism.context_parallel_degree = 8
 
 config = apply_transforms(
     config,
-    [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+    [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
 )
 ```
 
@@ -23,45 +24,46 @@ config = apply_transforms(
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
 
-Use `transform_model` when there is no trainer config, such as with a bare
+Use `transform_model_config` when there is no trainer config, such as with a bare
 `ModelSpec`. It rewrites the model config in place and returns the root. It does
 not copy or validate the config.
 
 ```python
 spec = model_registry("0.6B", attn_backend="varlen")
-spec.model = transform_model(spec.model, [LMHeadCastTransform()])
+spec.model = transform_model_config(spec.model, [LMHeadCastTransform()])
 ```
 
 ## What belongs here
 
-Use `model_registry` for options that define the base architecture or input
-contract. These include model dimensions and the attention backend.
+Use `model_registry` to select the base architecture, attention algorithm, and
+attention metadata format. For example, FlexInnerAttention consumes a `BlockMask`,
+while VarlenInnerAttention consumes cumulative sequence offsets.
 
 Use a transform for options that replace or wrap nodes in the built tree.
 Context parallelism, TP GEMM backends, MoE communication backends,
 quantization, and LoRA belong in transforms.
 
-Needing training settings for validation does not make an option a transform.
-For example, the attention backend still belongs in `model_registry`.
+A CP transform specializes the selected attention for distributed execution.
+It may change input sharding and preprocessing, but it preserves the selected
+attention algorithm and metadata format.
 
 ## Dependency direction
 
 This package may import other `torchtitan` packages. Those packages must not
 import this package. Recipes import and apply transforms.
 
-Keep shared types outside this package. For example, `ContextParallelKernel`
-lives with the attention code. Only the transform that installs the kernel
-belongs here.
+Keep shared types outside this package. For example, `CPInnerAttention` lives
+with the attention code. Only the transform that installs it belongs here.
 
 ## Writing a transform
 
-Subclass `ModelTransform`. Use a keyword-only dataclass for transform options.
+Subclass `ModelConfigTransform`. Use a keyword-only dataclass for transform options.
 Implement `transform`, rewrite nodes in place, and return the model root. Return
 a different config only when replacing the root.
 
 ```python
 @dataclass(kw_only=True, slots=True)
-class MyTransform(ModelTransform):
+class MyTransform(ModelConfigTransform):
     run_after = (QuantizationTransform,)
     setting: int
 
@@ -83,16 +85,9 @@ running them.
 
 ## Validation
 
-Keep full trainer config validation in `__post_init__`. `apply_transforms` runs
-it after the last transform. The trainer runs it again after command-line
-overrides.
-
-Place each check based on the data it needs.
-
-- Keep a feature's checks in its package.
-- Call a check from the first config that has every required value.
-- Put checks that need both model and parallelism configs in
-  `Trainer.Config.__post_init__`.
+See [Configuration validation](../README.md#validation) for where validation
+belongs. `apply_transforms` validates the final trainer config after the last
+transform. The trainer validates it again after command-line overrides.
 
 `__post_init__` also runs when a config is constructed. Set related training
 options before calling `apply_transforms`. It can then validate the final

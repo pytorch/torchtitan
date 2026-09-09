@@ -38,7 +38,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
 )
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.tools.utils import has_cuda_capability
 
 
@@ -113,7 +113,7 @@ def generate() -> None:
     if attention_backend is None:
         raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(
-        attention_backend, (VarlenAttention.Config, FlexAttention.Config)
+        attention_backend, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
     ):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
@@ -157,13 +157,13 @@ def generate() -> None:
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(attention_backend, FlexAttention.Config)
+                if isinstance(attention_backend, FlexInnerAttention.Config)
                 else AttentionBackendEnum.CUSTOM
             ),
         ),
         disable_log_stats=False,
     )
-    engine_kwargs["max_model_len"] = model_spec.model.max_context_length
+    engine_kwargs["max_model_len"] = model_spec.max_context_length
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
@@ -187,7 +187,8 @@ def generate() -> None:
 
     logger.debug("vLLM LLMEngine initialized successfully")
 
-    renderer = config.renderer.build(tokenizer_path=model_path)
+    tokenizer = config.tokenizer.build(tokenizer_path=model_path)
+    renderer = config.renderer.build(tokenizer=tokenizer)
     stop_token_ids = list(renderer.get_stop_token_ids())
 
     # Create sampling parameters from config

@@ -54,9 +54,9 @@ def run_worker(args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    config = qwen3_5_configs["debugmodel_moe"](
-        attn_backend="flex",
-        moe_comm_backend="standard",
+    build_config, max_context_length = qwen3_5_configs["debugmodel_moe"]
+    config = build_config(
+        attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
     )
 
     parallel_dims = ParallelDims(

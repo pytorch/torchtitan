@@ -10,20 +10,20 @@ Each episode is single-turn:
 user math problem -> one assistant solution -> binary Math-Verify reward
 ```
 
-The prompt asks for step-by-step reasoning followed by a final `Answer:` expression. [Math-Verify](https://github.com/huggingface/Math-Verify) parses that expression and assigns a reward of one when it is mathematically equivalent to the reference answer, or zero otherwise.
+The prompt asks for step-by-step reasoning followed by a final `Answer: \boxed{...}` expression. The scorer extracts the last boxed expression before [Math-Verify](https://github.com/huggingface/Math-Verify) checks it against the reference answer.
 
 An episode from the reference run is shown below. The prompt is reproduced in full; the response is abridged.
 
 ```text
 Prompt:
 Solve the following math problem step by step. The last line of your response
-should be of the form Answer: $Answer (without quotes) where $Answer is the
-answer to the problem.
+should be of the form Answer: \boxed{$Answer}, where $Answer is the answer to
+the problem.
 
 Let $r_1, r_2, \ldots, r_{47}$ be the roots of $x^{47} - 1 = 0$. Compute
 \( \sum_{i=1}^{47} r_i^{2020} \).
 
-Remember to put your answer on its own line after "Answer:".
+Remember to put your answer on its own line as "Answer: \boxed{...}".
 
 Response:
 The roots are the 47th roots of unity. Since 2020 is congruent to -1

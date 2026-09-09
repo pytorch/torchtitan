@@ -171,7 +171,24 @@ class TestConfigManager(unittest.TestCase):
         assert config.parallelism.pipeline_parallel_degree == 1
         assert config.parallelism.num_pp_microbatches == 3
 
-    def test_cuda_graphs_reject_pipeline_parallelism(self):
+    def test_cuda_graphs_allow_single_stage_pipeline_schedule(self):
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+                "--parallelism.pipeline_parallel_schedule",
+                "1F1B",
+            ]
+        )
+
+        assert config.parallelism.pipeline_parallel_schedule == "1F1B"
+
+    def test_cuda_graphs_reject_looped_pipeline_schedule(self):
         config_manager = ConfigManager()
         with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
             with pytest.raises((ValueError, SystemExit)) as exc_info:
@@ -183,6 +200,8 @@ class TestConfigManager(unittest.TestCase):
                         "llama3_debugmodel",
                         "--parallelism.pipeline_parallel_degree",
                         "2",
+                        "--parallelism.pipeline_parallel_schedule",
+                        "Interleaved1F1B",
                     ]
                 )
 
@@ -191,7 +210,25 @@ class TestConfigManager(unittest.TestCase):
             error = stderr.getvalue()
         else:
             error = str(exc_info.value)
-        assert "do not support pipeline parallelism" in error
+        assert "do not support looped pipeline schedules" in error
+
+    def test_cuda_graphs_reject_pipeline_validation(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.disable_cuda_graphs",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+            ]
+        )
+        config.training.disable_cuda_graphs = False
+        config.validator.enable = True
+
+        with pytest.raises(ValueError, match="do not support validation"):
+            config._validate_cuda_graphs()
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -332,10 +369,10 @@ class TestConfigManager(unittest.TestCase):
         config.compile.enable_async_tensor_parallel = True
         configs = {
             "symm_mem_async_tp": config,
-            "distributed_gemm": llama3_debugmodel_dist_gemm(),
-            "hybrid_ep": deepseek_v3_debugmodel_hybridep(),
-            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(),
-            "deep_ep": qwen3_moe_deepep(),
+            "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
+            "hybrid_ep": deepseek_v3_debugmodel_hybridep(seq_len=2048),
+            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048),
+            "deep_ep": qwen3_moe_deepep(seq_len=512),
         }
 
         for name, config in configs.items():
@@ -350,7 +387,7 @@ class TestConfigManager(unittest.TestCase):
             deepseek_v3_debugmodel_hybridep,
         )
 
-        config = deepseek_v3_debugmodel_hybridep()
+        config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
         dispatcher_configs = list(
             config.model_spec.model.traverse(HybridEPTokenDispatcher.Config)
         )

@@ -25,7 +25,6 @@ try:
         sys.modules["triton.language"] = MagicMock()
 
     from torchtitan.config import ParallelismConfig
-    from torchtitan.distributed.context_parallel import validate_context_parallel
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
@@ -55,7 +54,7 @@ def _make_trainer_config(tp: int, seq_len: int = 2048):
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
     """Build a minimal Llama3Model.Config with the given head counts."""
-    from torchtitan.models.common.attention import ScaledDotProductAttention
+    from torchtitan.models.common.attention import ScaledDotProductInnerAttention
     from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
 
     _LINEAR_INIT = {"weight": lambda t: t}
@@ -75,7 +74,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                     n_kv_heads=n_kv_heads,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_LINEAR_INIT,
-                    inner_attention=ScaledDotProductAttention.Config(),
+                    inner_attention=ScaledDotProductInnerAttention.Config(),
                     rope=ComplexRoPE.Config(
                         dim=_DIM // n_heads,
                         max_context_length=4096,
@@ -104,7 +103,8 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
 
 @unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")
 class TestTPKVHeadsValidation(unittest.TestCase):
-    """Validate head divisibility by the tensor parallel degree."""
+    """Validate that update_from_config rejects configs where n_heads or
+    n_kv_heads are not divisible by tensor_parallel_degree."""
 
     # ------------------------------------------------------------------
     # n_kv_heads not divisible by TP  →  should raise
@@ -114,7 +114,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """n_kv_heads=2, tp=4 → fractional KV heads per rank → ValueError."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
         with self.assertRaises(ValueError):
-            validate_context_parallel(cfg, _make_trainer_config(tp=4).parallelism)
+            cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     # ------------------------------------------------------------------
     # n_heads not divisible by TP  →  should raise
@@ -124,7 +124,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """n_heads=2, tp=4 -> fractional Q heads per rank -> ValueError."""
         cfg = _make_llama3_config(n_heads=2, n_kv_heads=2)
         with self.assertRaises(ValueError):
-            validate_context_parallel(cfg, _make_trainer_config(tp=4).parallelism)
+            cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     # ------------------------------------------------------------------
     # Valid configs  →  should not raise
@@ -133,17 +133,17 @@ class TestTPKVHeadsValidation(unittest.TestCase):
     def test_llama3_valid_gqa_does_not_raise(self):
         """n_kv_heads=8, n_heads=16, tp=4 → both divisible → no error."""
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
-        validate_context_parallel(cfg, _make_trainer_config(tp=4).parallelism)
+        cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     def test_llama3_mha_none_kv_heads_does_not_raise(self):
         """n_kv_heads=None (MHA, falls back to n_heads=16), tp=4 → no error."""
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=None)
-        validate_context_parallel(cfg, _make_trainer_config(tp=4).parallelism)
+        cfg.update_from_config(config=_make_trainer_config(tp=4))
 
     def test_llama3_tp1_skips_check(self):
         """tp=1 -> valid GQA head counts do not raise."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
-        validate_context_parallel(cfg, _make_trainer_config(tp=1).parallelism)
+        cfg.update_from_config(config=_make_trainer_config(tp=1))
 
 
 if __name__ == "__main__":

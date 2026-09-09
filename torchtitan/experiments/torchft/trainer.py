@@ -16,7 +16,6 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import DataloaderExhaustedError
-from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
@@ -57,6 +56,7 @@ class FaultTolerantTrainer(Trainer):
 
         # init distributed and build meshes (FT override handles ft_manager creation)
         self.parallel_dims = parallel_dims = self.init_distributed()
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -304,6 +304,10 @@ class FaultTolerantTrainer(Trainer):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd_types"
+                and config.debug.spmd_typechecking
+            ),
         )
         self.fwd_bwd_fn = self._forward_backward_body
         if not config.training.disable_cuda_graphs:
@@ -394,7 +398,8 @@ class FaultTolerantTrainer(Trainer):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
                 input_dict, labels = next(data_iterator)
-                local_valid_tokens += (labels != IGNORE_INDEX).sum()
+                # Popped so the batch reaching the model holds only its kwargs.
+                local_valid_tokens += input_dict.pop("num_valid_tokens")
                 microbatches.append((input_dict, labels))
             microbatch_groups.append(microbatches)
 

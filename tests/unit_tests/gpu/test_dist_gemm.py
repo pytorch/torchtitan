@@ -101,7 +101,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
     def test_unfused_qkv_is_rejected(self):
         """The all-gather feeds one wqkv GEMM; separate wq/wk/wv has no schedule."""
-        from torchtitan.models.common.attention import FlexAttention
+        from torchtitan.models.common.attention import FlexInnerAttention
         from torchtitan.models.common.rope import ComplexRoPE
 
         with self.assertRaisesRegex(ValueError, "requires fuse_qkv=True"):
@@ -110,7 +110,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 n_heads=N_HEADS,
                 wqkv_param_init={},
                 wo_param_init={},
-                inner_attention=FlexAttention.Config(),
+                inner_attention=FlexInnerAttention.Config(),
                 rope=ComplexRoPE.Config(dim=DIM // N_HEADS, max_context_length=128),
                 fuse_qkv=False,
                 tp_gemm_backend="dist_gemm",
@@ -227,7 +227,11 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 
         parallel_dims = self._parallel_dims()
-        attn_cfg = llama3_debugmodel_dist_gemm().model_spec.model.layers[0].attention
+        attn_cfg = (
+            llama3_debugmodel_dist_gemm(seq_len=2048)
+            .model_spec.model.layers[0]
+            .attention
+        )
         with use_spmd_backend("spmd_types"):
             set_gqa_attention_sharding(attn_cfg, enable_sp=True)
             attn = attn_cfg.build().to(self.device_type)

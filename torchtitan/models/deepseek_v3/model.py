@@ -15,7 +15,7 @@ from torch import nn
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    FlexAttention,
+    FlexInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -54,7 +54,9 @@ class Attention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+        inner_attention: Module.Config = field(
+            default_factory=FlexInnerAttention.Config
+        )
         mscale: float = 1.0
 
     def __init__(self, config: Config):
