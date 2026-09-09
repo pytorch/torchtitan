@@ -250,7 +250,6 @@ class TestGradAccumulator(unittest.TestCase):
 
         acc = GradAccumulator(
             reference,
-            num_chunks=num_chunks,
             dtype=reference.dtype,
         )
         for chunk in chunks:
@@ -267,7 +266,7 @@ class TestGradAccumulator(unittest.TestCase):
         reference = torch.randn(T, D)
         bf16_chunks = [c.bfloat16() for c in torch.chunk(reference, num_chunks, dim=0)]
 
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
+        acc = GradAccumulator(reference, dtype=torch.float32)
         for chunk in bf16_chunks:
             acc.add(chunk)
 
@@ -277,13 +276,12 @@ class TestGradAccumulator(unittest.TestCase):
         expected = torch.cat([c.float() for c in bf16_chunks], dim=0)
         torch.testing.assert_close(result, expected)
 
-    def test_too_many_adds_raises(self):
-        """Verify error when adding more chunks than expected."""
-        acc = GradAccumulator(torch.randn(8, 16), num_chunks=2, dtype=torch.float32)
+    def test_underfill_raises(self):
+        """Verify result rejects a partially filled gradient buffer."""
+        acc = GradAccumulator(torch.randn(8, 16), dtype=torch.float32)
         acc.add(torch.randn(4, 16))
-        acc.add(torch.randn(4, 16))
-        with self.assertRaises(ValueError):
-            acc.add(torch.randn(4, 16))
+        with self.assertRaisesRegex(RuntimeError, "cover 4 of 8 positions"):
+            acc.result()
 
 
 class TestGradAccumulatorDTensor(unittest.TestCase):
@@ -329,7 +327,7 @@ class TestGradAccumulatorDTensor(unittest.TestCase):
             torch.zeros(T, D), self._mesh, (Replicate(),), run_check=False
         )
 
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
+        acc = GradAccumulator(reference, dtype=torch.float32)
         for _ in range(num_chunks):
             acc.add(self._make_chunk((T // num_chunks, D), Partial()))
 
@@ -345,7 +343,7 @@ class TestGradAccumulatorDTensor(unittest.TestCase):
             torch.zeros(T, D), self._mesh, (Replicate(),), run_check=False
         )
 
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
+        acc = GradAccumulator(reference, dtype=torch.float32)
         acc.add(self._make_chunk((T // num_chunks, D), Partial()))
         with self.assertRaisesRegex(ValueError, "does not match first chunk"):
             acc.add(self._make_chunk((T // num_chunks, D), Replicate()))
@@ -500,28 +498,34 @@ class _FakeDecoder(nn.Module):
 
 
 class TestChunkedLossWrapper(unittest.TestCase):
-    def _make_model_and_loss(self, dim=32, vocab_size=64, num_chunks=4):
+    def test_config_rejects_non_positive_chunk_size(self):
+        for chunk_size in (0, -1):
+            with self.subTest(chunk_size=chunk_size):
+                with self.assertRaisesRegex(ValueError, "chunk_size must be positive"):
+                    ChunkedLossWrapper.Config(chunk_size=chunk_size)
+
+    def _make_model_and_loss(self, dim=32, vocab_size=64, chunk_size=4):
         """Create a fake Decoder and ChunkedLossWrapper for testing."""
         model = _FakeDecoder(dim, vocab_size)
         chunked_loss = ChunkedLossWrapper(
-            ChunkedLossWrapper.Config(num_chunks=num_chunks)
+            ChunkedLossWrapper.Config(chunk_size=chunk_size)
         )
         # Bypass isinstance(model, Decoder) check for unit testing
         chunked_loss.lm_head = model.output
         return model, chunked_loss
 
-    def _torch_chunk_loss_reference(
+    def _split_loss_reference(
         self,
         lm_head: nn.Module,
         hidden_states: torch.Tensor,
         labels: torch.Tensor,
-        num_chunks: int,
+        chunk_size: int,
         global_valid_tokens: torch.Tensor | None = None,
     ):
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
         for h_chunk, label_chunk in zip(
-            torch.chunk(hidden_states, num_chunks, dim=0),
-            torch.chunk(labels, num_chunks, dim=0),
+            torch.split(hidden_states, chunk_size, dim=0),
+            torch.split(labels, chunk_size, dim=0),
         ):
             chunk_loss = cross_entropy_loss(
                 lm_head(h_chunk.contiguous()),
@@ -532,39 +536,39 @@ class TestChunkedLossWrapper(unittest.TestCase):
             total_loss = total_loss + chunk_loss.detach()
         return total_loss
 
-    def test_chunked_loss_matches_torch_chunk_reference_for_supported_shapes(self):
+    def test_chunked_loss_matches_split_reference_for_supported_shapes(self):
         torch.manual_seed(42)
-        T, D, V, num_chunks = 24, 5, 17, 3
-        _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        T, D, V, chunk_size = 24, 5, 17, 8
+        _model, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
 
-        expected_loss = self._torch_chunk_loss_reference(
+        expected_loss = self._split_loss_reference(
             chunked_loss.lm_head,
             hidden_states,
             labels,
-            num_chunks,
+            chunk_size,
         )
         loss, _ = chunked_loss(hidden_states, labels)
 
         torch.testing.assert_close(loss, expected_loss)
 
-    def test_chunked_loss_backward_matches_torch_chunk_reference(self):
+    def test_chunked_loss_backward_matches_split_reference(self):
         torch.manual_seed(42)
-        T, D, V, num_chunks = 24, 5, 17, 3
-        model_ref, _ = self._make_model_and_loss(D, V, num_chunks)
-        model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        T, D, V, chunk_size = 24, 5, 17, 8
+        model_ref, _ = self._make_model_and_loss(D, V, chunk_size)
+        model_chunked, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
         model_chunked.output.load_state_dict(model_ref.output.state_dict())
 
         hidden = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
         global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
 
-        def torch_chunk_loss(hidden_states):
+        def split_loss(hidden_states):
             total = hidden_states.new_zeros((), dtype=torch.float32)
             for h_chunk, label_chunk in zip(
-                torch.chunk(hidden_states, num_chunks, dim=0),
-                torch.chunk(labels, num_chunks, dim=0),
+                torch.split(hidden_states, chunk_size, dim=0),
+                torch.split(labels, chunk_size, dim=0),
             ):
                 total = total + cross_entropy_loss(
                     model_ref.output(h_chunk.contiguous()),
@@ -575,7 +579,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         ref_hidden = hidden.detach().clone().requires_grad_(True)
         chunk_hidden = hidden.detach().clone().requires_grad_(True)
 
-        ref_loss = torch_chunk_loss(ref_hidden)
+        ref_loss = split_loss(ref_hidden)
         chunk_loss, _ = chunked_loss(chunk_hidden, labels, global_valid_tokens)
 
         ref_loss.backward()
@@ -610,7 +614,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 events.append("forward")
                 return super().forward(input)
 
-        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=2))
+        chunked_loss = ChunkedLossWrapper(ChunkedLossWrapper.Config(chunk_size=2))
         chunked_loss.lm_head = FakeFSDPLinear(4, 8, bias=False)
         hidden_states = torch.randn(4, 4)
         labels = torch.randint(0, 8, (4,))
@@ -623,14 +627,26 @@ class TestChunkedLossWrapper(unittest.TestCase):
         self.assertLess(events.index("unshard"), events.index("forward"))
         self.assertEqual(events[-1], "reshard")
 
+    def test_single_chunk_uses_standard_backward(self):
+        model, chunked_loss = self._make_model_and_loss(chunk_size=8)
+        hidden_states = torch.randn(4, 32, requires_grad=True)
+        labels = torch.randint(0, 64, (4,))
+
+        loss, _ = chunked_loss(hidden_states, labels)
+
+        self.assertIsNone(model.output.weight.grad)
+        loss.backward()
+        self.assertIsNotNone(model.output.weight.grad)
+        self.assertIsNotNone(hidden_states.grad)
+
     def test_numerical_equivalence(self):
         """ChunkedLossWrapper must produce the same loss and gradients as the standard path."""
         torch.manual_seed(42)
         T, D, V = 16, 32, 64
-        num_chunks = 4
+        chunk_size = 4
 
-        model_std, _ = self._make_model_and_loss(D, V, num_chunks)
-        model_chunked, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        model_std, _ = self._make_model_and_loss(D, V, chunk_size)
+        model_chunked, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
 
         # Share the same lm_head weights
         model_chunked.output.load_state_dict(model_std.output.state_dict())
@@ -685,8 +701,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
             msg="Chunked and standard lm_head gradients should match",
         )
 
-    def test_different_chunk_counts(self):
-        """Loss should be the same regardless of num_chunks."""
+    def test_different_chunk_sizes(self):
+        """Loss should be the same regardless of chunk_size."""
         torch.manual_seed(42)
         T, D, V = 32, 32, 64
         labels = torch.randint(0, V, (T,))
@@ -695,8 +711,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         losses = []
         ref_state_dict = None
-        for num_chunks in [1, 2, 4, 8]:
-            model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        for chunk_size in [32, 16, 8, 4]:
+            model, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
             # Use same lm_head weights
             if ref_state_dict is None:
                 ref_state_dict = model.output.state_dict()
@@ -714,7 +730,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 losses[0],
                 losses[i],
                 places=5,
-                msg=f"Loss with {2**i} chunks should match loss with 1 chunk",
+                msg="Loss should match for every chunk size",
             )
 
     def test_symbolic_seq_len_traces_chunking(self):
@@ -722,8 +738,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
         from torch.fx.experimental.proxy_tensor import make_fx
 
         torch.manual_seed(42)
-        T, D, V, num_chunks = 32, 8, 32, 4
-        _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        T, D, V, chunk_size = 32, 8, 32, 8
+        _model, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
         for tensor in (hidden_states, labels):
@@ -731,7 +747,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 tensor,
                 0,
                 hint_override=T,
-                min=num_chunks,
+                min=chunk_size,
                 max=T,
                 specialize_on=[lambda extent, hint=T: extent == hint],
             )
@@ -741,11 +757,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
             tracing_mode="symbolic",
             _allow_non_fake_inputs=True,
         )(hidden_states, labels)
-        expected_loss = self._torch_chunk_loss_reference(
+        expected_loss = self._split_loss_reference(
             chunked_loss.lm_head,
             hidden_states,
             labels,
-            num_chunks,
+            chunk_size,
         )
         traced_loss, _ = traced(hidden_states, labels)
         torch.testing.assert_close(traced_loss, expected_loss)
@@ -757,29 +773,43 @@ class TestChunkedLossWrapper(unittest.TestCase):
         ]
         self.assertEqual(len(split_nodes), 2)
 
-    def test_rejects_non_divisible_sequence_length(self):
+    def test_rejects_sequence_length_not_divisible_by_chunk_count(self):
         torch.manual_seed(42)
-        T, D, V, num_chunks = 10, 8, 32, 4
-        _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        T, D, V, chunk_size = 10, 8, 32, 4  # 3 chunks, 10 % 3 != 0
+        _model, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
 
-        with self.assertRaisesRegex(RuntimeError, "divisible by num_chunks"):
+        with self.assertRaisesRegex(RuntimeError, "not divisible by the 3 chunks"):
             chunked_loss(hidden_states, labels)
 
-    def test_single_token_chunks_match_torch_chunk_reference(self):
+    def test_equal_chunks_when_chunk_size_does_not_divide_sequence(self):
         torch.manual_seed(42)
-        T, D, V, num_chunks = 4, 8, 32, 4
-        _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
+        T, D, V, chunk_size = 12, 8, 32, 5  # 3 chunks of 4, each <= chunk_size
+        _model, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
+        hidden_states = torch.randn(T, D)
+        labels = torch.randint(0, V, (T,))
+
+        expected_loss = self._split_loss_reference(
+            chunked_loss.lm_head, hidden_states, labels, chunk_size=4
+        )
+        loss, _ = chunked_loss(hidden_states, labels)
+
+        torch.testing.assert_close(loss, expected_loss)
+
+    def test_single_token_chunks_match_split_reference(self):
+        torch.manual_seed(42)
+        T, D, V, chunk_size = 4, 8, 32, 1
+        _model, chunked_loss = self._make_model_and_loss(D, V, chunk_size)
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
         global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
 
-        expected_loss = self._torch_chunk_loss_reference(
+        expected_loss = self._split_loss_reference(
             chunked_loss.lm_head,
             hidden_states,
             labels,
-            num_chunks,
+            chunk_size,
             global_valid_tokens,
         )
         loss, _ = chunked_loss(hidden_states, labels, global_valid_tokens)
@@ -808,12 +838,12 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         self,
         lm_head: nn.Module,
         *,
-        num_chunks=4,
+        chunk_size=4,
     ):
         """Create the ChunkedLossWrapper variant under SPMD typecheck."""
         chunked_loss = ChunkedLossWrapper(
             ChunkedLossWrapper.Config(
-                num_chunks=num_chunks,
+                chunk_size=chunk_size,
                 loss_fn=CrossEntropyLoss.Config(
                     global_vocab_size=lm_head.out_features,
                 ),
@@ -854,7 +884,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         """
         torch.manual_seed(42)
         T, D, V = 16, 32, 64
-        num_chunks = 2
+        loss_chunk_size = 8
         mesh = init_device_mesh(
             self.device_type,
             (1, 1, 2),
@@ -874,7 +904,7 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         lm_head_spmd = self._make_vocab_parallel_lm_head(D, V, tp_group).to(
             self.device_type
         )
-        loss_spmd_fn = self._make_loss(lm_head_spmd, num_chunks=num_chunks)
+        loss_spmd_fn = self._make_loss(lm_head_spmd, chunk_size=loss_chunk_size)
 
         # copy over vocab shard
         chunk_size = (V + tp_degree - 1) // tp_degree
