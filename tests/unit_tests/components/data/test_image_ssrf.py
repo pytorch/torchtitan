@@ -169,3 +169,31 @@ class TestFetchURLSafe:
         from torchtitan.hf_datasets.multimodal.utils.image import _fetch_url_safe
         with pytest.raises(ValueError, match="Blocked redirect"):
             _fetch_url_safe("https://safe.example.com/img.png")
+
+    @mock.patch("torchtitan.hf_datasets.multimodal.utils.image._is_safe_url")
+    @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.socket.getaddrinfo")
+    @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.requests.Session")
+    def test_redirect_loop_bounded(
+        self, mock_session_cls, mock_getaddrinfo, mock_is_safe
+    ):
+        """Verify infinite redirect loops are bounded (max_redirects = 10)."""
+        import socket as sock
+        mock_getaddrinfo.return_value = [
+            (sock.AF_INET, None, None, None, ("8.8.8.8", 0)),
+        ]
+        mock_is_safe.return_value = True
+
+        session = mock_session_cls.return_value
+        redirect_resp = mock.MagicMock()
+        redirect_resp.is_redirect = True
+        redirect_resp.headers = {"Location": "https://safe-redirect.example.com/page"}
+        redirect_resp.url = "https://example.com/img.png"
+        redirect_resp.content = b"redirect-bytes"
+
+        # Every call returns a redirect response → would loop forever without cap
+        session.get.return_value = redirect_resp
+
+        from torchtitan.hf_datasets.multimodal.utils.image import _fetch_url_safe
+        _fetch_url_safe("https://example.com/img.png")
+        # First call is the initial request, then up to 10 redirect hops
+        assert session.get.call_count == 11

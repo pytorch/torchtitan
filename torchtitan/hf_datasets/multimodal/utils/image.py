@@ -88,15 +88,21 @@ def _fetch_url_safe(image_url: str, timeout: float = 10.0) -> bytes:
     """Fetch URL content with full SSRF + redirect protection.
 
     Validates the initial URL and EVERY redirect hop before following it,
-    using ``allow_redirects=False`` + manual loop so each hop is pre-checked.
+    using ``allow_redirects=False`` + a bounded manual loop so each hop is
+    pre-checked and we avoid unbounded redirect cycles.
     """
     if not _is_safe_url(image_url):
         raise ValueError(f"URL not allowed (SSRF protection): {image_url}")
     session = requests.Session()
     # First hop
     response = session.get(image_url, timeout=timeout, allow_redirects=False)
-    # Follow redirects manually, validating each hop before fetching
-    while response.is_redirect:
+    # Follow redirects manually, validating each hop before fetching.
+    # Bounded to 10 hops (matching requests' default max_redirects) to prevent
+    # infinite loops from cyclic redirect chains among safe hosts.
+    max_redirects = 10
+    for _ in range(max_redirects):
+        if not response.is_redirect:
+            break
         location = response.headers.get("Location")
         if not location:
             break
