@@ -20,6 +20,7 @@ from torchtitan.models.common import (
     Linear,
     RMSNorm,
     RoPE,
+    RouterGateLinear,
 )
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
@@ -332,7 +333,7 @@ def _make_v4_moe_config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,
-            gate=Linear.Config(
+            gate=RouterGateLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
                 bias=False,

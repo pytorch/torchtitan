@@ -188,7 +188,11 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     """
     if save_ops is None:
         save_ops = _get_default_save_ops()
-    mm_ops = {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
+    mm_ops = {
+        torch.ops.aten.mm.default,
+        torch.ops.aten.mm.dtype,
+        torch.ops.aten.linear.default,
+    }
     mm_count = 0
     current_layer = None
 

@@ -28,18 +28,13 @@ renderer test asserts equality with ``apply_chat_template`` across roles, tool s
 reasoning states. Treat that test as the spec -- if the template changes upstream, it
 fails first.
 
-Implements the ``renderers.Renderer`` Protocol. ``register()`` installs it into the
-``renderers`` library's public registry (``RENDERER_REGISTRY`` / ``_CONFIG_BY_NAME``),
-which is that library's supported extension path -- no fork or upstream change needed.
-
-Every other TorchTitan model resolves to a renderer that lives in
-PrimeIntellect-ai/renderers. This one ships here because Muse Glimmer is not in that
-library yet.
+Implements the ``renderers.Renderer`` Protocol. Muse Glimmer is not in the library yet, so
+``MuseGlimmerRendererConfig`` is a TorchTitan ``RendererConfig`` whose ``build`` constructs
+this class directly.
 
 TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
-atem.py -> a tool parser in renderers/parsers.py), then delete both files and
-``register()``, leaving only the ``_RENDERER_BY_MODEL`` entry in
-experiments/rl/renderer.py.
+atem.py -> a tool parser in renderers/parsers.py), then delete both files and select it
+through ``RenderersLibraryConfig`` like the other renderers.
 
 It lives under ``experiments/rl`` rather than ``torchtitan/models/muse_glimmer`` because
 RL is its only consumer and ``renderers`` is an RL-only optional dependency; keeping it
@@ -51,8 +46,10 @@ from __future__ import annotations
 import datetime
 import json
 import re
-from typing import ClassVar, Literal, NamedTuple
+from dataclasses import dataclass, replace
+from typing import NamedTuple
 
+from renderers import Renderer
 from renderers.base import (
     extract_message_tool_names,
     ParsedResponse,
@@ -63,30 +60,17 @@ from renderers.base import (
     should_rerender_for_thinking_retention,
     trim_to_turn_close,
 )
-from renderers.configs import BaseRendererConfig
+from renderers.configs import ThinkingRetention
+
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.rl.renderer import RendererConfig, RendererTokenizerWrapper
 
 from .atem import parse_atem_tool_calls, render_atem_tool_call
 
-RENDERER_NAME = "muse_glimmer"
 
-
-class MuseGlimmerRendererConfig(BaseRendererConfig):
+@dataclass(kw_only=True, slots=True)
+class MuseGlimmerRendererConfig(RendererConfig):
     """Muse Glimmer (harmony chat format + ATEM tool calls) renderer config."""
-
-    name: Literal["muse_glimmer"] = RENDERER_NAME
-
-    # renderers validates in BaseRendererConfig.__pydantic_init_subclass__ that every
-    # non-base field is classified as either a chat-template kwarg or a renderer-internal
-    # knob; the two sets must be disjoint and together cover all of them. Declared
-    # unconditionally -- versions without the validator ignore these ClassVars, so this
-    # is compatible with both. The template fields mirror kwargs the published
-    # chat_template.jinja reads, which is what the library's parity matrix varies.
-    _template_fields: ClassVar[frozenset[str]] = frozenset(
-        {"reasoning_strength", "knowledge_cutoff", "current_date"}
-    )
-    _internal_fields: ClassVar[frozenset[str]] = frozenset(
-        {"retain_reasoning_in_history", "answer_from_reasoning_fallback"}
-    )
 
     reasoning_strength: str | None = None
     """Sizes the reasoning budget, rendered as ``Reasoning strength: <value>.``
@@ -130,6 +114,34 @@ class MuseGlimmerRendererConfig(BaseRendererConfig):
     usually not what you want. Useful for outcome-scored RL, where a rollout with an
     empty ``content`` is unscoreable and the answer is often the final reasoning line.
     """
+
+    thinking_retention: ThinkingRetention | None = None
+    """The library-wide bridge policy override (`renderers.BaseRendererConfig.thinking_retention`).
+    ``None`` keeps the template's implied policy; ``"tool_cycle"`` re-renders at a new user query."""
+
+    def __post_init__(self) -> None:
+        # A dataclass does not validate values; these knobs change bridging and reward
+        # scoring with nothing visible in the rendered prompt, so check them here.
+        for name in ("reasoning_strength", "knowledge_cutoff", "current_date"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise TypeError(
+                    f"{name} must be str | None, got {type(value).__name__}"
+                )
+        for name in ("retain_reasoning_in_history", "answer_from_reasoning_fallback"):
+            value = getattr(self, name)
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be bool, got {type(value).__name__}")
+        if self.thinking_retention not in (None, "tool_cycle", "all"):
+            raise ValueError(
+                "thinking_retention must be None, 'tool_cycle' or 'all', "
+                f"got {self.thinking_retention!r}"
+            )
+
+    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+        # Snapshot the config, as `Configurable.Config.build` does, so later edits to the
+        # recipe object cannot desynchronize full renders from bridging.
+        return MuseGlimmerRenderer(RendererTokenizerWrapper(tokenizer), replace(self))
 
 
 # Muse Glimmer special tokens. The ids are checked against the tokenizer in __init__
@@ -343,17 +355,13 @@ class _Piece(NamedTuple):
 
 class MuseGlimmerRenderer:
     def __init__(self, tokenizer, config: MuseGlimmerRendererConfig | None = None):
-        # (tokenizer, config) is the renderers-library constructor contract, so
-        # ``create_renderer`` can instantiate this from RENDERER_REGISTRY.
+        # Match the `(tokenizer, config)` constructor used by library renderers.
         self._tok = tokenizer
         self._config = config or MuseGlimmerRendererConfig()
-        # The controller reads renderer._tokenizer (e.g. for pad_id=eos_token_id).
-        self._tokenizer = tokenizer
         self._bos = tokenizer.bos_token or ""
-        # BaseRendererConfig.thinking_retention is the library-wide knob every renderer
-        # is expected to honour in its bridge. Muse Glimmer's published chat template
-        # renders reasoning_content for every assistant turn unconditionally -- no
-        # query-boundary drop like gpt-oss's auto_drop_analysis or Qwen3's think-block
+        # `thinking_retention` is the library-wide bridge knob. Muse Glimmer's published
+        # chat template renders reasoning_content for every assistant turn unconditionally
+        # -- no query-boundary drop like gpt-oss's auto_drop_analysis or Qwen3's think-block
         # stripping -- so "all" is the template-faithful implied policy. An explicit
         # thinking_retention on the config overrides it.
         self.effective_thinking_retention = resolve_thinking_retention(
@@ -758,31 +766,3 @@ class MuseGlimmerRenderer:
             reasoning_content=reasoning,
             tool_calls=tool_calls,
         )
-
-
-def register() -> None:
-    """Install the muse_glimmer renderer into the ``renderers`` library registry.
-
-    Uses the library's public extension surface -- implement the ``Renderer``
-    Protocol, then add the class to ``RENDERER_REGISTRY`` and its config to
-    ``_CONFIG_BY_NAME`` -- so ``create_renderer(config_from_name("muse_glimmer"))``
-    resolves it. Also maps the ``muse_glimmer`` TorchTitan model name to it, which is what
-    ``RendererConfig(name="muse_glimmer")`` looks up.
-
-    Idempotent. Delete this once the renderer is upstreamed to
-    PrimeIntellect-ai/renderers (only the _RENDERER_BY_MODEL entry stays).
-    """
-    from renderers import base as renderers_base, configs as renderers_configs
-
-    from torchtitan.experiments.rl.renderer import _RENDERER_BY_MODEL
-
-    # Populate the library's built-ins first: _populate_registry() early-returns if
-    # RENDERER_REGISTRY is already non-empty, so registering before it runs would
-    # suppress every built-in renderer.
-    renderers_base._populate_registry()
-
-    renderers_configs._CONFIG_BY_NAME.setdefault(
-        RENDERER_NAME, MuseGlimmerRendererConfig
-    )
-    renderers_base.RENDERER_REGISTRY[RENDERER_NAME] = MuseGlimmerRenderer
-    _RENDERER_BY_MODEL["muse_glimmer"] = RENDERER_NAME

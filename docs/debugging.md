@@ -60,7 +60,7 @@ This will print a structured configuration to `stdout`, allowing you to verify t
 
 ## Fake Backend Debugging
 
-Set `COMM_MODE="fake_backend"` to validate your configuration, model setup, and rank-0 program logic without requiring full multi-GPU distributed execution:
+Set `COMM_MODE="fake_backend"` to validate your configuration, model setup, and rank-0 program logic without requiring full multi-GPU distributed execution. To inspect a nonzero rank under `torchrun`, see [Distributed Breakpoints and LOG_RANK](#distributed-breakpoints-and-log_rank).
 
 ```bash
 NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
@@ -85,6 +85,18 @@ NGPU=128 COMM_MODE="fake_backend" MODULE=llama3 CONFIG=llama3_70b ./run_train.sh
 ### Limitations
 
 - **Performance testing**: Fake backend mode does not provide accurate performance metrics; use actual distributed runs for benchmarking
+
+## Distributed Breakpoints and LOG_RANK
+
+`run_train.sh` defaults `LOG_RANK` to `0` and passes it to `torchrun` as `--local-ranks-filter`, so only rank 0's stdin/stdout are teed to the console. `torch.distributed.breakpoint(rank=N)` on a filtered rank therefore hangs and never prints a prompt.
+
+To debug rank N, set `LOG_RANK` to N (or a comma-separated list that includes N) before launching. Do not change the default `LOG_RANK` in `run_train.sh`.
+
+```bash
+LOG_RANK=1 ./run_train.sh
+# or, to keep rank 0 visible as well:
+LOG_RANK=0,1 ./run_train.sh
+```
 
 ## Troubleshooting jobs that timeout
 

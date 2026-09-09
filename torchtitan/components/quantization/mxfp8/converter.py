@@ -8,8 +8,10 @@ from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
 
+import torch
+
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -30,6 +32,27 @@ try:
 except ImportError as import_error:
     MXFP8Linear = None
     _mxfp8_linear_import_error = import_error
+
+
+def _torchao_nightly_install_command() -> str:
+    """Return the pip command that installs a torchao nightly for this torch.
+
+    torchao nightlies live on download.pytorch.org rather than PyPI and are
+    published per accelerator build, so the channel has to come from the torch
+    actually installed. ``--upgrade`` matters as much as ``--pre``: an existing
+    but older nightly is the common case, and without it pip leaves it alone.
+    ``USE_CPP=0`` skips building the C++ extensions, which MXFP8 does not need.
+    """
+    if torch.version.cuda:
+        channel = "cu" + torch.version.cuda.replace(".", "")
+    elif torch.version.hip:
+        channel = "rocm" + ".".join(torch.version.hip.split(".")[:2])
+    else:
+        channel = "cpu"
+    return (
+        "USE_CPP=0 python -m pip install --pre --upgrade torchao "
+        f"--index-url https://download.pytorch.org/whl/nightly/{channel}"
+    )
 
 
 class MXFP8LinearConverter(QuantizationConverter):
@@ -87,8 +110,9 @@ class MXFP8LinearConverter(QuantizationConverter):
         if MXFP8Linear is None:
             raise ImportError(
                 "MXFP8 linear layers need torchao's 32x32 swizzled cast "
-                "kernels, added in pytorch/ao#4777 and not in any release up "
-                "to v0.18.0. Install a torchao that contains it."
+                "kernels, which are not in any release up to v0.18.0, so a "
+                "nightly is required:\n\n"
+                f"    {_torchao_nightly_install_command()}\n"
             ) from _mxfp8_linear_import_error
 
         if not has_cuda_capability(10, 0):
@@ -102,6 +126,17 @@ class MXFP8LinearConverter(QuantizationConverter):
             for entry in model_config.traverse(Linear.Config)
             if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
         ]
+
+        quantized_router_fqns = [
+            fqn
+            for fqn, config, _parent, _attr in targets
+            if isinstance(config, RouterGateLinear.Config)
+        ]
+        if quantized_router_fqns:
+            raise ValueError(
+                "MXFP8 quantization does not support router gates; exclude "
+                f"{quantized_router_fqns} with fqns."
+            )
 
         selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
         target_fqns = [fqn for fqn, _config, _parent, _attr in targets]

@@ -187,7 +187,8 @@ def generate() -> None:
 
     logger.debug("vLLM LLMEngine initialized successfully")
 
-    renderer = config.renderer.build(tokenizer_path=model_path)
+    tokenizer = config.tokenizer.build(tokenizer_path=model_path)
+    renderer = config.renderer.build(tokenizer=tokenizer)
     stop_token_ids = list(renderer.get_stop_token_ids())
 
     # Create sampling parameters from config

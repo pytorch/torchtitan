@@ -315,6 +315,28 @@ def is_in_batch_invariant_mode() -> bool:
     return _batch_invariant_enabled
 
 
+def enable_fp32_matmul_emulation_with_bf16x9() -> None:
+    """Enable BF16x9 emulation for FP32 CUDA matmuls where supported."""
+    if (
+        device_type != "cuda"
+        or not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability() < (10, 0)
+    ):
+        return
+
+    try:
+        torch.backends.cuda.matmul.fp32_precision = "bfx9"
+    except (AttributeError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "TorchTitan on NVIDIA GPUs with compute capability 10.0 or later "
+            "requires PyTorch with CUDA BFX9 matmul support "
+            "(pytorch/pytorch#195301) and CUDA 12.9 or later."
+        ) from exc
+
+    logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
+
+
 def set_batch_invariance(enable: bool) -> None:
     """Enable batch-invariant mode for reproducible RL training.
 
@@ -449,6 +471,8 @@ def init_distributed(
     base_folder: str = "",
     ranks: list[int] | None = None,
 ) -> int:
+    enable_fp32_matmul_emulation_with_bf16x9()
+
     # Skip initialization if already initialized
     if torch.distributed.is_initialized():
         logger.warning(

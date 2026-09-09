@@ -17,7 +17,7 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
-from torchtitan.components.quantization import Float8Linear
+from torchtitan.components.quantization import Float8Linear, Float8LinearConverter
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.components.quantization.mxfp8.converter import (
     _get_mxfp8_grouped_experts_cls,
@@ -26,6 +26,7 @@ from torchtitan.components.quantization.mxfp8.converter import (
 )
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.config import ConfigManager
+from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -44,6 +45,51 @@ def test_no_float8_by_default():
     if Float8Linear is not None:
         for _fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
             assert not isinstance(lc, Float8Linear.Config)
+
+
+def _router_config_for_quantization(dim: int):
+    return make_router_config(
+        dim=dim,
+        num_experts=dim,
+        gate_param_init={"weight": torch.nn.init.zeros_},
+    )
+
+
+def test_float8_converter_rejects_router_gate():
+    pytest.importorskip("torchao")
+    if Float8Linear is None:
+        pytest.skip("torchao Float8Linear is unavailable")
+    converter = Float8LinearConverter(
+        Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
+    )
+    with pytest.raises(ValueError, match="does not support router gate"):
+        converter.convert(_router_config_for_quantization(16))
+
+
+def test_mxfp8_converter_rejects_router_gate(monkeypatch):
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(MXFP8LinearConverter.Config())
+    with pytest.raises(ValueError, match="does not support router gates"):
+        converter.convert(_router_config_for_quantization(128))
+
+
+def test_nvfp4_converter_rejects_router_gate(monkeypatch):
+    pytest.importorskip("torchao")
+    from torchtitan.components.quantization import NVFP4Linear, NVFP4LinearConverter
+
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+    import torchtitan.components.quantization.nvfp4 as nvfp4_mod
+
+    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    converter = NVFP4LinearConverter(NVFP4LinearConverter.Config())
+    with pytest.raises(ValueError, match="does not support router gate"):
+        converter.convert(_router_config_for_quantization(128))
 
 
 def test_float8_applied_by_model_registry():

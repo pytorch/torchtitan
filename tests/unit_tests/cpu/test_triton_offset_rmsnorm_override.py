@@ -10,6 +10,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.config import apply_overrides, OverrideConfig
+from torchtitan.config.override import _REGISTRY
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm
@@ -20,7 +21,14 @@ from torchtitan.overrides.offset_rmsnorm import (
 from torchtitan.protocols.sharding import ShardingConfig
 
 
+_OVERRIDE_TARGET = "torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"
+_OFFSET_RMSNORM_OVERRIDE = _REGISTRY[_OVERRIDE_TARGET]
+
+
 class TestTritonOffsetRMSNormOverride(unittest.TestCase):
+    def setUp(self):
+        _REGISTRY.setdefault(_OVERRIDE_TARGET, _OFFSET_RMSNORM_OVERRIDE)
+
     def test_override_replaces_all_qwen35_offset_norms(self):
         config = model_registry("debugmodel", attn_backend="flex").model
         num_offset_norms = len(list(config.traverse(OffsetRMSNorm.Config)))

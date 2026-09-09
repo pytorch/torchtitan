@@ -118,6 +118,16 @@ pip install -r requirements.txt
 
 > **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
 
+`torchao` is not installed by the command above. It is only needed for the
+low-precision training recipes (float8, MXFP8, NVFP4), and it is deliberately
+left out so that it does not get resolved independently of the `torch` you
+already have. Install a nightly matching your accelerator build when you need
+one, replacing `cu130` to match:
+
+```bash
+USE_CPP=0 python -m pip install --pre --upgrade torchao --index-url https://download.pytorch.org/whl/nightly/cu130
+```
+
 ### Nightly builds
 
 This method requires the nightly build of PyTorch. You can replace `cu130` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).
