@@ -416,6 +416,11 @@ class _StubMesh:
 
 class _StubMixedPrecisionPolicy:
     param_dtype = torch.bfloat16
+    reduce_dtype = torch.bfloat16
+
+
+class _StubOwningLinear:
+    """Stand in for the module argument of fsdp_pre_all_gather."""
 
 
 def test_fsdp_pre_all_gather_pads_an_uneven_shard():
@@ -436,7 +441,7 @@ def test_fsdp_pre_all_gather_pads_an_uneven_shard():
         _StubMesh(5),
         torch.Size([96, 128]),
         None,
-        None,
+        _StubOwningLinear(),
         _StubMixedPrecisionPolicy(),
     )
 
@@ -465,7 +470,7 @@ def test_fsdp_pre_all_gather_casts_while_padding():
         _StubMesh(5),
         torch.Size([96, 128]),
         None,
-        None,
+        _StubOwningLinear(),
         _Fp32Policy(),
     )
 
@@ -503,6 +508,105 @@ def test_fsdp_pre_all_gather_rejects_a_non_zero_shard_dim():
             _StubMesh(2),
             torch.Size([96, 128]),
             None,
-            None,
+            _StubOwningLinear(),
             _StubMixedPrecisionPolicy(),
         )
+
+
+def _make_unsharded_mxfp8_linear(
+    *, grad_dtype: torch.dtype = torch.bfloat16
+) -> MXFP8Linear:
+    linear = (
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            bias=False,
+        )
+        .build()
+        .cuda()
+        .bfloat16()
+    )
+    linear = _install_unsharded_weight(linear)
+    linear.weight.grad_dtype = grad_dtype
+    return linear
+
+
+@pytest.mark.parametrize("grad_dtype", [torch.bfloat16, torch.float32])
+def test_mxfp8_fused_wgrad_accum_matches_ordinary_accumulation(grad_dtype):
+    """Two backwards must match separately materialized contributions.
+
+    This is the property that matters: folding the second contribution into
+    the first buffer is a scheduling change, not a change of what is computed.
+    The two are not bitwise identical because the unfused path rounds each
+    contribution before adding it. Compare relative error over the whole
+    gradient rather than elementwise, whose absolute scale here runs to tens.
+    """
+    torch.manual_seed(0)
+    inputs = [
+        torch.randn(64, 128, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    ]
+    grads = [
+        torch.randn(64, 128, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    ]
+
+    torch.manual_seed(1)
+    linear = _make_unsharded_mxfp8_linear(grad_dtype=grad_dtype)
+    for x, grad_out in zip(inputs, grads, strict=True):
+        linear(x).backward(grad_out)
+    fused = linear.weight.grad.float()
+
+    torch.manual_seed(1)
+    linear = _make_unsharded_mxfp8_linear(grad_dtype=grad_dtype)
+    contributions = []
+    for x, grad_out in zip(inputs, grads, strict=True):
+        linear.weight.grad = None
+        linear(x).backward(grad_out)
+        contributions.append(linear.weight.grad.clone())
+    ordinary = (contributions[0] + contributions[1]).float()
+
+    relative_error = (fused - ordinary).norm() / ordinary.norm()
+    assert relative_error < 1e-2, f"relative L2 error {relative_error:.5f}"
+
+
+@pytest.mark.parametrize("grad_dtype", [torch.bfloat16, torch.float32])
+def test_mxfp8_fused_wgrad_accum_folds_in_the_second_contribution(
+    monkeypatch, grad_dtype
+):
+    """Two backwards must sum, with neither contribution lost nor counted twice."""
+    linear = _make_unsharded_mxfp8_linear(grad_dtype=grad_dtype)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    original_scaled_addmm_ = mxfp8_linear.F.scaled_addmm_
+    num_scaled_addmm_calls = 0
+
+    def counting_scaled_addmm_(*args, **kwargs):
+        nonlocal num_scaled_addmm_calls
+        num_scaled_addmm_calls += 1
+        return original_scaled_addmm_(*args, **kwargs)
+
+    monkeypatch.setattr(mxfp8_linear.F, "scaled_addmm_", counting_scaled_addmm_)
+
+    linear(x).backward(grad_out)
+    after_one = linear.weight.grad.clone()
+
+    linear(x).backward(grad_out)
+    after_two = linear.weight.grad
+
+    assert num_scaled_addmm_calls == 1
+    # Same input and grad twice, so the running gradient must have doubled.
+    torch.testing.assert_close(
+        after_two.float(), (after_one * 2).float(), rtol=2e-2, atol=2e-2
+    )
+
+
+@pytest.mark.parametrize("grad_dtype", [torch.bfloat16, torch.float32])
+def test_mxfp8_fused_wgrad_accum_uses_grad_dtype(grad_dtype):
+    """Fused accumulation must honor the parameter's gradient contract."""
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+    linear = _make_unsharded_mxfp8_linear(grad_dtype=grad_dtype)
+    linear(x).backward(grad_out)
+    linear(x).backward(grad_out)
+    assert linear.weight.grad.dtype == grad_dtype

@@ -12,6 +12,7 @@ Tensor shape suffixes:
     K: input features
 """
 
+import weakref
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd.function import once_differentiable
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchao.prototype.mx_formats.kernels import (
     mxfp8_quantize_cuda,
@@ -76,6 +78,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         weight_scale_dgrad_swizzled: torch.Tensor,
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
+        weight_ref: "weakref.ReferenceType[torch.Tensor] | None",
     ) -> torch.Tensor:
         # FPROP always consumes rowwise MXFP8. WGRAD can either retain the
         # original BF16 input and quantize it columnwise in backward, or retain
@@ -192,6 +195,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         ctx.requires_wgrad = requires_wgrad
         ctx.input_activation_format_for_backward = input_activation_format_for_backward
         ctx.has_bias = bias_N is not None
+        ctx.weight_ref = weight_ref
 
         return output_MN[:num_rows].reshape(*input_shape[:-1], weight_NK.shape[0])
 
@@ -277,19 +281,57 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                 grad_output_col_scales = triton_mx_block_rearrange(
                     grad_output_col_scales
                 )
-                grad_weight_NK = F.scaled_mm(
-                    grad_output_col_MN.t(),
-                    x_qdata_col_MK,
+
+                scaled_mm_kwargs = dict(
                     scale_a=grad_output_col_scales,
                     scale_recipe_a=F.ScalingType.BlockWise1x32,
                     scale_b=x_scale_col,
                     scale_recipe_b=F.ScalingType.BlockWise1x32,
                     swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
-                    output_dtype=torch.bfloat16,
                 )
 
-        return grad_input, grad_weight_NK, None, None, None, None, grad_bias_N, None
+                weight = ctx.weight_ref() if ctx.weight_ref is not None else None
+                wgrad_dtype = (
+                    weight.grad_dtype
+                    if weight is not None and weight.grad_dtype is not None
+                    else torch.bfloat16
+                )
+                if weight is None or weight.grad is None:
+                    # First contribution of this unshard window, or a traced
+                    # execution. Nothing to accumulate into.
+                    grad_weight_NK = F.scaled_mm(
+                        grad_output_col_MN.t(),
+                        x_qdata_col_MK,
+                        output_dtype=wgrad_dtype,
+                        **scaled_mm_kwargs,
+                    )
+                else:
+                    # A later pipeline microbatch. Fold this contribution into
+                    # the gradient the earlier one produced with an in-place
+                    # scaled addmm, so the accumulation rides the GEMM epilogue
+                    # instead of a separate add kernel. Hand that same buffer
+                    # back and clear the parameter so AccumulateGrad reattaches
+                    # it instead of adding it to itself.
+                    grad_weight_NK = F.scaled_addmm_(
+                        weight.grad,
+                        grad_output_col_MN.t(),
+                        x_qdata_col_MK,
+                        **scaled_mm_kwargs,
+                    )
+                    weight.grad = None
+
+        return (
+            grad_input,
+            grad_weight_NK,
+            None,
+            None,
+            None,
+            None,
+            grad_bias_N,
+            None,
+            None,
+        )
 
 
 # Marks the function local-only so SPMD type checking can propagate through
@@ -399,6 +441,26 @@ class MXFP8Linear(Linear):
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
+        # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
+        # ask the proxy mode as well. A traced backward cannot represent the
+        # read-and-clear protocol on parameter.grad and uses an ordinary WGRAD.
+        # Tracing-based execution must enable this optimization with a graph
+        # pass that represents the running gradient as an explicit dependency.
+        is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
+        if is_tracing:
+            weight_ref = None
+        else:
+            # A custom backward does not receive its forward inputs, but this
+            # one needs the exact tensor object whose .grad owns the running
+            # WGRAD. save_for_backward() is unsuitable for that side channel:
+            # saved-tensor hooks may pack and reconstruct a different tensor
+            # object, while storing the tensor directly on ctx would add a
+            # strong ownership edge from the autograd node. The module and
+            # autograd normally keep the weight alive through backward, so a
+            # weak reference preserves its identity without owning it. If that
+            # lifetime ends early, backward returns a fresh WGRAD because no
+            # live accumulation buffer remains.
+            weight_ref = weakref.ref(weight_NK)
         return _MXFP8LinearFunction.apply(
             input,
             weight_NK,
@@ -408,4 +470,5 @@ class MXFP8Linear(Linear):
             operands.weight_scale_dgrad_swizzled,
             self.bias,
             self.input_activation_format_for_backward,
+            weight_ref,
         )
