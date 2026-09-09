@@ -53,96 +53,100 @@ class Linear(nn.Linear, Module):
 
 
 def _make_interleaved_linear_config(
-    logical_configs: tuple[tuple[str, Linear.Config], ...],
-    param_init: dict[str, Callable] | None,
+    first_config: Linear.Config,
+    second_config: Linear.Config,
     *,
-    config_type: type[Linear.Config] | None = None,
+    logical_names: tuple[str, str],
+    param_init: dict[str, Callable] | None,
 ) -> Linear.Config:
-    """Merge compatible logical output projections into one Linear config.
+    """Merge two compatible logical projections into one Linear config.
 
     Every option except output size and initialization must match so the result
     can be represented by one physical GEMM without changing either projection's
     requested behavior.
     """
-    if not logical_configs:
-        raise ValueError("At least one logical Linear config is required")
+    first_name, second_name = logical_names
+    merged_config_type = type(first_config)
+    if type(second_config) is not merged_config_type:
+        raise ValueError(
+            "Cannot fuse logical Linear projections with different "
+            f"implementations: {first_name} uses {type(first_config).__name__}, "
+            f"but {second_name} uses {type(second_config).__name__}."
+        )
 
-    first_name, first_config = logical_configs[0]
-    merged_config_type = config_type or type(first_config)
     comparable_fields = {
         field.name
         for field in fields(merged_config_type)
         if field.init and field.name not in ("out_features", "param_init")
     }
-
-    for logical_name, config in logical_configs:
-        compatible_type = (
-            isinstance(config, merged_config_type)
-            if config_type is not None
-            else type(config) is merged_config_type
-        )
-        if not compatible_type:
+    for field_name in comparable_fields:
+        if getattr(second_config, field_name) != getattr(first_config, field_name):
             raise ValueError(
                 "Cannot fuse logical Linear projections with different "
-                f"implementations: {first_name} uses {type(first_config).__name__}, "
-                f"but {logical_name} uses {type(config).__name__}."
+                f"{field_name}: {first_name} and {second_name}."
             )
-        for field_name in comparable_fields:
-            if getattr(config, field_name) != getattr(first_config, field_name):
-                raise ValueError(
-                    "Cannot fuse logical Linear projections with different "
-                    f"{field_name}: {first_name} and {logical_name}."
-                )
 
     config_kwargs = {
         field.name: getattr(first_config, field.name)
         for field in fields(merged_config_type)
         if field.init
     }
-    config_kwargs["out_features"] = sum(
-        config.out_features for _, config in logical_configs
+    config_kwargs["out_features"] = (
+        first_config.out_features + second_config.out_features
     )
     config_kwargs["param_init"] = param_init
     return merged_config_type(**config_kwargs)
 
 
 def _build_interleaved_linear(
-    logical_configs: tuple[tuple[str, Linear.Config], ...],
+    first_config: Linear.Config,
+    second_config: Linear.Config,
+    *,
+    logical_names: tuple[str, str],
     param_init: dict[str, Callable] | None,
 ) -> Any:
-    """Build equal-sized logical projections as one interleaved Linear.
+    """Build two equal-sized logical projections as one interleaved Linear.
 
     ``_logical_output_slices`` lets checkpoint and serving integrations recover
     the logical projection names even though ``named_parameters()`` sees only the
     merged module.
     """
-    if not logical_configs:
-        raise ValueError("At least one logical Linear config is required")
-
-    output_sizes = {config.out_features for _, config in logical_configs}
-    if len(output_sizes) != 1:
+    if first_config.out_features != second_config.out_features:
         raise ValueError(
             "Interleaved logical Linear projections must have matching out_features"
         )
+    first_name, second_name = logical_names
 
-    custom_builders = {
-        builder
-        for _, config in logical_configs
-        if (builder := type(config)._custom_interleaved_linear_builder) is not None
-    }
-    if len(custom_builders) > 1:
+    first_builder = type(first_config)._custom_interleaved_linear_builder
+    second_builder = type(second_config)._custom_interleaved_linear_builder
+    if (
+        first_builder is not None
+        and second_builder is not None
+        and first_builder is not second_builder
+    ):
         raise ValueError(
             "Logical Linear projections specify different custom interleaved builders"
         )
 
-    if custom_builders:
-        custom_builder = custom_builders.pop()
-        merged = custom_builder(logical_configs, param_init)
+    custom_builder = first_builder or second_builder
+    if custom_builder is not None:
+        merged = custom_builder(
+            first_config,
+            second_config,
+            logical_names=logical_names,
+            param_init=param_init,
+        )
     else:
-        merged = _make_interleaved_linear_config(logical_configs, param_init).build()
+        merged = _make_interleaved_linear_config(
+            first_config,
+            second_config,
+            logical_names=logical_names,
+            param_init=param_init,
+        ).build()
 
-    merged._logical_output_slices = tuple(
-        (name, config.out_features) for name, config in logical_configs
+    merged._logical_output_slices = (
+        (first_name, first_config.out_features),
+        (second_name, second_config.out_features),
     )
     return merged
 

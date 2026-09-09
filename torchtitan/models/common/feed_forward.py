@@ -82,8 +82,10 @@ class FeedForward(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.w13 = _build_interleaved_linear(
-            (("w1", config.w1), ("w3", config.w3)),
-            _merge_gate_up_param_init(config.w1, config.w3),
+            config.w1,
+            config.w3,
+            logical_names=("w1", "w3"),
+            param_init=_merge_gate_up_param_init(config.w1, config.w3),
         )
         self.w2 = config.w2.build()
         self.register_state_dict_post_hook(self._split_w13_on_save)

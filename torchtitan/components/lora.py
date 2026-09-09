@@ -238,31 +238,23 @@ def _get_lora_cls(parent_cls: type) -> type:
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
 
     def build_interleaved_lora_linear(
-        logical_configs: tuple[tuple[str, Linear.Config], ...],
+        first_config: Linear.Config,
+        second_config: Linear.Config,
+        *,
+        logical_names: tuple[str, str],
         param_init: dict[str, Callable] | None,
     ):
-        base_configs = []
         lora_specs = []
         parent_field_names = {
             field.name for field in fields(parent_config_cls) if field.init
         }
-        for name, config in logical_configs:
+
+        def make_base_config(name: str, config: Linear.Config):
             if not isinstance(config, parent_config_cls):
                 raise ValueError(
                     "Cannot fuse LoRA projections backed by different Linear "
                     f"implementations: {name} uses {type(config).__name__}."
                 )
-            base_configs.append(
-                (
-                    name,
-                    parent_config_cls(
-                        **{
-                            field_name: getattr(config, field_name)
-                            for field_name in parent_field_names
-                        }
-                    ),
-                )
-            )
             if isinstance(config, LoRALinear.Config):
                 lora_specs.append(
                     _LogicalSliceLoRASpec(
@@ -272,11 +264,21 @@ def _get_lora_cls(parent_cls: type) -> type:
                         base_sharding=config.sharding_config,
                     )
                 )
+            return parent_config_cls(
+                **{
+                    field_name: getattr(config, field_name)
+                    for field_name in parent_field_names
+                }
+            )
 
+        first_name, second_name = logical_names
+        first_base_config = make_base_config(first_name, first_config)
+        second_base_config = make_base_config(second_name, second_config)
         merged_base_config = _make_interleaved_linear_config(
-            tuple(base_configs),
-            param_init,
-            config_type=parent_config_cls,
+            first_base_config,
+            second_base_config,
+            logical_names=logical_names,
+            param_init=param_init,
         )
         logical_slice_lora_cls = _get_logical_slice_lora_cls(parent_cls)
         merged_config_cls = vars(logical_slice_lora_cls)["Config"]
@@ -286,8 +288,9 @@ def _get_lora_cls(parent_cls: type) -> type:
                 for field in fields(parent_config_cls)
                 if field.init
             },
-            logical_output_slices=tuple(
-                (name, config.out_features) for name, config in logical_configs
+            logical_output_slices=(
+                (first_name, first_config.out_features),
+                (second_name, second_config.out_features),
             ),
             lora_specs=tuple(lora_specs),
         ).build()
