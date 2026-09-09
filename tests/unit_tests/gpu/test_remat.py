@@ -208,17 +208,15 @@ class TestRematRegions(unittest.TestCase):
 
     def test_feed_forward_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
-            ([], (2, 2, 2)),
-            (["feed_forward.*"], (1, 1, 1)),
-            (["feed_forward.w1"], (1, 2, 2)),
-            (["feed_forward.w3"], (2, 1, 2)),
-            (["feed_forward.w2"], (2, 2, 1)),
+            ([], (2, 2)),
+            (["feed_forward.*"], (1, 1)),
+            (["feed_forward.w13"], (1, 2)),
+            (["feed_forward.w2"], (2, 1)),
         ):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
                 feed_forward = _feed_forward_config().build()
-                feed_forward.w1 = _CountingOp(feed_forward.w1)
-                feed_forward.w3 = _CountingOp(feed_forward.w3)
+                feed_forward.w13 = _CountingOp(feed_forward.w13)
                 feed_forward.w2 = _CountingOp(feed_forward.w2)
                 baseline = _RematModel(_FeedForwardBlock(feed_forward))
                 remat_model = deepcopy(baseline)
@@ -241,8 +239,7 @@ class TestRematRegions(unittest.TestCase):
                 assert isinstance(feed_forward, FeedForward)
                 self.assertEqual(
                     (
-                        feed_forward.w1.num_forwards,
-                        feed_forward.w3.num_forwards,
+                        feed_forward.w13.num_forwards,
                         feed_forward.w2.num_forwards,
                     ),
                     expected_counts,
@@ -256,12 +253,8 @@ class TestRematRegions(unittest.TestCase):
             w3=feed_forward_config.w3,
             gate=_linear_config(4, 4),
         )
-        fused_config = FusedSwiGLU.Config(
-            w13=_linear_config(4, 16),
-            w2=_linear_config(8, 4),
-        )
         variants = (
-            (sigmoid_config.build(), ["w1", "w3", "w2", "gate"]),
+            (sigmoid_config.build(), ["w13", "w2", "gate"]),
             (
                 DistGEMMFeedForward.Config(
                     w1=feed_forward_config.w1,
@@ -270,11 +263,19 @@ class TestRematRegions(unittest.TestCase):
                 ).build(),
                 ["w13", "w2"],
             ),
-            (fused_config.build(), ["w13", "w2"]),
+            (
+                FusedSwiGLU.Config(
+                    w1=feed_forward_config.w1,
+                    w2=feed_forward_config.w2,
+                    w3=feed_forward_config.w3,
+                ).build(),
+                ["w13", "w2"],
+            ),
             (
                 DistGEMMFusedSwiGLU.Config(
-                    w13=_linear_config(4, 16),
-                    w2=_linear_config(8, 4),
+                    w1=feed_forward_config.w1,
+                    w2=feed_forward_config.w2,
+                    w3=feed_forward_config.w3,
                 ).build(),
                 ["w13", "w2"],
             ),

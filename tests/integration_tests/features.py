@@ -276,7 +276,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fused_swiglu_tp2],
-            test_descr="Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
+            test_descr="Override: use Triton SwiGLU activation (FSDP2 + TP2)",
             test_name="override_fused_swiglu",
             ngpu=4,
         ),

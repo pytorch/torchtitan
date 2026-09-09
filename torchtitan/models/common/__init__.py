@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from .attention import (
-    BaseQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttention,
@@ -16,7 +15,6 @@ from .attention import (
     get_fixed_block_mask_mod,
     get_sliding_window_mask_mod,
     GQAttention,
-    QKVLinear,
     ScaledDotProductAttention,
     VarlenAttention,
     VarlenMetadata,
@@ -50,7 +48,6 @@ __all__ = [
     "FeedForward",
     "SigmoidGatedFeedForward",
     "FlexAttention",
-    "BaseQKVLinear",
     "FusedQKVLinear",
     "GELU",
     "get_causal_mask_mod",
@@ -64,7 +61,6 @@ __all__ = [
     "LayerNorm",
     "Linear",
     "MoE",
-    "QKVLinear",
     "RMSNorm",
     "RoPE",
     "RouterGateLinear",

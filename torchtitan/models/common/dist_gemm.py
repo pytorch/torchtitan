@@ -8,20 +8,18 @@
 
 :class:`AllGatherFusedQKVLinear`, :class:`RowParallelLinear` and
 :class:`DistGEMMFeedForward` are drop-in replacements for the stock QKV,
-output and SwiGLU projections. They keep the stock parameter layouts and only
-move the TP collective into the GEMM, over the autograd Functions in
-``torchtitan/distributed/linear.py``. ``RowParallelLinear`` serves both attention's ``wo`` and the
-FFN's ``w2``; nothing about the primitives is attention-specific, and MoE
-projections could use the same pair.
+output and SwiGLU projections. They move the TP collective into the GEMM over
+the autograd Functions in ``torchtitan/distributed/linear.py``.
+``RowParallelLinear`` serves both attention's ``wo`` and the FFN's ``w2``;
+nothing about the primitives is attention-specific, and MoE projections could
+use the same pair.
 
 What lives here is the wiring around each collective and the fallbacks, while
 ``torchtitan/distributed/linear.py`` holds the collective+GEMM math itself.
 
 Selected by passing ``tp_gemm_backend="dist_gemm"`` to ``make_gqa_config`` or
 ``make_ffn_config`` (see ``config_utils.py``), which also drops the boundary
-all-gather these modules take over. No attention or FFN subclass is needed beyond
-the projections: the stock ``GQAttention`` forward handles a QKV that changes the
-sequence length.
+all-gather these modules take over.
 """
 
 from __future__ import annotations
@@ -30,14 +28,9 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch_remat as remat
 
-from torchtitan.distributed.linear import (
-    AllGatherLinear,
-    AllGatherLinearMulti,
-    LinearReduceScatter,
-)
+from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
@@ -47,12 +40,15 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 
+# Shape suffix legend:
+#   T = token dimensions, F = feed-forward hidden dimension
+
 
 _WARNED_NO_TP = False
 
 
-def _warn_once_unfused() -> None:
-    """Say so when the fused modules were selected but TP is not on.
+def _warn_once_no_tp_overlap() -> None:
+    """Say so when the dist-GEMM modules were selected but TP is not on.
 
     Otherwise the fallback is indistinguishable from the feature working: the run
     succeeds, the loss looks fine, and nothing ran fused. The preconditions cover
@@ -64,7 +60,8 @@ def _warn_once_unfused() -> None:
         _WARNED_NO_TP = True
         logger.warning(
             "tp_gemm_backend='dist_gemm' selected but tensor parallelism is not "
-            "active; running the stock projections. Nothing is fused."
+            "active; running the standard feed-forward path without collective "
+            "overlap."
         )
 
 
@@ -125,7 +122,7 @@ class AllGatherFusedQKVLinear(FusedQKVLinear):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tp_group = _tp_group_from_context()
         if tp_group is None:
-            _warn_once_unfused()
+            _warn_once_no_tp_overlap()
             return super().forward(x)
 
         qkv = AllGatherLinear.apply(
@@ -164,7 +161,7 @@ class RowParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()
         if tp_group is None:
-            _warn_once_unfused()
+            _warn_once_no_tp_overlap()
             return super().forward(input)
 
         return LinearReduceScatter.apply(
@@ -179,82 +176,53 @@ class RowParallelLinear(Linear):
 class DistGEMMFeedForward(FeedForward):
     """SwiGLU feed-forward with both TP collectives folded into its GEMMs.
 
-    ``w1`` and ``w3`` share an input, so one all-gather feeds both
-    (:class:`AllGatherLinearMulti`); ``w2`` is row-parallel and reduce-scatters
-    back to a sequence shard (:class:`LinearReduceScatter`). Parameter layout and
-    checkpoint FQNs are the stock ``w1``/``w2``/``w3``.
+    The fused ``w13`` projection consumes an all-gather of the sequence shard;
+    ``w2`` is row-parallel and reduce-scatters back to a sequence shard. Logical
+    checkpoint FQNs remain the logical ``w1``/``w2``/``w3``.
 
-    Falls back to the stock forward when TP is off, or when ``w1``/``w3`` carry a
-    bias: the multi-weight gather takes no per-weight bias (torchtitan's dense FFN
-    builds these with ``bias=False``).
+    Falls back to the standard forward when TP is off.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
-        """Same fields as the stock FFN. The subclass exists because it is what
-        binds ``Config.build()`` to this module rather than the stock one, so it
+        """Same fields as the standard FFN. The subclass exists because it is what
+        binds ``Config.build()`` to this module rather than the standard one, so it
         cannot be deleted as empty."""
-
-        def __post_init__(self) -> None:
-            # Rejected at config construction rather than falling back silently in
-            # forward: a silent fallback means asking for the fused FFN, getting
-            # the stock one, and having no way to tell. The multi-weight gather
-            # takes no per-weight bias, and torchtitan's dense FFN builds these
-            # with bias=False, so this is a misconfiguration rather than a gap.
-            if self.w1.bias or self.w3.bias:
-                raise ValueError(
-                    "DistGEMMFeedForward does not support a bias on w1/w3; "
-                    "the fused all-gather takes no per-weight bias. Use the stock "
-                    "FeedForward, or build w1/w3 with bias=False."
-                )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()
         if tp_group is None:
-            _warn_once_unfused()
-            h1, h3 = remat.region(
-                self._unfused_w13,
-                self.remat_region_name("w13"),
-                recompute=self.remat_should_recompute("w13"),
-            )(x)
-        else:
-            h1, h3 = remat.region(
-                AllGatherLinearMulti.apply,
-                self.remat_region_name("w13"),
-                recompute=self.remat_should_recompute("w13"),
-            )(
-                x,
-                self.w1.weight,
-                self.w3.weight,
-                tp_group,
-                tp_group.group_name,
-            )
-        remat.recompute_needs_tensor(h1, h3)
-        # Elementwise on feature-sharded activations: no collective.
-        h = F.silu(h1) * h3
-        if tp_group is None:
-            out = remat.region(
-                self.w2,
-                self.remat_region_name("w2"),
-                recompute=self.remat_should_recompute("w2"),
-            )(h)
-        else:
-            out = remat.region(
-                LinearReduceScatter.apply,
-                self.remat_region_name("w2"),
-                recompute=self.remat_should_recompute("w2"),
-            )(
-                h,
-                self.w2.weight,
-                self.w2.bias,
-                tp_group,
-                tp_group.group_name,
-            )
-        remat.recompute_needs_tensor(out)
-        return out
+            _warn_once_no_tp_overlap()
+            return super().forward(x)
 
-    def _unfused_w13(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.w1(x), self.w3(x)
+        gate_up_TF = remat.region(
+            AllGatherLinear.apply,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(
+            x,
+            self.w13.weight,
+            self.w13.bias,
+            tp_group,
+            tp_group.group_name,
+        )
+        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
+        # Elementwise on feature-sharded activations: no collective.
+        remat.recompute_needs_tensor(gate_TF, up_TF)
+        h_TF = self._activation(gate_TF, up_TF)
+        out_TD = remat.region(
+            LinearReduceScatter.apply,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(
+            h_TF,
+            self.w2.weight,
+            self.w2.bias,
+            tp_group,
+            tp_group.group_name,
+        )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 __all__ = [
