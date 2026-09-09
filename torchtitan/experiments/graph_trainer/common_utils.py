@@ -20,6 +20,7 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.fsdp import set_model_grad_dtype
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
@@ -476,6 +477,7 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
+    set_model_grad_dtype(model, TORCH_DTYPE_MAP[training.grad_dtype])
     use_spmd_types = get_spmd_backend() == "spmd_types"
     fsdp_mesh: DeviceMesh | None = None
     if use_spmd_types:

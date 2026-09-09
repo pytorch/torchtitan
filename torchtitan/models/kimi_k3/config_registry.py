@@ -84,6 +84,7 @@ def kimi_k3_debugmodel() -> Trainer.Config:
             max_context_length=256,
             steps=10,
             dtype="bfloat16",
+            grad_dtype="bfloat16",
             disable_cuda_graphs=True,
         ),
         checkpoint=CheckpointManager.Config(

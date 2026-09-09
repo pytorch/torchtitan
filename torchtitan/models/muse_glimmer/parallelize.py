@@ -105,12 +105,14 @@ def parallelize_muse_glimmer(
     if has_vision:
         param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
         reduce_dtype = TORCH_DTYPE_MAP[training.mixed_precision_reduce]
+        grad_dtype = TORCH_DTYPE_MAP[training.grad_dtype]
         for module in (model.vision_encoder, model.vision_adapter):
             apply_fsdp_to_vision_encoder(
                 module,  # pyrefly: ignore [bad-argument-type]
                 dp_mesh,
                 param_dtype,
                 reduce_dtype,
+                grad_dtype,
                 reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
                 pp_enabled=parallel_dims.pp_enabled,
                 cpu_offload=training.enable_cpu_offload,
@@ -122,6 +124,7 @@ def parallelize_muse_glimmer(
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        grad_dtype=TORCH_DTYPE_MAP[training.grad_dtype],
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,

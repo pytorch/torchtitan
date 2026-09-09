@@ -20,7 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config.configs import ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, set_model_grad_dtype
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
     ParallelDims,
@@ -40,6 +40,18 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
+
+
+def test_set_model_grad_dtype_updates_trainable_parameters_only():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4)).bfloat16()
+    model[1].weight.requires_grad_(False)
+
+    set_model_grad_dtype(model, torch.float32)
+
+    assert model[0].weight.grad_dtype == torch.float32
+    assert model[0].bias.grad_dtype == torch.float32
+    assert model[1].weight.grad_dtype == model[1].weight.dtype
+    assert model[1].bias.grad_dtype == torch.float32
 
 
 class TestParallelDimsValidation(unittest.TestCase):
@@ -938,6 +950,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
             dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
+            grad_dtype=torch.float32,
             pp_enabled=False,
         )
         optim = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -947,6 +960,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         ref_model_bf16 = copy.deepcopy(ref_model)
         for p in ref_model_bf16.parameters():
             p.data = p.data.to(torch.bfloat16)
+            p.grad_dtype = torch.float32
 
         tokens = torch.randint(
             0, model_config.vocab_size, (64,), device=self.device_type

@@ -438,6 +438,7 @@ def data_parallel(
 
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
+                grad_dtype = p.grad_dtype
                 if get_spmd_backend() == "spmd_types":
                     p, non_dp_mesh_types = _prepare_spmd_parameter_for_fsdp(
                         p,
@@ -448,12 +449,12 @@ def data_parallel(
                 distribute_tensor_func = (
                     _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
                 )
-                mod.register_parameter(
-                    p_name,
-                    nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
-                    ),
+                sharded_param = nn.Parameter(
+                    distribute_tensor_func(p, device_mesh, param_sharding)
                 )
+                if sharded_param.requires_grad:
+                    sharded_param.grad_dtype = grad_dtype
+                mod.register_parameter(p_name, sharded_param)
 
                 # to be compatible with DCP, we use a customized _register_parametrization
                 # instead of nn.utils.parametrize.register_parametrization here

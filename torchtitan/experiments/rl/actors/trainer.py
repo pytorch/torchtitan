@@ -32,6 +32,7 @@ from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
     SelectiveAC,
 )
+from torchtitan.distributed.fsdp import set_model_grad_dtype
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
@@ -283,6 +284,7 @@ class PolicyTrainer(Actor, Configurable):
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
                 model = model_spec.model.build()
+        set_model_grad_dtype(model, TORCH_DTYPE_MAP[config.training.grad_dtype])
 
         model = model_spec.parallelize_fn(
             model,

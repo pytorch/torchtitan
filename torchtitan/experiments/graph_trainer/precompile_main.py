@@ -29,6 +29,7 @@ import torch.distributed as dist
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.fsdp import set_model_grad_dtype
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -133,6 +134,7 @@ def _common_setup(config):
         utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
     ):
         model = model_config.build()
+    set_model_grad_dtype(model, TORCH_DTYPE_MAP[config.training.grad_dtype])
 
     model.verify_module_protocol()
 

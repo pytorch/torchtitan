@@ -19,6 +19,7 @@ from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
+from torchtitan.distributed.fsdp import set_model_grad_dtype
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import (
     maybe_semi_sync_training,
@@ -123,6 +124,7 @@ class FaultTolerantTrainer(Trainer):
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
         ):
             model = model_config.build()
+        set_model_grad_dtype(model, TORCH_DTYPE_MAP[config.training.grad_dtype])
 
         # Verify all submodules satisfy the Module protocol
         model.verify_module_protocol()

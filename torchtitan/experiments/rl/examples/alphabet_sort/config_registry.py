@@ -178,6 +178,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
+                grad_dtype="bfloat16",
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
@@ -543,6 +544,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
+                grad_dtype="bfloat16",
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
@@ -816,6 +818,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
+                grad_dtype="bfloat16",
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
@@ -1010,6 +1013,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
+                grad_dtype="bfloat16",
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
@@ -1099,6 +1103,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
                 max_context_length=seq_len,
                 dtype="bfloat16",
+                grad_dtype="bfloat16",
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,

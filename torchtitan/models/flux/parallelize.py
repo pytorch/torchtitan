@@ -32,6 +32,7 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     resolve_fsdp_mesh,
+    set_model_grad_dtype,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -70,6 +71,7 @@ def parallelize_flux(
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        grad_dtype=TORCH_DTYPE_MAP[training.grad_dtype],
         cpu_offload=training.enable_cpu_offload,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
         dp_mesh_dims=dp_mesh_dims,
@@ -85,6 +87,7 @@ def apply_fsdp(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    grad_dtype: torch.dtype,
     cpu_offload: bool = False,
     enable_symm_mem: bool = False,
     dp_mesh_dims: DataParallelMeshDims | None = None,
@@ -97,9 +100,11 @@ def apply_fsdp(
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
+        grad_dtype (torch.dtype): The data type for parameter gradients.
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
         enable_symm_mem (bool): Whether to enable symmetric-memory FSDP communication.
     """
+    set_model_grad_dtype(model, grad_dtype)
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if dp_mesh_dims is not None:
@@ -219,6 +224,7 @@ def parallelize_encoders(
     assert isinstance(hf_module, nn.Module)
     if parallel_dims.spmd_backend == "spmd_types":
         annotate_replicated_parameters(hf_module, parallel_dims)
+    set_model_grad_dtype(hf_module, TORCH_DTYPE_MAP[training.grad_dtype])
     # pyrefly: ignore [missing-attribute, not-iterable]
     for block in hf_module.encoder.block:
         fully_shard(block, **fsdp_config)

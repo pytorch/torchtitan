@@ -88,9 +88,17 @@ class TrainingConfig:
 
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
-    torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
-    put all parameters, gradients, and optimizer states in bfloat16, without an extra copy of fp32 weights.
-    In the case of full bf16 training, RoPE calculations and logits will still be in fp32.
+    Dtype for persistent model parameters and optimizer states. This is also
+    the model-construction dtype. Parameter gradients use ``grad_dtype``.
+    In BF16 training, RoPE calculations and logits still use FP32.
+    """
+
+    grad_dtype: Literal["bfloat16", "float32"] = "float32"
+    """
+    Dtype for model parameter gradients. FSDP preserves this dtype on its
+    sharded and unsharded parameters. It controls parameter-gradient storage
+    and accumulation independently from ``mixed_precision_reduce``, which
+    controls gradient communication.
     """
 
     mixed_precision_param: Literal["bfloat16", "float32"] = "bfloat16"
@@ -101,7 +109,7 @@ class TrainingConfig:
     and no other parallelism is enabled, i.e. under DDP or single-device training.
     """
 
-    mixed_precision_reduce: Literal["float32"] = "float32"
+    mixed_precision_reduce: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype to use for reductions when applying mixed precision via FSDP.
     This feature only takes effect when data_parallel_shard_degree > 1
