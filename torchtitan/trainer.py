@@ -50,7 +50,11 @@ from torchtitan.distributed.activation_checkpoint import (
     MemoryBudgetAC,
     SelectiveAC,
 )
-from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
+from torchtitan.distributed.cudagraph import (
+    cudagraph_teardown,
+    CUDAGraphGradientState,
+    wrap_with_cuda_graph,
+)
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
@@ -752,12 +756,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             and not config.training.disable_cuda_graphs
         ):
             sdc_config = config.sdc_replayer
+            gradient_state = CUDAGraphGradientState(
+                parameter
+                for model_part in self.model_parts
+                for parameter in model_part.parameters()
+            )
             self._run_gradient_accumulation = wrap_with_cuda_graph(
                 self._gradient_accumulation_body,
                 sdc_num_steps=sdc_config.num_steps if sdc_config is not None else 0,
                 sdc_num_replays=(
                     sdc_config.num_replays if sdc_config is not None else 0
                 ),
+                gradient_state=gradient_state,
             )
         else:
             self._run_gradient_accumulation = self._gradient_accumulation_body
@@ -981,7 +991,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         return accumulated_loss
 
     def train_step(self, data_iterator: Iterator[TrainerBatch]):
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=True)
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
         should_log = self.metrics_processor.should_log(self.step)

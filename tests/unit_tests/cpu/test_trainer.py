@@ -335,11 +335,39 @@ def test_gradient_accumulation_body_finalizes_only_last_schedule():
     assert finalize_gradients == [False, True]
 
 
+def test_cuda_graph_passes_local_gradient_state() -> None:
+    model = torch.nn.Linear(2, 2)
+    trainer = _make_trainer(
+        config=SimpleNamespace(
+            training=SimpleNamespace(disable_cuda_graphs=False),
+            sdc_replayer=None,
+        ),
+        parallel_dims=SimpleNamespace(pp_enabled=False),
+        model_parts=[model],
+    )
+    with patch(
+        "torchtitan.trainer.wrap_with_cuda_graph",
+        side_effect=lambda fn, **kwargs: fn,
+    ) as wrap:
+        Trainer._init_gradient_accumulation(trainer)
+
+    gradient_state = wrap.call_args.kwargs["gradient_state"]
+    assert gradient_state.parameters == tuple(model.parameters())
+
+
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
+        def __init__(
+            self,
+            fn,
+            example_inputs,
+            *,
+            num_warmup_iterations=1,
+            gradient_state=None,
+        ):
             self.fn = fn
             assert num_warmup_iterations == 2
+            assert gradient_state is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -381,9 +409,17 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
 
 def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
+        def __init__(
+            self,
+            fn,
+            example_inputs,
+            *,
+            num_warmup_iterations=1,
+            gradient_state=None,
+        ):
             self.fn = fn
             assert num_warmup_iterations == 2
+            assert gradient_state is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -488,7 +524,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     ):
         Trainer.train_step(trainer, data_iterator)
 
-    trainer.optimizers.zero_grad.assert_called_once_with(set_to_none=False)
+    trainer.optimizers.zero_grad.assert_called_once_with(set_to_none=True)
     metrics_processor.log.assert_called_once_with(
         1,
         6.0,
@@ -509,7 +545,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             data_iterator=iter([batch(position) for position in range(4, 7)]),
         )
 
-    trainer.optimizers.zero_grad.assert_called_once_with(set_to_none=False)
+    trainer.optimizers.zero_grad.assert_called_once_with(set_to_none=True)
     metrics_processor.log.assert_not_called()
     assert prepared_positions == [[1, 2, 3], [4, 5, 6]]
 
