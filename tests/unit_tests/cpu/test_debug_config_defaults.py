@@ -9,6 +9,19 @@ from inspect import signature
 
 import pytest
 
+from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+    graph_trainer_deepseek_v3_debugmodel,
+)
+from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+    graph_trainer_llama3_debugmodel,
+)
+from torchtitan.experiments.graph_trainer.muse_glimmer.config_registry import (
+    graph_trainer_muse_glimmer_debugmodel,
+)
+from torchtitan.experiments.graph_trainer.qwen3.config_registry import (
+    graph_trainer_qwen3_debugmodel,
+    graph_trainer_qwen3_debugmodel_moe,
+)
 from torchtitan.experiments.torchft.llama3.config_registry import (
     llama3_torchft_debugmodel,
 )
@@ -127,3 +140,22 @@ def test_debug_config_default_seq_len(config_factory: DebugConfigFactory) -> Non
         signature(config_factory).parameters["seq_len"].default
         == DEFAULT_DEBUG_MODEL_SEQ_LEN
     )
+
+
+@pytest.mark.parametrize(
+    "config_factory",
+    (
+        graph_trainer_deepseek_v3_debugmodel,
+        graph_trainer_llama3_debugmodel,
+        graph_trainer_muse_glimmer_debugmodel,
+        graph_trainer_qwen3_debugmodel,
+        graph_trainer_qwen3_debugmodel_moe,
+    ),
+)
+def test_graph_trainer_debug_config_default_seq_len(
+    config_factory: DebugConfigFactory,
+) -> None:
+    config = config_factory()
+    assert config.training.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN
+    assert config.model_spec is not None
+    assert config.model_spec.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN
