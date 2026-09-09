@@ -119,7 +119,10 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    FSDP_PARAM_FQNS_META,
+)
 from torchtitan.experiments.graph_trainer.subgraph_regions import (
     apply_subgraph_region_annotations_pass,
     SUBGRAPH_REGION,
@@ -498,17 +501,52 @@ class TestFsdpDenseSchedulerPass(TestCase):
             node.meta["autograd_backward"] = True
         return node
 
-    def _tag_fsdp_bucket(self, node, plan_fqns, direction):
-        node.meta[_FSDP_BUCKET_META] = {
-            "plan_fqns": tuple(plan_fqns),
-            "direction": direction,
-        }
+    def _tag_fsdp_chain(self, node, param_fqns, direction):
+        custom = dict(node.meta.get("custom", {}))
+        custom[FSDP_PARAM_FQNS_META] = tuple(param_fqns)
+        node.meta["custom"] = custom
         if direction == "bwd":
             node.meta["autograd_backward"] = True
         return node
 
+    def _tag_fsdp_bucket(self, node, plan_fqns, direction):
+        self._tag_fsdp_chain(node, plan_fqns, direction)
+        node.meta[_FSDP_BUCKET_META] = {
+            "plan_fqns": tuple(plan_fqns),
+            "direction": direction,
+        }
+        return node
+
     def _node_order(self, gm):
         return {node: i for i, node in enumerate(gm.graph.nodes)}
+
+    def _add_bucketed_ag_with_late_input(
+        self,
+        graph,
+        source,
+        *,
+        plan_fqn,
+        direction,
+        group_name="pg",
+    ):
+        prep = graph.call_function(torch.ops.aten.detach.default, args=(source,))
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([prep], 2, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1))
+        coll = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            args=(shard, 2, group_name),
+            kwargs={"out": bucket},
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(coll,)
+        )
+        self._tag_fsdp_chain(prep, [plan_fqn], direction)
+        for node in (bucket, shard, coll, wait):
+            self._tag_fsdp_bucket(node, [plan_fqn], direction)
+        return prep, coll, wait
 
     def test_transformer_block_bucket_counts_follow_bucket_plan(self):
         counts = get_transformer_block_bucket_counts(
@@ -579,6 +617,327 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 local_layer_ids=frozenset(),
                 require_backward_all_gathers=True,
             )
+
+    def test_fsdp_dense_scheduler_prefetches_full_ac_ag_input_chains(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        fwd_dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        fwd_buckets = [
+            self._add_bucketed_ag_with_late_input(
+                graph,
+                x,
+                plan_fqn=plan_fqn,
+                direction="fwd",
+            )
+            for plan_fqn in (
+                "layers.1.attention",
+                "layers.1.moe.routed_experts.inner_experts",
+            )
+        ]
+        fwd_dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(fwd_buckets[0][2], fwd_buckets[1][2]),
+            ),
+            "layers.1.attention",
+        )
+        bwd_dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(fwd_dense1,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        bwd_dense1.name = f"{bwd_dense1.name}_recomputed"
+        bwd_buckets = [
+            self._add_bucketed_ag_with_late_input(
+                graph,
+                x,
+                plan_fqn=plan_fqn,
+                direction="bwd",
+            )
+            for plan_fqn in (
+                "layers.0.attention",
+                "layers.0.moe.routed_experts.inner_experts",
+            )
+        ]
+        bwd_dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(bwd_buckets[0][2], bwd_buckets[1][2]),
+            ),
+            "layers.0.attention",
+            backward=True,
+        )
+        bwd_dense0.name = f"{bwd_dense0.name}_recomputed"
+        graph.output((fwd_dense0, fwd_dense1, bwd_dense1, bwd_dense0))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset({0, 1}),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        for prep, coll, wait in fwd_buckets:
+            self.assertLess(order[prep], order[coll])
+            self.assertLess(order[coll], order[fwd_dense0])
+            self.assertLess(order[fwd_dense0], order[wait])
+        self.assertLess(order[fwd_buckets[0][1]], order[fwd_buckets[1][1]])
+        for prep, coll, wait in bwd_buckets:
+            self.assertLess(order[prep], order[coll])
+            self.assertLess(order[coll], order[bwd_dense1])
+            self.assertLess(order[bwd_dense1], order[wait])
+        self.assertLess(order[bwd_buckets[0][1]], order[bwd_buckets[1][1]])
+
+    def test_fsdp_dense_scheduler_prefetches_padded_ag_input_chain(self):
+        graph = torch.fx.Graph()
+        parameter = graph.placeholder("parameter")
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(parameter,)),
+            "layers.0.attention",
+        )
+        padded = graph.call_function(
+            torch.ops.aten.constant_pad_nd.default,
+            args=(parameter, [0, 1], 0.0),
+        )
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([padded], 2, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1))
+        coll = self._tag_fsdp_bucket(
+            graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 2, "pg"),
+                kwargs={"out": bucket},
+            ),
+            ["layers.1.attention"],
+            "fwd",
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(coll,)
+        )
+        for node in (padded, bucket, shard, wait):
+            self._tag_fsdp_chain(node, ["layers.1.attention"], "fwd")
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        self.assertLess(order[padded], order[bucket])
+        self.assertLess(order[bucket], order[shard])
+        self.assertLess(order[shard], order[coll])
+        self.assertLess(order[coll], order[dense0])
+        self.assertLess(order[dense0], order[wait])
+
+    def test_fsdp_dense_scheduler_prefetches_shared_ag_input_once(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        shared_prep = graph.call_function(torch.ops.aten.detach.default, args=(x,))
+        self._tag_fsdp_chain(
+            shared_prep,
+            [
+                "layers.1.attention",
+                "layers.1.moe.routed_experts.inner_experts",
+            ],
+            "fwd",
+        )
+        buckets = []
+        for plan_fqn in (
+            "layers.1.attention",
+            "layers.1.moe.routed_experts.inner_experts",
+        ):
+            bucket = graph.call_function(
+                torch.ops.bucketing._pre_bucket_all_gather.default,
+                args=([shared_prep], 2, torch.float32, [0], 0),
+            )
+            shard = graph.call_function(
+                torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1)
+            )
+            coll = graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 2, "pg"),
+                kwargs={"out": bucket},
+            )
+            wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default, args=(coll,)
+            )
+            for node in (bucket, shard, coll, wait):
+                self._tag_fsdp_bucket(node, [plan_fqn], "fwd")
+            buckets.append((coll, wait))
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(buckets[0][1], buckets[1][1]),
+            ),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset({1}),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        for coll, wait in buckets:
+            self.assertLess(order[shared_prep], order[coll])
+            self.assertLess(order[coll], order[dense0])
+            self.assertLess(order[dense0], order[wait])
+        self.assertLess(order[buckets[0][0]], order[buckets[1][0]])
+
+    def test_fsdp_dense_scheduler_prefetches_ag_with_group_placeholder(self):
+        graph = torch.fx.Graph()
+        parameter = graph.placeholder("parameter")
+        group_name = graph.placeholder("group_name")
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(parameter,)),
+            "layers.0.attention",
+        )
+        prep, coll, wait = self._add_bucketed_ag_with_late_input(
+            graph,
+            parameter,
+            plan_fqn="layers.1.attention",
+            direction="fwd",
+            group_name=group_name,
+        )
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        self.assertLess(order[group_name], order[prep])
+        self.assertLess(order[prep], order[coll])
+        self.assertLess(order[coll], order[dense0])
+        self.assertLess(order[dense0], order[wait])
+
+    def test_fsdp_dense_scheduler_rejects_late_getattr_without_reordering(self):
+        root = torch.nn.Module()
+        root.register_buffer("parameter", torch.ones(1))
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        parameter = graph.get_attr("parameter")
+        prep, coll, wait = self._add_bucketed_ag_with_late_input(
+            graph,
+            parameter,
+            plan_fqn="layers.1.attention",
+            direction="fwd",
+        )
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(root, graph)
+        original_nodes = list(gm.graph.nodes)
+
+        with self.assertRaisesRegex(ValueError, "launch inputs are after dense region"):
+            schedule_fsdp_comms_to_dense_regions_pass(
+                gm,
+                moe_layer_ids=frozenset(),
+                n_layers=2,
+                strict=True,
+            )
+
+        self.assertEqual(list(gm.graph.nodes), original_nodes)
+        order = self._node_order(gm)
+        self.assertLess(order[dense0], order[parameter])
+        self.assertLess(order[parameter], order[prep])
+        self.assertLess(order[prep], order[coll])
+        self.assertLess(order[coll], order[wait])
+
+    def test_fsdp_dense_scheduler_does_not_move_independent_rs_producer(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+
+        dense2 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.2.attention",
+            backward=True,
+        )
+        dense1_early = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(dense2,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        grad = graph.call_function(torch.ops.aten.neg.default, args=(x,))
+        grad.meta["autograd_backward"] = True
+        dense1_late = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(dense1_early,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(dense1_late,)),
+            "layers.0.attention",
+            backward=True,
+        )
+        rs2 = self._tag_fsdp_bucket(
+            graph.call_function(
+                c10d.reduce_scatter_tensor.default,
+                args=(grad, "sum", 1, "pg"),
+            ),
+            ["layers.2"],
+            "bwd",
+        )
+        rs2_wait = graph.call_function(c10d.wait_tensor.default, args=(rs2,))
+        graph.output((dense0, rs2_wait))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        self.assertLess(order[dense1_early], order[grad])
+        self.assertLess(order[grad], order[rs2])
+        self.assertLess(order[rs2], order[dense1_late])
 
     def test_fsdp_dense_scheduler_accepts_expected_bucket_counts(self):
         graph = torch.fx.Graph()
@@ -777,7 +1136,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=3, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -832,7 +1194,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=1, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=1,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -886,7 +1251,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=3, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -929,7 +1297,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=3, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -968,7 +1339,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=2, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=2,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -1005,6 +1379,8 @@ class TestFsdpDenseSchedulerPass(TestCase):
         ag1_wait = graph.call_function(
             torch.ops._c10d_functional.wait_tensor.default, args=(ag1,)
         )
+        for node in (padded, bucket, shard, ag1_wait):
+            self._tag_fsdp_chain(node, ["layers.1"], "fwd")
         dense1 = self._tag_fsdp_schedule_node(
             graph.call_function(torch.ops.aten.relu.default, args=(ag1_wait,)),
             "layers.1.attention",
@@ -1370,7 +1746,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset({0}), n_layers=2, strict=True
+            gm,
+            moe_layer_ids=frozenset({0}),
+            n_layers=2,
+            strict=True,
         )
 
         order = self._node_order(gm)

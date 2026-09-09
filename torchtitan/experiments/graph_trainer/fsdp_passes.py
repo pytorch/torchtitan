@@ -52,6 +52,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     annotate_fsdp_unshard_outputs,
     find_fsdp_unshard_outputs_by_param,
 )
+from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
 from torchtitan.tools.logging import logger
 
 
@@ -726,6 +727,10 @@ def _fsdp_bucket_logical_index(
     return None
 
 
+def _is_fsdp_chain_node(node: fx.Node) -> bool:
+    return bool(node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META, ()))
+
+
 def _is_dense_region_target_node(node: fx.Node) -> bool:
     """Return whether ``node`` is useful dense compute, not FSDP plumbing.
 
@@ -735,6 +740,8 @@ def _is_dense_region_target_node(node: fx.Node) -> bool:
     compute window and can make them interfere with MoE token exchange.
     """
     if node.op != "call_function":
+        return False
+    if _is_fsdp_chain_node(node):
         return False
     if is_wait_tensor(node) or is_all_gather(node):
         return False
@@ -1112,7 +1119,6 @@ def schedule_fsdp_comms_to_dense_regions_pass(
         )
 
     order = {node: i for i, node in enumerate(gm.graph.nodes)}
-
     _FSDP_INFRA_OPS = {
         torch.ops.bucketing._pre_bucket_all_gather.default,
         torch.ops.bucketing._pre_bucket_reduce_scatter.default,
@@ -1170,15 +1176,19 @@ def schedule_fsdp_comms_to_dense_regions_pass(
         return True, None
 
     def _collect_launch_chain(launch: fx.Node) -> list[fx.Node]:
-        """Collect the FSDP infrastructure chain rooted at ``launch``."""
+        """Collect the FSDP preparation chain rooted at ``launch``."""
         chain: list[fx.Node] = []
         work = [launch]
         visited: set[fx.Node] = set()
+        annotated_all_gather = is_all_gather(launch) and _is_fsdp_chain_node(launch)
         while work:
             n = work.pop()
             if n in visited or n.op in ("placeholder", "get_attr"):
                 continue
-            if n.target not in _FSDP_INFRA_OPS:
+            if annotated_all_gather:
+                if not _is_fsdp_chain_node(n):
+                    continue
+            elif n.target not in _FSDP_INFRA_OPS:
                 continue
             visited.add(n)
             chain.append(n)
@@ -1227,9 +1237,9 @@ def schedule_fsdp_comms_to_dense_regions_pass(
     def _move_chain_before(launch: fx.Node, target: fx.Node) -> tuple[bool, list[str]]:
         """Move an AG/RS launch and its FSDP infrastructure chain before ``target``.
 
-        Only moves FSDP-specific infrastructure nodes. In particular, RS
-        gradient producers such as casts or adds stay where autograd produced
-        them; target selection ensures the launch moves after those producers.
+        Annotated AG chains include all parameter preparation. RS gradient
+        producers such as casts or adds stay where autograd produced them;
+        target selection ensures the launch moves after those producers.
         """
         target_pos = order[target]
 
@@ -1363,17 +1373,23 @@ def schedule_fsdp_comms_to_dense_regions_pass(
             + "\n".join(f"- {blocker}" for blocker in blockers)
         )
 
-    failed_moves: list[str] = []
     for comm in all_comms:
         if comm.kind != "rs":
             continue
         moved_wait, reason = _sink_output_only_wait_closure(comm.wait)
         wait_closures_sunk += int(moved_wait)
-        if not moved_wait and strict:
-            failed_moves.append(
+        if not moved_wait and strict and comm.logical_index is not None:
+            blockers.append(
                 f"RS wait sink for {comm.plan_fqns!r} {comm.wait.name}: {reason}"
             )
 
+    if blockers and strict:
+        raise ValueError(
+            "Could not finish FSDP dense-region scheduling:\n"
+            + "\n".join(f"- {blocker}" for blocker in blockers)
+        )
+
+    failed_moves: list[str] = []
     for launch, _wait, target, description in moves:
         # Recompute order before each move to account for prior moves.
         order = {node: i for i, node in enumerate(gm.graph.nodes)}
