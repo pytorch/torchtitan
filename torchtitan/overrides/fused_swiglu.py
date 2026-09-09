@@ -35,7 +35,7 @@ from torchtitan.models.common.moe import GroupedExperts
 
 __all__ = [
     "DistGEMMFusedSwiGLU",
-    "FusedGroupedExperts",
+    "FusedSwiGLUGroupedExperts",
     "FusedSwiGLU",
     "dist_gemm_fused_swiglu",
     "fused_grouped_experts",
@@ -417,7 +417,7 @@ def dist_gemm_fused_swiglu(
     return derive(cfg, DistGEMMFusedSwiGLU.Config)
 
 
-class FusedGroupedExperts(GroupedExperts):
+class FusedSwiGLUGroupedExperts(GroupedExperts):
     """GroupedExperts using the fused Triton SiLU-and-multiply operation."""
 
     @dataclass(kw_only=True, slots=True)
@@ -441,4 +441,4 @@ class FusedGroupedExperts(GroupedExperts):
 def fused_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
-    return derive(cfg, FusedGroupedExperts.Config)
+    return derive(cfg, FusedSwiGLUGroupedExperts.Config)
