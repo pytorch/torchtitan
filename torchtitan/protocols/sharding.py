@@ -58,7 +58,7 @@ class ShardingConfig:
             e.g. ``{"x": {TP: Replicate()}}`` for all-gather.
             ``None`` means no input redistribution.
         out_src_shardings: Source SPMD type of the forward's output. When
-            ``local_map`` is set, this declares the local region's output
+            ``local_spmd`` is set, this declares the local region's output
             type. Accepts a single
             ``SpmdType`` (single-output case) or a tuple (multi-
             output case). ``None``

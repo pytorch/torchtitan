@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.utils import get_spmd_context
 from torchtitan.experiments.graph_trainer.configs import (
@@ -53,6 +54,7 @@ def build_minimal_trainer(
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
+    trainer.dataloader = SimpleNamespace(max_num_documents=None)
     trainer.ntokens_seen = 0
 
     if trainer_cls is GraphTrainer:
@@ -85,6 +87,8 @@ def build_minimal_trainer(
                 "selective": SelectiveAC.Config(),
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
+            dataloader=SimpleNamespace(max_num_documents=None),
+            training=TrainingConfig(),
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
@@ -93,6 +97,10 @@ def build_minimal_trainer(
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
-        trainer.config = SimpleNamespace(parallelism=SimpleNamespace())
+        trainer.config = SimpleNamespace(
+            dataloader=SimpleNamespace(max_num_documents=None),
+            training=TrainingConfig(),
+            parallelism=SimpleNamespace(),
+        )
 
     return trainer

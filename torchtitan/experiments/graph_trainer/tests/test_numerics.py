@@ -22,6 +22,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 
 
 STEPS = 20
@@ -227,21 +228,15 @@ LLAMA3_PARALLELISM = (
     "--parallelism.tensor_parallel_degree=2"
     " --parallelism.data_parallel_shard_degree=4"
 )
-# Core debug configs default to each flavor's full context length, while the
-# GraphTrainer configs use smaller contexts to keep graph tests tractable.
-DEBUGMODEL_2K_TRAINING_OPTIONS = (
-    "--training.max_context_length=2048"
-    " --training.num_tokens_per_microbatch_per_dp_rank=16384"
-)
-DEBUGMODEL_4K_TRAINING_OPTIONS = (
-    "--training.max_context_length=4096"
+DEBUGMODEL_TRAINING_OPTIONS = (
+    f"--training.max_context_length={DEFAULT_DEBUG_MODEL_SEQ_LEN}"
     " --training.num_tokens_per_microbatch_per_dp_rank=16384"
 )
 
 
 def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
     """Run loss_compare for llama3 vs graph_trainer.llama3 with FSDP+TP."""
-    options = f"{LLAMA3_PARALLELISM} {DEBUGMODEL_2K_TRAINING_OPTIONS}"
+    options = f"{LLAMA3_PARALLELISM} {DEBUGMODEL_TRAINING_OPTIONS}"
     test_options = options
     if test_options_extra:
         test_options += f" {test_options_extra}"
@@ -301,7 +296,7 @@ def _run_deepseek_v3_loss_compare(
     baseline_options_extra: str = "",
 ) -> bool:
     """Run loss_compare for deepseek_v3 vs graph_trainer.deepseek_v3."""
-    options = f"{parallelism} {DEBUGMODEL_2K_TRAINING_OPTIONS}"
+    options = f"{parallelism} {DEBUGMODEL_TRAINING_OPTIONS}"
     baseline_options = options
     if baseline_options_extra:
         baseline_options += f" {baseline_options_extra}"
@@ -468,7 +463,7 @@ QWEN3_PARALLELISM = (
 
 def _run_qwen3_loss_compare(test_options_extra: str = "") -> bool:
     """Run loss_compare for qwen3 vs graph_trainer.qwen3 with FSDP+TP."""
-    options = f"{QWEN3_PARALLELISM} {DEBUGMODEL_2K_TRAINING_OPTIONS}"
+    options = f"{QWEN3_PARALLELISM} {DEBUGMODEL_TRAINING_OPTIONS}"
     test_options = options
     if test_options_extra:
         test_options += f" {test_options_extra}"
@@ -492,7 +487,7 @@ QWEN3_MOE_PARALLELISM = (
 
 def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
     """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
-    options = f"{QWEN3_MOE_PARALLELISM} {DEBUGMODEL_4K_TRAINING_OPTIONS}"
+    options = f"{QWEN3_MOE_PARALLELISM} {DEBUGMODEL_TRAINING_OPTIONS}"
     test_options = options
     if test_options_extra:
         test_options += f" {test_options_extra}"
@@ -539,7 +534,7 @@ def _run_autoparallel_llama3_loss_compare() -> bool:
 AUTOPARALLEL_DSV3_PARALLELISM = (
     "--parallelism.data_parallel_shard_degree=4"
     " --parallelism.expert_parallel_degree=2"
-    f" {DEBUGMODEL_2K_TRAINING_OPTIONS}"
+    f" {DEBUGMODEL_TRAINING_OPTIONS}"
 )
 
 

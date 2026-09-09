@@ -5,21 +5,29 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
+import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 from torch import nn
 
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexAttention,
+    VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -320,6 +328,49 @@ class KimiK3Model(Decoder):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Build masks and annotate K3 multimodal inputs."""
+        batch: dict[str, Any] = dict(input_dict)
+        positions = batch.get("positions")
+        padding_mask = batch.pop("padding_mask", None)
+        if positions is not None:
+            inner = self.config.first_full_attention_backend
+            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
+
+        multimodal_layout = SpmdType({MeshAxisName.DP: spmd.V})
+        input_sharding = decoder_input_sharding()
+        input_sharding.update(
+            {
+                name: multimodal_layout
+                for name in (
+                    "pixel_values",
+                    "pixel_values_videos",
+                    "grid_thw",
+                    "grid_thw_videos",
+                )
+            }
+        )
+        if parallelism.spmd_backend == "spmd_types":
+            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+
+        inputs = batch.pop("input")
+        labels = batch.pop("labels")
+        return inputs, labels, batch
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -376,17 +427,20 @@ class KimiK3Model(Decoder):
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
         if self.tok_embeddings is not None:
-            h_TD = self._prepare_multimodal_embeds(
-                tokens,
-                pixel_values=pixel_values,
-                grid_thw=grid_thw,
-                special_tokens=special_tokens,
-            )
+            with multimodal_context():
+                h_TD = self._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=pixel_values,
+                    grid_thw=grid_thw,
+                    special_tokens=special_tokens,
+                )
         else:
             h_TD = tokens
 
-        num_tokens, D = h_TD.shape
-        block_residual_TND = h_TD.new_zeros(num_tokens, 0, D)
+        if spmd.is_type_checking():
+            spmd.assert_type(h_TD, {MeshAxisName.DP: spmd.S(0)})
+
+        block_residual_TND = h_TD.unsqueeze(1)[:, :0]
         for layer in self.layers.values():
             h_TD, block_residual_TND = layer(
                 h_TD,

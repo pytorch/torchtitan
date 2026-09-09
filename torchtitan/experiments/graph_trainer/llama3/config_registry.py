@@ -30,7 +30,7 @@ from . import model_registry
 
 
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(llama3_debugmodel(seq_len=2048), model_registry)
+    config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -53,7 +53,7 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     Functions survive tracing. Needs tensor_parallel_degree > 1 and CUDA.
     """
     config = to_graph_trainer_config(
-        llama3_debugmodel_dist_gemm(seq_len=2048),
+        llama3_debugmodel_dist_gemm(),
         partial(model_registry, tp_gemm_backend="dist_gemm"),
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
@@ -64,6 +64,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
     base = llama3_debugmodel()
     base.model_spec = llama3_model_registry(
         "debugmodel",
+        seq_len=base.training.max_context_length,
         converters=[
             llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
         ],
@@ -82,7 +83,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     the same machinery without those obstacles. See
     ``build_decoder_config_for_backend``.
     """
-    base = llama3_debugmodel(seq_len=2048)
+    base = llama3_debugmodel()
     base.parallelism.context_parallel_load_balancer = "headtail"
     base.model_spec = model_registry(
         "debugmodel",

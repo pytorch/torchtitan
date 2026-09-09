@@ -277,14 +277,14 @@ def set_gqa_inner_attention_local_spmd(inner_attention_cfg) -> None:
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
     shards H.
-    ``local_map`` defines how the local tensors' SPMD annotations change across
-    the kernel.
+    The local SPMD boundary defines how tensor annotations change across the
+    kernel.
 
     Declares placements over the full dense SPMD axis set (DP/CP/TP) so the
     local region composes with the surrounding multi-axis mesh.
 
     With CP, q stays token-sharded on the CP axis while k/v are
-    unsharded (``R``) on CP -- the local_map boundary all-gathers k/v so the
+    unsharded (``R``) on CP -- the module boundary all-gathers k/v so the
     kernel sees full-length keys (matching the BlockMask's kv dimension).
     Q's local grad is naturally token-sharded; k/v's local grads accumulate as
     partial (``P``) on CP and are reduced on the way out.

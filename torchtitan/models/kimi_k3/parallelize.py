@@ -55,9 +55,8 @@ def parallelize_kimi_k3(
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
     assert isinstance(model, KimiK3Model)
-    # Kimi K3 only declares layouts for its MoE modules. Seed replicated
-    # layouts for the remaining decoder and vision parameters before the MoE
-    # declarations replace the expert parameters with sparse shards.
+    # Seed replicated layouts for parameters outside the explicit expert
+    # declarations. Vision buffers declare their DP layouts separately.
     annotate_replicated_parameters(model, parallel_dims)
 
     # model_registry's moe_comm_backend picks the dispatcher: standard

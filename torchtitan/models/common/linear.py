@@ -21,6 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -122,14 +123,23 @@ class ScaledBiasRowwiseLinear(Linear):
     class Config(Linear.Config):
         pass
 
+    def __init__(self, config: Config):
+        if not config.bias:
+            raise ValueError("ScaledBiasRowwiseLinear requires bias=True")
+        super().__init__(config)
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        bias = spmd.convert(
-            self.bias,
-            "tp",
-            src=spmd.I,
-            dst=spmd.P,
-            expert_mode=True,
-        )
+        bias = self.bias
+        assert bias is not None
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
         return F.linear(input, self.weight, bias)
 
 

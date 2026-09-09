@@ -16,14 +16,17 @@ from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 
 
 def llama3_torchft_debugmodel(
-    seq_len: int | None = None,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> FaultTolerantTrainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return FaultTolerantTrainer.Config(

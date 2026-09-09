@@ -10,7 +10,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, ScaledBiasRowwiseLinear
 from torchtitan.protocols.module import Module
 
 
@@ -127,6 +127,29 @@ class TestLinear(unittest.TestCase):
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
+
+
+class TestScaledBiasRowwiseLinear(unittest.TestCase):
+    def test_requires_bias(self):
+        with self.assertRaisesRegex(ValueError, "requires bias=True"):
+            ScaledBiasRowwiseLinear.Config(
+                in_features=4,
+                out_features=2,
+                bias=False,
+            ).build()
+
+    def test_unparallelized_forward(self):
+        linear = ScaledBiasRowwiseLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+        ).build()
+        input = torch.randn(3, 4)
+
+        expected = nn.functional.linear(input, linear.weight, linear.bias)
+        actual = linear(input)
+
+        torch.testing.assert_close(actual, expected)
 
 
 if __name__ == "__main__":

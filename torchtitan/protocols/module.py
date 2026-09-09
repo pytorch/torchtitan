@@ -457,7 +457,7 @@ class Module(nn.Module, Configurable):
         in_named: list[SpmdType],
         out_src: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
-        """Apply spmd_types local_map for a local-tensor compute region."""
+        """Disable typechecking inside a local-tensor compute region."""
         in_types = tuple(
             (layout.local_type, layout.partition_spec) for layout in in_named
         )

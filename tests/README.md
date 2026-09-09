@@ -91,12 +91,14 @@ and uses its fixed initialization path.
 | Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 |
 | Muse Glimmer text | FSDP 8 |
 | Qwen3.5 MoE multimodal | FSDP 4 x TP 2, EP 4 |
+| Kimi K2.5 DistMuon | FSDP 8, EP 8 |
 
-Kimi K2.5 continues to run as an FSDP 8, EP 8 integration case. Its multimodal
-backward uses bicubic upsampling, whose CUDA backward has no deterministic
-implementation, so the case does not carry a numerical golden. For manual
-comparisons, `loss_compare.py` can create the model-only seed checkpoint with a
-model-equivalent AdamW config while the measured run continues to use DistMuon.
+Kimi K2.5 DistMuon FSDP+EP and Kimi K2.7 DistMuon PP+FSDP+EP both run on A10G.
+The K2.5 multimodal backward uses bicubic upsampling, whose CUDA backward has no
+deterministic implementation, so the FSDP+EP case does not carry a numerical
+golden. For manual comparisons, `loss_compare.py` can create the model-only seed
+checkpoint with a model-equivalent AdamW config while the measured run continues
+to use DistMuon.
 
 Additional A10G Real-PG-only cases exercise CP and pipeline communication:
 
@@ -105,6 +107,7 @@ Additional A10G Real-PG-only cases exercise CP and pipeline communication:
 | DeepSeek V3 | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
 | Llama 3 | FSDP 2 x TP 2 x PP 2, 1F1B |
 | GPT-OSS | FSDP 2 x CP 2 x PP 2, EP 4, Interleaved1F1B |
+| Kimi K2.7 DistMuon | FSDP 2 x PP 2, EP 2, Interleaved1F1B |
 
 On pull requests, the Fake-PG lane and the `real_pg_required` Real-PG scope
 partition the enabled A10G tests without overlap. Post-merge and scheduled

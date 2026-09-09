@@ -25,6 +25,7 @@ from torchtitan.experiments.torchft.manager import (
     TorchFTManager,
 )
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -37,6 +38,7 @@ class FaultTolerantTrainer(Trainer):
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     ft_manager: TorchFTManager
+    sdc_replayer: SDCReplayer | None
 
     @record
     def __init__(self, config: Config):
@@ -284,6 +286,24 @@ class FaultTolerantTrainer(Trainer):
         self.step = 0
         self.ntokens_seen = 0
 
+        # SDC replay state is process-local and not checkpointed; its check
+        # schedule restarts after every checkpoint load (see load_state_dict).
+        self.sdc_replayer = None
+        if config.sdc_replayer is not None:
+            self.sdc_replayer = config.sdc_replayer.build(
+                modules=self.model_parts,
+                device=self.device,
+                # ntokens_seen is the only trainer scalar the replayed
+                # forward/backward mutates; self.step is incremented outside
+                # the replay boundary and needs no capture.
+                scalar_state={
+                    "ntokens_seen": ScalarStateAccessor(
+                        get=lambda: self.ntokens_seen,
+                        set=lambda value: setattr(self, "ntokens_seen", value),
+                    )
+                },
+            )
+
         # FT addition: pass ft_manager to CheckpointManager
         self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
@@ -304,9 +324,22 @@ class FaultTolerantTrainer(Trainer):
             parallel_dims=parallel_dims,
             spmd_typechecking=config.debug.spmd_typechecking,
         )
-        self.fwd_bwd_fn = self._forward_backward_body
+        if parallel_dims.pp_enabled:
+            self.fwd_bwd_fn = self._pp_forward_backward_body
+            self._pp_loss_sentinel_on_non_last_stage = torch.full(
+                (1,), -1.0, device=self.device
+            )
+        else:
+            self.fwd_bwd_fn = self._forward_backward_body
+
         if not config.training.disable_cuda_graphs:
-            self.fwd_bwd_fn = wrap_with_cuda_graph(self.fwd_bwd_fn)
+            sdc_config = config.sdc_replayer
+            self.fwd_bwd_fn = wrap_with_cuda_graph(
+                self.fwd_bwd_fn,
+                gradient_accumulation_steps=self.gradient_accumulation_steps,
+                sdc_num_steps=sdc_config.num_steps if sdc_config is not None else 0,
+                sdc_num_replays=sdc_config.num_replays if sdc_config is not None else 0,
+            )
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -408,7 +441,7 @@ class FaultTolerantTrainer(Trainer):
             )
 
         accumulated_loss: torch.Tensor | None = None
-        for microbatches in microbatch_groups:
+        for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
             input_dict_mbs = []
             label_mbs = []
             for input_dict, labels in microbatches:
@@ -426,11 +459,22 @@ class FaultTolerantTrainer(Trainer):
                 fwd_bwd_input_dict = input_dict_mbs[0]
                 fwd_bwd_labels = label_mbs[0]
 
-            loss = self.forward_backward_step(
-                input_dict=fwd_bwd_input_dict,
-                labels=fwd_bwd_labels,
-                global_valid_tokens=global_valid_tokens,
-            )
+            def fwd_bwd() -> torch.Tensor:
+                return self.forward_backward_step(
+                    input_dict=fwd_bwd_input_dict,
+                    labels=fwd_bwd_labels,
+                    global_valid_tokens=global_valid_tokens,
+                )
+
+            if self.sdc_replayer is not None and fwd_bwd_index == 0:
+                # Only the step's first gradient-accumulation group is
+                # replay-checked; under PP one group is a complete pipeline
+                # schedule. Later groups exercise the same compute and
+                # communication paths, so checking them too would only add
+                # overhead.
+                loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
+            else:
+                loss = fwd_bwd()
             if should_log:
                 loss = loss.detach()
                 if accumulated_loss is None:
