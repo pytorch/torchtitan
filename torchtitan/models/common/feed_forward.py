@@ -93,11 +93,6 @@ class FeedForward(Module):
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out_TD = self._forward_swiglu(x)
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
-
-    def _forward_swiglu(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_TF = remat.region(
             self.w13,
             self.remat_region_name("w13"),
@@ -110,6 +105,7 @@ class FeedForward(Module):
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
         )(self._activation(gate_TF, up_TF))
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:
@@ -174,7 +170,7 @@ class SigmoidGatedFeedForward(FeedForward):
         self.gate = config.gate.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out_TD = self._forward_swiglu(x)
+        out_TD = super().forward(x)
         gate_out_TD = remat.region(
             self.gate,
             self.remat_region_name("gate"),
