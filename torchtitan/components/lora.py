@@ -277,7 +277,6 @@ def _get_lora_cls(parent_cls: type) -> type:
         merged_base_config = _make_interleaved_linear_config(
             first_base_config,
             second_base_config,
-            logical_names=logical_names,
             param_init=param_init,
         )
         logical_slice_lora_cls = _get_logical_slice_lora_cls(parent_cls)

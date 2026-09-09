@@ -56,7 +56,6 @@ def _make_interleaved_linear_config(
     first_config: Linear.Config,
     second_config: Linear.Config,
     *,
-    logical_names: tuple[str, str],
     param_init: dict[str, Callable] | None,
 ) -> Linear.Config:
     """Merge two compatible logical projections into one Linear config.
@@ -65,13 +64,13 @@ def _make_interleaved_linear_config(
     can be represented by one physical GEMM without changing either projection's
     requested behavior.
     """
-    first_name, second_name = logical_names
     merged_config_type = type(first_config)
     if type(second_config) is not merged_config_type:
         raise ValueError(
             "Cannot fuse logical Linear projections with different "
-            f"implementations: {first_name} uses {type(first_config).__name__}, "
-            f"but {second_name} uses {type(second_config).__name__}."
+            "implementations: the first uses "
+            f"{type(first_config).__name__}, but the second uses "
+            f"{type(second_config).__name__}."
         )
 
     comparable_fields = {
@@ -83,7 +82,7 @@ def _make_interleaved_linear_config(
         if getattr(second_config, field_name) != getattr(first_config, field_name):
             raise ValueError(
                 "Cannot fuse logical Linear projections with different "
-                f"{field_name}: {first_name} and {second_name}."
+                f"{field_name} values."
             )
 
     config_kwargs = {
@@ -107,9 +106,12 @@ def _build_interleaved_linear(
 ) -> Any:
     """Build two equal-sized logical projections as one interleaved Linear.
 
-    ``_logical_output_slices`` lets checkpoint and serving integrations recover
-    the logical projection names even though ``named_parameters()`` sees only the
-    merged module.
+    The built module's ``_logical_output_slices`` contains ``(name, size)`` for
+    each logical projection in physical interleave order. For example,
+    ``(("w1", H), ("w3", H))`` means reshaping the output to ``[..., H, 2]``
+    places w1 in lane 0 and w3 in lane 1. Checkpoint and serving integrations
+    use this metadata even though ``named_parameters()`` sees only the merged
+    module.
     """
     if first_config.out_features != second_config.out_features:
         raise ValueError(
@@ -119,30 +121,30 @@ def _build_interleaved_linear(
 
     first_builder = type(first_config)._custom_interleaved_linear_builder
     second_builder = type(second_config)._custom_interleaved_linear_builder
-    if (
-        first_builder is not None
-        and second_builder is not None
-        and first_builder is not second_builder
-    ):
-        raise ValueError(
-            "Logical Linear projections specify different custom interleaved builders"
-        )
-
-    custom_builder = first_builder or second_builder
-    if custom_builder is not None:
+    if first_builder is None and second_builder is None:
+        merged = _make_interleaved_linear_config(
+            first_config,
+            second_config,
+            param_init=param_init,
+        ).build()
+    else:
+        if (
+            first_builder is not None
+            and second_builder is not None
+            and first_builder is not second_builder
+        ):
+            raise ValueError(
+                "Logical Linear projections specify different custom "
+                "interleaved builders"
+            )
+        custom_builder = first_builder or second_builder
+        assert custom_builder is not None
         merged = custom_builder(
             first_config,
             second_config,
             logical_names=logical_names,
             param_init=param_init,
         )
-    else:
-        merged = _make_interleaved_linear_config(
-            first_config,
-            second_config,
-            logical_names=logical_names,
-            param_init=param_init,
-        ).build()
 
     merged._logical_output_slices = (
         (first_name, first_config.out_features),
