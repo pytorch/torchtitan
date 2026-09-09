@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import os
+
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
+import torch.distributed as dist
 from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -79,6 +82,13 @@ class ParallelDims:
     # same object instead of re-slicing a submesh on every lookup.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
+    # Opt-in pipeline transport groups (``TORCHTITAN_PIPELINE_NEIGHBOR_P2P=1``):
+    # per PP replica, a CPU control group and one two-rank NCCL group per
+    # adjacent edge, created before the mesh's own subgroups.
+    _pipeline_neighbor_groups: dict[
+        tuple[int, ...],
+        tuple[dist.ProcessGroup, dict[tuple[int, int], dist.ProcessGroup]],
+    ] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
 
     @classmethod
@@ -217,6 +227,7 @@ class ParallelDims:
         fsdp = self.dp_shard * self.cp
         efsdp = fsdp * self.tp // self.ep
 
+        self._create_pipeline_neighbor_groups()
         self._world_mesh = init_device_mesh(
             device_type, (self.world_size,), mesh_dim_names=("world",)
         )
@@ -551,6 +562,49 @@ class ParallelDims:
             for k, v in self._single_axis_meshes.items()
             if v.ndim == 1 and v.size() > 1 and self._mesh_exist(k, v.size())
         }
+
+    def _create_pipeline_neighbor_groups(self) -> None:
+        """Create the PP control group and the adjacent-edge P2P groups.
+
+        Opt-in (``TORCHTITAN_PIPELINE_NEIGHBOR_P2P=1``). Runs before DeviceMesh
+        creates its NCCL subgroups: ProcessGroupNCCL requires a globally
+        consistent creation order. PP is the leading mesh axis, so the ranks
+        of one PP replica are ``world_size // pp`` apart. Edges are keyed by
+        the sorted global-rank pair; for more than two stages the pair (last,
+        first) is created as well, the edge a looped schedule's stage
+        ``k * pp - 1 -> k * pp`` crosses.
+        """
+        if os.environ.get("TORCHTITAN_PIPELINE_NEIGHBOR_P2P") != "1" or self.pp <= 1:
+            return
+        ranks_per_pp_replica = self.world_size // self.pp
+        global_rank = dist.get_rank()
+        for replica_idx in range(ranks_per_pp_replica):
+            pp_ranks = tuple(
+                stage_rank * ranks_per_pp_replica + replica_idx
+                for stage_rank in range(self.pp)
+            )
+            metadata_group = dist.new_group(ranks=list(pp_ranks), backend="gloo")
+            pairs = [(pp_ranks[i], pp_ranks[i + 1]) for i in range(self.pp - 1)]
+            if self.pp > 2:
+                pairs.append((pp_ranks[0], pp_ranks[-1]))
+            edge_groups: dict[tuple[int, int], dist.ProcessGroup] = {}
+            for a, b in pairs:
+                key = (min(a, b), max(a, b))
+                group = dist.new_group(
+                    ranks=list(key),
+                    backend="nccl",
+                    group_desc=f"pipeline_neighbor_{replica_idx}_{key[0]}_{key[1]}",
+                )
+                if global_rank in key:
+                    edge_groups[key] = group
+            if global_rank in pp_ranks:
+                self._pipeline_neighbor_groups[pp_ranks] = (metadata_group, edge_groups)
+
+    def get_pipeline_neighbor_groups(
+        self, pp_ranks: tuple[int, ...]
+    ) -> tuple[dist.ProcessGroup, dict[tuple[int, int], dist.ProcessGroup]] | None:
+        """This rank's early-created transport groups for one PP replica."""
+        return self._pipeline_neighbor_groups.get(pp_ranks)
 
     @property
     def world_mesh(self) -> DeviceMesh:

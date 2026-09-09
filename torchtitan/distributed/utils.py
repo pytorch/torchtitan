@@ -12,7 +12,7 @@ import os
 from abc import abstractmethod
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import Protocol, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -527,10 +527,19 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
+    init_kwargs: dict[str, Any] = {}
+    if os.environ.get("TORCHTITAN_PIPELINE_NEIGHBOR_P2P") == "1":
+        # Bind the default NCCL group to this device before the pipeline
+        # transport groups are created: PyTorch then forms those subgroups
+        # eagerly with ncclCommSplit instead of at their first collective.
+        from torchtitan.tools.utils import get_local_device
+
+        init_kwargs["device_id"] = get_local_device()
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
         timeout=timedelta(seconds=comm_config.init_timeout_seconds),
         _ranks=ranks if ranks is not None else [],
+        **init_kwargs,
     )
 
     return torch.distributed.get_world_size()
