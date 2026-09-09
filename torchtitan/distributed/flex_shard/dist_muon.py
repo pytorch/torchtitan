@@ -364,8 +364,8 @@ class DistMuon(Optimizer):
                     raise TypeError("DistMuon requires DTensor parameters")
                 local_device = param.to_local().device
                 local_devices.add(local_device)
-        if len(local_devices) != 1 or next(iter(local_devices)).type != "cuda":
-            raise ValueError("DistMuon requires one CUDA device per process")
+        if len(local_devices) != 1:
+            raise ValueError("DistMuon requires one device per process")
         return local_devices.pop()
 
     def _build_parameter_compute_layouts(
