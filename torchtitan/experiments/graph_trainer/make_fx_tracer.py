@@ -47,7 +47,7 @@ def _skip_nested_compile() -> Generator[None, None, None]:
     """Tell dynamo to skip torch.compile calls encountered during make_fx tracing.
 
     make_fx cannot trace through torch.compile'd functions (e.g. compiled
-    flex_attention in FlexAttention). Setting error_on_nested_fx_trace
+    flex_attention in FlexInnerAttention). Setting error_on_nested_fx_trace
     to False makes dynamo silently inline the wrapped function instead of
     raising, so make_fx traces the underlying ops normally.
     """
@@ -500,7 +500,7 @@ def minimal_fx_tracer(
         # Forcing backward onto the main CPU thread is a good default
         # for both tracing and runtime, not just the tracing path.
         # _skip_nested_compile lets the current make_fx trace inline through
-        # torch.compile'd FlexAttention kernels instead of erroring.
+        # torch.compile'd FlexInnerAttention kernels instead of erroring.
         # _non_strict_tracing_context is required by _patch_autograd_grad() and
         # marks this make_fx pass as the non-strict tracing flow, distinct from
         # other make_fx-based entry points such as non-strict export.

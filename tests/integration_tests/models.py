@@ -173,7 +173,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenInnerAttention",
             test_name="gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
             use_real_pg=True,

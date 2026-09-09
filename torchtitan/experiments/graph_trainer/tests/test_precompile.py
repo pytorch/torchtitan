@@ -414,7 +414,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         block_mask = create_block_mask(mask_mod, B=1, H=1, Q_LEN=128, KV_LEN=128)
 
         # Build a user_inputs_spec that includes BlockMask — this is what
-        # minimal_fx_tracer produces when FlexAttention is configured.
+        # minimal_fx_tracer produces when FlexInnerAttention is configured.
         _, blockmask_spec = torch.utils._pytree.tree_flatten(
             ((torch.zeros(2),), {"attention_masks": block_mask})
         )

@@ -41,7 +41,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _register_coor_ops,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -241,7 +241,9 @@ def _precompile_aot_fx_trace(
         )
         extra_kwargs["positions"] = positions
 
-        if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
+        if isinstance(
+            inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+        ):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,
             )

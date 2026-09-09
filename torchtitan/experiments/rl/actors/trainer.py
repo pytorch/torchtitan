@@ -35,7 +35,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -259,12 +259,12 @@ class PolicyTrainer(Actor, Configurable):
             Model with random-initialized weights.
         """
 
-        from torchtitan.models.common.attention import VarlenAttention
+        from torchtitan.models.common.attention import VarlenInnerAttention
 
         attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
             attention_backend,
-            (VarlenAttention.Config, FlexAttention.Config),
+            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
         # Fill sharding configs on the config BEFORE build via the

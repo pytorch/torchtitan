@@ -36,8 +36,8 @@ spec.model = transform_model_config(spec.model, [LMHeadCastTransform()])
 ## What belongs here
 
 Use `model_registry` to select the base architecture, attention algorithm, and
-attention metadata format. For example, FlexAttention consumes a `BlockMask`,
-while VarlenAttention consumes cumulative sequence offsets.
+attention metadata format. For example, FlexInnerAttention consumes a `BlockMask`,
+while VarlenInnerAttention consumes cumulative sequence offsets.
 
 Use a transform for options that replace or wrap nodes in the built tree.
 Context parallelism, TP GEMM backends, MoE communication backends,

@@ -17,7 +17,7 @@ import torch.distributed as dist
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     CPInnerAttention,
@@ -28,7 +28,7 @@ from torchtitan.models.common.cp_attention import (
 class TestKernelSelection(unittest.TestCase):
     def test_cp_kernel_is_a_flex_kernel(self):
         self.assertIsInstance(
-            KVAllGatherCPFlexInnerAttention.Config(), FlexAttention.Config
+            KVAllGatherCPFlexInnerAttention.Config(), FlexInnerAttention.Config
         )
 
     def test_cp_kernel_inherits_flex_fields(self):
@@ -124,7 +124,9 @@ class TestAllGather(unittest.TestCase):
 
         with _in_mesh(8), mock.patch.object(
             spmd, "redistribute", record
-        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+        ), mock.patch.object(
+            FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
+        ):
             KVAllGatherCPFlexInnerAttention(
                 KVAllGatherCPFlexInnerAttention.Config()
             ).forward(q, k, v)
@@ -150,7 +152,9 @@ class TestAllGather(unittest.TestCase):
         q, k, v = (torch.randn(8, 2, 16, dtype=torch.bfloat16) for _ in range(3))
         with _in_mesh(8), mock.patch.object(
             spmd, "redistribute", record
-        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+        ), mock.patch.object(
+            FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
+        ):
             KVAllGatherCPFlexInnerAttention(config).forward(q, k, v)
         return seen
 
@@ -197,7 +201,7 @@ class TestAllGatherCollective(unittest.TestCase):
             "torchtitan.models.common.cp_attention." "require_spmd_mesh_axis_group",
             return_value=dist.group.WORLD,
         ), mock.patch.object(
-            FlexAttention, "forward", lambda self, q, k, v, **kw: k + v
+            FlexInnerAttention, "forward", lambda self, q, k, v, **kw: k + v
         ):
             kernel.forward(q, k, v).float().sum().backward()
         k_grad, v_grad = k.grad, v.grad
