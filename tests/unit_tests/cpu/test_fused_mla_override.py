@@ -26,7 +26,7 @@ from torchtitan.overrides.fused_mla import fused_mla_kv, fused_mla_q, FusedMLAAt
 
 class TestFusedMLAOverrideConfig(unittest.TestCase):
     def test_override_replaces_all_debug_attention_configs(self):
-        config = deepseek_v3_debugmodel()
+        config = deepseek_v3_debugmodel(seq_len=2048)
         model_spec = config.model_spec
         self.assertIsNotNone(model_spec)
         assert model_spec is not None
@@ -388,7 +388,7 @@ class TestFusedMLANumerics(unittest.TestCase):
 
     def _check_attention_module_forward_backward(self, dtype: torch.dtype) -> None:
         torch.manual_seed(42)
-        config = deepseek_v3_debugmodel()
+        config = deepseek_v3_debugmodel(seq_len=2048)
         model_spec = config.model_spec
         self.assertIsNotNone(model_spec)
         assert model_spec is not None

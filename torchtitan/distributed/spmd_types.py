@@ -32,11 +32,13 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 
 __all__ = [
     "annotate_input_spmd_types",
+    "annotate_replicated_parameters",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
+    "require_spmd_mesh_axis_group",
     "spmd_dense_mesh",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -156,6 +158,24 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
+def require_spmd_mesh_axis_group(
+    axis_name: MeshAxisName,
+) -> torch.distributed.ProcessGroup:
+    """Return an active multi-rank SPMD mesh axis group."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        raise RuntimeError("No active SPMD mesh.")
+    mesh_axis_names = mesh.mesh_dim_names or ()
+    if axis_name not in mesh_axis_names:
+        raise RuntimeError(f"The active SPMD mesh has no {axis_name.value!r} axis.")
+    group = mesh.get_group(axis_name)
+    if group.size() == 1:
+        raise RuntimeError(
+            f"The {axis_name.value!r} mesh axis must have multiple ranks."
+        )
+    return group
+
+
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
@@ -226,6 +246,21 @@ def annotate_input_spmd_types(
             "or annotate nested/container tensors at their construction site."
         )
     return input_dict
+
+
+def annotate_replicated_parameters(
+    module: torch.nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Annotate undistributed model parameters as replicated.
+
+    Call this before state-sharding modules with ``Module.parallelize``. That
+    replaces declared parameters with their model-parallel shards, while these
+    annotations remain on parameters without a ``ShardingConfig`` for FSDP.
+    """
+    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+        for param in module.parameters():
+            spmd.assert_type(param, spmd.R)
 
 
 def _per_axis_types(
@@ -337,7 +372,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # 3) If one side has no PartitionSpec, synthesize the simple
         # one-axis-per-dim form from its S(dim) local types.
         ndim = (
-            len(src.partition_spec)  # pyrefly: ignore [bad-argument-type]
+            len(src.partition_spec)
             if dst.partition_spec is None
             else len(dst.partition_spec)
         )

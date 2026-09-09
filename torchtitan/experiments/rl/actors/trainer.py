@@ -6,7 +6,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
@@ -271,23 +271,6 @@ class PolicyTrainer(Actor, Configurable):
         # model-agnostic `update_from_config` hook (RL's trainer bypasses
         # `torchtitan.Trainer's` call, so we invoke it directly).
         model_spec.model.update_from_config(config=config)
-
-        # Check if the requested context exceeds the model context length.
-        max_context_length = model_spec.model.max_context_length
-        seq_len = config.training.max_context_length
-        if seq_len > max_context_length:
-            raise ValueError(
-                f"Training sequence length {seq_len} exceeds "
-                f"attention RoPE maximum supported sequence "
-                f"length {max_context_length}."
-            )
-
-        for layer_cfg in model_spec.model.layers:
-            attention_cfg = getattr(layer_cfg, "attention", None)
-            if attention_cfg is not None:
-                attention_cfg.rope = replace(
-                    attention_cfg.rope, max_context_length=seq_len
-                )
 
         # Apply this trainer's config overrides after update_from_config (which
         # sets the sharding configs the override factories read) and before build

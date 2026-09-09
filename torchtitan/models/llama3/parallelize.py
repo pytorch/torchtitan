@@ -29,6 +29,7 @@ def parallelize_llama(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -53,6 +54,12 @@ def parallelize_llama(
             compile_config=compile_config,
             parallel_dims=parallel_dims,
         )
+
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
 
     # Always run apply_fsdp_to_decoder -- with shard_degree=1 it is a no-op for
     # the all-gather but still installs the MixedPrecisionPolicy.

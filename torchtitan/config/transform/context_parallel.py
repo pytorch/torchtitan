@@ -10,37 +10,39 @@ from dataclasses import dataclass
 from typing import cast
 
 from torchtitan.models.common.attention import BaseAttention
-from torchtitan.models.common.cp_attention import ContextParallelKernel
+from torchtitan.models.common.cp_attention import CPInnerAttention
 from torchtitan.protocols.module import Module
 
-from .base import ModelTransform, retype_node
+from .base import ModelConfigTransform, retype_node
 
 __all__ = ["ContextParallelTransform"]
 
 
 @dataclass(kw_only=True, slots=True)
-class ContextParallelTransform(ModelTransform):
+class ContextParallelTransform(ModelConfigTransform):
     """Run attention under context parallelism.
 
-    Replace every attention kernel with ``kernel`` while preserving its config.
+    Replace every inner attention with ``inner_attention`` while preserving its
+    config.
 
     TODO(fegin): support one kernel per attention type, for models that mix
     them.
     """
 
-    kernel: type[Module]
-    """CP attention kernel; must inherit ``ContextParallelKernel``."""
+    inner_attention: type[Module]
+    """Replacement inner attention; must inherit ``CPInnerAttention``."""
 
     def __post_init__(self) -> None:
-        if not issubclass(self.kernel, ContextParallelKernel):
+        if not issubclass(self.inner_attention, CPInnerAttention):
             raise ValueError(
-                f"{self.kernel.__qualname__} must inherit ContextParallelKernel."
+                f"{self.inner_attention.__qualname__} must inherit CPInnerAttention."
             )
 
     def transform(self, model: Module.Config) -> Module.Config:
-        kernel = self.kernel
         for _, traversed, _, _ in model.traverse(BaseAttention.Config):
             # traverse returns the base config type.
             attention = cast(BaseAttention.Config, traversed)
-            attention.inner_attention = retype_node(attention.inner_attention, kernel)
+            attention.inner_attention = retype_node(
+                attention.inner_attention, self.inner_attention
+            )
         return model

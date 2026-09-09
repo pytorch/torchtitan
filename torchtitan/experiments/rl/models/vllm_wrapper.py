@@ -59,7 +59,7 @@ def _replace_vllm_layer_configs(model_config):
     # These modules inspect the breakable-cudagraph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
-    # models do not acquire FLA as an optional dependency.
+    # models do not acquire its vLLM-specific dependencies.
     from torchtitan.experiments.rl.models.attention import VLLMAttentionWrapper
 
     new_layers = []

@@ -215,6 +215,9 @@ class CheckpointManager(BaseCheckpointManager):
 
         # Retention Policy (Purge)
         self.keep_latest_k = config.keep_latest_k
+        self.purge_exempt = (
+            config.purge_exempt.build() if config.purge_exempt is not None else None
+        )
         self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
             self.purge_queue: queue.Queue[str | None] = queue.Queue()
@@ -424,6 +427,7 @@ class CheckpointManager(BaseCheckpointManager):
         sl.add_step_tag("checkpoint_save")
 
         self.maybe_wait_for_saving()
+        self._purge_stale_checkpoints(saving_step=curr_step)
 
         begin = time.monotonic()
         checkpoint_phase = (
@@ -483,8 +487,6 @@ class CheckpointManager(BaseCheckpointManager):
                 async_mode=AsyncMode.DISABLED,
                 enable_garbage_collection=True,
             )
-
-        self._purge_stale_checkpoints()
 
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
@@ -668,12 +670,6 @@ class CheckpointManager(BaseCheckpointManager):
             )
         )
 
-    def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
-        """Generate the standardized filesystem path for a checkpoint
-        (e.g., 'checkpoints/step-100')."""
-        folder = folder or self.folder
-        return filesystem.join(folder, f"step-{step}")
-
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -775,21 +771,3 @@ class CheckpointManager(BaseCheckpointManager):
             enable_garbage_collection=True,
             to_hf=self.last_save_in_hf,
         )
-
-    def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        """Determine whether a checkpoint should be saved based on
-        the current step, interval, and training status."""
-
-        if not self.enable or self.load_only:
-            return False
-
-        if curr_step == 1 and self.enable_first_step_checkpoint:
-            return True
-
-        if last_step:
-            return True
-
-        if curr_step % self.interval == 0:
-            return True
-
-        return False

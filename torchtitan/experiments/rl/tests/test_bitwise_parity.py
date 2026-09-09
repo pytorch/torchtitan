@@ -260,7 +260,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    engine_kwargs["max_model_len"] = config.model_spec.model.max_context_length
+    assert config.model_spec is not None
+    engine_kwargs["max_model_len"] = config.model_spec.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -632,16 +633,17 @@ class BitwiseParityTestBase(unittest.TestCase):
         if hf_path:
             config.hf_assets_path = hf_path
 
-        from torchtitan.tools.utils import has_cuda_capability
+        from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
-        if has_cuda_capability(9, 0):
+        flash_attention_impl = get_cuda_flash_attention_impl()
+        if flash_attention_impl is not None:
             from torch.nn.attention import (
                 activate_flash_attention_impl,
                 current_flash_attention_impl,
             )
 
-            if current_flash_attention_impl() != "FA3":
-                activate_flash_attention_impl("FA3")
+            if current_flash_attention_impl() != flash_attention_impl:
+                activate_flash_attention_impl(flash_attention_impl)
 
         # Enable batch-invariant mode BEFORE init_distributed
         set_batch_invariance(config.trainer.debug.batch_invariant)

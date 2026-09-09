@@ -19,8 +19,8 @@ from . import model_registry
 from .mtp import MTPLoss
 
 
-def deepseek_v4_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def deepseek_v4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -46,8 +46,8 @@ def deepseek_v4_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -62,8 +62,8 @@ def deepseek_v4_debugmodel() -> Trainer.Config:
     )
 
 
-def deepseek_v4_mtp_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel", n_mtp_layers=1)
+def deepseek_v4_mtp_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len, n_mtp_layers=1)
     return Trainer.Config(
         loss=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(model_spec),
@@ -87,8 +87,8 @@ def deepseek_v4_mtp_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -103,8 +103,8 @@ def deepseek_v4_mtp_debugmodel() -> Trainer.Config:
     )
 
 
-def deepseek_v4_flash() -> Trainer.Config:
-    model_spec = model_registry("deepseek_v4_flash")
+def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("deepseek_v4_flash", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -130,8 +130,8 @@ def deepseek_v4_flash() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -146,8 +146,8 @@ def deepseek_v4_flash() -> Trainer.Config:
     )
 
 
-def deepseek_v4_pro() -> Trainer.Config:
-    model_spec = model_registry("deepseek_v4_pro")
+def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("deepseek_v4_pro", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -173,8 +173,8 @@ def deepseek_v4_pro() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(

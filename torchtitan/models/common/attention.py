@@ -19,6 +19,7 @@ from typing import Any, ClassVar, NamedTuple
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -80,7 +81,6 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
-    cu_seq_q_host: tuple[int, ...] | None = None
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
@@ -592,8 +592,6 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
-    *,
-    include_host_offsets: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -603,8 +601,6 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
-        include_host_offsets: Also materialize cumulative sequence offsets as
-            host metadata for kernels that need it.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -625,24 +621,7 @@ def create_varlen_metadata_for_document(
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
     seq_lengths = torch.diff(packed_cu_seqlens)
 
-    max_seqlen: int
-    packed_cu_seqlens_host = None
-    if include_host_offsets:
-        packed_cu_seqlens_host = tuple(
-            int(offset) for offset in packed_cu_seqlens.tolist()
-        )
-        max_seqlen = max(
-            (
-                end - start
-                for start, end in zip(
-                    packed_cu_seqlens_host[:-1],
-                    packed_cu_seqlens_host[1:],
-                    strict=False,
-                )
-            ),
-            default=0,
-        )
-    elif seq_lengths.numel() > 0:
+    if seq_lengths.numel() > 0:
         # device to host sync but only done once per model forward
         max_seqlen = int(seq_lengths.max().item())
     else:
@@ -653,7 +632,6 @@ def create_varlen_metadata_for_document(
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
-        cu_seq_q_host=packed_cu_seqlens_host,
     )
 
 
@@ -890,6 +868,11 @@ class GQAttention(BaseAttention):
     The QKV projection strategy is determined by the ``qkv_linear`` config field:
     use :class:`QKVLinear` for three independent projections, or
     :class:`FusedQKVLinear` for a single fused projection.
+
+    ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
+    the inner attention unrotated, and positional information reaches the layer
+    only through the attention mask. Interleaved RoPE/NoPE models (iRoPE) set it
+    per layer.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -902,7 +885,7 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         inner_attention: Module.Config
-        rope: RoPE.Config
+        rope: RoPE.Config | None
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
@@ -931,7 +914,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build()
+        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -954,7 +937,12 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+        xq_THK, xk_THK, xv_THV = remat.region(
+            self.qkv_linear,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
+        remat.recompute_needs_tensor(xq_THK, xk_THK, xv_THV)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -963,15 +951,28 @@ class GQAttention(BaseAttention):
             xk_THK = self.k_norm(xk_THK)
 
         # Apply rotary embeddings
-        xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+        if self.rope is not None:
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq_THK,
             xk_THK,
             xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        return self.wo(out_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD

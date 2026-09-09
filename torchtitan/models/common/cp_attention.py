@@ -9,48 +9,73 @@
 Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor.experimental._context_parallel import flex_cp_allgather
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
 
 from torchtitan.models.common.attention import FlexAttention
 
+if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
+
 __all__ = [
-    "ContextParallelKernel",
-    "AllGatherCPFlexAttention",
+    "CPInnerAttention",
+    "KVAllGatherCPFlexInnerAttention",
 ]
 
 _SEQ_DIM = 0
 
 
-class ContextParallelKernel:
-    """Mixin for attention kernels that own their CP collectives."""
+class CPInnerAttention(ABC):
+    """Inner attention that owns its context-parallel behavior."""
 
-    @property
-    def cp_group(self) -> dist.ProcessGroup:
-        """Return the active multi-rank CP process group."""
-        mesh = current_spmd_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                f"{type(self).__name__} requires an active SPMD mesh context."
-            )
-        mesh_axis_names = mesh.mesh_dim_names or ()
-        cp_group = mesh.get_group("cp") if "cp" in mesh_axis_names else None
-        if cp_group is None or cp_group.size() == 1:
-            raise RuntimeError(f"{type(self).__name__} requires an active CP mesh.")
-        return cp_group
+    @classmethod
+    @abstractmethod
+    def cp_shard(
+        cls,
+        input_dict: dict[str, Any],
+        input_shardings: dict[str, Any] | None,
+        cp_mesh: "DeviceMesh",
+        load_balancer_type: str | None,
+        ptrr_mask_key: str | None,
+    ) -> dict[str, Any]:
+        """Shard model inputs for this attention implementation."""
 
 
-class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
+class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexAttention):
     """FlexAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(FlexAttention.Config):
         pass
+
+    @classmethod
+    def cp_shard(
+        cls,
+        input_dict: dict[str, Any],
+        input_shardings: dict[str, Any] | None,
+        cp_mesh: "DeviceMesh",
+        load_balancer_type: str | None,
+        ptrr_mask_key: str | None,
+    ) -> dict[str, Any]:
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        return prepare_context_parallel_input(
+            input_dict,
+            input_shardings,
+            cp_mesh,
+            load_balancer_type,
+            ptrr_mask_key,
+        )
 
     def forward(
         self,
@@ -60,7 +85,8 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
         **kwargs,
     ) -> torch.Tensor:
         # TODO(fegin): replace flex_cp_allgather with spmd_types.redistribute.
-        pg_name = dist._get_process_group_name(self.cp_group)
+        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+        pg_name = dist._get_process_group_name(cp_group)
         k_THK, v_THV = flex_cp_allgather(
             k_THK.contiguous(), v_THV.contiguous(), _SEQ_DIM, pg_name
         )

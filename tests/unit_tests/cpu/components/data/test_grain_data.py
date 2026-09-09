@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 import torch
 
+from torchtitan.components.data import collators
 from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
 from torchtitan.components.data.dataset import (
     DatasetConcatConfig,
@@ -1022,6 +1023,72 @@ def test_unpacked_text_collator_pads_positions_within_context_window():
 
     assert len(inputs["positions"]) == CONTEXT.num_tokens_per_batch
     assert int(inputs["positions"].max()) < CONTEXT.max_context_length
+
+
+def test_text_collator_counts_unmasked_labels():
+    sequence = TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([2, 3, IGNORE_INDEX]),
+    )
+
+    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
+
+    assert inputs["num_valid_tokens"] == 2
+    assert inputs["input"][:3].tolist() == [1, 2, 3]
+
+
+def _text_sequence() -> TextSequence:
+    return TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([2, 3, 4]),
+    )
+
+
+def test_text_collator_falls_back_to_pageable_without_accelerator(monkeypatch):
+    # Allocating with pin_memory=True raises when no accelerator is present,
+    # which is how CPU-only test runs and CI execute this path.
+    monkeypatch.setattr(collators, "HAS_PIN_MEMORY", False)
+
+    inputs, labels = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
+
+    assert not inputs["input"].is_pinned()
+    assert not labels.is_pinned()
+    assert inputs["input"][:3].tolist() == [1, 2, 3]
+
+
+@pytest.mark.skipif(
+    not collators.HAS_PIN_MEMORY,
+    reason="page-locking host memory requires an accelerator",
+)
+def test_text_collator_allocates_page_locked_batches():
+    inputs, labels = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
+
+    assert inputs["input"].is_pinned()
+    assert inputs["positions"].is_pinned()
+    assert labels.is_pinned()
+
+
+def test_loader_batches_carry_valid_token_count():
+    config = GrainDataLoader.Config(
+        dataset=SingleDatasetConfig(
+            source=RowsSourceConfig(rows=({"tokens": [1, 10, 11, 2]},)),
+            processor=RowToTokens.Config(),
+        ),
+        collator=TextCollator.Config(),
+        repeat=True,
+    )
+    loader = config.build(
+        dp_world_size=1,
+        dp_rank=0,
+        tokenizer=FakeTokenizer(),
+        max_context_length=CONTEXT.max_context_length,
+        num_tokens_per_batch=CONTEXT.num_tokens_per_batch,
+    )
+
+    input_dict, labels = next(iter(loader))
+
+    assert input_dict["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 3
+    loader.close()
 
 
 def test_pack_then_pack_then_collate_preserves_aligned_pairs():

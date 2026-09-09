@@ -220,6 +220,8 @@ def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     dim = 256
     n_layers = 6
@@ -254,7 +256,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -358,6 +360,8 @@ def _moonlight_16b_a3b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
@@ -365,7 +369,7 @@ def _moonlight_16b_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=50000.0,
-        max_context_length=8192,
+        max_context_length=seq_len,
         vision_encoder=None,
     )
 
@@ -374,6 +378,8 @@ def _kimi_vl_a3b(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
 
@@ -386,7 +392,7 @@ def _kimi_vl_a3b(
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope_theta=800000.0,
-        max_context_length=131072,
+        max_context_length=seq_len,
         vision_encoder=_vision_encoder_config(
             dim=1152,
             ffn_dim=4304,
@@ -405,6 +411,8 @@ def _kimi_k2_5(
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
+    *,
+    seq_len: int,
 ) -> KimiK25Model.Config:
     """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
     ~32B-active DeepSeekV3-style text tower (384 routed experts, top-8) plus a
@@ -452,7 +460,7 @@ def _kimi_k2_5(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=262144,
+            max_context_length=seq_len,
             theta=50000.0,
             scaling="yarn",
             rope_factor=64.0,
@@ -488,24 +496,34 @@ def _kimi_k2_5(
 
 
 kimi_k2_5_configs = {
-    "debugmodel": _debugmodel,
-    "moonlight-16B-A3B": _moonlight_16b_a3b,
-    "Kimi-VL-A3B": _kimi_vl_a3b,
-    "Kimi-K2.5": _kimi_k2_5,
+    "debugmodel": (_debugmodel, 16384),
+    "moonlight-16B-A3B": (_moonlight_16b_a3b, 8192),
+    "Kimi-VL-A3B": (_kimi_vl_a3b, 131072),
+    "Kimi-K2.5": (_kimi_k2_5, 262144),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = kimi_k2_5_configs[flavor](
+    get_config, max_context_len = kimi_k2_5_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -515,6 +533,7 @@ def model_registry(
         name="kimi_k2_5",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k2_5,
         pipelining_fn=pipeline_vlm,
         post_optimizer_build_fn=_register_optimizer_hooks,
