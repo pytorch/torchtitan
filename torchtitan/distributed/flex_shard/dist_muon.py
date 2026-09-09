@@ -164,6 +164,7 @@ def _matrix_batch_view_from_compute_layout(
     return _MatrixBatchView.from_storage_shape(
         storage_shape,
         matrix_rows=block_size,
+        interleaved=compute_layout.matrix_layout == "interleaved_gated",
     )
 
 
@@ -211,7 +212,11 @@ def _initialize_dist_muon(
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
         else:
-            compute_view_key = ("matrix_batch", compute_view.matrix_rows)
+            compute_view_key = (
+                "matrix_batch",
+                compute_view.matrix_rows,
+                compute_view.interleaved,
+            )
             global_compute_shape = compute_view.matrix_batch_shape(global_storage_shape)
         if len(global_compute_shape) not in (2, 3):
             raise ValueError(
@@ -628,6 +633,8 @@ class DistMuon(Optimizer):
         local_param = compute_layout.param.to_local()
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
+        if compute_layout.compute_view is not None:
+            direction = compute_layout.compute_view.view_as_storage(direction)
         _apply_muon_update(
             local_param,
             direction,
@@ -651,6 +658,7 @@ class DistMuon(Optimizer):
 class _MatrixBatchView:
     matrix_rows: int
     matrix_columns: int
+    interleaved: bool = False
 
     @classmethod
     def from_storage_shape(
@@ -658,12 +666,21 @@ class _MatrixBatchView:
         storage_shape: torch.Size,
         *,
         matrix_rows: int,
+        interleaved: bool = False,
     ) -> _MatrixBatchView:
-        if (
-            len(storage_shape) != 2
-            or storage_shape[0] == 0
-            or storage_shape[0] % matrix_rows
-        ):
+        if interleaved:
+            valid_shape = (
+                len(storage_shape) == 2
+                and storage_shape[0] == 2 * matrix_rows
+                and storage_shape[0] > 0
+            )
+        else:
+            valid_shape = (
+                len(storage_shape) == 2
+                and storage_shape[0] > 0
+                and storage_shape[0] % matrix_rows == 0
+            )
+        if not valid_shape:
             raise ValueError(
                 f"storage shape {tuple(storage_shape)} cannot be partitioned "
                 f"into {matrix_rows}-row Muon matrices"
@@ -671,12 +688,17 @@ class _MatrixBatchView:
         return cls(
             matrix_rows=matrix_rows,
             matrix_columns=storage_shape[1],
+            interleaved=interleaved,
         )
 
     def matrix_batch_shape(self, compute_tensor_shape: torch.Size) -> torch.Size:
         if not (
             len(compute_tensor_shape) == 2
-            and not compute_tensor_shape[0] % self.matrix_rows
+            and (
+                compute_tensor_shape[0] == 2 * self.matrix_rows
+                if self.interleaved
+                else not compute_tensor_shape[0] % self.matrix_rows
+            )
             and compute_tensor_shape[1] == self.matrix_columns
         ):
             raise RuntimeError(
@@ -685,7 +707,7 @@ class _MatrixBatchView:
             )
         return torch.Size(
             (
-                compute_tensor_shape[0] // self.matrix_rows,
+                (compute_tensor_shape[0] // self.matrix_rows) if not self.interleaved else 2,
                 self.matrix_rows,
                 self.matrix_columns,
             )
@@ -693,8 +715,26 @@ class _MatrixBatchView:
 
     def view_as_matrix_batch(self, compute_tensor: Tensor) -> Tensor:
         """Return a zero-copy matrix-batch view of the compute tensor."""
+        if self.interleaved:
+            self.matrix_batch_shape(torch.Size(compute_tensor.shape))
+            return compute_tensor.view(
+                self.matrix_rows, 2, self.matrix_columns
+            ).permute(1, 0, 2)
         matrix_batch_shape = self.matrix_batch_shape(torch.Size(compute_tensor.shape))
         return compute_tensor.unflatten(0, matrix_batch_shape[:2])
+
+    def view_as_storage(self, compute_tensor: Tensor) -> Tensor:
+        if self.interleaved:
+            if tuple(compute_tensor.shape) != (
+                2,
+                self.matrix_rows,
+                self.matrix_columns,
+            ):
+                raise RuntimeError("interleaved Muon direction has invalid shape")
+            return compute_tensor.permute(1, 0, 2).reshape(
+                2 * self.matrix_rows, self.matrix_columns
+            )
+        return compute_tensor.reshape(-1, self.matrix_columns)
 
 
 def _validate_matrix_batch_storage_placements(
