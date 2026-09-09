@@ -162,67 +162,41 @@ class GptOssGroupedExperts(GroupedExperts):
         ).long()
 
         h_RG = remat.region(
-            self._mlp1_projection,
+            self._grouped_mm,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(
-            x_RD,
-            mlp1_weight_EGD,
-            mlp1_bias_EG,
-            offsets_E,
-            num_tokens_per_expert_P,
+            A=x_RD.bfloat16(),
+            weight_EOI=mlp1_weight_EGD,
+            offs=offsets_E,
         )
-        remat.recompute_needs_tensor(h_RG)
-        h_RF = swiglu(h_RG, limit=self.swiglu_limit)
-        out_RD = remat.region(
-            self._mlp2_projection,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(
-            h_RF,
-            mlp2_weight_EDF,
-            mlp2_bias_ED,
-            offsets_E,
-            num_tokens_per_expert_P,
-            tp_degree,
+        bias_PG = torch.cat(
+            [mlp1_bias_EG, mlp1_bias_EG.new_zeros(1, mlp1_bias_EG.shape[-1])]
         )
-        remat.recompute_needs_tensor(out_RD)
-        return out_RD
-
-    def _mlp1_projection(
-        self,
-        x_RD: torch.Tensor,
-        weight_EGD: torch.Tensor,
-        bias_EG: torch.Tensor,
-        offsets_E: torch.Tensor,
-        num_tokens_per_expert_P: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute GPT-OSS's fused gate-up projection, including bias."""
-        out_RG = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=weight_EGD, offs=offsets_E
-        )
-        bias_PG = torch.cat([bias_EG, bias_EG.new_zeros(1, bias_EG.shape[-1])])
         bias_RG = bias_PG.repeat_interleave(
             num_tokens_per_expert_P, dim=0, output_size=x_RD.shape[0]
         )
-        return out_RG + bias_RG.to(out_RG.dtype)
+        remat.recompute_needs_tensor(h_RG)
+        h_RG = h_RG + bias_RG.to(h_RG.dtype)
+        h_RF = swiglu(h_RG, limit=self.swiglu_limit)
 
-    def _mlp2_projection(
-        self,
-        h_RF: torch.Tensor,
-        weight_EDF: torch.Tensor,
-        bias_ED: torch.Tensor,
-        offsets_E: torch.Tensor,
-        num_tokens_per_expert_P: torch.Tensor,
-        tp_degree: int,
-    ) -> torch.Tensor:
-        """Compute GPT-OSS's down projection, including its scaled bias."""
-        out_RD = self._grouped_mm(A=h_RF, weight_EOI=weight_EDF, offs=offsets_E)
-        bias_PD = torch.cat([bias_ED, bias_ED.new_zeros(1, bias_ED.shape[-1])])
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(
+            A=h_RF,
+            weight_EOI=mlp2_weight_EDF,
+            offs=offsets_E,
+        )
+        bias_PD = torch.cat(
+            [mlp2_bias_ED, mlp2_bias_ED.new_zeros(1, mlp2_bias_ED.shape[-1])]
+        )
         bias_RD = bias_PD.repeat_interleave(
-            num_tokens_per_expert_P, dim=0, output_size=h_RF.shape[0]
+            num_tokens_per_expert_P, dim=0, output_size=x_RD.shape[0]
         )
         bias_RD = ScaleBiasForward.apply(bias_RD, tp_degree, out_RD.dtype)
+        remat.recompute_needs_tensor(out_RD)
         return out_RD + bias_RD
 
 

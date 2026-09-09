@@ -16,7 +16,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
 )
 from torchtitan.overrides.fused_swiglu import (
     fused_grouped_experts,
-    FusedGroupedExperts,
+    FusedSwiGLUGroupedExperts,
     silu_and_mul_backward_kernel,
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
@@ -28,8 +28,8 @@ _HIDDEN = 32
 _E = 4
 
 
-def _build_fused_grouped_experts() -> FusedGroupedExperts:
-    fused = FusedGroupedExperts.Config(
+def _build_fused_swiglu_grouped_experts() -> FusedSwiGLUGroupedExperts:
+    fused = FusedSwiGLUGroupedExperts.Config(
         dim=_DIM,
         hidden_dim=_HIDDEN,
         num_experts=_E,
@@ -58,29 +58,29 @@ class TestFusedSwiGLUOverride(unittest.TestCase):
 
         replacement = fused_grouped_experts(cfg)
 
-        self.assertIsInstance(replacement, FusedGroupedExperts.Config)
+        self.assertIsInstance(replacement, FusedSwiGLUGroupedExperts.Config)
 
 
-class TestFusedGroupedExperts(unittest.TestCase):
+class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
     """Checkpoint interop and configuration for the fused activation override."""
 
     def test_saves_and_loads_stock_layout(self):
         """tests save and load checkpoint"""
-        src = _build_fused_grouped_experts()
+        src = _build_fused_swiglu_grouped_experts()
         sd = src.state_dict()
 
         self.assertEqual(set(sd), {"w1_EFD", "w3_EFD", "w2_EDF"})
         self.assertTrue(torch.equal(sd["w1_EFD"], src.w13[:, :, 0, :]))
         self.assertTrue(torch.equal(sd["w3_EFD"], src.w13[:, :, 1, :]))
 
-        dst = _build_fused_grouped_experts()
+        dst = _build_fused_swiglu_grouped_experts()
         dst.load_state_dict(sd)
         self.assertTrue(torch.equal(dst.w13, src.w13))
         self.assertTrue(torch.equal(dst.w2_EDF, src.w2_EDF))
 
     def test_built_module_has_only_fused_params(self):
         """The override keeps the default physical w13 parameter layout."""
-        fused = _build_fused_grouped_experts()
+        fused = _build_fused_swiglu_grouped_experts()
         names = {name for name, _ in fused.named_parameters(recurse=False)}
         self.assertEqual(names, {"w13", "w2_EDF"})
         self.assertEqual(tuple(fused.w13.shape), (_E, _HIDDEN, 2, _DIM))
@@ -132,7 +132,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestFusedGroupedExpertsNumerics(unittest.TestCase):
+class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
     """The Triton activation override must match the torch-native default."""
 
     def test_default_matches_unfused_reference(self):
@@ -214,7 +214,7 @@ class TestFusedGroupedExpertsNumerics(unittest.TestCase):
             .cuda()
         )
         fused = (
-            FusedGroupedExperts.Config(
+            FusedSwiGLUGroupedExperts.Config(
                 dim=_DIM,
                 hidden_dim=_HIDDEN,
                 num_experts=_E,
