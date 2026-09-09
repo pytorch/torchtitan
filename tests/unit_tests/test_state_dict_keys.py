@@ -187,6 +187,37 @@ class TestStateDictKeys(unittest.TestCase):
         optimizers.load_state_dict(optim_sd)
         self.assertEqual(set(optim_sd.keys()), set(optimizers.state_dict().keys()))
 
+    def test_init_optim_state_materializes_only_missing_parameter_state(self) -> None:
+        """A partially-used model must still produce a loadable AdamW state."""
+        used = torch.nn.Parameter(torch.tensor([1.0]))
+        unused = torch.nn.Parameter(torch.tensor([2.0]))
+        optim = torch.optim.AdamW([used, unused], lr=0.1, foreach=False)
+
+        used.grad = torch.ones_like(used)
+        optim.step()
+        # Checkpoint saving follows optimizer.step() and therefore observes
+        # the previous step's gradients.
+        used_grad_before = used.grad.detach().clone()
+        used_before = used.detach().clone()
+        used_state_before = {
+            name: value.detach().clone() if isinstance(value, torch.Tensor) else value
+            for name, value in optim.state[used].items()
+        }
+
+        init_optim_state(optim)
+
+        self.assertIn(unused, optim.state)
+        self.assertEqual(set(optim.state[used]), set(used_state_before))
+        self.assertTrue(torch.equal(used, used_before))
+        self.assertTrue(torch.equal(used.grad, used_grad_before))
+        for name, value in used_state_before.items():
+            actual = optim.state[used][name]
+            if isinstance(value, torch.Tensor):
+                self.assertTrue(torch.equal(actual, value), name)
+            else:
+                self.assertEqual(actual, value, name)
+        self.assertEqual(set(optim.state[unused]), set(_ADAMW_STATE_NAMES))
+
     def test_flat_optim_roundtrip_values(self) -> None:
         """get/load_flat_optim_state_dict preserve state values exactly."""
         optimizers = _debugmodel_optimizer_config().build(model_parts=self.model_parts)

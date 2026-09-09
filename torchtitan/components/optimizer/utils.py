@@ -34,26 +34,33 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
     and before load (to load into them). This runs a step with zero gradients
     and ``lr=0`` so parameters are untouched, then restores ``lr``.
 
-    No-op if state already exists or any gradient is set, so it is safe to call
-    repeatedly and never disturbs an in-progress training step.
+    Parameters which already have state are left untouched. The function is a
+    no-op when every trainable parameter has state. It is also safe immediately
+    after an optimizer step: only missing parameters are stepped, so existing
+    optimizer state is neither advanced nor changed.
     """
-    if optim.state:
+    missing_params = []
+    for param_group in optim.param_groups:
+        for param in param_group["params"]:
+            if param.requires_grad and param not in optim.state:
+                missing_params.append(param)
+
+    if not missing_params:
         return
 
-    for param_group in optim.param_groups:
-        for param in param_group["params"]:
-            if param.grad is not None:
-                return
-
-    for param_group in optim.param_groups:
-        for param in param_group["params"]:
-            if param.requires_grad:
-                param.grad = torch.zeros_like(param)
+    for param in missing_params:
+        param.grad = torch.zeros_like(param)
 
     # Some optimizers update parameters regardless of gradients due to lr, so set
     # lr to zero before stepping to keep parameters unchanged.
     saved_lrs = []
+    saved_group_params = []
+    missing_param_ids = {id(param) for param in missing_params}
     for param_group in optim.param_groups:
+        saved_group_params.append(param_group["params"])
+        param_group["params"] = [
+            param for param in param_group["params"] if id(param) in missing_param_ids
+        ]
         if "lr" in param_group:
             saved_lrs.append(param_group["lr"])
             param_group["lr"] = (
@@ -61,11 +68,15 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
                 if isinstance(param_group["lr"], torch.Tensor)
                 else 0.0
             )
-    optim.step(closure=None)
-    for param_group in optim.param_groups:
-        if "lr" in param_group:
-            param_group["lr"] = saved_lrs.pop(0)
-    optim.zero_grad(set_to_none=True)
+    try:
+        optim.step(closure=None)
+    finally:
+        for param_group, original_params in zip(optim.param_groups, saved_group_params):
+            param_group["params"] = original_params
+            if "lr" in param_group:
+                param_group["lr"] = saved_lrs.pop(0)
+        for param in missing_params:
+            param.grad = None
 
 
 def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
