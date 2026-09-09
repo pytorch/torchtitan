@@ -641,7 +641,7 @@ class TestTraceModule(unittest.TestCase):
         )
         lm_head_test.load_state_dict(lm_head_ref.state_dict())
         num_tokens = self.BATCH_SIZE * self.SEQ_LEN
-        chunk_len = num_tokens // num_chunks
+        chunk_size = num_tokens // num_chunks
         hidden_states = torch.randn(
             num_tokens,
             D,
@@ -653,7 +653,7 @@ class TestTraceModule(unittest.TestCase):
 
         def train_step(lm_head, hidden_states, labels):
             loss_fn = ChunkedLossWrapperWithParamGrads(
-                ChunkedLossWrapperWithParamGrads.Config(chunk_len=chunk_len)
+                ChunkedLossWrapperWithParamGrads.Config(chunk_size=chunk_size)
             )
             loss_fn.set_lm_head(lm_head)
             loss, _ = loss_fn(hidden_states, labels)

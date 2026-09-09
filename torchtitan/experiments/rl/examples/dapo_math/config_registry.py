@@ -127,7 +127,6 @@ def _qwen3_4b_dapo_math_config(
                 keep_latest_k=3,
             ),
             loss=ChunkedLossWrapper.Config(
-                chunk_len=8192,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,

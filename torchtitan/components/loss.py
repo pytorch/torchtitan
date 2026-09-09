@@ -399,12 +399,11 @@ class GradAccumulator:
             gradient placement (e.g. Partial(sum) on the TP axis when the
             forward used a Replicate input with a Shard(0) weight, as in
             ColwiseParallel lm_head) rather than the activation placement.
-        num_chunks: Number of chunks that will be added.
         seq_dim: The sequence dimension along which chunks are accumulated.
         dtype: Dtype for the buffer.
 
     Usage:
-        accumulator = GradAccumulator(hidden_states, num_chunks=4, dtype=torch.float32)
+        accumulator = GradAccumulator(hidden_states, dtype=torch.float32)
         for chunk_grad in chunk_grads:
             accumulator.add(chunk_grad)
         full_grad = accumulator.result()
@@ -414,16 +413,13 @@ class GradAccumulator:
         self,
         reference: torch.Tensor,
         *,
-        num_chunks: int,
         seq_dim: int = 0,
         dtype: torch.dtype,
     ):
         from torch.distributed.device_mesh import DeviceMesh
         from torch.distributed.tensor import DTensor, Placement
 
-        self.num_chunks = num_chunks
         self.seq_dim = seq_dim
-        self._next_idx = 0
         self._next_start = 0
         self._device_mesh: DeviceMesh | None = None
         # Captured from the first added chunk; see __init__ docstring.
@@ -438,14 +434,8 @@ class GradAccumulator:
         self._buffer = torch.zeros_like(local, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
-        """Add the next chunk gradient sequentially.
-
-        Chunks must be added in order (0, 1, 2, ..., num_chunks - 1).
-        """
+        """Add the next chunk gradient sequentially."""
         from torch.distributed.tensor import DTensor
-
-        if self._next_idx >= self.num_chunks:
-            raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
 
         if isinstance(chunk_grad, DTensor):
             if self._placements is None:
@@ -478,7 +468,6 @@ class GradAccumulator:
         slices[self.seq_dim] = slice(start, end)
         self._buffer[tuple(slices)] = chunk_grad
 
-        self._next_idx += 1
         self._next_start = end
 
     def result(self) -> torch.Tensor:
@@ -489,6 +478,14 @@ class GradAccumulator:
         gradient lands on the decoder-side leaf.
         """
         from torch.distributed.tensor import DTensor
+
+        buffer_seq_len = self._buffer.shape[self.seq_dim]
+        # torch._check, not `if`: symbolic tracing records the bound instead of guarding on it.
+        torch._check(
+            self._next_start == buffer_seq_len,
+            lambda: f"chunk grads cover {self._next_start} of {buffer_seq_len} "
+            f"positions along dim {self.seq_dim}",
+        )
 
         if self._device_mesh is not None:
             if self._placements is None:
@@ -509,9 +506,9 @@ class ChunkedLossWrapper(BaseLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
     Instead of materializing the full [T, V] logits tensor at once, this splits
-    the hidden states into chunks of at most ``chunk_len`` tokens and computes
+    the hidden states into chunks of at most ``chunk_size`` tokens and computes
     lm_head + loss on each chunk sequentially. This reduces peak memory
-    from O(T*V) to O(chunk_len*V).
+    from O(T*V) to O(chunk_size*V).
 
     The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
     chunk on logits from that chunk. Additional per-token ``loss_inputs`` are
@@ -521,7 +518,7 @@ class ChunkedLossWrapper(BaseLoss):
     The flow:
     1. Model forward with _skip_lm_head=True to get hidden states [T, D]
     2. Detach hidden states at the boundary
-    3. Split detached hidden states into chunks of up to chunk_len along seq dim
+    3. Split detached hidden states into chunks of up to chunk_size along seq dim
     4. Disable FSDP reshard on lm_head to keep weight unsharded across chunks
     5. For each chunk: lm_head(chunk) -> loss_fn(logits, labels, gvt) -> backward()
     6. Assemble chunk gradients into a full gradient [T, D] via GradAccumulator
@@ -550,15 +547,20 @@ class ChunkedLossWrapper(BaseLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
-        chunk_len: int = 8192
-        """Maximum number of tokens in each loss chunk."""
+        chunk_size: int = 2048
+        """Maximum local tokens per lm_head + loss chunk.
+
+        The sequence is split into ceil(seq_len / chunk_size) equal chunks and must be
+        divisible by that count. Eager peak memory grows by roughly
+        13 bytes x chunk_size x vocabulary size per rank.
+        """
 
         loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
         def __post_init__(self) -> None:
-            if self.chunk_len <= 0:
-                raise ValueError("chunk_len must be greater than zero")
+            if self.chunk_size <= 0:
+                raise ValueError("chunk_size must be positive")
 
     def __init__(
         self,
@@ -566,7 +568,7 @@ class ChunkedLossWrapper(BaseLoss):
         *,
         compile_config: CompileConfig | None = None,
     ):
-        self.chunk_len = config.chunk_len
+        self.chunk_size = config.chunk_size
         self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
         self.lm_head: nn.Module | None = None
 
@@ -603,7 +605,12 @@ class ChunkedLossWrapper(BaseLoss):
             if isinstance(hidden_states, DTensor)
             else hidden_states.shape[0]
         )
-        if isinstance(local_seq_len, int) and local_seq_len <= self.chunk_len:
+        from torch.fx.experimental.symbolic_shapes import optimization_hint
+
+        # The chunk count must be a Python int (a traced graph needs a fixed-length
+        # tuple), so derive it from the size hint; for eager ints the hint is the value.
+        num_chunks = -(-optimization_hint(local_seq_len) // self.chunk_size)
+        if num_chunks == 1:
             return self.loss_fn(
                 lm_head(hidden_states), labels, global_valid_tokens, **loss_inputs
             )
@@ -615,50 +622,29 @@ class ChunkedLossWrapper(BaseLoss):
 
         # Chunking always operates on the *local* view: when ``t`` is a
         # Shard(0) DTensor, chunking the global view would distribute whole
-        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
-        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
-        # local seq=0 and breaking GradAccumulator's slice writes.
+        # chunks across ranks and can leave per-chunk DTensors with an empty
+        # local sequence, breaking GradAccumulator's slice writes.
         # ``local_map`` runs the chunking body on plain tensors; under the
         # non-DTensor (eager) path we call ``_chunk_local`` directly.
-        def _chunk_count(seq_len: int | torch.SymInt) -> int:
-            from torch.fx.experimental.symbolic_shapes import optimization_hint
-
-            seq_len_hint = optimization_hint(seq_len)
-            return (seq_len_hint + self.chunk_len - 1) // self.chunk_len
-
         def _chunk_local(t):
             seq_len = t.shape[0]
-            if isinstance(seq_len, int):
-                return tuple(
-                    c.contiguous() for c in torch.split(t, self.chunk_len, dim=0)
-                )
-
-            # A Python tuple cannot have a symbolic number of elements. Keep
-            # symbolic chunks equal-sized so tracing the per-chunk backward does
-            # not introduce data-dependent guards on a symbolic final chunk.
-            chunk_count = _chunk_count(t.shape[0])
             torch._check(
-                seq_len <= chunk_count * self.chunk_len,
-                lambda: "Symbolic loss chunks must not exceed chunk_len",
+                seq_len % num_chunks == 0,
+                lambda: f"seq_len {seq_len} is not divisible by the {num_chunks} chunks "
+                f"implied by chunk_size={self.chunk_size}",
             )
-            torch._check(
-                seq_len % chunk_count == 0,
-                lambda: "Symbolic sequence length must be divisible by chunk count",
-            )
-            symbolic_chunk_len = seq_len // chunk_count
             return tuple(
                 c.contiguous()
-                for c in torch.split(t, [symbolic_chunk_len] * chunk_count, dim=0)
+                for c in torch.split(t, [seq_len // num_chunks] * num_chunks, dim=0)
             )
 
         def _chunk(t):
             if not isinstance(t, DTensor):
                 return _chunk_local(t)
             p = t.placements
-            chunk_count = _chunk_count(t.to_local().shape[0])
             wrapped = local_map(
                 _chunk_local,
-                out_placements=(p,) * chunk_count,
+                out_placements=(p,) * num_chunks,
                 in_placements=(p,),
                 device_mesh=t.device_mesh,
             )
@@ -680,7 +666,6 @@ class ChunkedLossWrapper(BaseLoss):
             if requires_grad:
                 grad_accumulator = GradAccumulator(
                     hidden_states,
-                    num_chunks=len(h_chunks),
                     dtype=torch.float32,
                 )
 

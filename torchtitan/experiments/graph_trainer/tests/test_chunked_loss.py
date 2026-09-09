@@ -32,12 +32,12 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
-def _make_model_and_loss(dim, vocab_size, chunk_len=4, with_param_grads=False):
+def _make_model_and_loss(dim, vocab_size, chunk_size=4, with_param_grads=False):
     model = _FakeDecoder(dim, vocab_size)
     loss_cls = (
         ChunkedLossWrapperWithParamGrads if with_param_grads else ChunkedLossWrapper
     )
-    chunked_loss = loss_cls(loss_cls.Config(chunk_len=chunk_len))
+    chunked_loss = loss_cls(loss_cls.Config(chunk_size=chunk_size))
     chunked_loss.lm_head = model.output
     return model, chunked_loss
 
@@ -56,22 +56,22 @@ def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
 
 class TestChunkedLossWrapperWithParamGrads(TestCase):
     def test_config_builds_param_grads_loss(self):
-        loss = ChunkedLossWrapperWithParamGrads.Config(chunk_len=4).build()
+        loss = ChunkedLossWrapperWithParamGrads.Config(chunk_size=4).build()
         self.assertIsInstance(loss, ChunkedLossWrapperWithParamGrads)
-        self.assertEqual(loss.chunk_len, 4)
+        self.assertEqual(loss.chunk_size, 4)
 
     def test_bitwise_equal_with_chunked_loss(self):
-        for num_tokens, chunk_len in ((16, 4), (8, 2)):
-            with self.subTest(num_tokens=num_tokens, chunk_len=chunk_len):
+        for num_tokens, chunk_size in ((16, 4), (8, 2)):
+            with self.subTest(num_tokens=num_tokens, chunk_size=chunk_size):
                 torch.manual_seed(42)
                 D, V = 32, 64
                 labels = torch.randint(0, V, (num_tokens,))
                 global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
                 hidden_states = torch.randn(num_tokens, D)
 
-                model_a, loss_a_fn = _make_model_and_loss(D, V, chunk_len)
+                model_a, loss_a_fn = _make_model_and_loss(D, V, chunk_size)
                 model_b, loss_b_fn = _make_model_and_loss(
-                    D, V, chunk_len, with_param_grads=True
+                    D, V, chunk_size, with_param_grads=True
                 )
                 model_b.output.load_state_dict(model_a.output.state_dict())
 
@@ -94,6 +94,36 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
         labels = torch.randint(0, V, (num_tokens,))
         loss, _ = chunked_loss(h, labels)
         torch.autograd.grad(loss, [h, model.output.weight])
+        self.assertIsNone(h.grad)  # pyrefly: ignore[missing-attribute]
+        self.assertIsNone(
+            model.output.weight.grad
+        )  # pyrefly: ignore[missing-attribute]
+
+    def test_single_chunk_uses_standard_autograd(self):
+        """T <= chunk_size takes the plain lm_head + loss path; grads still flow via autograd.grad."""
+        torch.manual_seed(0)
+        num_tokens, D, V = 16, 32, 64
+        model, chunked_loss = _make_model_and_loss(
+            D, V, chunk_size=num_tokens, with_param_grads=True
+        )
+        h = torch.randn(num_tokens, D, requires_grad=True)
+        labels = torch.randint(0, V, (num_tokens,))
+        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+
+        loss, _ = chunked_loss(h, labels, global_valid_tokens)
+        h_grad, w_grad = torch.autograd.grad(loss, [h, model.output.weight])
+
+        h_ref = h.detach().requires_grad_(True)
+        ref_loss, _ = chunked_loss.loss_fn(
+            model.output(h_ref), labels, global_valid_tokens
+        )
+        h_grad_ref, w_grad_ref = torch.autograd.grad(
+            ref_loss, [h_ref, model.output.weight]
+        )
+
+        self.assertEqual(loss, ref_loss)
+        self.assertEqual(h_grad, h_grad_ref)
+        self.assertEqual(w_grad, w_grad_ref)
         self.assertIsNone(h.grad)  # pyrefly: ignore[missing-attribute]
         self.assertIsNone(
             model.output.weight.grad
