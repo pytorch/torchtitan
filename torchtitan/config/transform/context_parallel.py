@@ -6,7 +6,7 @@
 
 """Context-parallel transform."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 from torchtitan.models.common.attention import BaseAttention
@@ -32,6 +32,9 @@ class ContextParallelTransform(ModelConfigTransform):
     inner_attention: type[Module]
     """Replacement inner attention; must inherit ``CPInnerAttention``."""
 
+    inner_attention_config_updates: dict[str, object] = field(default_factory=dict)
+    """Values for fields defined by the replacement config."""
+
     def __post_init__(self) -> None:
         if not issubclass(self.inner_attention, CPInnerAttention):
             raise ValueError(
@@ -43,6 +46,8 @@ class ContextParallelTransform(ModelConfigTransform):
             # traverse returns the base config type.
             attention = cast(BaseAttention.Config, traversed)
             attention.inner_attention = retype_node(
-                attention.inner_attention, self.inner_attention
+                attention.inner_attention,
+                self.inner_attention,
+                **self.inner_attention_config_updates,
             )
         return model

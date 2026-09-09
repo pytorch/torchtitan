@@ -10,7 +10,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import spmd_types as spmd
+
 import torch
+import torch.distributed as dist
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
@@ -107,6 +110,108 @@ class TestCpGroup(unittest.TestCase):
 
     def test_cp_inner_attention_holds_no_mesh_state(self):
         self.assertNotIn("cp_group", CPInnerAttention.__dict__)
+
+
+class TestAllGather(unittest.TestCase):
+    def test_gathers_k_and_v_over_the_cp_group(self):
+        num_tokens, heads, head_dim = 8, 2, 16
+        q, k, v = (torch.randn(num_tokens, heads, head_dim) for _ in range(3))
+        calls = []
+
+        def record(x, group, *, src, dst, backward_options):
+            calls.append((x, group, src, dst, backward_options))
+            return x
+
+        with _in_mesh(8), mock.patch.object(
+            spmd, "redistribute", record
+        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+            KVAllGatherCPFlexInnerAttention(
+                KVAllGatherCPFlexInnerAttention.Config()
+            ).forward(q, k, v)
+
+        self.assertEqual(2, len(calls))
+        self.assertIs(k, calls[0][0])
+        self.assertIs(v, calls[1][0])
+        for _, group, src, dst, backward_options in calls:
+            self.assertEqual(8, group.size())
+            self.assertEqual(spmd.S(0), src)
+            self.assertEqual(spmd.R, dst)
+            self.assertEqual({"op_dtype": torch.float32}, backward_options)
+
+    @staticmethod
+    def _reduce_dtypes(config):
+        """Reduction dtype the kernel asks for, once per gathered tensor."""
+        seen = []
+
+        def record(x, group, *, src, dst, backward_options):
+            seen.append(backward_options["op_dtype"])
+            return x
+
+        q, k, v = (torch.randn(8, 2, 16, dtype=torch.bfloat16) for _ in range(3))
+        with _in_mesh(8), mock.patch.object(
+            spmd, "redistribute", record
+        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+            KVAllGatherCPFlexInnerAttention(config).forward(q, k, v)
+        return seen
+
+    def test_reduces_in_float32_by_default(self):
+        config = KVAllGatherCPFlexInnerAttention.Config()
+        self.assertEqual([torch.float32] * 2, self._reduce_dtypes(config))
+
+    def test_reduce_dtype_can_use_bfloat16(self):
+        config = KVAllGatherCPFlexInnerAttention.Config(reduce_dtype="bfloat16")
+        self.assertEqual([torch.bfloat16] * 2, self._reduce_dtypes(config))
+
+
+class TestAllGatherCollective(unittest.TestCase):
+    """Exercise the real collective and its backward.
+
+    A single-rank group is enough: the reduction dtype is validated first.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._owns_pg = not dist.is_initialized()
+        if cls._owns_pg:
+            dist.init_process_group(
+                backend="gloo",
+                init_method="tcp://localhost:12362",
+                world_size=1,
+                rank=0,
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._owns_pg and dist.is_initialized():
+            dist.destroy_process_group()
+
+    def _gather_and_backward(self, dtype):
+        """Pair each of K and V with the gradient the gather returns to it."""
+        kernel = KVAllGatherCPFlexInnerAttention(
+            KVAllGatherCPFlexInnerAttention.Config()
+        )
+        q, k, v = (
+            torch.randn(4, 2, 8, dtype=dtype, requires_grad=True) for _ in range(3)
+        )
+        with mock.patch(
+            "torchtitan.models.common.cp_attention." "require_spmd_mesh_axis_group",
+            return_value=dist.group.WORLD,
+        ), mock.patch.object(
+            FlexAttention, "forward", lambda self, q, k, v, **kw: k + v
+        ):
+            kernel.forward(q, k, v).float().sum().backward()
+        k_grad, v_grad = k.grad, v.grad
+        assert k_grad is not None and v_grad is not None
+        return ((k, k_grad), (v, v_grad))
+
+    def test_bfloat16_kv_reach_the_reducing_backward(self):
+        for tensor, grad in self._gather_and_backward(torch.bfloat16):
+            self.assertEqual(torch.bfloat16, grad.dtype)
+            self.assertEqual(tensor.shape, grad.shape)
+
+    def test_float32_kv_reach_the_reducing_backward(self):
+        for _, grad in self._gather_and_backward(torch.float32):
+            self.assertEqual(torch.float32, grad.dtype)
 
 
 if __name__ == "__main__":
