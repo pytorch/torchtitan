@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import multiprocessing
 import os
 from dataclasses import dataclass, field
 from queue import Empty
-from typing import Any
+from typing import Annotated, Any
 
+import tyro
 from verifiers.v1.configs.env import EnvConfig as VerifiersEnvConfig
 from verifiers.v1.configs.serve import (
     pool_serve_kwargs,
@@ -25,62 +25,14 @@ from verifiers.v1.utils.loaders import resolve_env_config
 from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
+from torchtitan.experiments.rl.examples.verifiers.components.data import (
     register_local_taskset_alias,
 )
 
 
-REQUEST_IDS_BY_NODE_INFO_KEY = "torchtitan_request_ids_by_node"
-_REQUEST_ID_PATCH_MARKER = "_torchtitan_records_request_id"
-
-
-def _wrap_commit_to_retain_response_id(commit):
-    """Carry the key for TorchTitan generation metadata across processes.
-
-    ``GenerationServer`` and the Verifiers EnvServer run in different
-    processes and record different halves of a model call:
-
-    1. ``GenerationServer`` creates and returns ``request_id``, then stores a
-       ``VerifiersGenerationMetadata`` value in
-       ``generation_metadata[request_id]``.
-    2. Verifiers converts that same ``request_id`` field to ``Response.id`` and
-       commits the response as an assistant node. Verifiers 0.3.1 does not
-       retain ``Response.id`` in its trace, so this wrapper stores it as
-       ``trace.info[node] = response.id``.
-    3. ``VerifiersRollouter`` later receives the trace and must match each node
-       with its ``VerifiersGenerationMetadata`` value.
-
-    Matching the two lists by position is incorrect when concurrent requests
-    finish or commit in different orders. This wrapper runs synchronously around
-    the commit, when both values are known, and stores
-    ``trace.info[node] = response.id``. ``Trace.info`` crosses the EnvServer
-    process boundary, so ``VerifiersRollouter`` can use
-    ``node -> request_id -> metadata`` instead of relying on list order.
-    """
-
-    @functools.wraps(commit)
-    def commit_with_request_id(turn, response, tools=None):
-        node = commit(turn, response, tools)
-        if response.id:
-            request_ids = turn.trace.info.setdefault(REQUEST_IDS_BY_NODE_INFO_KEY, {})
-            request_ids[str(node)] = response.id
-        return node
-
-    setattr(commit_with_request_id, _REQUEST_ID_PATCH_MARKER, True)
-    return commit_with_request_id
-
-
 def _setup_env_server_process() -> None:
-    """Configure logging and install TorchTitan's Verifiers compatibility patch."""
+    """Configure logging in the spawned environment-server process."""
     setup_logging("INFO")
-
-    # Verifiers 0.3.1 carries the generation request ID on Response.id but drops
-    # it when committing the response to a Trace. Preserve it in Trace.info so
-    # policy-version metadata can be joined by identity instead of call order.
-    from verifiers.v1.graph import PendingTurn
-
-    if not getattr(PendingTurn.commit, _REQUEST_ID_PATCH_MARKER, False):
-        PendingTurn.commit = _wrap_commit_to_retain_response_id(PendingTurn.commit)
 
 
 def _run_env_server_process(
@@ -114,20 +66,22 @@ def _run_env_server_process(
 
 
 class VerifiersEnvServer(Configurable):
-    """Locally managed Verifiers EnvServer process."""
+    """Spawn and own a Verifiers EnvServer process on the controller host."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        environment: VerifiersEnvConfig
+        environment: Annotated[VerifiersEnvConfig, tyro.conf.Suppress]
         """Typed Verifiers environment and agent configuration."""
 
-        serve: VerifiersServeConfig = field(
+        serve: Annotated[VerifiersServeConfig, tyro.conf.Suppress] = field(
             default_factory=lambda: VerifiersServeConfig(address="tcp://127.0.0.1:0")
         )
         """Typed Verifiers worker-pool and bind-address configuration."""
 
-        local_taskset_module: str | None = None
-        """Dotted local taskset module to register in the spawned server process."""
+        # TODO: pass the taskset to build() and derive its module there, removing
+        # this field from the user-facing configuration entirely.
+        local_taskset_module: Annotated[str | None, tyro.conf.Suppress] = None
+        """Local taskset module derived from the rollouter's dataset config."""
 
         startup_timeout_sec: float = 120.0
         """Maximum time to wait for the server process to publish its address."""

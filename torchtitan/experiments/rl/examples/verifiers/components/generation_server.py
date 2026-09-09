@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""HTTP generation server connecting Verifiers to TitanRL."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +14,8 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
+from torchtitan.config import Configurable
+from torchtitan.experiments.rl.observability import metrics as m
 from torchtitan.experiments.rl.rollout.types import GenerateFn
 
 logger = logging.getLogger(__name__)
@@ -21,11 +25,11 @@ _SESSION_ID_HEADER = "X-Session-ID"
 
 @dataclass(frozen=True, slots=True)
 class VerifiersGenerationMetadata:
-    """TorchTitan completion data that Verifiers does not retain in its trace.
+    """TorchTitan generation data aggregated over one Verifiers rollout.
 
-    ``GenerationServer`` stores these entries by request ID under the Verifiers
-    session ID. Trace conversion uses the request ID recorded for each Verifiers
-    node to attach this metadata to the corresponding rollout turn.
+    Verifiers sends the trace ID as the generation session ID, but does not
+    retain TorchTitan policy versions or generator metrics in the returned
+    trace. The generation server therefore records their rollout-wide span.
     """
 
     min_policy_version: int
@@ -34,11 +38,11 @@ class VerifiersGenerationMetadata:
     max_policy_version: int
     """Newest policy version used to generate the completion."""
 
-    metrics: list
-    """Generator metrics attached to the corresponding rollout turn."""
+    metrics: list[m.Metric]
+    """Metrics from every generation in the rollout."""
 
 
-class GenerationServer:
+class GenerationServer(Configurable):
     """Expose a TorchTitan ``GenerateFn`` through Verifiers' model API.
 
     A Verifiers environment calls a named HTTP model endpoint, while TitanRL
@@ -48,29 +52,39 @@ class GenerationServer:
     that the resulting Verifiers trace does not carry.
     """
 
-    def __init__(
-        self,
-        *,
-        host: str,
-        port: int,
-        model_id: str,
-        max_model_len: int,
-    ) -> None:
-        self.host = host
-        self.requested_port = port
-        self.model_id = model_id
-        self.max_model_len = max_model_len
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        host: str = "127.0.0.1"
+        """Interface on which the local HTTP server listens."""
+
+        port: int = 0
+        """Listening port; zero requests an ephemeral port."""
+
+        def __post_init__(self) -> None:
+            if not 0 <= self.port <= 65535:
+                raise ValueError("port must be between 0 and 65535")
+
+    model_id = "torchtitan"
+
+    def __init__(self, config: Config) -> None:
+        self.host = config.host
+        self.requested_port = config.port
         self.generate_fn: GenerateFn | None = None
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
         self.request_counts: dict[str, int] = {}
-        self.generation_metadata: dict[str, dict[str, VerifiersGenerationMetadata]] = {}
+        self.generation_metadata: dict[str, VerifiersGenerationMetadata] = {}
 
     @property
     def port(self) -> int:
         if self.bound_port is None:
             raise RuntimeError("GenerationServer has not started")
         return self.bound_port
+
+    @property
+    def base_url(self) -> str:
+        """OpenAI-compatible base URL used by the local Verifiers client."""
+        return f"http://{self.host}:{self.port}/v1"
 
     def set_generate_fn(self, generate_fn: GenerateFn) -> None:
         self.generate_fn = generate_fn
@@ -80,7 +94,6 @@ class GenerationServer:
             return
         app = web.Application()
         app.router.add_get("/healthz", self._handle_health_request)
-        app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -109,30 +122,14 @@ class GenerationServer:
 
     def pop_generation_metadata(
         self, session_id: str
-    ) -> dict[str, VerifiersGenerationMetadata]:
-        """Detach one rollout's metadata for `trace_to_rollout_turns`."""
+    ) -> VerifiersGenerationMetadata | None:
+        """Detach the generation metadata accumulated for one rollout."""
         self.request_counts.pop(session_id, None)
-        return self.generation_metadata.pop(session_id, {})
+        return self.generation_metadata.pop(session_id, None)
 
     async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
         return web.json_response({"status": "ok"})
-
-    async def _handle_models_request(self, request: web.Request) -> web.Response:
-        del request
-        return web.json_response(
-            {
-                "object": "list",
-                "data": [
-                    {
-                        "id": self.model_id,
-                        "object": "model",
-                        "owned_by": "torchtitan",
-                        "max_model_len": self.max_model_len,
-                    }
-                ],
-            }
-        )
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:
         if self.generate_fn is None:
@@ -191,12 +188,23 @@ class GenerationServer:
                 status=502,
             )
 
-        self.generation_metadata.setdefault(session_id, {})[
-            completion.request_id
-        ] = VerifiersGenerationMetadata(
-            min_policy_version=completion.min_policy_version,
-            max_policy_version=completion.max_policy_version,
-            metrics=list(completion.metrics),
+        previous = self.generation_metadata.get(session_id)
+        self.generation_metadata[session_id] = VerifiersGenerationMetadata(
+            min_policy_version=(
+                completion.min_policy_version
+                if previous is None
+                else min(previous.min_policy_version, completion.min_policy_version)
+            ),
+            max_policy_version=(
+                completion.max_policy_version
+                if previous is None
+                else max(previous.max_policy_version, completion.max_policy_version)
+            ),
+            metrics=(
+                list(completion.metrics)
+                if previous is None
+                else [*previous.metrics, *completion.metrics]
+            ),
         )
         return web.json_response(
             {

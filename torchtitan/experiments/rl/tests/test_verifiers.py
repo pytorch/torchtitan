@@ -13,11 +13,7 @@ from types import SimpleNamespace
 
 from aiohttp import ClientSession
 
-from torchtitan.experiments.rl.examples.verifiers.components.env_server import (
-    _wrap_commit_to_retain_response_id,
-    REQUEST_IDS_BY_NODE_INFO_KEY,
-)
-from torchtitan.experiments.rl.examples.verifiers.components.model_adapter import (
+from torchtitan.experiments.rl.examples.verifiers.components.generation_server import (
     GenerationServer,
     VerifiersGenerationMetadata,
 )
@@ -36,17 +32,15 @@ def test_trainable_token_spans() -> None:
 
 
 def test_verifiers_trace_preserves_generation_metadata() -> None:
-    from verifiers.v1.types import AssistantMessage
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
 
     node = SimpleNamespace(
         token_ids=[10, 11, 12, 13],
         mask=[False, False, True, True],
         sampled=True,
-        message=AssistantMessage(content="Answer: $42$"),
+        message=VerifiersAssistantMessage(content="Answer: $42$"),
     )
     trace = SimpleNamespace(
-        calls=[SimpleNamespace(node=0)],
-        info={REQUEST_IDS_BY_NODE_INFO_KEY: {"0": "request-0"}},
         nodes=[node],
         branches=[
             SimpleNamespace(
@@ -58,13 +52,11 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     )
     turns = VerifiersRollouter.trace_to_rollout_turns(
         trace=trace,
-        generation_metadata={
-            "request-0": VerifiersGenerationMetadata(
-                min_policy_version=3,
-                max_policy_version=4,
-                metrics=[],
-            )
-        },
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=3,
+            max_policy_version=4,
+            metrics=[],
+        ),
         group_id=5,
         rollout_id=2,
     )
@@ -81,29 +73,22 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     assert turns[0].max_policy_version == 4
 
 
-def test_verifiers_trace_matches_out_of_order_metadata_by_request_id() -> None:
-    from verifiers.v1.types import AssistantMessage
+def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
 
     first_node = SimpleNamespace(
         token_ids=[10, 11],
         mask=[False, True],
         sampled=True,
-        message=AssistantMessage(content="first"),
+        message=VerifiersAssistantMessage(content="first"),
     )
     second_node = SimpleNamespace(
         token_ids=[12, 13],
         mask=[False, True],
         sampled=True,
-        message=AssistantMessage(content="second"),
+        message=VerifiersAssistantMessage(content="second"),
     )
     trace = SimpleNamespace(
-        calls=[SimpleNamespace(node=1), SimpleNamespace(node=0)],
-        info={
-            REQUEST_IDS_BY_NODE_INFO_KEY: {
-                "0": "request-first",
-                "1": "request-second",
-            }
-        },
         nodes=[first_node, second_node],
         branches=[
             SimpleNamespace(
@@ -115,42 +100,25 @@ def test_verifiers_trace_matches_out_of_order_metadata_by_request_id() -> None:
     )
     turns = VerifiersRollouter.trace_to_rollout_turns(
         trace=trace,
-        generation_metadata={
-            "request-second": VerifiersGenerationMetadata(
-                min_policy_version=7,
-                max_policy_version=8,
-                metrics=[],
-            ),
-            "request-first": VerifiersGenerationMetadata(
-                min_policy_version=3,
-                max_policy_version=4,
-                metrics=[],
-            ),
-        },
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=3,
+            max_policy_version=8,
+            metrics=[],
+        ),
         group_id=5,
         rollout_id=2,
     )
 
-    assert [turn.min_policy_version for turn in turns] == [3, 7]
-    assert [turn.max_policy_version for turn in turns] == [4, 8]
-
-
-def test_verifiers_commit_patch_records_request_id_by_node() -> None:
-    def commit(turn, response, tools=None):
-        del turn, response, tools
-        return 4
-
-    patched_commit = _wrap_commit_to_retain_response_id(commit)
-    turn = SimpleNamespace(trace=SimpleNamespace(info={}))
-    node = patched_commit(turn, SimpleNamespace(id="request-4"))
-
-    assert node == 4
-    assert turn.trace.info == {REQUEST_IDS_BY_NODE_INFO_KEY: {"4": "request-4"}}
+    assert [turn.min_policy_version for turn in turns] == [3, 3]
+    assert [turn.max_policy_version for turn in turns] == [8, 8]
+    assert [turn.prompt_token_ids for turn in turns] == [[10], [10, 11, 12]]
+    assert [turn.completion_token_ids for turn in turns] == [[11], [13]]
+    assert [turn.completion_logprobs for turn in turns] == [[-0.1], [-0.2]]
 
 
 def test_generation_server_forwards_token_request() -> None:
     async def run_test() -> None:
-        received = {}
+        received = []
 
         async def generate_fn(
             prompt_token_ids,
@@ -159,63 +127,63 @@ def test_generation_server_forwards_token_request() -> None:
             routing_session_id=None,
             sampling_config=None,
         ):
-            received.update(
-                prompt_token_ids=prompt_token_ids,
-                request_id=request_id,
-                routing_session_id=routing_session_id,
-                sampling_config=sampling_config,
+            received.append(
+                {
+                    "prompt_token_ids": prompt_token_ids,
+                    "request_id": request_id,
+                    "routing_session_id": routing_session_id,
+                    "sampling_config": sampling_config,
+                }
             )
+            request_index = int(request_id.rsplit("=", 1)[1])
             return Completion(
-                min_policy_version=7,
-                max_policy_version=8,
+                min_policy_version=7 - request_index,
+                max_policy_version=8 + request_index,
                 request_id=request_id,
                 token_ids=[31, 32],
                 token_logprobs=[-0.1, -0.2],
                 finish_reason="stop",
             )
 
-        server = GenerationServer(
-            host="127.0.0.1",
-            port=0,
-            model_id="test-model",
-            max_model_len=128,
-        )
+        server = GenerationServer.Config().build()
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
             async with ClientSession() as session:
-                response = await session.post(
-                    f"http://127.0.0.1:{server.port}/inference/v1/generate",
-                    headers={"X-Session-ID": "group=1/rollout=2"},
-                    json={
-                        "token_ids": [10, 11],
-                        "sampling_params": {
-                            "temperature": 1.0,
-                            "top_p": 0.9,
-                            "max_tokens": 2,
-                            "seed": 4,
-                            "logprobs": 1,
+                for _ in range(2):
+                    response = await session.post(
+                        f"http://127.0.0.1:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "group=1/rollout=2"},
+                        json={
+                            "token_ids": [10, 11],
+                            "sampling_params": {
+                                "temperature": 1.0,
+                                "top_p": 0.9,
+                                "max_tokens": 2,
+                                "seed": 4,
+                                "logprobs": 1,
+                            },
                         },
-                    },
-                )
-                assert response.status == 200
-                payload = await response.json()
+                    )
+                    assert response.status == 200
+                    payload = await response.json()
             generation_metadata = server.pop_generation_metadata("group=1/rollout=2")
         finally:
             await server.close()
 
-        assert received["prompt_token_ids"] == [10, 11]
-        assert received["request_id"] == "group=1/rollout=2/request=0"
-        assert received["routing_session_id"] == "group=1/rollout=2"
-        assert received["sampling_config"].seed == 4
+        assert [request["request_id"] for request in received] == [
+            "group=1/rollout=2/request=0",
+            "group=1/rollout=2/request=1",
+        ]
+        assert all(request["prompt_token_ids"] == [10, 11] for request in received)
+        assert all(
+            request["routing_session_id"] == "group=1/rollout=2" for request in received
+        )
+        assert all(request["sampling_config"].seed == 4 for request in received)
         assert payload["choices"][0]["token_ids"] == [31, 32]
-        assert {
-            request_id: (
-                item.min_policy_version,
-                item.max_policy_version,
-            )
-            for request_id, item in generation_metadata.items()
-        } == {"group=1/rollout=2/request=0": (7, 8)}
+        assert generation_metadata is not None
+        assert generation_metadata.min_policy_version == 6
+        assert generation_metadata.max_policy_version == 9
 
     asyncio.run(run_test())
 
@@ -238,12 +206,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
                 finish_reason="abort",
             )
 
-        server = GenerationServer(
-            host="127.0.0.1",
-            port=0,
-            model_id="test-model",
-            max_model_len=128,
-        )
+        server = GenerationServer.Config().build()
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
@@ -262,6 +225,6 @@ def test_generation_server_rejects_aborted_generation() -> None:
         assert payload == {
             "error": "generation finished without a usable completion: abort"
         }
-        assert generation_metadata == {}
+        assert generation_metadata is None
 
     asyncio.run(run_test())

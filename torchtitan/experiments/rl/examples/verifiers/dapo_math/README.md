@@ -1,10 +1,12 @@
 # DAPO Math with Verifiers
 
-This example keeps the existing [DAPO Math](../../dapo_math) recipe unchanged and replaces only its rollout path with [Verifiers](https://github.com/PrimeIntellect-ai/verifiers). Training still uses the filtered DAPO-Math dataset, AIME 2025 validation, DAPO loss, and the Qwen3-4B-Base model.
+This example keeps the existing [DAPO Math](../../dapo_math) recipe unchanged
+and replaces only its rollout path with
+[Verifiers](https://github.com/PrimeIntellect-ai/verifiers).
 
-Verifiers runs a single-turn math task with its `null` harness. The runtime is a local subprocess; there is no Docker or remote sandbox and no tools are exposed. Do not use this configuration for untrusted code execution.
-
-Verifiers is optional. Other TitanRL recipes do not require it.
+It uses Verifiers' null harness and a local subprocess runtime for a
+single-turn math task. No tools or sandbox are provided, so do not use this
+configuration for untrusted code execution.
 
 ## Setup
 

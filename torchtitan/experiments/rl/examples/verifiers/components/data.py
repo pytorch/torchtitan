@@ -10,9 +10,10 @@ import importlib
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
 import grain.python as grain
+import tyro
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
@@ -37,15 +38,18 @@ def register_local_taskset_alias(taskset_id: str) -> str:
 class VerifiersTaskSample:
     """Serialized task data dispatched to a stateless Verifiers EnvServer."""
 
-    task_data: dict[str, Any]
+    verifiers_task_data: dict[str, Any]
 
 
 class VerifiersTaskDataset(Configurable):
     """Adapt one Verifiers taskset to a resumable Grain iterator."""
 
+    # TODO: implement this as a SourceConfig and reuse SingleDatasetConfig once
+    # Rollouter supplies the core data pipeline's build context and iteration policy.
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        taskset: VerifiersTasksetConfig
+        verifiers_taskset: Annotated[VerifiersTasksetConfig, tyro.conf.Suppress]
         """Typed configuration for the Verifiers taskset to load."""
 
         num_tasks: int | None = None
@@ -63,40 +67,42 @@ class VerifiersTaskDataset(Configurable):
 
         def to_dict(self) -> dict[str, Any]:
             return {
-                "taskset": self.taskset.model_dump(mode="json"),
+                "verifiers_taskset": self.verifiers_taskset.model_dump(mode="json"),
                 "num_tasks": self.num_tasks,
                 "seed": self.seed,
                 "shuffle": self.shuffle,
             }
 
     def __init__(self, config: Config) -> None:
-        taskset_config = config.taskset.model_copy(
-            update={"id": register_local_taskset_alias(config.taskset.id)}
+        verifiers_taskset_config = config.verifiers_taskset.model_copy(
+            update={"id": register_local_taskset_alias(config.verifiers_taskset.id)}
         )
-        taskset = load_taskset(taskset_config)
-        if config.num_tasks is None and taskset.INFINITE:
+        verifiers_taskset = load_taskset(verifiers_taskset_config)
+        if config.num_tasks is None and verifiers_taskset.INFINITE:
             raise ValueError(
-                f"Verifiers taskset {config.taskset.id!r} is infinite; "
+                f"Verifiers taskset {config.verifiers_taskset.id!r} is infinite; "
                 "num_tasks is required"
             )
-        taskset = (
-            taskset if config.num_tasks is None else taskset.head(config.num_tasks)
+        verifiers_taskset = (
+            verifiers_taskset
+            if config.num_tasks is None
+            else verifiers_taskset.head(config.num_tasks)
         )
         if config.shuffle:
-            taskset = taskset.shuffle(config.seed)
-        tasks = list(taskset)
+            verifiers_taskset = verifiers_taskset.shuffle(config.seed)
+        tasks = list(verifiers_taskset)
         if not tasks:
             raise ValueError(
-                f"Verifiers taskset {config.taskset.id!r} yielded no tasks"
+                f"Verifiers taskset {config.verifiers_taskset.id!r} yielded no tasks"
             )
         if config.num_tasks is not None and len(tasks) != config.num_tasks:
             raise ValueError(
-                f"Verifiers taskset {config.taskset.id!r} yielded {len(tasks)} "
+                f"Verifiers taskset {config.verifiers_taskset.id!r} yielded {len(tasks)} "
                 f"tasks, expected {config.num_tasks}"
             )
 
         samples = [
-            VerifiersTaskSample(task_data=task.data.model_dump(mode="json"))
+            VerifiersTaskSample(verifiers_task_data=task.data.model_dump(mode="json"))
             for task in tasks
         ]
         dataset = grain.MapDataset.source(samples)

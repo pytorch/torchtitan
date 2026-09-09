@@ -7,83 +7,76 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import verifiers.v1 as vf
-from verifiers.v1.harnesses.null import NullHarnessConfig
+from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
 from torchtitan.experiments.rl.examples.verifiers.components import (
+    RewardFromVerifiers,
     VerifiersEnvServer,
-    VerifiersRewardFn,
     VerifiersRollouter,
     VerifiersTaskDataset,
 )
-from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
+from torchtitan.experiments.rl.examples.verifiers.components.data import (
     register_local_taskset_alias,
 )
-from torchtitan.experiments.rl.examples.verifiers.dapo_math.taskset import (
+from torchtitan.experiments.rl.examples.verifiers.dapo_math.data import (
     VerifiersMathTasksetConfig,
 )
 from torchtitan.experiments.rl.rubrics import Rubric
 
 
-# Register the local module under the single-segment plugin ID expected by
-# Verifiers' taskset loader. The spawned server repeats this registration.
-_TASKSET_MODULE = "torchtitan.experiments.rl.examples.verifiers.dapo_math.taskset"
-_TASKSET_ID = register_local_taskset_alias(_TASKSET_MODULE)
+def _math_taskset_config(
+    dataset: Literal["dapo_math", "aime2025"],
+) -> VerifiersMathTasksetConfig:
+    taskset_id = register_local_taskset_alias(VerifiersMathTasksetConfig.__module__)
+    return VerifiersMathTasksetConfig(id=taskset_id, dataset=dataset)
 
 
 class VerifiersMathRollouter(VerifiersRollouter):
-    """Run DAPO-Math and AIME rollouts through Verifiers."""
+    """Run DAPO-Math and AIME through a local Verifiers environment server.
+
+    The default uses one static environment worker, the null harness, and a
+    subprocess runtime. It performs single-turn generation without tools or a
+    sandbox.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(VerifiersRollouter.Config):
         train_dataset: VerifiersTaskDataset.Config = field(
             default_factory=lambda: VerifiersTaskDataset.Config(
-                taskset=VerifiersMathTasksetConfig(
-                    id=_TASKSET_ID,
-                    dataset="dapo_math",
-                ),
+                verifiers_taskset=_math_taskset_config("dapo_math"),
                 seed=42,
             )
         )
         validation_dataset: VerifiersTaskDataset.Config = field(
             default_factory=lambda: VerifiersTaskDataset.Config(
-                taskset=VerifiersMathTasksetConfig(
-                    id=_TASKSET_ID,
-                    dataset="aime2025",
-                ),
+                verifiers_taskset=_math_taskset_config("aime2025"),
                 seed=99,
                 shuffle=False,
             )
         )
-        env_server: VerifiersEnvServer.Config = field(
+        verifiers_env_server: VerifiersEnvServer.Config = field(
             default_factory=lambda: VerifiersEnvServer.Config(
                 environment=vf.SingleAgentEnvConfig(
-                    taskset=VerifiersMathTasksetConfig(
-                        id=_TASKSET_ID,
-                        dataset="dapo_math",
-                    ),
                     agent=vf.AgentConfig(
                         runtime=vf.SubprocessConfig(),
                         max_turns=1,
-                        harness=NullHarnessConfig(id="null"),
+                        harness=VerifiersNullHarnessConfig(id="null"),
                     ),
                 ),
                 serve=vf.ServeConfig(
-                    # One worker is sufficient for this lightweight single-turn
-                    # task. CPU-heavy or multi-turn environments should use
-                    # multiple workers, or an elastic pool, for process-level
-                    # parallelism instead of sharing one EnvServer GIL.
+                    # This lightweight single-turn recipe starts with one worker.
+                    # Increase num_workers for CPU-heavy or multi-turn environments.
                     pool=vf.StaticPoolConfig(num_workers=1),
                     address="tcp://127.0.0.1:0",
                 ),
-                local_taskset_module=_TASKSET_MODULE,
             )
         )
         rubric: Rubric.Config = field(
             default_factory=lambda: Rubric.Config(
-                reward_fns=[VerifiersRewardFn.Config(weight=1.0)],
+                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
             )
         )
-        max_model_len: int = 10240

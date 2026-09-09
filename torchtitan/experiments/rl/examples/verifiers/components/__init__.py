@@ -4,23 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Reusable adapters connecting Verifiers episodes to TitanRL rollouts."""
+"""Reusable adapters connecting Verifiers execution to TitanRL rollouts."""
 
-from torchtitan.experiments.rl.examples.verifiers.components.dataset import (
+from torchtitan.experiments.rl.examples.verifiers.components.data import (
     VerifiersTaskDataset,
     VerifiersTaskSample,
 )
 from torchtitan.experiments.rl.examples.verifiers.components.env_server import (
     VerifiersEnvServer,
 )
+from torchtitan.experiments.rl.examples.verifiers.components.generation_server import (
+    GenerationServer,
+)
 from torchtitan.experiments.rl.examples.verifiers.components.rollouter import (
-    VerifiersRewardFn,
+    RewardFromVerifiers,
     VerifiersRollouter,
 )
 
 __all__ = [
+    "GenerationServer",
+    "RewardFromVerifiers",
     "VerifiersEnvServer",
-    "VerifiersRewardFn",
     "VerifiersRollouter",
     "VerifiersTaskDataset",
     "VerifiersTaskSample",

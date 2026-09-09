@@ -82,7 +82,7 @@
 </text>
 <rect x="440" y="1260" width="440" height="70" rx="12" fill="#fef7e0" stroke="#8d6e3f" stroke-width="2"/>
 <text x="660" y="1287" fill="#202124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="500" text-anchor="middle">
-<tspan x="660" dy="0">Current DAPO-Math: local Subprocess runtime</tspan>
+<tspan x="660" dy="0">Example: local Subprocess runtime</tspan>
 <tspan x="660" dy="18">Null harness; no tools or isolation</tspan>
 </text>
 <rect x="440" y="1370" width="440" height="80" rx="12" fill="#fff8e1" stroke="#f9ab00" stroke-width="2" stroke-dasharray="8 7"/>
