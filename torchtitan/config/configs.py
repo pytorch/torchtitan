@@ -27,9 +27,10 @@ The command-line surface is frozen either way, so annotate a new field with
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
+import tyro
 
 
 @dataclass(kw_only=True, slots=True)
@@ -238,6 +239,18 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pipeline_parallel_defer_recv: Annotated[bool, tyro.conf.Suppress] = False
+    """Place pipeline receives immediately before their first consumer."""
+
+    pipeline_parallel_reuse_recv_buffers: Annotated[bool, tyro.conf.Suppress] = False
+    """Reuse schedule-planned receive buffers across non-overlapping actions."""
+
+    pipeline_parallel_per_direction_p2p: Annotated[bool, tyro.conf.Suppress] = False
+    """Use independent process groups for forward and backward PP traffic."""
+
+    pipeline_parallel_max_active_stages: Annotated[int, tyro.conf.Suppress] = 3
+    """Maximum FSDP stages kept unsharded by a looped pipeline schedule."""
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -276,6 +289,8 @@ class ParallelismConfig:
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
             )
+        if self.pipeline_parallel_max_active_stages < 1:
+            raise ValueError("pipeline_parallel_max_active_stages must be positive")
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
             or (
@@ -349,13 +364,16 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend"] = "default"
+    mode: Literal["default", "fake_backend", "real_pp_fake_spmd_backend"] = "default"
     """
     Communication mode for distributed training.
 
     Options:
     - "default": Normal distributed training with real communication
     - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - "real_pp_fake_spmd_backend": Testing-only mode with one physical process
+      per PP rank. PP uses a real device process group while all other axes use
+      a larger fake logical world selected through ``NGPU``.
     """
 
 

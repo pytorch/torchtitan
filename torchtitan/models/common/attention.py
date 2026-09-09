@@ -139,6 +139,9 @@ class VarlenAttention(Module):
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
 
+        max_num_documents: int | None = None
+        """Upper bound on packed documents used for fixed-shape metadata."""
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size
@@ -592,6 +595,8 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    max_num_documents: int | None = None,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -601,6 +606,9 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
+        max_num_documents: Optional fixed capacity for document offsets. Unused
+            offsets repeat the terminal token index, encoding empty sequences.
+            Exceeding the capacity raises an asynchronous device assertion.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -608,6 +616,37 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
+    if max_num_documents is not None:
+        if max_num_documents < 1:
+            raise ValueError("max_num_documents must be positive")
+        document_mask = positions == 0
+        document_slots = torch.cumsum(document_mask, dim=0) - 1
+        overflow_slot = max_num_documents + 1
+        scatter_slots = torch.where(
+            document_mask & (document_slots < max_num_documents),
+            document_slots,
+            torch.full_like(document_slots, overflow_slot),
+        )
+        packed_cu_seqlens = torch.full(
+            (overflow_slot + 1,),
+            num_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+        packed_cu_seqlens.scatter_(
+            0,
+            scatter_slots,
+            torch.arange(num_tokens, dtype=torch.int32, device=device),
+        )
+        torch._assert_async(document_mask.sum() <= max_num_documents)
+        packed_cu_seqlens = packed_cu_seqlens[:overflow_slot]
+        return VarlenMetadata(
+            cu_seq_q=packed_cu_seqlens,
+            cu_seq_k=packed_cu_seqlens,
+            max_q=num_tokens,
+            max_k=num_tokens,
+        )
+
     doc_starts = (positions == 0).nonzero(as_tuple=True)[0].to(torch.int32)
     packed_cu_seqlens = torch.cat(
         [
