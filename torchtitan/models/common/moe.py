@@ -96,13 +96,32 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
-        )
-        h_RF = h_RF * self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
-        )
-        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
+        gate_RF, up_RF = remat.region(
+            self._gate_up_projection,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(x_RD, w1_EFD, w3_EFD, offsets_E)
+        remat.recompute_needs_tensor(gate_RF, up_RF)
+        h_RF = F.silu(gate_RF) * up_RF
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E)
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
+
+    def _gate_up_projection(
+        self,
+        x_RD: torch.Tensor,
+        w1_EFD: torch.Tensor,
+        w3_EFD: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute the logical w1 and w3 grouped projections together."""
+        gate_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
+        up_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E)
+        return gate_RF, up_RF
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor

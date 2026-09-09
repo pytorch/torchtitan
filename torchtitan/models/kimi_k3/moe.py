@@ -9,6 +9,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common import Linear
@@ -85,24 +86,24 @@ class KimiGroupedExperts(GroupedExperts):
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
-        gate_RF = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            weight_EOI=w1_EFD,
-            offs=offsets_E,
-        )
-        up_RF = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            weight_EOI=w3_EFD,
-            offs=offsets_E,
-        )
-
+        gate_RF, up_RF = remat.region(
+            self._gate_up_projection,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(x_RD, w1_EFD, w3_EFD, offsets_E)
+        remat.recompute_needs_tensor(gate_RF, up_RF)
         h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
-
-        return self._grouped_mm(
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(
             A=h_RF,
             weight_EOI=w2_EDF,
             offs=offsets_E,
-        ).type_as(x_RD)
+        )
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
 
 
 class KimiLatentMoE(MoE):

@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 import triton
 import triton.language as tl
 
@@ -499,12 +500,21 @@ class FusedGroupedExperts(GroupedExperts):
         # The fused parameter stores gate and up interleaved as (E, F, 2, D);
         # the grouped GEMM consumes them as one (E, 2F, D) expert weight.
         w13_E_2F_D = w13.bfloat16().reshape(E, F * 2, D)
-        gate_up_R2F = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w13_E_2F_D, offs=offsets_E
-        )
+        gate_up_R2F = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(A=x_RD.bfloat16(), weight_EOI=w13_E_2F_D, offs=offsets_E)
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
+        remat.recompute_needs_tensor(gate_RF, up_RF)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E)
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:

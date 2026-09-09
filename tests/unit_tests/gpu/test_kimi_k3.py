@@ -6,12 +6,16 @@
 
 import unittest
 
+from unittest.mock import patch
+
 import torch
+import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.moe import KimiGroupedExperts
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
 
@@ -106,6 +110,33 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_grouped_experts_use_w13_and_w2_remat_regions(self):
+        grouped_experts = KimiGroupedExperts.Config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=1,
+        ).build()
+
+        def grouped_mm(
+            *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
+        ) -> torch.Tensor:
+            return A.float() @ weight_EOI[0].float().transpose(0, 1)
+
+        grouped_experts.configure_remat_regions(["*"])
+        checkpointed_forward = remat.checkpoint(
+            region_name="grouped_experts", preserve_rng_state=False
+        )(grouped_experts.forward)
+        with patch.object(grouped_experts, "_grouped_mm", side_effect=grouped_mm):
+            x_RD = torch.randn(3, 4, requires_grad=True)
+            with remat.collect_trace() as trace:
+                out_RD = checkpointed_forward(
+                    x_RD, torch.tensor([3], device=x_RD.device)
+                )
+            out_RD.sum().backward()
+
+        self.assertEqual([entry.name for entry in trace.entries], ["w13", "w2"])
+        self.assertIsNotNone(x_RD.grad)
+
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()
