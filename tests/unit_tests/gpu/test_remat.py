@@ -121,21 +121,13 @@ class _CountingGroupedExperts(GroupedExperts):
         for parameter in self.parameters():
             torch.nn.init.normal_(parameter)
 
-    def _gate_up_projection(
-        self,
-        x_RD: torch.Tensor,
-        w1_EFD: torch.Tensor,
-        w3_EFD: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        self.num_w13_forwards += 1
-        return super()._gate_up_projection(x_RD, w1_EFD, w3_EFD, offsets_E)
-
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
     ) -> torch.Tensor:
         if weight_EOI is self.w2_EDF:
             self.num_w2_forwards += 1
+        else:
+            self.num_w13_forwards += 1
         return A.float() @ weight_EOI[0].float().transpose(0, 1)
 
 

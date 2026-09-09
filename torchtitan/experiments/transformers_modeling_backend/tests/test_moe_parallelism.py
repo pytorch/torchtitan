@@ -25,22 +25,8 @@ from torchtitan.models.common.moe import MoE
 
 
 def _expert_weights(experts):
-    """Return (w1, w2, w3) expert params by their dynamically-discovered names.
-
-    GroupedExperts param names carry dimension suffixes (e.g. ``w1_EFD``), so
-    resolve the canonical (gate, down, up) roles via the same helper the
-    production state-dict adapter uses instead of hardcoding ``w1``/``w2``/``w3``.
-    """
-    from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
-        _expert_names,
-    )
-
-    gate_name, down_name, up_name = _expert_names()
-    return (
-        getattr(experts, gate_name),
-        getattr(experts, down_name),
-        getattr(experts, up_name),
-    )
+    """Return logical gate, down, and up expert-weight tensors."""
+    return experts.w13[:, :, 0, :], experts.w2_EDF, experts.w13[:, :, 1, :]
 
 
 def _moe_buffer(moe, prefix):
@@ -429,10 +415,9 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         output.sum().backward()
 
         self.assertIsNotNone(x.grad)
-        w1, w2, w3 = _expert_weights(native_moe.routed_experts.inner_experts)
-        self.assertIsNotNone(w1.grad)
-        self.assertIsNotNone(w2.grad)
-        self.assertIsNotNone(w3.grad)
+        inner_experts = native_moe.routed_experts.inner_experts
+        self.assertIsNotNone(inner_experts.w13.grad)
+        self.assertIsNotNone(inner_experts.w2_EDF.grad)
 
 
 # ---------------------------------------------------------------------------

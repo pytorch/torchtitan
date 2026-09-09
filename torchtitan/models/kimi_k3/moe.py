@@ -9,8 +9,6 @@
 from dataclasses import dataclass
 
 import torch
-import torch_remat as remat
-from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.feed_forward import FeedForward
@@ -68,42 +66,14 @@ class KimiGroupedExperts(GroupedExperts):
         self.beta = config.beta
         self.linear_beta = config.linear_beta
 
-    def forward(
+    def _activation(
         self,
-        x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        gate_RF: torch.Tensor,
+        up_RF: torch.Tensor,
+        offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w1_EFD, DTensor):
-            w1_EFD = self.w1_EFD.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
-        else:
-            w1_EFD = self.w1_EFD
-            w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
-
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-
-        gate_RF, up_RF = remat.region(
-            self._gate_up_projection,
-            self.remat_region_name("w13"),
-            recompute=self.remat_should_recompute("w13"),
-        )(x_RD, w1_EFD, w3_EFD, offsets_E)
-        remat.recompute_needs_tensor(gate_RF, up_RF)
-        h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
-        out_RD = remat.region(
-            self._grouped_mm,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(
-            A=h_RF,
-            weight_EOI=w2_EDF,
-            offs=offsets_E,
-        )
-        remat.recompute_needs_tensor(out_RD)
-        return out_RD.type_as(x_RD)
+        del offsets_E
+        return _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
 
 
 class KimiLatentMoE(MoE):
