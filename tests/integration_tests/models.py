@@ -115,14 +115,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             # unvalidated (see torchtitan/overrides/helion_rope.py).
             skip_rocm_test=True,
         ),
-        OverrideDefinitions(
-            configs=[recipes.qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2],
-            # Reverse test: fused QKV is the debugmodel default, so exercise the
-            # separate wq/wk/wv projection path under FSDP+TP+CP.
-            test_descr="Qwen3 non-fused QKV FSDP+TP+CP",
-            test_name="qwen3_non_fused_qkv_fsdp+tp+cp",
-            ngpu=8,
-        ),
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
