@@ -145,6 +145,8 @@ class Rollout:
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
     """Ordered rollout turns. Each turn stores its full prompt (redundant across turns); kept so a
     rollout can be replayed/branched and divergences found, then collapsed at training_sample assembly."""
+    # TODO: represent shared history as graph nodes so branching does not repeat
+    # complete prompt prefixes and consume O(num_turns**2) token storage.
 
     status: RolloutStatus
     """Rollout-level terminal status."""
