@@ -7,7 +7,7 @@ This guide provides a general framework on how to test your conversion script fo
 ## Methods
 
 ### Sanity Check (Greedy Decode)
-A quick way to sanity check if your conversion is correct is to perform greedy decoding inference on both the initial and converted checkpoints and confirm that they are the same. This method doesn't guarantee correctness but will very likely result in a fast **true negative** if the model definitions are not the same. There is no dedicated Llama greedy-decode script in this repo; greedy decode is still a valid method even when a model has no inference entry point.
+A quick way to sanity check if your conversion is correct is to perform greedy decoding inference on both the initial and converted checkpoints and confirm that they are the same. This method doesn't guarantee correctness but will very likely result in a fast **true negative** if the model definitions are not the same. The vLLM-based [`generate.py`](/torchtitan/experiments/rl/generate.py) is largely model-agnostic and can serve this purpose; pass `--temperature 0` for greedy decode. It has been tested on some but not all models. The methodology holds the same for a model with no inference entry point of its own.
 
 Note that your model definition needs to match your conversion script. For example, if converting from `torchtitan` to HuggingFace, be sure to include the correct `config.json` file that matches the `torchtitan` model architecture. Providing an incorrect `config.json` when loading the model with HuggingFace `transformers` will result in incorrect generations despite a correct weight conversion.
 
