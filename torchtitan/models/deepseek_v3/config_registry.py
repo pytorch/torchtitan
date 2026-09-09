@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Literal
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.dist_moe import DistMoeBackendConfig, DistMoeConverter
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -18,18 +21,20 @@ from torchtitan.components.quantization import (
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.models.common.attention import VarlenAttention
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 
 
 def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool
+    *, model_compile_enabled: bool, include_lm_head: bool = False
 ) -> MXFP8LinearConverter.Config:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
 
@@ -41,15 +46,59 @@ def deepseek_v3_mxfp8_linear_converter_config(
     Checkpointing changes when the selected representation is recreated and how
     long it remains live.
     """
+    fqns = ["attention", "shared_experts", "feed_forward"]
+    if include_lm_head:
+        fqns.append("lm_head")
     return MXFP8LinearConverter.Config(
         model_compile_enabled=model_compile_enabled,
-        fqns=["attention", "shared_experts", "feed_forward"],
+        fqns=fqns,
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.wkv_b",
             "feed_forward.w2",
             "shared_experts.w2",
         ],
     )
+
+
+def _enable_dist_moe(
+    config: Trainer.Config,
+    *,
+    flavor: str,
+    seq_len: int | None,
+    dtype: Literal["bf16", "mxfp8"],
+) -> Trainer.Config:
+    """Replace routed experts while preserving the base training recipe."""
+    config.parallelism.pipeline_parallel_per_direction_p2p = True
+    config.parallelism.pipeline_parallel_reuse_recv_buffers = True
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    converters: list[ModelConfigConverter.Config] = []
+    if dtype == "mxfp8":
+        converters.append(
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+                include_lm_head=True,
+            )
+        )
+    converters.append(
+        DistMoeConverter.Config(
+            backend=DistMoeBackendConfig(
+                dtype=dtype,
+                mxfp8_fast_math=dtype == "mxfp8",
+            )
+        )
+    )
+    config.model_spec = model_registry(
+        flavor,
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=converters,
+    )
+    for _, attention, _, _ in config.model_spec.model.traverse(VarlenAttention.Config):
+        assert isinstance(attention, VarlenAttention.Config)
+        attention.max_num_documents = 512
+    return config
 
 
 def enable_fused_swiglu(config: Trainer.Config) -> None:
@@ -140,6 +189,30 @@ def deepseek_v3_debugmodel_mxfp8(
         ],
     )
     return config
+
+
+def deepseek_v3_debugmodel_dist_moe_bf16(
+    seq_len: int | None = None,
+) -> Trainer.Config:
+    """Build the debug DSV3 recipe with BF16 Dist-MoE experts."""
+    return _enable_dist_moe(
+        deepseek_v3_debugmodel(seq_len=seq_len),
+        flavor="debugmodel",
+        seq_len=seq_len,
+        dtype="bf16",
+    )
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8(
+    seq_len: int | None = None,
+) -> Trainer.Config:
+    """Build the debug DSV3 recipe with MXFP8 Dist-MoE experts and linears."""
+    return _enable_dist_moe(
+        deepseek_v3_debugmodel(seq_len=seq_len),
+        flavor="debugmodel",
+        seq_len=seq_len,
+        dtype="mxfp8",
+    )
 
 
 def deepseek_v3_debugmodel_hybridep(
@@ -247,6 +320,26 @@ def deepseek_v3_16b_minimal_async_ep(seq_len: int | None = None) -> Trainer.Conf
     return config
 
 
+def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 16B recipe with BF16 Dist-MoE experts."""
+    return _enable_dist_moe(
+        deepseek_v3_16b(seq_len=seq_len),
+        flavor="16B",
+        seq_len=seq_len,
+        dtype="bf16",
+    )
+
+
+def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 16B recipe with MXFP8 Dist-MoE experts and linears."""
+    return _enable_dist_moe(
+        deepseek_v3_16b(seq_len=seq_len),
+        flavor="16B",
+        seq_len=seq_len,
+        dtype="mxfp8",
+    )
+
+
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry(
         "671B",
@@ -311,3 +404,23 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
         ],
     )
     return config
+
+
+def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 671B recipe with BF16 Dist-MoE experts."""
+    return _enable_dist_moe(
+        deepseek_v3_671b(seq_len=seq_len),
+        flavor="671B",
+        seq_len=seq_len,
+        dtype="bf16",
+    )
+
+
+def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 671B recipe with MXFP8 Dist-MoE experts and linears."""
+    return _enable_dist_moe(
+        deepseek_v3_671b(seq_len=seq_len),
+        flavor="671B",
+        seq_len=seq_len,
+        dtype="mxfp8",
+    )
