@@ -78,7 +78,7 @@ def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Conf
 
 
 def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
-    """Test-only FlexAttention baseline that runs through eager pipeline parallelism."""
+    """Test-only FlexInnerAttention baseline that runs through eager pipeline parallelism."""
     config = graph_trainer_deepseek_v3_debugmodel()
     config.compile = GraphTrainerCompileConfig(
         enable=True,

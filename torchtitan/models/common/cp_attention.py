@@ -21,7 +21,7 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -50,11 +50,11 @@ class CPInnerAttention(ABC):
         """Shard model inputs for this attention implementation."""
 
 
-class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexAttention):
-    """FlexAttention with sharded Q and all-gathered K/V."""
+class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
+    """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
+    class Config(FlexInnerAttention.Config):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
         """Dtype of the backward reduce-scatter."""
 

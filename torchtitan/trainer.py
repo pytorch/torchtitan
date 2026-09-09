@@ -51,7 +51,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -153,12 +153,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 and self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
                 and self.model_spec is not None
-                and any(self.model_spec.model.traverse(FlexAttention.Config))
+                and any(self.model_spec.model.traverse(FlexInnerAttention.Config))
             ):
-                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
                 raise ValueError(
                     "Selective activation checkpointing (SAC) is not supported "
-                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "with FlexInnerAttention while SPMD typechecking is enabled. "
                     "Use full activation checkpointing, disable activation "
                     "checkpointing, or switch to a non-Flex attention backend."
                 )

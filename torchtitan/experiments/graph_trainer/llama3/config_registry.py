@@ -78,7 +78,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     """Debug model on the test-only SDPA backend.
 
     Used by graph machinery tests (precompile artifact serialization, context
-    parallel) that can't run on the default FlexAttention backend: its BlockMask
+    parallel) that can't run on the default FlexInnerAttention backend: its BlockMask
     is unpicklable (mask_mod code objects) and is not a tensor. SDPA exercises
     the same machinery without those obstacles. See
     ``build_decoder_config_for_backend``.
@@ -111,7 +111,7 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
     Serves as the eager reference for the AutoParallel SDPA loss-compare test:
     with ``mode=None`` GraphTrainer.forward_backward_step delegates to the core
     (eager) Trainer path, so this is a plain eager FSDP+TP run of the same SDPA
-    model the AutoParallel test traces. The default FlexAttention backend can't
+    model the AutoParallel test traces. The default FlexInnerAttention backend can't
     fill this role — flex + AutoParallel is unsupported (BlockMask flattening).
     """
     config = graph_trainer_llama3_debugmodel_sdpa()

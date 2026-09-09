@@ -245,7 +245,7 @@ class ParallelismConfig:
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
-    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - "ptrr": Use PTRRLoadBalancer for FlexInnerAttention
     - None: Disable load balancing
     """
 

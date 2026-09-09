@@ -15,7 +15,7 @@ from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    FlexAttention,
+    FlexInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.multimodal import (
@@ -65,7 +65,9 @@ class KimiMLAAttention(BaseAttention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+        inner_attention: Module.Config = field(
+            default_factory=FlexInnerAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()

@@ -60,7 +60,7 @@ def _measure_step(
     model.zero_grad(set_to_none=True)
     global_valid_tokens = torch.tensor(labels.numel(), dtype=torch.float, device="cuda")
     # The dataloader always supplies per-document positions, which the trainer
-    # requires to build the FlexAttention mask. Reset positions between the
+    # requires to build the FlexInnerAttention mask. Reset positions between the
     # packed documents.
     positions = torch.arange(NUM_TOKENS, device="cuda", dtype=torch.int32) % 2048
 

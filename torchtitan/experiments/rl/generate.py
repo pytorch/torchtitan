@@ -38,7 +38,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
 )
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.tools.utils import has_cuda_capability
 
 
@@ -113,7 +113,7 @@ def generate() -> None:
     if attention_backend is None:
         raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(
-        attention_backend, (VarlenAttention.Config, FlexAttention.Config)
+        attention_backend, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
     ):
         raise ValueError("Only varlen and flex attention backends are supported.")
 
@@ -157,7 +157,7 @@ def generate() -> None:
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(attention_backend, FlexAttention.Config)
+                if isinstance(attention_backend, FlexInnerAttention.Config)
                 else AttentionBackendEnum.CUSTOM
             ),
         ),

@@ -55,7 +55,7 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools.logging import init_logger
@@ -851,7 +851,7 @@ class VLLMGenerator(Actor, Configurable):
         attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
             attention_backend,
-            (VarlenAttention.Config, FlexAttention.Config),
+            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
@@ -901,7 +901,7 @@ class VLLMGenerator(Actor, Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(attention_backend, FlexAttention.Config)
+                    if isinstance(attention_backend, FlexInnerAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),
