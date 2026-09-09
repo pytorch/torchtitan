@@ -38,4 +38,11 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             ngpu=2,
             use_real_pg=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm],
+            test_descr="MXFP8 Dist-MoE with prefetched VMM host scratch",
+            test_name="dist_moe_mxfp8_fsdp_ep_cudagraph_vmm",
+            ngpu=2,
+            use_real_pg=True,
+        ),
     ]

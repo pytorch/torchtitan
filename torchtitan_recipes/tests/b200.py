@@ -52,3 +52,18 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
     config.training.steps = 4
     config.checkpoint.enable = False
     return config
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
+    """Exercise prefetched VMM host scratch with the MXFP8 integration."""
+    from torchtitan.components.dist_moe import DistMoeRoutedExperts
+
+    config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
+    assert config.model_spec is not None
+    experts = list(config.model_spec.model.traverse(DistMoeRoutedExperts.Config))
+    assert experts, "the VMM integration recipe requires routed experts"
+    for _, expert, _, _ in experts:
+        assert isinstance(expert, DistMoeRoutedExperts.Config)
+        expert.backend.vmm_host_scratch_imbalance_factor = 4.0
+        expert.backend.prefetch_vmm = True
+    return config
