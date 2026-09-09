@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import _merge_linear_configs, Linear
+from torchtitan.models.common.linear import _make_interleaved_linear_config, Linear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -273,7 +273,7 @@ def _get_lora_cls(parent_cls: type) -> type:
                     )
                 )
 
-        merged_base_config = _merge_linear_configs(
+        merged_base_config = _make_interleaved_linear_config(
             tuple(base_configs),
             param_init,
             config_type=parent_config_cls,
@@ -292,7 +292,7 @@ def _get_lora_cls(parent_cls: type) -> type:
             lora_specs=tuple(lora_specs),
         ).build()
 
-    LoRALinear.Config._interleaved_linear_builder = build_interleaved_lora_linear
+    LoRALinear.Config._custom_interleaved_linear_builder = build_interleaved_lora_linear
     _lora_class_cache[parent_cls] = LoRALinear
     return LoRALinear
 

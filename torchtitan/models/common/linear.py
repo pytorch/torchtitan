@@ -39,7 +39,7 @@ class Linear(nn.Linear, Module):
     class Config(Module.Config):
         # Converters such as LoRA use this hook to preserve independent state
         # for each logical projection while building one interleaved GEMM.
-        _interleaved_linear_builder: ClassVar[_InterleavedLinearBuilder | None] = None
+        _custom_interleaved_linear_builder: ClassVar[Callable[..., Any] | None] = None
         in_features: int
         out_features: int
         bias: bool = False
@@ -52,15 +52,7 @@ class Linear(nn.Linear, Module):
         )
 
 
-# The result can be a standard, quantized, or dynamically generated LoRA
-# module, so there is no single concrete Linear type shared by every builder.
-_InterleavedLinearBuilder = Callable[
-    [tuple[tuple[str, Linear.Config], ...], dict[str, Callable] | None],
-    Any,
-]
-
-
-def _merge_linear_configs(
+def _make_interleaved_linear_config(
     logical_configs: tuple[tuple[str, Linear.Config], ...],
     param_init: dict[str, Callable] | None,
     *,
@@ -133,18 +125,21 @@ def _build_interleaved_linear(
             "Interleaved logical Linear projections must have matching out_features"
         )
 
-    builders = {
+    custom_builders = {
         builder
         for _, config in logical_configs
-        if (builder := type(config)._interleaved_linear_builder) is not None
+        if (builder := type(config)._custom_interleaved_linear_builder) is not None
     }
-    if len(builders) > 1:
-        raise ValueError("Logical Linear projections require incompatible mergers")
+    if len(custom_builders) > 1:
+        raise ValueError(
+            "Logical Linear projections specify different custom interleaved builders"
+        )
 
-    if builders:
-        merged = next(iter(builders))(logical_configs, param_init)
+    if custom_builders:
+        custom_builder = custom_builders.pop()
+        merged = custom_builder(logical_configs, param_init)
     else:
-        merged = _merge_linear_configs(logical_configs, param_init).build()
+        merged = _make_interleaved_linear_config(logical_configs, param_init).build()
 
     merged._logical_output_slices = tuple(
         (name, config.out_features) for name, config in logical_configs
