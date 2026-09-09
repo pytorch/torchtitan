@@ -60,6 +60,8 @@ class BaseModel(Module):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Prepare the forward inputs from a dataloader batch.
 
