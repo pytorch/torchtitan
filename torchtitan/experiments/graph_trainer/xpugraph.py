@@ -626,6 +626,95 @@ def get_static_input_indices(
     return static_input_indices
 
 
+def replace_embedding_dense_backward(gm: torch.fx.GraphModule) -> int:
+    """Rewrite ``aten.embedding_dense_backward`` into capture-safe primitives.
+
+    Returns the number of nodes rewritten.
+    """
+    graph = gm.graph
+    rewritten = 0
+
+    for node in list(graph.nodes):
+        if node.op != "call_function":
+            continue
+
+        if node.target != torch.ops.aten.embedding_dense_backward.default:
+            continue
+
+        if len(node.args) < 5:
+            logger.warning(
+                "Not rewriting %s: unexpected arity %d",
+                node.name,
+                len(node.args),
+            )
+            continue
+
+        grad, indices, num_weights, padding_idx, scale_grad_by_freq = node.args[:5]
+
+        if padding_idx is not None and padding_idx >= 0:
+            logger.warning(
+                "Not rewriting %s: padding_idx=%s is not handled",
+                node.name,
+                padding_idx,
+            )
+            continue
+
+        if scale_grad_by_freq:
+            logger.warning(
+                "Not rewriting %s: scale_grad_by_freq=True is not handled",
+                node.name,
+            )
+            continue
+
+        val = node.meta.get("val")
+
+        if not isinstance(val, torch.Tensor) or val.dim() != 2:
+            logger.warning(
+                "Not rewriting %s: missing or unexpected output meta",
+                node.name,
+            )
+            continue
+
+        embedding_dim = val.shape[-1]
+
+        with graph.inserting_before(node):
+            grad_2d = graph.call_function(
+                torch.ops.aten.reshape.default,
+                (grad, [-1, embedding_dim]),
+            )
+            indices_1d = graph.call_function(
+                torch.ops.aten.reshape.default,
+                (indices, [-1]),
+            )
+            zeros = graph.call_function(
+                torch.ops.aten.zeros.default,
+                ([num_weights, embedding_dim],),
+                {"dtype": val.dtype, "device": val.device},
+            )
+            replacement = graph.call_function(
+                torch.ops.aten.index_add.default,
+                (zeros, 0, indices_1d, grad_2d),
+            )
+
+        replacement.meta.update(node.meta)
+        node.replace_all_uses_with(replacement)
+        graph.erase_node(node)
+        rewritten += 1
+
+    if rewritten:
+        graph.lint()
+        gm.recompile()
+        logger.warning(
+            "Rewrote %d embedding_dense_backward node(s) into "
+            "zeros+index_add for XPUGraph capture; embedding-gradient "
+            "accumulation order is now atomics-dependent, so embedding "
+            "grads are no longer bitwise reproducible run to run.",
+            rewritten,
+        )
+
+    return rewritten
+
+
 def xpugraph_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
@@ -672,6 +761,8 @@ def xpugraph_pass(
             "Skipping xpugraph: XPU is not available."
         )
         return gm
+
+    replace_embedding_dense_backward(gm)
 
     if not is_xpugraph_compatible(gm):
         logger.warning(
