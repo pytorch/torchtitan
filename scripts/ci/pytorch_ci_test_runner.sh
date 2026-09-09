@@ -41,9 +41,7 @@ case "$COMMAND" in
     model_tests)
         # qwen3_5_fsdp+tp+varlen_attn+per_op_sac: varlen attention needs
         # flash_attn_interface/FA3, which the PyTorch CI image does not install
-        # and which is unavailable on its A10G (sm86) runners anyway. Excluded
-        # here rather than disabled in models.py so torchtitan's own CI, whose
-        # image ships flash-linear-attention, keeps running it.
+        # and which is unavailable on its A10G (sm86) runners anyway.
         python -m tests.integration_tests.run_tests \
             --test_suite models \
             --exclude "qwen3_5_moe_fsdp+tp+ep+pp,qwen3_5_fsdp+tp+varlen_attn+per_op_sac" \

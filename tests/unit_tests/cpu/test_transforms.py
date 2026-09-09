@@ -8,15 +8,16 @@
 
 import unittest
 
-from torchtitan.models.common.attention import FlexAttention
-from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
-from torchtitan.transforms import (
+from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    ModelTransform,
+    ModelConfigTransform,
     retype_node,
-    transform_model,
+    transform_model_config,
 )
+
+from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 
 
 def _llama3_cp_ready():
@@ -31,7 +32,7 @@ def _llama3_cp_ready():
     return config
 
 
-class _Record(ModelTransform):
+class _Record(ModelConfigTransform):
     order: list[str] = []
 
     def transform(self, model):
@@ -59,7 +60,7 @@ class _Loose(_Record):
     pass
 
 
-class _Boom(ModelTransform):
+class _Boom(ModelConfigTransform):
     def transform(self, model):
         model.layers[0].attention.inner_attention.block_size = (1, 1)
         raise ValueError("boom")
@@ -71,26 +72,34 @@ class TestRetypeNode(unittest.TestCase):
         existing.block_size = (256, 128)
         existing.kernel_options = {"BACKEND": "FLASH"}
 
-        swapped = retype_node(existing, AllGatherCPFlexAttention)
+        swapped = retype_node(existing, KVAllGatherCPFlexInnerAttention)
 
-        self.assertIsInstance(swapped, AllGatherCPFlexAttention.Config)
+        self.assertIsInstance(swapped, KVAllGatherCPFlexInnerAttention.Config)
         self.assertEqual(swapped.block_size, (256, 128))
         self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
 
     def test_rejects_a_replacement_that_does_not_inherit_the_current_type(self):
         # A non-subclass would drop fields added by an earlier transform.
-        existing = AllGatherCPFlexAttention.Config()
+        existing = KVAllGatherCPFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
             retype_node(existing, FlexAttention)
 
     def test_sets_fields_defined_by_the_replacement(self):
         swapped = retype_node(
             FlexAttention.Config(),
-            AllGatherCPFlexAttention,
+            KVAllGatherCPFlexInnerAttention,
             reduce_dtype="float32",
         )
 
         self.assertEqual(swapped.reduce_dtype, "float32")
+
+    def test_rejects_an_unknown_update(self):
+        with self.assertRaisesRegex(ValueError, "has no init field: typo"):
+            retype_node(
+                FlexAttention.Config(),
+                KVAllGatherCPFlexInnerAttention,
+                typo=True,
+            )
 
 
 class TestOrdering(unittest.TestCase):
@@ -132,11 +141,11 @@ class TestAtomicApplication(unittest.TestCase):
         config = _llama3_cp_ready()
         result = apply_transforms(
             config,
-            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
         self.assertIsNot(result, config)
         original = config.model_spec.model.layers[0].attention.inner_attention
-        self.assertNotIsInstance(original, AllGatherCPFlexAttention.Config)
+        self.assertNotIsInstance(original, KVAllGatherCPFlexInnerAttention.Config)
 
 
 class TestTransformModel(unittest.TestCase):
@@ -150,12 +159,12 @@ class TestTransformModel(unittest.TestCase):
 
     def test_rewrites_a_bare_model_spec(self):
         spec = self._spec()
-        spec.model = transform_model(
+        spec.model = transform_model_config(
             spec.model,
-            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
         inner = spec.model.layers[0].attention.inner_attention
-        self.assertIsInstance(inner, AllGatherCPFlexAttention.Config)
+        self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
 
     def test_does_not_validate(self):
         """A CP kernel without a CP degree passes here and fails in the trainer.
@@ -164,14 +173,14 @@ class TestTransformModel(unittest.TestCase):
         a spec that no ``Trainer.Config`` owns yet.
         """
         spec = self._spec()
-        transform_model(
+        transform_model_config(
             spec.model,
-            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
 
     def test_orders_transforms(self):
         _Record.order = []
-        transform_model(
+        transform_model_config(
             self._spec().model,
             [_Third(), _First(), _Second()],
         )
@@ -179,20 +188,20 @@ class TestTransformModel(unittest.TestCase):
 
 
 class TestContextParallelTransform(unittest.TestCase):
-    def test_sets_cp_kernel_config_fields(self):
+    def test_updates_inner_attention_config_fields(self):
         config = _llama3_cp_ready()
         result = apply_transforms(
             config,
             [
                 ContextParallelTransform(
-                    kernel=AllGatherCPFlexAttention,
-                    kernel_config_overrides={"reduce_dtype": "float32"},
+                    inner_attention=KVAllGatherCPFlexInnerAttention,
+                    inner_attention_config_updates={"reduce_dtype": "bfloat16"},
                 )
             ],
         )
 
         swapped = result.model_spec.model.layers[0].attention.inner_attention
-        self.assertEqual(swapped.reduce_dtype, "float32")
+        self.assertEqual(swapped.reduce_dtype, "bfloat16")
 
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
@@ -202,17 +211,17 @@ class TestContextParallelTransform(unittest.TestCase):
 
         result = apply_transforms(
             config,
-            [ContextParallelTransform(kernel=AllGatherCPFlexAttention)],
+            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
 
         swapped = result.model_spec.model.layers[0].attention.inner_attention
-        self.assertIsInstance(swapped, AllGatherCPFlexAttention.Config)
+        self.assertIsInstance(swapped, KVAllGatherCPFlexInnerAttention.Config)
         self.assertEqual(swapped.block_size, (256, 128))
         self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
-        with self.assertRaisesRegex(ValueError, "must inherit ContextParallelKernel"):
-            ContextParallelTransform(kernel=FlexAttention)
+        with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
+            ContextParallelTransform(inner_attention=FlexAttention)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from renderers import Qwen3RendererConfig
+
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.experiments.rl.examples.alphabet_sort import (
     AlphabetSortDataset,
@@ -22,6 +25,7 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
 )
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import score_sorted_list
+from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.experiments.rl.types import RolloutTurnID
 
@@ -369,10 +373,6 @@ def test_env_walks_through_follow_up_turns() -> None:
 def test_rollouter_builds_one_env_per_group_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _RendererConfig:
-        def build(self, *, tokenizer_path: str):
-            return None
-
     _patch_names(monkeypatch)
     config = AlphabetSortRollouter.Config()
     rollouter = AlphabetSortRollouter(config)
@@ -381,8 +381,11 @@ def test_rollouter_builds_one_env_per_group_member(
     assert isinstance(worker, AlphabetSortWorker)
     asyncio.run(
         worker.setup_async(
-            renderer_config=_RendererConfig(),
-            hf_assets_path="hf_assets_path",
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=RenderersLibraryConfig(
+                renderers_config=Qwen3RendererConfig(enable_thinking=False)
+            ),
+            hf_assets_path="tests/assets/tokenizer",
         )
     )
     sample = rollouter.get_training_sample()

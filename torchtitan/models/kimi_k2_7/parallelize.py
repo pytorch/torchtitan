@@ -42,6 +42,7 @@ def parallelize_kimi_k2_5(
     compile_config: CompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    skip_dp: bool = False,
 ):
     """Apply TP/EP, activation checkpointing, ``torch.compile``, and FSDP.
 
@@ -88,6 +89,12 @@ def parallelize_kimi_k2_5(
                 parallel_dims=parallel_dims,
             )
 
+    # Skip FSDP wrapper for inference. FSDP's forward hooks
+    # are incompatible with torch.inference_mode() used by vLLM.
+    # AC and compile are disabled via config (mode="none", enable=False).
+    if skip_dp:
+        return model
+
     if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
@@ -123,6 +130,7 @@ def parallelize_kimi_k2_5(
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
             dp_mesh_dims=dp_mesh_dims,
         )
 

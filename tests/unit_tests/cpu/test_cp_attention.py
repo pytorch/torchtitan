@@ -15,20 +15,24 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
-    AllGatherCPFlexAttention,
-    ContextParallelKernel,
+    CPInnerAttention,
+    KVAllGatherCPFlexInnerAttention,
 )
 
 
 class TestKernelSelection(unittest.TestCase):
     def test_cp_kernel_is_a_flex_kernel(self):
-        self.assertIsInstance(AllGatherCPFlexAttention.Config(), FlexAttention.Config)
+        self.assertIsInstance(
+            KVAllGatherCPFlexInnerAttention.Config(), FlexAttention.Config
+        )
 
     def test_cp_kernel_inherits_flex_fields(self):
-        config = AllGatherCPFlexAttention.Config(block_size=256)
+        config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
         self.assertEqual(config.block_size, 256)
 
     def test_cp_kernel_is_not_an_attention_backend(self):
@@ -38,7 +42,23 @@ class TestKernelSelection(unittest.TestCase):
     def test_plain_flex_is_not_a_cp_kernel(self):
         kernel = get_attention_config("flex")._owner
         assert kernel is not None
-        self.assertFalse(issubclass(kernel, ContextParallelKernel))
+        self.assertFalse(issubclass(kernel, CPInnerAttention))
+
+    def test_cp_inner_attention_owns_input_sharding(self):
+        batch = {"input": torch.arange(8)}
+        sharded = {"input": torch.arange(4)}
+        mesh = object()
+        with mock.patch(
+            "torchtitan.distributed.context_parallel.api."
+            "prepare_context_parallel_input",
+            return_value=sharded,
+        ) as prepare:
+            result = KVAllGatherCPFlexInnerAttention.cp_shard(
+                batch, None, mesh, "headtail", None
+            )
+
+        self.assertIs(result, sharded)
+        prepare.assert_called_once_with(batch, None, mesh, "headtail", None)
 
 
 class _FakeMesh:
@@ -53,48 +73,43 @@ class _FakeMesh:
 
 def _in_mesh(cp_size):
     return mock.patch(
-        "torchtitan.models.common.cp_attention.current_spmd_mesh",
+        "torchtitan.distributed.spmd_types.current_spmd_mesh",
         return_value=_FakeMesh(cp_size),
     )
 
 
 class TestCpGroup(unittest.TestCase):
-    """CP kernels require a multi-rank CP group."""
+    """CP inner attention requires a multi-rank CP group."""
 
     @staticmethod
     def _kernel():
-        return AllGatherCPFlexAttention(AllGatherCPFlexAttention.Config())
+        return KVAllGatherCPFlexInnerAttention(KVAllGatherCPFlexInnerAttention.Config())
 
     def test_cp_axis_above_one_yields_its_group(self):
         with _in_mesh(8):
-            self.assertEqual(self._kernel().cp_group.size(), 8)
+            group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+            self.assertEqual(group.size(), 8)
 
     def test_no_mesh_context_is_an_error(self):
-        with self.assertRaisesRegex(RuntimeError, "requires an active SPMD mesh"):
-            self._kernel().cp_group
+        with self.assertRaisesRegex(RuntimeError, "No active SPMD mesh"):
+            require_spmd_mesh_axis_group(MeshAxisName.CP)
 
     def test_degree_one_is_an_error(self):
-        with _in_mesh(1), self.assertRaisesRegex(
-            RuntimeError, "requires an active CP mesh"
-        ):
-            self._kernel().cp_group
+        with _in_mesh(1), self.assertRaisesRegex(RuntimeError, "multiple ranks"):
+            require_spmd_mesh_axis_group(MeshAxisName.CP)
 
     def test_mesh_without_a_cp_axis_is_an_error(self):
-        with _in_mesh(None), self.assertRaisesRegex(
-            RuntimeError, "requires an active CP mesh"
-        ):
-            self._kernel().cp_group
+        with _in_mesh(None), self.assertRaisesRegex(RuntimeError, "has no 'cp' axis"):
+            require_spmd_mesh_axis_group(MeshAxisName.CP)
 
     def test_forward_without_a_cp_group_is_an_error(self):
         num_tokens, heads, head_dim = 8, 2, 16
         q, k, v = (torch.randn(num_tokens, heads, head_dim) for _ in range(3))
-        with _in_mesh(1), self.assertRaisesRegex(
-            RuntimeError, "requires an active CP mesh"
-        ):
+        with _in_mesh(1), self.assertRaisesRegex(RuntimeError, "multiple ranks"):
             self._kernel().forward(q, k, v)
 
-    def test_the_kernel_holds_no_mesh_state(self):
-        self.assertNotIn("parallelize", ContextParallelKernel.__dict__)
+    def test_cp_inner_attention_holds_no_mesh_state(self):
+        self.assertNotIn("cp_group", CPInnerAttention.__dict__)
 
 
 class TestAllGather(unittest.TestCase):
@@ -110,7 +125,9 @@ class TestAllGather(unittest.TestCase):
         with _in_mesh(8), mock.patch.object(
             spmd, "redistribute", record
         ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
-            AllGatherCPFlexAttention(AllGatherCPFlexAttention.Config()).forward(q, k, v)
+            KVAllGatherCPFlexInnerAttention(
+                KVAllGatherCPFlexInnerAttention.Config()
+            ).forward(q, k, v)
 
         self.assertEqual(2, len(calls))
         self.assertIs(k, calls[0][0])
@@ -134,16 +151,16 @@ class TestAllGather(unittest.TestCase):
         with _in_mesh(8), mock.patch.object(
             spmd, "redistribute", record
         ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
-            AllGatherCPFlexAttention(config).forward(q, k, v)
+            KVAllGatherCPFlexInnerAttention(config).forward(q, k, v)
         return seen
 
-    def test_reduces_in_the_input_dtype_by_default(self):
-        config = AllGatherCPFlexAttention.Config()
-        self.assertEqual([torch.bfloat16] * 2, self._reduce_dtypes(config))
-
-    def test_reduce_dtype_overrides_the_input_dtype(self):
-        config = AllGatherCPFlexAttention.Config(reduce_dtype="float32")
+    def test_reduces_in_float32_by_default(self):
+        config = KVAllGatherCPFlexInnerAttention.Config()
         self.assertEqual([torch.float32] * 2, self._reduce_dtypes(config))
+
+    def test_reduce_dtype_can_use_bfloat16(self):
+        config = KVAllGatherCPFlexInnerAttention.Config(reduce_dtype="bfloat16")
+        self.assertEqual([torch.bfloat16] * 2, self._reduce_dtypes(config))
 
 
 class TestAllGatherCollective(unittest.TestCase):
@@ -170,14 +187,14 @@ class TestAllGatherCollective(unittest.TestCase):
 
     def _gather_and_backward(self, dtype):
         """Pair each of K and V with the gradient the gather returns to it."""
-        kernel = AllGatherCPFlexAttention(AllGatherCPFlexAttention.Config())
+        kernel = KVAllGatherCPFlexInnerAttention(
+            KVAllGatherCPFlexInnerAttention.Config()
+        )
         q, k, v = (
             torch.randn(4, 2, 8, dtype=dtype, requires_grad=True) for _ in range(3)
         )
-        with mock.patch.object(
-            AllGatherCPFlexAttention,
-            "cp_group",
-            new_callable=mock.PropertyMock,
+        with mock.patch(
+            "torchtitan.models.common.cp_attention." "require_spmd_mesh_axis_group",
             return_value=dist.group.WORLD,
         ), mock.patch.object(
             FlexAttention, "forward", lambda self, q, k, v, **kw: k + v

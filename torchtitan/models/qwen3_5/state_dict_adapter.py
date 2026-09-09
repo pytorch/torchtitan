@@ -9,12 +9,11 @@ State dict adapter for Qwen3.5.
 
 Converts between HuggingFace Qwen3.5 checkpoint format and torchtitan format.
 
-MoE expert weights require two transformations:
-- **Transpose**: HF and TT use transposed layouts for grouped 3D expert weights.
-  E.g. HF down_proj [E, hidden, dim] <-> TT w2 [E, dim, hidden].
-- **Fuse/split gate_up_proj**: HF fuses gate_proj and up_proj into a single
-  gate_up_proj [E, dim, 2*hidden_dim]. TT stores them separately as
+MoE expert weights use the same grouped 3D layouts in HF and TT. HF fuses
+gate_proj and up_proj into a single gate_up_proj [E, 2*hidden_dim, dim], while
+TT stores them separately as
   w1 [E, hidden_dim, dim] and w3 [E, hidden_dim, dim].
+HF down_proj and TT w2 both use [E, dim, hidden_dim].
 
 Other notable conversions:
 - Conv3d patch embedding (HF) <-> Linear (TT) via weight reshape
@@ -38,6 +37,11 @@ class Qwen35StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen35Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
+        self.hf_language_model_prefix = (
+            "model.language_model"
+            if model_config.vision_encoder is not None
+            else "model"
+        )
 
         self.from_hf_map = {
             # ===== Language Model =====
@@ -107,6 +111,14 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.visual.merger.linear_fc2.weight": "vision_encoder.merger.linear_fc2.weight",
             "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
         }
+        if model_config.vision_encoder is None:
+            # multimodal checkpoints use model.language_model.*, while
+            # text-only checkpoints use model.*.
+            self.from_hf_map = {
+                hf_key.replace("model.language_model.", "model.", 1): tt_key
+                for hf_key, tt_key in self.from_hf_map.items()
+                if not hf_key.startswith("model.visual.")
+            }
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3.5 format."""
@@ -141,9 +153,10 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     == "layers.{}.moe.routed_experts.inner_experts.w2_EDF"
                 ):
                     hf_key = (
-                        f"model.language_model.layers.{layer_num}.mlp.experts.down_proj"
+                        f"{self.hf_language_model_prefix}.layers."
+                        f"{layer_num}.mlp.experts.down_proj"
                     )
-                    hf_state_dict[hf_key] = value.transpose(-2, -1)
+                    hf_state_dict[hf_key] = value
                     continue
 
                 if tt_abstract_key not in to_hf_map:
@@ -214,11 +227,11 @@ class Qwen35StateDictAdapter(StateDictAdapter):
 
         # Fuse MoE w1 (gate) + w3 (up) → gate_up_proj
         for layer_num in moe_w1_by_layer:
-            w1 = moe_w1_by_layer[layer_num].transpose(-2, -1)
-            w3 = moe_w3_by_layer[layer_num].transpose(-2, -1)
+            w1 = moe_w1_by_layer[layer_num]
+            w3 = moe_w3_by_layer[layer_num]
             hf_state_dict[
-                f"model.language_model.layers.{layer_num}.mlp.experts.gate_up_proj"
-            ] = torch.cat([w1, w3], dim=-1)
+                f"{self.hf_language_model_prefix}.layers.{layer_num}.mlp.experts.gate_up_proj"
+            ] = torch.cat([w1, w3], dim=-2)
 
         # Fuse vision wq/wk/wv → qkv
         for layer_num, parts in vision_qkv_by_layer.items():
@@ -238,14 +251,14 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             v = parts.get("in_proj_v.weight")
             if q is not None and k is not None and v is not None:
                 hf_state_dict[
-                    f"model.language_model.layers.{layer_num}.linear_attn.in_proj_qkv.weight"
+                    f"{self.hf_language_model_prefix}.layers.{layer_num}.linear_attn.in_proj_qkv.weight"
                 ] = torch.cat([q, k, v], dim=0)
             cq = parts.get("conv_q.weight")
             ck = parts.get("conv_k.weight")
             cv = parts.get("conv_v.weight")
             if cq is not None and ck is not None and cv is not None:
                 hf_state_dict[
-                    f"model.language_model.layers.{layer_num}.linear_attn.conv1d.weight"
+                    f"{self.hf_language_model_prefix}.layers.{layer_num}.linear_attn.conv1d.weight"
                 ] = torch.cat([cq, ck, cv], dim=0)
 
         return hf_state_dict
@@ -256,7 +269,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
 
         # HF ties lm_head with embed_tokens — copy if missing
         if "lm_head.weight" not in hf_state_dict:
-            embed_key = "model.language_model.embed_tokens.weight"
+            embed_key = f"{self.hf_language_model_prefix}.embed_tokens.weight"
             if embed_key not in hf_state_dict:
                 raise ValueError(
                     f"HF checkpoint missing both 'lm_head.weight' and '{embed_key}'"
@@ -269,34 +282,34 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 # pyrefly: ignore [missing-attribute]
                 idx = re.search(r"\d+", hf_key).group(0)
 
-                # MoE gate_up_proj → split into w1 + w3 and transpose
+                # MoE gate_up_proj -> split into w1 + w3
                 if (
                     hf_abstract_key
-                    == "model.language_model.layers.{}.mlp.experts.gate_up_proj"
+                    == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.gate_up_proj"
                 ):
-                    w1_hf, w3_hf = value.chunk(2, dim=-1)
+                    w1_hf, w3_hf = value.chunk(2, dim=-2)
                     tt_state_dict[
                         f"layers.{idx}.moe.routed_experts.inner_experts.w1_EFD"
-                    ] = w1_hf.transpose(-2, -1)
+                    ] = w1_hf
                     tt_state_dict[
                         f"layers.{idx}.moe.routed_experts.inner_experts.w3_EFD"
-                    ] = w3_hf.transpose(-2, -1)
+                    ] = w3_hf
                     continue
 
-                # MoE down_proj → transpose
+                # MoE down_proj has the same layout as TT w2
                 if (
                     hf_abstract_key
-                    == "model.language_model.layers.{}.mlp.experts.down_proj"
+                    == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.down_proj"
                 ):
                     tt_state_dict[
                         f"layers.{idx}.moe.routed_experts.inner_experts.w2_EDF"
-                    ] = value.transpose(-2, -1)
+                    ] = value
                     continue
 
                 # GatedDeltaNet fused in_proj_qkv → split into q/k/v
                 if (
                     hf_abstract_key
-                    == "model.language_model.layers.{}.linear_attn.in_proj_qkv.weight"
+                    == f"{self.hf_language_model_prefix}.layers.{{}}.linear_attn.in_proj_qkv.weight"
                 ):
                     # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].delta_net
@@ -311,7 +324,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 # GatedDeltaNet fused conv1d → split into conv_q/k/v
                 if (
                     hf_abstract_key
-                    == "model.language_model.layers.{}.linear_attn.conv1d.weight"
+                    == f"{self.hf_language_model_prefix}.layers.{{}}.linear_attn.conv1d.weight"
                 ):
                     # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].delta_net

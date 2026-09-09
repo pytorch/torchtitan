@@ -32,7 +32,7 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MoE,
@@ -191,7 +191,7 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
-    rope: RoPE.Config,
+    rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     fuse_qkv: bool = False,
@@ -199,6 +199,9 @@ def make_gqa_config(
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config.
+
+    ``rope=None`` builds a NoPE layer (no positional encoding); see
+    :class:`GQAttention`.
 
     ``tp_gemm_backend`` selects which implementation runs the QKV and output
     projections. ``"default"`` leaves the TP collectives to the framework, either
@@ -213,7 +216,7 @@ def make_gqa_config(
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    rope = dataclasses.replace(rope)
+    rope = dataclasses.replace(rope) if rope is not None else None
 
     # The backend picks the classes; everything below builds the same shapes into
     # whichever was chosen.
@@ -340,7 +343,7 @@ def make_router_config(
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
     return TokenChoiceTopKRouter.Config(
         num_experts=num_experts,
-        gate=Linear.Config(
+        gate=RouterGateLinear.Config(
             in_features=dim,
             out_features=num_experts,
             bias=bias,
@@ -360,8 +363,8 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     comm_backend: str,
+    hidden_dim: int,
     non_blocking_capacity_factor: float | None = None,
-    hidden_dim: int | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> LocalTokenDispatcher.Config:
@@ -409,6 +412,7 @@ def make_token_dispatcher_config(
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "standard":

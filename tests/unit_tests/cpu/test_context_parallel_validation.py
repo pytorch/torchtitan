@@ -12,9 +12,9 @@ from dataclasses import dataclass
 import pytest
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.context_parallel import validate_context_parallel
+from torchtitan.config.transform import ContextParallelTransform
+from torchtitan.config.validation import validate_context_parallel
 from torchtitan.protocols.module import Module
-from torchtitan.transforms import ContextParallelTransform
 
 
 class _NoAttentionModel(Module):
@@ -51,7 +51,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
     def _config(
         *, spmd_backend: str, cp: int, varlen: bool = False, cp_kernel: bool = False
     ):
-        from torchtitan.models.common.cp_attention import AllGatherCPFlexAttention
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
         from torchtitan.models.llama3.config_registry import (
             llama3_debugmodel,
             llama3_debugmodel_varlen_attn,
@@ -60,9 +62,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
         if cp_kernel:
             # Apply the transform without its final validation.
-            ContextParallelTransform(kernel=AllGatherCPFlexAttention).transform(
-                config.model_spec.model
-            )
+            ContextParallelTransform(
+                inner_attention=KVAllGatherCPFlexInnerAttention
+            ).transform(config.model_spec.model)
         config.parallelism.spmd_backend = spmd_backend
         config.parallelism.context_parallel_degree = cp
         config.training.max_context_length = 512
@@ -92,12 +94,12 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
 
     def test_rejects_plain_flex_cp_on_spmd_types(self):
         config = self._config(spmd_backend="spmd_types", cp=2)
-        with self.assertRaisesRegex(ValueError, "AllGatherCPFlexAttention"):
+        with self.assertRaisesRegex(ValueError, "KVAllGatherCPFlexInnerAttention"):
             config.__post_init__()
 
     def test_rejects_varlen_cp_on_spmd_types(self):
         config = self._config(spmd_backend="spmd_types", cp=2, varlen=True)
-        with self.assertRaisesRegex(ValueError, "ContextParallelKernel"):
+        with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
             config.__post_init__()
 
     def test_rejects_an_unrecognized_kernel_cp_on_spmd_types(self):
@@ -109,7 +111,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = self._config(spmd_backend="spmd_types", cp=2)
         for layer in config.model_spec.model.layers:
             layer.attention.inner_attention = LocalOnlyAttention.Config()
-        with self.assertRaisesRegex(ValueError, "ContextParallelKernel"):
+        with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
             config.__post_init__()
 
 

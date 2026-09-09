@@ -4,16 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model transforms. See README.md for what belongs here."""
+"""Model config transforms. See README.md for what belongs here."""
 
-from .apply import apply_transforms, transform_model
-from .base import ModelTransform, retype_node
+from .apply import apply_transforms, transform_model_config
+from .base import ModelConfigTransform, retype_node
 from .context_parallel import ContextParallelTransform
 
 __all__ = [
-    "ModelTransform",
+    "ModelConfigTransform",
     "apply_transforms",
-    "transform_model",
+    "transform_model_config",
     "retype_node",
     "ContextParallelTransform",
 ]

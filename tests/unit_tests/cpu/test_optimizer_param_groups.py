@@ -63,7 +63,7 @@ class FakeMoEBlock(nn.Module):
 
 
 class FakeMoEModel(nn.Module):
-    def __init__(self, load_balance_coeffs=(0.1, 0.2)):
+    def __init__(self, load_balance_coeffs=(0.1, 0.2), mtp_load_balance_coeff=None):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor([1.0]))
         self.layers = nn.ModuleDict(
@@ -72,6 +72,9 @@ class FakeMoEModel(nn.Module):
                 "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
             }
         )
+        self.mtp_layers = nn.ModuleList()
+        if mtp_load_balance_coeff is not None:
+            self.mtp_layers.append(FakeMoEBlock(mtp_load_balance_coeff, [3, 1]))
 
 
 class FakeParallelDims:
@@ -205,6 +208,32 @@ class TestParamGroupConfig(unittest.TestCase):
                 [model],
                 FakeParallelDims(),
             )
+
+    def test_moe_load_balancing_updates_mtp_layers(self):
+        model = FakeMoEModel(mtp_load_balance_coeff=0.3)
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        register_moe_load_balancing_hook(container, [model], FakeParallelDims())
+
+        container.step()
+
+        torch.testing.assert_close(
+            model.mtp_layers[0].moe.expert_bias_E,
+            torch.tensor([-0.3, 0.3]),
+        )
+        torch.testing.assert_close(
+            model.mtp_layers[0].moe.tokens_per_expert_E,
+            torch.tensor([0, 0]),
+        )
 
     def test_single_pattern_weight_decay_zero(self):
         """Pattern matching bias params with weight_decay=0."""
