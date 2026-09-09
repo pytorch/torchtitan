@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import logging
 
 import pytest
 
@@ -53,6 +54,10 @@ def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
     )
 
 
+def _untrainable_group(group_id: int) -> TrainingSampleGroup:
+    return TrainingSampleGroup(group_id=group_id, training_samples=[], metrics=[])
+
+
 def _build_batcher(*, num_prompts_per_train_step: int) -> Batcher:
     return Batcher.Config().build(
         num_tokens_per_microbatch_per_dp_rank=16384,
@@ -94,6 +99,48 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch is not None
     assert group_is_trainable
     assert batch.num_global_valid_tokens > 0
+
+
+def test_batcher_warns_after_each_batch_of_untrainable_groups(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=2)
+
+    with caplog.at_level(logging.WARNING):
+        batcher.add_training_samples(training_sample_group=_untrainable_group(0))
+        batcher.add_training_samples(training_sample_group=_untrainable_group(1))
+
+    assert (
+        "Consecutive untrainable batches: 1/10 "
+        "(2 rollout groups produced no trainable samples)."
+    ) in caplog.text
+
+
+def test_batcher_resets_no_progress_count_on_trainable_group(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=2)
+
+    with caplog.at_level(logging.WARNING):
+        batcher.add_training_samples(training_sample_group=_untrainable_group(0))
+        batcher.add_training_samples(training_sample_group=_untrainable_group(1))
+        batcher.add_training_samples(
+            training_sample_group=_trainable_group(2, num_samples=1)
+        )
+        caplog.clear()
+        batcher.add_training_samples(training_sample_group=_untrainable_group(3))
+
+    assert "zero-output batch equivalents" not in caplog.text
+
+
+def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=2)
+
+    for group_id in range(19):
+        batcher.add_training_samples(training_sample_group=_untrainable_group(group_id))
+
+    with pytest.raises(RuntimeError, match="10 consecutive untrainable batches"):
+        batcher.add_training_samples(training_sample_group=_untrainable_group(19))
 
 
 def test_microbatch_grid_avoids_all_padding_cells_when_possible() -> None:

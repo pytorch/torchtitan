@@ -25,6 +25,8 @@ from torchtitan.experiments.rl.types import (
 
 logger = logging.getLogger(__name__)
 
+_MAX_CONSECUTIVE_UNTRAINABLE_BATCHES = 10
+
 # Per-field pad values + tensor dtypes for a packed row.
 _PAD_VALUES: dict[str, int | float | bool] = {
     "input_ids": 0,  # overwritten with pad_id in __init__-bound builds
@@ -102,6 +104,45 @@ class Batcher(Configurable):
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
+        self._num_consecutive_zero_output_groups = 0
+
+    def _record_untrainable_groups(self, *, group_is_trainable: bool) -> None:
+        """Fail when consecutive groups cannot contribute one training sample.
+
+        Each ``num_prompts_per_train_step`` consecutive untrainable groups
+        represents one complete untrainable batch. For a target of 8 groups,
+        warn after each block of 8 and fail after 10 such batches (80 groups).
+        Any trainable group resets the count.
+        """
+        # A useful group proves the pipeline is making progress, even before
+        # enough useful groups have accumulated to form a complete batch.
+        if group_is_trainable:
+            self._num_consecutive_zero_output_groups = 0
+            return
+
+        self._num_consecutive_zero_output_groups += 1
+        # Report once per group count that would normally produce a training step.
+        if self._num_consecutive_zero_output_groups % self._num_prompts_per_train_step:
+            return
+
+        num_untrainable_batches = (
+            self._num_consecutive_zero_output_groups // self._num_prompts_per_train_step
+        )
+        logger.warning(
+            "Consecutive untrainable batches: %d/%d (%d rollout groups "
+            "produced no trainable samples).",
+            num_untrainable_batches,
+            _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES,
+            self._num_consecutive_zero_output_groups,
+        )
+        if num_untrainable_batches < _MAX_CONSECUTIVE_UNTRAINABLE_BATCHES:
+            return
+
+        raise RuntimeError(
+            f"{num_untrainable_batches} consecutive untrainable batches "
+            f"({self._num_consecutive_zero_output_groups} rollout groups); "
+            "check reward diversity and training-sample filters."
+        )
 
     def add_training_samples(
         self, *, training_sample_group: TrainingSampleGroup
@@ -147,6 +188,7 @@ class Batcher(Configurable):
 
         group_is_trainable = bool(training_sample_group.training_samples)
         self._groups_for_next_batch.append(training_sample_group)
+        self._record_untrainable_groups(group_is_trainable=group_is_trainable)
         num_trainable_groups = sum(
             bool(group.training_samples) for group in self._groups_for_next_batch
         )
