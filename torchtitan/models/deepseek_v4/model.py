@@ -196,10 +196,12 @@ class DeepSeekV4Model(Decoder):
             if not isinstance(inner, DSV4FlexAttention):
                 continue
             key = dsv4_mask_key(inner.compress_ratio)
-            if key is None or key in masks:
+            if key is None:
                 continue
             assert window_sizes.setdefault(key, inner.window_size) == inner.window_size
             assert block_sizes.setdefault(key, inner.block_size) == inner.block_size
+            if key in masks:
+                continue
 
             cache_key = (key, seqlen, device)
             cached = self.mask_cache.get(cache_key)
