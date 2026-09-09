@@ -14,7 +14,7 @@ import ipaddress
 import math
 import socket
 from collections.abc import Callable
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse
 
 import einops as E
 import requests
@@ -30,18 +30,39 @@ from torchtitan.tools.logging import logger
 
 
 def _is_blocked_ip(ip: ipaddress.ip_address) -> bool:
-    """Return True if the IP is private, loopback, link-local, multicast, or unspecified."""
+    """Return True if the IP should be blocked for SSRF protection.
+
+     .. note::
+        DNS rebinding (TOCTOU) is a known limitation: ``_is_safe_url``
+        resolves the hostname, then the caller resolves it again
+        independently when fetching. A malicious DNS server could return
+        a public IP for the check and a private IP for the fetch. Full
+        protection requires DNS pinning, which should be addressed in a
+        future PR.
+    """
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped  # unwrap ::ffff:a.b.c.d before classifying
     return (
         ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_multicast
         or ip.is_unspecified
+        or ip.is_reserved
     )
 
 
 def _is_safe_url(url: str) -> bool:
-    """Check if URL is safe from SSRF by resolving and checking all IP addresses."""
+    """Check if URL is safe from SSRF by resolving and checking all IP addresses.
+
+    .. note::
+        DNS rebinding (TOCTOU) is a known limitation: this function resolves
+        the hostname, then the caller resolves it again independently when
+        fetching. A malicious DNS server could return a public IP for the
+        check and a private IP for the fetch. Full protection requires DNS
+        pinning, which should be addressed in a future PR.
+    """
     try:
         parsed = urlparse(url)
         hostname = parsed.hostname
@@ -63,28 +84,28 @@ def _is_safe_url(url: str) -> bool:
         return False
 
 
-class _SSRFProtectedSession(requests.Session):
-    """Session that blocks redirects to private/loopback/metadata IPs."""
+def _fetch_url_safe(image_url: str, timeout: float = 10.0) -> bytes:
+    """Fetch URL content with full SSRF + redirect protection.
 
-    def resolve_redirects(self, resp, req, **kwargs):
-        # Override to validate EVERY redirect hop, not just the first.
-        # requests.Session.resolve_redirects is a generator that internally
-        # loops the entire redirect chain via self.send + get_redirect_target.
-        # We bypass that loop and validate each hop ourselves.
-        while True:
-            location = resp.headers.get("Location")
-            if not location:
-                return
-            # Build fully-qualified redirect URL
-            full_url = urljoin(resp.url, location)
-            if not _is_safe_url(full_url):
-                raise requests.exceptions.InvalidURL(
-                    f"Blocked redirect to unsafe URL: {full_url}"
-                )
-            prepared_request = self.prepare_request(
-                requests.Request("GET", full_url).prepare()
-            )
-            resp = self.send(prepared_request, allow_redirects=False, timeout=10)
+    Validates the initial URL and EVERY redirect hop before following it,
+    using ``allow_redirects=False`` + manual loop so each hop is pre-checked.
+    """
+    if not _is_safe_url(image_url):
+        raise ValueError(f"URL not allowed (SSRF protection): {image_url}")
+    session = requests.Session()
+    # First hop
+    response = session.get(image_url, timeout=timeout, allow_redirects=False)
+    # Follow redirects manually, validating each hop before fetching
+    while response.is_redirect:
+        location = response.headers.get("Location")
+        if not location:
+            break
+        full_url = urljoin(response.url, location)
+        if not _is_safe_url(full_url):
+            raise ValueError(f"Blocked redirect to unsafe URL: {full_url}")
+        response = session.get(full_url, timeout=timeout, allow_redirects=False)
+    # Final response is either the target or the last safe hop
+    return response.content
 
 
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
@@ -94,11 +115,7 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     falls back to TVF.pil_to_tensor for PIL Image inputs.
     """
     if isinstance(image, str) and image.startswith("http"):
-        if not _is_safe_url(image):
-            raise ValueError(f"URL not allowed (SSRF protection): {image}")
-        session = _SSRFProtectedSession()
-        response = session.get(image, timeout=10, allow_redirects=True)
-        image = response.content
+        image = _fetch_url_safe(image)
     if isinstance(image, bytes):
         raw = torch.frombuffer(bytearray(image), dtype=torch.uint8)
         return torchvision.io.decode_image(raw, mode=torchvision.io.ImageReadMode.RGB)
