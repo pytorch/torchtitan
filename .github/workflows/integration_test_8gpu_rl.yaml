@@ -8,6 +8,7 @@ on:
     paths:
       - 'torchtitan/experiments/rl/**'
       - 'torchtitan/models/qwen3_5/**'
+      - 'torchtitan/models/qwen3_8/**'
       - '.github/workflows/integration_test_8gpu_rl.yaml'
   schedule:
     # Runs every 12 hours
@@ -79,14 +80,10 @@ jobs:
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match
 
-        # 4. Install the pinned GDN kernels without replacing nightly PyTorch.
-        uv pip install --no-deps \
-          "git+https://github.com/fla-org/flash-linear-attention.git@v0.5.2"
-
-        # 5. Make the checkout importable for subprocesses spawned by the test.
+        # 4. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # 6. Download HF model checkpoint for tests
+        # 5. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

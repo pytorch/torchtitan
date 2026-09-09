@@ -208,7 +208,7 @@ def _get_pipeline_metadata(
     if hasattr(model_config, "layers"):
         num_layers = len(model_config.layers)
     else:
-        raise ValueError("Model does not have n_layers attribute.")
+        raise ValueError("Model does not have layers attribute.")
 
     # You can adjust these weights based on the computational cost of embeddings and output layers
     # Higher weights mean these modules are treated as "heavier" in the distribution

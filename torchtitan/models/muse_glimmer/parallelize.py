@@ -113,6 +113,7 @@ def parallelize_muse_glimmer(
                 reduce_dtype,
                 reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
                 pp_enabled=parallel_dims.pp_enabled,
+                cpu_offload=training.enable_cpu_offload,
                 dp_mesh_dims=dp_mesh_dims,
             )
 

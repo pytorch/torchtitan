@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import dataclasses
 
+from renderers import Qwen3RendererConfig
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -44,9 +46,12 @@ from torchtitan.experiments.rl.examples.search_r1.rollouter import (
     SearchR1Worker,
 )
 from torchtitan.experiments.rl.losses import DAPOLoss
+from torchtitan.experiments.rl.models.muse_glimmer.renderer import (
+    MuseGlimmerRendererConfig,
+)
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.renderer import RendererConfig
+from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
 from torchtitan.models.muse_glimmer.state_dict_adapter import (
@@ -62,8 +67,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     server on the spare GPUs. Requires a running retrieval server and the QA parquet
     data; see ``README.md``.
     """
+    seq_len = 4096
     return Controller.Config(
-        model_spec=model_registry("1.7B", attn_backend="varlen"),
+        model_spec=model_registry("1.7B", seq_len=seq_len, attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -77,7 +83,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -85,8 +93,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
             training=TrainingConfig(
-                num_tokens_per_microbatch_per_dp_rank=4096,
-                max_context_length=4096,
+                num_tokens_per_microbatch_per_dp_rank=seq_len,
+                max_context_length=seq_len,
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
@@ -136,7 +144,11 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     # TODO: use mixed precision (fp32 master + bf16 compute) via FSDP + activation
     # checkpointing, which is more memory-efficient and could keep the split generator-heavy.
     config = rl_grpo_qwen3_1_7b_search_r1()
-    config.model_spec = model_registry("8B", attn_backend="varlen")
+    config.model_spec = model_registry(
+        "8B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="varlen",
+    )
     config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-8B"
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -169,8 +181,12 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
     as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
+    seq_len = 4096
     model_spec = model_registry(
-        "30B-A3B", attn_backend="varlen", moe_comm_backend="deepep"
+        "30B-A3B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        moe_comm_backend="deepep",
     )
 
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied
@@ -197,7 +213,9 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),  # TODO: TBD
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -206,8 +224,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             ),
             # TODO: Tune the trainer token budget and maximum context length.
             training=TrainingConfig(
-                num_tokens_per_microbatch_per_dp_rank=4096,
-                max_context_length=4096,
+                num_tokens_per_microbatch_per_dp_rank=seq_len,
+                max_context_length=seq_len,
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=8,  # TODO: TBD
@@ -271,12 +289,9 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
 
     varlen attention is used for both roles so the trainer and the vLLM generator run
     one ModelSpec. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
-    on load, and the renderer (registered below) handles Muse Glimmer's harmony chat
+    on load, and the renderer handles Muse Glimmer's harmony chat
     format and ATEM tool calls.
     """
-    # Muse Glimmer's renderer ships in torchtitan rather than the `renderers` library;
-    # registering makes RendererConfig(name="muse_glimmer") resolve it.
-
     model_spec = muse_glimmer_model_registry("30B", attn_backend="varlen")
     model_spec = dataclasses.replace(
         model_spec, state_dict_adapter=MuseGlimmerStateDictAdapter
@@ -297,7 +312,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RendererConfig(name="muse_glimmer", enable_thinking=True),
+        renderer=MuseGlimmerRendererConfig(),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),

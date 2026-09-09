@@ -9,11 +9,8 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
-from torch import nn
 
-from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
@@ -69,13 +66,6 @@ def set_flux_sharding_config(config: "FluxModel.Config") -> None:
 
     for block_cfg in config.single_blocks:
         set_flux_inner_attention_local_map(block_cfg.inner_attention)
-
-
-def annotate_dp_cp_params_as_r(model: nn.Module, parallel_dims: ParallelDims) -> None:
-    # TODO(pianpwk): Infer these from the active SPMD mesh instead.
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
-        for param in model.parameters():
-            spmd.assert_type(param, spmd.R)
 
 
 def annotate_flux_forward_inputs(

@@ -175,11 +175,11 @@ def _make_stub_rl_trainer():
         rollout_recorder = RolloutSampleRecorder.Config()
         hf_assets_path = "./tests/assets/tokenizer"
         # __init__ builds these too; stub them so construction does no real work.
+        tokenizer = SimpleNamespace(
+            build=lambda *, tokenizer_path: SimpleNamespace(eos_id=0)
+        )
         renderer = SimpleNamespace(
-            build=lambda *, tokenizer_path: SimpleNamespace(
-                get_stop_token_ids=lambda: [],
-                _tokenizer=SimpleNamespace(eos_token_id=0),
-            )
+            build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
         )
         # __init__ reads generator.sampling (a dataclass, for replace) + generator.debug.seed.
         generator = SimpleNamespace(

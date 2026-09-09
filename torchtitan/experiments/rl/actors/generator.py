@@ -13,12 +13,13 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
+import tyro
 from monarch.actor import (
     Actor,
     Channel,
@@ -762,10 +763,10 @@ class VLLMGenerator(Actor, Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
-        vllm_stat_logger: VllmOtelStatLogger.Config = field(
-            default_factory=VllmOtelStatLogger.Config
-        )
-        """Logger instantiated on TP rank 0 to export vLLM metrics."""
+        vllm_stat_logger: Annotated[
+            VllmOtelStatLogger.Config | None, tyro.conf.Suppress
+        ] = None
+        """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
@@ -907,7 +908,7 @@ class VLLMGenerator(Actor, Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        engine_kwargs["max_model_len"] = model_spec.model.max_context_length
+        engine_kwargs["max_model_len"] = model_spec.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
@@ -934,22 +935,31 @@ class VLLMGenerator(Actor, Configurable):
             logger.info("Initializing LLMEngine from EngineArgs...")
             stat_loggers = None
             if self._tp_rank == 0:
-                logger_context = StatLoggerContext(
-                    rank=self._rank,
-                    tp_rank=self._tp_rank,
-                    dp_rank=self._dp_rank,
-                    generator_name=context().actor_instance.actor_id.actor_name,
-                    output_dir=output_dir,
-                )
-
-                def build_stat_logger(vllm_config, engine_index):
-                    return config.vllm_stat_logger.build(
-                        vllm_config=vllm_config,
-                        engine_index=engine_index,
-                        context=logger_context,
+                if config.vllm_stat_logger is None:
+                    logger.info(
+                        "VllmOtelStatLogger inactive because "
+                        "vllm_stat_logger=None. To record vLLM metrics, set it "
+                        "to VllmOtelStatLogger.Config() and set "
+                        "OTEL_METRICS_EXPORTER=jsonl or otlp"
+                    )
+                else:
+                    vllm_stat_logger_config = config.vllm_stat_logger
+                    logger_context = StatLoggerContext(
+                        rank=self._rank,
+                        tp_rank=self._tp_rank,
+                        dp_rank=self._dp_rank,
+                        generator_name=context().actor_instance.actor_id.actor_name,
+                        output_dir=output_dir,
                     )
 
-                stat_loggers = [build_stat_logger]
+                    def build_stat_logger(vllm_config, engine_index):
+                        return vllm_stat_logger_config.build(
+                            vllm_config=vllm_config,
+                            engine_index=engine_index,
+                            context=logger_context,
+                        )
+
+                    stat_loggers = [build_stat_logger]
             self._engine = LLMEngine.from_engine_args(
                 engine_args, stat_loggers=stat_loggers
             )
