@@ -152,7 +152,7 @@ def test_generation_server_forwards_token_request() -> None:
             async with ClientSession() as session:
                 for _ in range(2):
                     response = await session.post(
-                        f"http://127.0.0.1:{server.port}/inference/v1/generate",
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
                         headers={"X-Session-ID": "group=1/rollout=2"},
                         json={
                             "token_ids": [10, 11],
@@ -212,7 +212,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
         try:
             async with ClientSession() as session:
                 response = await session.post(
-                    f"http://127.0.0.1:{server.port}/inference/v1/generate",
+                    f"http://{server.host}:{server.port}/inference/v1/generate",
                     headers={"X-Session-ID": "group=1/rollout=2"},
                     json={"token_ids": [10, 11], "sampling_params": {}},
                 )
