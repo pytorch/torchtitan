@@ -8,7 +8,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
+from torchtitan.models.common.attention import FusedQKVLinear, GQAttention
 from torchtitan.models.common.dist_gemm import (
     DistGEMMFeedForward,
     RowParallelLinear,
@@ -191,22 +191,9 @@ def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
-    """Colwise-shard each Q/K/V projection of a ``BaseQKVLinear``.
-
-    Handles both ``QKVLinear`` (separate ``wq`` + ``wkv``) and
-    ``FusedQKVLinear`` (single ``wqkv``).
-    """
-    if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
-        qkv_linear_cfg.wqkv.sharding_config = colwise_config()
-    elif isinstance(qkv_linear_cfg, QKVLinear.Config):
-        qkv_linear_cfg.wq.sharding_config = colwise_config()
-        qkv_linear_cfg.wkv.sharding_config = colwise_config()
-    else:
-        raise TypeError(
-            f"set_qkv_linear_sharding requires QKVLinear.Config or "
-            f"FusedQKVLinear.Config, got {type(qkv_linear_cfg).__name__}"
-        )
+def set_fused_qkv_linear_sharding(qkv_linear_cfg: FusedQKVLinear.Config) -> None:
+    """Colwise-shard the fused QKV projection."""
+    qkv_linear_cfg.wqkv.sharding_config = colwise_config()
 
 
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
@@ -254,7 +241,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    set_qkv_linear_sharding(attention_cfg.qkv_linear)
+    set_fused_qkv_linear_sharding(attention_cfg.qkv_linear)
 
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:

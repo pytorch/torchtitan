@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checkpoint interop tests for FusedQKVLinear.
+"""Checkpoint and forward tests for FusedQKVLinear.
 
 FusedQKVLinear stores a single fused ``wqkv`` parameter but checkpoints in the
-stock ``QKVLinear`` layout (``wq.weight`` / ``wk.weight`` / ``wv.weight``) via
-state_dict hooks, so its checkpoints round-trip with the non-fused module.
+logical ``wq.weight`` / ``wk.weight`` / ``wv.weight`` layout via state_dict
+hooks.
 
 All tests run on CPU.
 """
@@ -16,7 +16,7 @@ All tests run on CPU.
 import unittest
 
 import torch
-from torchtitan.models.common.attention import FusedQKVLinear, QKVLinear
+from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.linear import Linear
 
 _DIM = 16
@@ -44,67 +44,90 @@ def _build_fused(with_bias: bool = False) -> FusedQKVLinear:
     return fused
 
 
-def _build_stock(with_bias: bool = False) -> QKVLinear:
-    stock = QKVLinear.Config(
-        head_dim=_HEAD_DIM,
-        wq=Linear.Config(in_features=_DIM, out_features=_WQ_OUT, bias=with_bias),
-        wkv=Linear.Config(in_features=_DIM, out_features=_WK_OUT, bias=with_bias),
-    ).build()
-    with torch.no_grad():
-        for p in stock.parameters():
-            p.copy_(torch.randn_like(p))
-    return stock
+def _logical_state_dict(with_bias: bool = False) -> dict[str, torch.Tensor]:
+    state_dict = {
+        "wq.weight": torch.randn(_WQ_OUT, _DIM),
+        "wk.weight": torch.randn(_WK_OUT, _DIM),
+        "wv.weight": torch.randn(_WK_OUT, _DIM),
+    }
+    if with_bias:
+        state_dict.update(
+            {
+                "wq.bias": torch.randn(_WQ_OUT),
+                "wk.bias": torch.randn(_WK_OUT),
+                "wv.bias": torch.randn(_WK_OUT),
+            }
+        )
+    return state_dict
 
 
 class TestFusedQKVCheckpointInterop(unittest.TestCase):
-    def test_fused_checkpoint_loads_into_stock(self):
-        """Fused state_dict loads into stock QKVLinear with correct weights."""
+    def test_state_dict_exposes_logical_qkv(self):
+        """The fused parameter is exposed as logical Q/K/V tensors."""
         fused = _build_fused(with_bias=True)
-        stock = _build_stock(with_bias=True)
-        stock.load_state_dict(fused.state_dict())
+        state_dict = fused.state_dict()
 
         n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
         wqkv = fused.wqkv.weight.reshape(n_kv, _R_DIM, _HEAD_DIM, _DIM)
-        self.assertTrue(torch.equal(stock.wq.weight, wqkv[:, :_HPK].reshape(-1, _DIM)))
-        self.assertTrue(torch.equal(stock.wk.weight, wqkv[:, _HPK].reshape(-1, _DIM)))
         self.assertTrue(
-            torch.equal(stock.wv.weight, wqkv[:, _HPK + 1].reshape(-1, _DIM))
+            torch.equal(state_dict["wq.weight"], wqkv[:, :_HPK].reshape(-1, _DIM))
+        )
+        self.assertTrue(
+            torch.equal(state_dict["wk.weight"], wqkv[:, _HPK].reshape(-1, _DIM))
+        )
+        self.assertTrue(
+            torch.equal(state_dict["wv.weight"], wqkv[:, _HPK + 1].reshape(-1, _DIM))
         )
 
         b_3d = fused.wqkv.bias.reshape(n_kv, _R_DIM, _HEAD_DIM)
-        self.assertTrue(torch.equal(stock.wq.bias, b_3d[:, :_HPK].reshape(-1)))
-        self.assertTrue(torch.equal(stock.wk.bias, b_3d[:, _HPK].reshape(-1)))
-        self.assertTrue(torch.equal(stock.wv.bias, b_3d[:, _HPK + 1].reshape(-1)))
+        self.assertTrue(torch.equal(state_dict["wq.bias"], b_3d[:, :_HPK].reshape(-1)))
+        self.assertTrue(torch.equal(state_dict["wk.bias"], b_3d[:, _HPK].reshape(-1)))
+        self.assertTrue(
+            torch.equal(state_dict["wv.bias"], b_3d[:, _HPK + 1].reshape(-1))
+        )
 
-    def test_stock_checkpoint_loads_into_fused(self):
-        """A stock checkpoint loads into FusedQKVLinear."""
-        stock = _build_stock(with_bias=True)
+    def test_logical_checkpoint_loads_into_fused(self):
+        """Logical Q/K/V checkpoint tensors are packed into wqkv."""
+        state_dict = _logical_state_dict(with_bias=True)
         fused = _build_fused(with_bias=True)
-        fused.load_state_dict(stock.state_dict())
+        fused.load_state_dict(state_dict)
 
         n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
         wqkv = fused.wqkv.weight.reshape(n_kv, _R_DIM, _HEAD_DIM, _DIM)
-        self.assertTrue(torch.equal(wqkv[:, :_HPK].reshape(-1, _DIM), stock.wq.weight))
-        self.assertTrue(torch.equal(wqkv[:, _HPK].reshape(-1, _DIM), stock.wk.weight))
         self.assertTrue(
-            torch.equal(wqkv[:, _HPK + 1].reshape(-1, _DIM), stock.wv.weight)
+            torch.equal(wqkv[:, :_HPK].reshape(-1, _DIM), state_dict["wq.weight"])
+        )
+        self.assertTrue(
+            torch.equal(wqkv[:, _HPK].reshape(-1, _DIM), state_dict["wk.weight"])
+        )
+        self.assertTrue(
+            torch.equal(wqkv[:, _HPK + 1].reshape(-1, _DIM), state_dict["wv.weight"])
         )
 
         wqkv_b = fused.wqkv.bias.reshape(n_kv, _R_DIM, _HEAD_DIM)
-        self.assertTrue(torch.equal(wqkv_b[:, :_HPK].reshape(-1), stock.wq.bias))
-        self.assertTrue(torch.equal(wqkv_b[:, _HPK].reshape(-1), stock.wk.bias))
-        self.assertTrue(torch.equal(wqkv_b[:, _HPK + 1].reshape(-1), stock.wv.bias))
+        self.assertTrue(
+            torch.equal(wqkv_b[:, :_HPK].reshape(-1), state_dict["wq.bias"])
+        )
+        self.assertTrue(torch.equal(wqkv_b[:, _HPK].reshape(-1), state_dict["wk.bias"]))
+        self.assertTrue(
+            torch.equal(wqkv_b[:, _HPK + 1].reshape(-1), state_dict["wv.bias"])
+        )
 
     def test_hf_adapter_roundtrip(self):
         """HF adapter works with FusedQKVLinear's hook-produced wq/wk/wv keys."""
         from torchtitan.models.llama3 import llama3_configs
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+        from torchtitan.models.muse_glimmer import muse_glimmer_configs
+        from torchtitan.models.muse_glimmer.state_dict_adapter import (
+            MuseGlimmerStateDictAdapter,
+        )
         from torchtitan.models.qwen3 import qwen3_configs
         from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 
         for config_name, configs, adapter_cls in (
             ("llama3", llama3_configs, Llama3StateDictAdapter),
             ("qwen3", qwen3_configs, Qwen3StateDictAdapter),
+            ("muse_glimmer", muse_glimmer_configs, MuseGlimmerStateDictAdapter),
         ):
             with self.subTest(model=config_name):
                 build_config, max_context_length = configs["debugmodel"]
