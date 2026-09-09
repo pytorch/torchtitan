@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from typing import ClassVar, Protocol
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -37,6 +37,8 @@ class Linear(nn.Linear, Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        # Converters such as LoRA use this hook to preserve independent state
+        # for each logical projection while building one interleaved GEMM.
         _interleaved_linear_builder: ClassVar[_InterleavedLinearBuilder | None] = None
         in_features: int
         out_features: int
@@ -50,20 +52,11 @@ class Linear(nn.Linear, Module):
         )
 
 
-class _InterleavedLinear(Protocol):
-    """Interface required from a built interleaved output projection."""
-
-    weight: torch.Tensor
-    bias: torch.Tensor | None
-    _logical_output_slices: tuple[tuple[str, int], ...]
-
-    def __call__(self, input: torch.Tensor) -> torch.Tensor:
-        ...
-
-
+# The result can be a standard, quantized, or dynamically generated LoRA
+# module, so there is no single concrete Linear type shared by every builder.
 _InterleavedLinearBuilder = Callable[
     [tuple[tuple[str, Linear.Config], ...], dict[str, Callable] | None],
-    _InterleavedLinear,
+    Any,
 ]
 
 
@@ -124,7 +117,7 @@ def _merge_linear_configs(
 def _build_interleaved_linear(
     logical_configs: tuple[tuple[str, Linear.Config], ...],
     param_init: dict[str, Callable] | None,
-) -> _InterleavedLinear:
+) -> Any:
     """Build equal-sized logical projections as one interleaved Linear.
 
     ``_logical_output_slices`` lets checkpoint and serving integrations recover
