@@ -13,14 +13,18 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 
 
 def _gpt_oss_debugmodel(
-    seq_len: int | None = None, attn_backend: str = "varlen"
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend=attn_backend
@@ -64,11 +68,15 @@ def _gpt_oss_debugmodel(
     )
 
 
-def gpt_oss_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def gpt_oss_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     return _gpt_oss_debugmodel(seq_len=seq_len)
 
 
-def gpt_oss_debugmodel_flex(seq_len: int | None = None) -> Trainer.Config:
+def gpt_oss_debugmodel_flex(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     return _gpt_oss_debugmodel(seq_len=seq_len, attn_backend="flex")
 
 

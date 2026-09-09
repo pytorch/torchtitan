@@ -27,14 +27,19 @@ from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 from .model import Qwen3Model
 
 
-def qwen3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -69,7 +74,9 @@ def qwen3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_debugmodel_nvfp4(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
@@ -90,7 +97,7 @@ def qwen3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen3_debugmodel_first_85_pct_layers_nvfp4(
-    seq_len: int | None = None,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
@@ -118,7 +125,9 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(
     return config
 
 
-def qwen3_debugmodel_moe_param_groups(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_debugmodel_moe_param_groups(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = qwen3_moe_debug(seq_len=seq_len)
     config.optimizer = OptimizersContainer.Config(
         param_groups=[
@@ -152,7 +161,9 @@ def qwen3_debugmodel_moe_param_groups(seq_len: int | None = None) -> Trainer.Con
     return config
 
 
-def qwen3_debugmodel_flex_flash(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_debugmodel_flex_flash(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend="flex_flash"
     )
@@ -379,7 +390,9 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_non_fused_qkv(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_debugmodel_non_fused_qkv(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     # Reverse test: exercise the separate wq/wk/wv path now that fused QKV is
     # the debugmodel default.
     config = qwen3_debugmodel(seq_len=seq_len)
@@ -387,7 +400,9 @@ def qwen3_debugmodel_non_fused_qkv(seq_len: int | None = None) -> Trainer.Config
     return config
 
 
-def qwen3_moe_debug(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_moe_debug(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -421,7 +436,9 @@ def qwen3_moe_debug(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def qwen3_moe_deepep(seq_len: int | None = None) -> Trainer.Config:
+def qwen3_moe_deepep(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     """Qwen3 debug MoE pretraining with the DeepEP v2 backend (compact training path), EP=4.
 
     The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
