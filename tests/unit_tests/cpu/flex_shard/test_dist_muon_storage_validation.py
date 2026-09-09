@@ -49,7 +49,9 @@ class TestDistMuonStorageValidation(unittest.TestCase):
                 "param_names": ["layer1.weight", "layer2.weight"],
             }
         ]
-        with self.assertRaisesRegex(ValueError, "DistMuon requires one device per process"):
+        with self.assertRaisesRegex(
+            ValueError, "DistMuon requires one device per process"
+        ):
             optimizer._validate_parameter_storage()
 
     def test_non_dtensor_rejected(self):
