@@ -220,6 +220,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         param_group_configs = config.param_groups
         all_params = []
         self.optimizers = []
+        self._cuda_graph_checkpoint_capturable: list[list[bool]] | None = None
         self.model_parts = model_parts
 
         for part_idx, model in enumerate(self.model_parts):
@@ -303,18 +304,62 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=set_to_none)
 
+    def prepare_for_cuda_graph(self) -> None:
+        """Make fused Adam optimizers safe to capture.
+
+        ``state_dict`` saves the CUDA graph-only values in their host form.
+        """
+        for optimizer in self.optimizers:
+            if not isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+                raise ValueError("Optimizer CUDA graphs support only Adam and AdamW.")
+            for group in optimizer.param_groups:
+                if not group.get("fused"):
+                    raise ValueError(
+                        "Optimizer CUDA graphs require the fused implementation."
+                    )
+
+        if self._cuda_graph_checkpoint_capturable is None:
+            self._cuda_graph_checkpoint_capturable = [
+                [group["capturable"] for group in optimizer.param_groups]
+                for optimizer in self.optimizers
+            ]
+        for optimizer in self.optimizers:
+            for group in optimizer.param_groups:
+                parameters = group["params"]
+                group["capturable"] = True
+                group["lr"] = torch.tensor(
+                    float(group["lr"]),
+                    dtype=torch.float32,
+                    device=parameters[0].device,
+                )
+
     def state_dict(self) -> dict[str, Any]:
         """Return a flat, FQN-keyed optimizer state dict for all optimizers.
 
-        Side effect: if an optimizer's state has not been created yet (no training
-        step taken), ``init_optim_state`` materializes it with a zero-gradient,
-        zero-lr step before reading. The step leaves parameters unchanged, and the
-        call is a no-op once state exists.
+        If an optimizer's state does not exist, ``init_optim_state`` materializes
+        it without changing parameters. CUDA graph learning rates are saved as
+        host floats with the original ``capturable`` setting.
         """
         result: dict[str, Any] = {}
-        for optim in self.optimizers:
+        for optimizer_index, optim in enumerate(self.optimizers):
             init_optim_state(optim)
-            result.update(get_flat_optim_state_dict(optim))
+            param_group_value_overrides = None
+            if self._cuda_graph_checkpoint_capturable is not None:
+                # Capture puts lr on the device. Checkpoints keep the host form.
+                param_group_value_overrides = [
+                    {"lr": float(group["lr"]), "capturable": capturable}
+                    for group, capturable in zip(
+                        optim.param_groups,
+                        self._cuda_graph_checkpoint_capturable[optimizer_index],
+                        strict=True,
+                    )
+                ]
+            result.update(
+                get_flat_optim_state_dict(
+                    optim,
+                    param_group_value_overrides=param_group_value_overrides,
+                )
+            )
         return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:

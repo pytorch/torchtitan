@@ -249,6 +249,26 @@ class TestConfigManager(unittest.TestCase):
                 with pytest.raises(ValueError, match="fsdp_reshard_after_forward"):
                     config.__post_init__()
 
+    def test_optimizer_cuda_graph_requires_cuda_graphs_enabled(self):
+        config = ConfigManager().parse_args(
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
+        )
+        config.training.enable_optimizer_cuda_graph = True
+        config.training.disable_cuda_graphs = True
+
+        with pytest.raises(ValueError, match="requires CUDA graphs"):
+            config.__post_init__()
+
+    def test_optimizer_cuda_graph_requires_fused_adam(self):
+        config = ConfigManager().parse_args(
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
+        )
+        config.training.enable_optimizer_cuda_graph = True
+        config.optimizer.implementation = "foreach"
+
+        with pytest.raises(ValueError, match="fused implementation"):
+            config.__post_init__()
+
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         config_manager = ConfigManager()
         with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:

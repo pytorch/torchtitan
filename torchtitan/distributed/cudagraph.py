@@ -139,6 +139,10 @@ class CUDAGraphGradientState:
             tuple[torch.nn.Parameter, torch.Tensor], ...
         ] | None = None
 
+    @property
+    def is_recorded(self) -> bool:
+        return self._gradients is not None
+
     def require_cleared(self) -> None:
         if any(parameter.grad is not None for parameter in self.parameters):
             raise RuntimeError(
@@ -253,6 +257,7 @@ class CUDAGraphWrapper:
             replay. When omitted, these are inferred from ``example_inputs``.
         num_warmup_iterations: Number of eager invocations before capture.
         gradient_state: State that owns gradients allocated during capture.
+        capture_setup: Callable to run immediately before capture.
 
     Raises:
         ValueError: If ``num_warmup_iterations`` is negative.
@@ -268,6 +273,7 @@ class CUDAGraphWrapper:
         *,
         num_warmup_iterations: int = 1,
         gradient_state: CUDAGraphGradientState | None = None,
+        capture_setup: Callable[[], None] | None = None,
     ):
         if num_warmup_iterations < 0:
             raise ValueError("num_warmup_iterations must be non-negative")
@@ -310,6 +316,7 @@ class CUDAGraphWrapper:
         self._should_check_address = should_check_address
         self._static_input_addresses: dict[int, int] = {}
         self._gradient_state = gradient_state
+        self._capture_setup = capture_setup
 
         _manager.maybe_initialize()
         _manager.register(self)
@@ -376,6 +383,8 @@ class CUDAGraphWrapper:
             self._gradient_state.require_cleared()
 
         if self._graph is None:
+            if self._capture_setup is not None:
+                self._capture_setup()
             self._args = args
             self._record_static_input_addresses(args)
             self._graph = torch.cuda.CUDAGraph()
@@ -422,6 +431,7 @@ def wrap_with_cuda_graph(
     sdc_num_replays: int,
     num_warmup_steps: int = 2,
     gradient_state: CUDAGraphGradientState | None = None,
+    capture_setup: Callable[[], None] | None = None,
 ) -> Callable[..., torch.Tensor]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -439,6 +449,7 @@ def wrap_with_cuda_graph(
         sdc_num_replays: Additional calls for each SDC-checked optimizer step.
         num_warmup_steps: Number of eager optimizer steps before capture.
         gradient_state: State that owns gradients allocated during capture.
+        capture_setup: Callable to run immediately before capture.
     """
 
     if not (
@@ -485,6 +496,7 @@ def wrap_with_cuda_graph(
                 flat_inputs,
                 num_warmup_iterations=num_warmup_iterations,
                 gradient_state=gradient_state,
+                capture_setup=capture_setup,
             )
         else:
             assert input_spec is not None

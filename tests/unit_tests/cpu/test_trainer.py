@@ -52,6 +52,18 @@ def test_graph_trainer_keeps_its_cuda_graph_owner() -> None:
     wrap.assert_not_called()
 
 
+def test_graph_trainer_rejects_optimizer_cuda_graph() -> None:
+    config = SimpleNamespace(training=SimpleNamespace(enable_optimizer_cuda_graph=True))
+
+    with (
+        patch.object(Trainer, "__init__") as init,
+        pytest.raises(ValueError, match="not supported with GraphTrainer"),
+    ):
+        GraphTrainer(config)
+
+    init.assert_not_called()
+
+
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
     sentinel = torch.full((1,), -1.0)
     trainer = _make_trainer(
@@ -352,7 +364,89 @@ def test_cuda_graph_passes_local_gradient_state() -> None:
         Trainer._init_gradient_accumulation(trainer)
 
     gradient_state = wrap.call_args.kwargs["gradient_state"]
+    assert trainer._cudagraph_gradient_state is gradient_state
     assert gradient_state.parameters == tuple(model.parameters())
+
+
+def test_optimizer_step_body_clips_before_update() -> None:
+    events = []
+    optimizers = MagicMock()
+    optimizers.step.side_effect = lambda: events.append("step")
+    trainer = _make_trainer(
+        config=SimpleNamespace(
+            training=SimpleNamespace(
+                max_norm=1.0,
+                enable_optimizer_cuda_graph=True,
+            )
+        ),
+        parallel_dims=SimpleNamespace(
+            pp_enabled=False,
+            ep_enabled=False,
+            get_optional_mesh=lambda name: None,
+        ),
+        model_parts=[SimpleNamespace(parameters=lambda: [])],
+        optimizers=optimizers,
+    )
+
+    def clip_grad_norm(*args, **kwargs):
+        events.append("clip")
+        return torch.tensor(2.0)
+
+    with patch(
+        "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        side_effect=clip_grad_norm,
+    ):
+        grad_norm = Trainer._optimizer_step_body(
+            trainer, torch.ones((), dtype=torch.int32)
+        )
+
+    torch.testing.assert_close(grad_norm, torch.tensor(2.0))
+    assert events == ["clip", "step"]
+
+
+def test_optimizer_cuda_graph_waits_for_forward_backward_capture() -> None:
+    model = torch.nn.Linear(2, 2)
+    trainer = _make_trainer(
+        config=SimpleNamespace(
+            training=SimpleNamespace(disable_cuda_graphs=False),
+            sdc_replayer=None,
+        ),
+        parallel_dims=SimpleNamespace(pp_enabled=False),
+        model_parts=[model],
+        optimizers=MagicMock(),
+    )
+    with patch(
+        "torchtitan.trainer.wrap_with_cuda_graph",
+        side_effect=lambda fn, **kwargs: fn,
+    ):
+        Trainer._init_gradient_accumulation(trainer)
+
+    with pytest.raises(AssertionError, match="forward-backward CUDA graph"):
+        Trainer._prepare_optimizer_cuda_graph(trainer)
+
+    assert trainer._cudagraph_gradient_state is not None
+    trainer._cudagraph_gradient_state.record()
+    Trainer._prepare_optimizer_cuda_graph(trainer)
+    trainer.optimizers.prepare_for_cuda_graph.assert_called_once_with()
+
+
+def test_optimizer_step_is_wrapped_separately() -> None:
+    trainer = _make_trainer(
+        config=SimpleNamespace(
+            training=SimpleNamespace(enable_optimizer_cuda_graph=True)
+        )
+    )
+    wrapped = MagicMock()
+    with patch("torchtitan.trainer.wrap_with_cuda_graph", return_value=wrapped) as wrap:
+        Trainer._init_optimizer_step_function(trainer)
+
+    assert trainer.optimizer_step_fn is wrapped
+    assert wrap.call_args.args == (trainer._optimizer_step_body,)
+    assert wrap.call_args.kwargs["sdc_num_steps"] == 0
+    assert wrap.call_args.kwargs["sdc_num_replays"] == 0
+    assert (
+        wrap.call_args.kwargs["capture_setup"] == trainer._prepare_optimizer_cuda_graph
+    )
 
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():
@@ -364,10 +458,12 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             *,
             num_warmup_iterations=1,
             gradient_state=None,
+            capture_setup=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 2
             assert gradient_state is None
+            assert capture_setup is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -416,10 +512,12 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             *,
             num_warmup_iterations=1,
             gradient_state=None,
+            capture_setup=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 2
             assert gradient_state is None
+            assert capture_setup is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -483,6 +581,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 disable_cuda_graphs=False,
                 max_norm=1.0,
                 max_context_length=2048,
+                enable_optimizer_cuda_graph=True,
             ),
             parallelism="PARA",
         ),
@@ -503,6 +602,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         num_pp_microbatches=1,
         device=torch.device("cpu"),
         _run_gradient_accumulation=run_gradient_accumulation,
+        optimizer_step_fn=MagicMock(return_value=torch.tensor(4.0)),
         sdc_replayer=None,
         model_parts=[model],
         checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
@@ -561,6 +661,7 @@ def test_train_step_replay_checks_whole_accumulation():
                 disable_cuda_graphs=True,
                 max_norm=1.0,
                 max_context_length=2048,
+                enable_optimizer_cuda_graph=False,
             ),
             parallelism="PARA",
         ),
@@ -624,6 +725,7 @@ def test_replay_failure_happens_before_optimizer():
                 disable_cuda_graphs=True,
                 max_norm=1.0,
                 max_context_length=2048,
+                enable_optimizer_cuda_graph=False,
             ),
             parallelism="PARA",
         ),

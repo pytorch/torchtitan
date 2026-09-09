@@ -10,8 +10,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.optim.lr_scheduler import LambdaLR, LRScheduler
+from torch.optim.lr_scheduler import LambdaLR
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
@@ -20,6 +21,22 @@ from .optimizer import OptimizersContainer
 __all__ = [
     "LRSchedulersContainer",
 ]
+
+
+class _HostLambdaLR(LambdaLR):
+    """Expose the latest learning rates as host floats."""
+
+    host_lrs: list[float] = []
+
+    def get_lr(self) -> list[float | Tensor]:
+        lrs = super().get_lr()
+        # CUDA graph setup moves group lr values to the device. Save the
+        # scheduler results before PyTorch copies them into the groups.
+        self.host_lrs = [float(lr) for lr in lrs]
+        return lrs
+
+    def get_last_host_lrs(self) -> list[float]:
+        return list(self.host_lrs)
 
 
 class LRSchedulersContainer(Stateful, Configurable):
@@ -193,30 +210,37 @@ class LRSchedulersContainer(Stateful, Configurable):
             )
             return LRSchedulersContainer(optimizers, lr_lambda)
 
-    schedulers: list[LRScheduler]
+    schedulers: list[_HostLambdaLR]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
         assert (
             len(optimizers) > 0
         ), "Must have at least one optimizer to create LRScheduler"
 
-        self.schedulers = [LambdaLR(optimizer, lr_lambda) for optimizer in optimizers]
+        self.schedulers = [
+            _HostLambdaLR(optimizer, lr_lambda) for optimizer in optimizers
+        ]
 
-    def __iter__(self) -> Iterator[LRScheduler]:
+    def __iter__(self) -> Iterator[_HostLambdaLR]:
         return iter(self.schedulers)
 
     def __len__(self) -> int:
         return len(self.schedulers)
 
+    def get_host_lrs_per_scheduler(self) -> list[list[float]]:
+        """Return host learning rates for each scheduler."""
+        return [scheduler.get_last_host_lrs() for scheduler in self.schedulers]
+
     def get_metrics(self) -> dict[str, float]:
         """Return learning rates keyed by optimizer (and param-group index)."""
         metrics = {}
-        for scheduler in self.schedulers:
+        for scheduler, last_lrs in zip(
+            self.schedulers, self.get_host_lrs_per_scheduler(), strict=True
+        ):
             opt_name = type(scheduler.optimizer).__name__
-            last_lrs = scheduler.get_last_lr()
             for i, lr_val in enumerate(last_lrs):
                 key = f"lr/{opt_name}" if len(last_lrs) == 1 else f"lr/{opt_name}/{i}"
-                metrics[key] = float(lr_val)
+                metrics[key] = lr_val
         return metrics
 
     def step(self) -> None:

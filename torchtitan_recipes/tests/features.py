@@ -258,6 +258,19 @@ def llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
+    config.training.enable_optimizer_cuda_graph = True
+    return config
+
+
+def llama3_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.training.enable_optimizer_cuda_graph = True
+    return config
+
+
 def llama3_debugmodel_fsdp2_pp2_1f1b_layers_per_stage() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_pp2_1f1b()
     config.parallelism.pipeline_parallel_layers_per_stage = 4

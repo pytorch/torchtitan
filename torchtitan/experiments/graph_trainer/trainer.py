@@ -116,6 +116,10 @@ class GraphTrainer(Trainer):
         )
 
     def __init__(self, config):
+        if config.training.enable_optimizer_cuda_graph:
+            raise ValueError(
+                "Optimizer CUDA graphs are not supported with GraphTrainer."
+            )
         super().__init__(config)
 
         validate_memory_policy_config(self.config.compile)

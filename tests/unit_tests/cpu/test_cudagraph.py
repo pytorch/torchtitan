@@ -133,6 +133,7 @@ def test_cudagraph_wrapper_collects_annotations() -> None:
     annotations = {42: [{"module_fqn": "layers.0"}]}
     graph_pool = object()
     stream = MagicMock()
+    capture_setup = MagicMock()
 
     with (
         patch.object(_manager, "maybe_initialize"),
@@ -147,13 +148,18 @@ def test_cudagraph_wrapper_collects_annotations() -> None:
             return_value=annotations,
         ),
     ):
-        wrapper = CUDAGraphWrapper(lambda x: x, (torch.tensor(1),))
+        wrapper = CUDAGraphWrapper(
+            lambda x: x,
+            (torch.tensor(1),),
+            capture_setup=capture_setup,
+        )
         wrapper._warmup_remaining = 0
 
         output = wrapper(torch.tensor(2))
 
         assert output.item() == 2
         assert get_cudagraph_annotations() == annotations
+        capture_setup.assert_called_once_with()
         cuda_graph.assert_called_once_with(
             graph,
             pool=graph_pool,

@@ -85,7 +85,11 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
         param.grad = grad
 
 
-def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
+def get_flat_optim_state_dict(
+    optim: torch.optim.Optimizer,
+    *,
+    param_group_value_overrides: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Return a flat, FQN-keyed optimizer state dict ready for DCP.
 
     Output keys are ``state.{fqn}.{state_name}`` and ``param_groups.{fqn}.{key}``.
@@ -93,17 +97,22 @@ def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
     pipeline-parallel checkpoints (multiple chunks reusing index 0).
 
     The optimizer state must already exist; call ``init_optim_state`` first.
+    ``param_group_value_overrides`` replaces values by param-group position.
     """
     fqn_sd = _optim_state_dict_to_fqn_keys(optim.state_dict())
+    if param_group_value_overrides is None:
+        param_group_value_overrides = [{} for _ in fqn_sd["param_groups"]]
 
     flat: dict[str, Any] = {}
     for fqn, state in fqn_sd["state"].items():
         _flatten_state_nested(state, f"state.{fqn}", flat)
-    for param_group in fqn_sd["param_groups"]:
+    for param_group, value_overrides in zip(
+        fqn_sd["param_groups"], param_group_value_overrides, strict=True
+    ):
         for fqn in param_group["params"]:
             for key, value in param_group.items():
                 if key != "params":
-                    flat[f"param_groups.{fqn}.{key}"] = value
+                    flat[f"param_groups.{fqn}.{key}"] = value_overrides.get(key, value)
     return flat
 
 

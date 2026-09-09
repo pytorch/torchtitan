@@ -175,6 +175,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "fsdp_reshard_after_forward='never'."
                 )
 
+            if (
+                self.training.enable_optimizer_cuda_graph
+                and self.training.disable_cuda_graphs
+            ):
+                raise ValueError(
+                    "enable_optimizer_cuda_graph requires CUDA graphs to be enabled."
+                )
+            if self.training.enable_optimizer_cuda_graph:
+                if self.optimizer.implementation not in (
+                    "fused",
+                    "fused_opt_states_bf16",
+                ):
+                    raise ValueError(
+                        "Optimizer CUDA graphs require the fused implementation."
+                    )
+                if any(
+                    group.optimizer_name not in ("Adam", "AdamW")
+                    or group.optimizer_kwargs.get("fused") is False
+                    for group in self.optimizer.param_groups
+                ):
+                    raise ValueError(
+                        "Optimizer CUDA graphs support only fused Adam and AdamW."
+                    )
+
             self._validate_cuda_graphs()
 
             if (
@@ -359,6 +383,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     _run_gradient_accumulation: Callable[
         [list[tuple[Any, ...]], torch.Tensor], torch.Tensor
     ]
+    _cudagraph_gradient_state: CUDAGraphGradientState | None
     _pp_loss_sentinel_on_non_last_stage: torch.Tensor
     gradient_accumulation_steps: int
     num_pp_microbatches: int
@@ -710,6 +735,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             ),
         )
         self._init_gradient_accumulation()
+        self._init_optimizer_step_function()
 
         # Build validator if validation is configured
         if config.validator.enable:
@@ -751,12 +777,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def _init_gradient_accumulation(self) -> None:
         config = self.config
+        self._cudagraph_gradient_state = None
         if (
             self._use_accumulation_cuda_graph
             and not config.training.disable_cuda_graphs
         ):
             sdc_config = config.sdc_replayer
-            gradient_state = CUDAGraphGradientState(
+            self._cudagraph_gradient_state = CUDAGraphGradientState(
                 parameter
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
@@ -767,10 +794,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 sdc_num_replays=(
                     sdc_config.num_replays if sdc_config is not None else 0
                 ),
-                gradient_state=gradient_state,
+                gradient_state=self._cudagraph_gradient_state,
             )
         else:
             self._run_gradient_accumulation = self._gradient_accumulation_body
+
+    def _init_optimizer_step_function(self) -> None:
+        if not self.config.training.enable_optimizer_cuda_graph:
+            return
+
+        self.optimizer_step_fn = wrap_with_cuda_graph(
+            self._optimizer_step_body,
+            sdc_num_steps=0,
+            sdc_num_replays=0,
+            capture_setup=self._prepare_optimizer_cuda_graph,
+        )
+
+    def _prepare_optimizer_cuda_graph(self) -> None:
+        gradient_state = self._cudagraph_gradient_state
+        assert gradient_state is not None and gradient_state.is_recorded, (
+            "The forward-backward CUDA graph must be captured before the "
+            "optimizer CUDA graph."
+        )
+        self.optimizers.prepare_for_cuda_graph()
 
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
@@ -990,6 +1036,59 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert accumulated_loss is not None
         return accumulated_loss
 
+    def _clip_and_validate_gradients(
+        self, loss_is_finite: torch.Tensor
+    ) -> torch.Tensor:
+        """Clip gradients and stop on non-finite values."""
+        parallel_dims = self.parallel_dims
+        grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in self.model_parts for p in m.parameters()],
+            self.config.training.max_norm,
+            foreach=True,
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=parallel_dims.ep_enabled,
+        )
+
+        # Only the last PP stage owns the loss. First combine its DP/CP
+        # replicas, then propagate the result across PP. TP replicas hold
+        # identical loss values, and grad_norm is already reduced across all ranks.
+        if not parallel_dims.pp_enabled or self.pp_has_last_stage:
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            if loss_mesh is not None:
+                torch.distributed.all_reduce(
+                    loss_is_finite,
+                    op=torch.distributed.ReduceOp.MIN,
+                    group=loss_mesh.get_group(),
+                )
+        pp_mesh = parallel_dims.get_optional_mesh("pp")
+        if pp_mesh is not None:
+            torch.distributed.all_reduce(
+                loss_is_finite,
+                op=torch.distributed.ReduceOp.MIN,
+                group=pp_mesh.get_group(),
+            )
+
+        step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
+        # CUDA graph capture freezes Python values such as self.step in messages.
+        if self.config.training.enable_optimizer_cuda_graph:
+            error_message = (
+                "Loss or gradient norm is not finite. Stopping before the update."
+            )
+        else:
+            error_message = (
+                "Loss or gradient norm is not finite on at least one rank at "
+                f"step {self.step}. Stopping training before the optimizer update."
+            )
+        # Keep the check ordered on the device without synchronizing the host.
+        torch._assert_async(step_is_finite, error_message)
+        return grad_norm
+
+    def _optimizer_step_body(self, loss_is_finite: torch.Tensor) -> torch.Tensor:
+        """Clip gradients, validate numerics, and update parameters."""
+        grad_norm = self._clip_and_validate_gradients(loss_is_finite)
+        self.optimizers.step()
+        return grad_norm
+
     def train_step(self, data_iterator: Iterator[TrainerBatch]):
         self.optimizers.zero_grad(set_to_none=True)
         # Save per-optimizer-group learning rates for logging
@@ -1052,44 +1151,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # int32 is supported by NCCL reductions, unlike bool.
         loss_is_finite = torch.isfinite(local_loss).all().to(torch.int32)
         with sl.log_trace_span("optim"):
-            grad_norm = dist_utils.clip_grad_norm_(
-                [p for m in self.model_parts for p in m.parameters()],
-                self.config.training.max_norm,
-                foreach=True,
-                pp_mesh=parallel_dims.get_optional_mesh("pp"),
-                ep_enabled=parallel_dims.ep_enabled,
-            )
-            # Only the last PP stage owns the loss. First combine its DP/CP
-            # replicas, then propagate the result across PP. TP replicas have
-            # identical loss values, and grad_norm is already world-reduced by
-            # clip_grad_norm_.
-            if not parallel_dims.pp_enabled or self.pp_has_last_stage:
-                loss_mesh = parallel_dims.get_optional_mesh("loss")
-                if loss_mesh is not None:
-                    torch.distributed.all_reduce(
-                        loss_is_finite,
-                        op=torch.distributed.ReduceOp.MIN,
-                        group=loss_mesh.get_group(),
-                    )
-            pp_mesh = parallel_dims.get_optional_mesh("pp")
-            if pp_mesh is not None:
-                torch.distributed.all_reduce(
-                    loss_is_finite,
-                    op=torch.distributed.ReduceOp.MIN,
-                    group=pp_mesh.get_group(),
-                )
-
-            step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
-            # Keep the check and optimizer kernels ordered on the device without
-            # synchronizing the host on every step. The RuntimeError is catchable
-            # on CPU, while a failed CUDA assertion invalidates the process.
-            torch._assert_async(
-                step_is_finite,
-                "Loss or gradient norm is not finite on at least one rank at "
-                f"step {self.step}. Stopping training before the optimizer update.",
-            )
-            self.checkpointer.maybe_wait_for_staging()
-            self.optimizers.step()
+            if self.config.training.enable_optimizer_cuda_graph:
+                self.checkpointer.maybe_wait_for_staging()
+                grad_norm = self.optimizer_step_fn(loss_is_finite)
+            else:
+                grad_norm = self._clip_and_validate_gradients(loss_is_finite)
+                # Eager clipping can overlap checkpoint staging. The captured
+                # optimizer step cannot be split, so it waits before replay.
+                self.checkpointer.maybe_wait_for_staging()
+                self.optimizers.step()
             self.lr_schedulers.step()
 
         # log metrics

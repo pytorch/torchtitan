@@ -430,7 +430,7 @@ class PolicyTrainer(Actor, Configurable):
         # to allow controller-owned schedules.
 
         # capture LR before step
-        current_lrs = self.lr_schedulers.schedulers[0].get_last_lr()
+        current_lrs = self.lr_schedulers.get_host_lrs_per_scheduler()[0]
         if len(current_lrs) != 1:
             raise ValueError(
                 "RL metrics only support a single optimizer LR for "
