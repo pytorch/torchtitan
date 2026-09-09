@@ -52,6 +52,11 @@ jobs:
           uv pip install -r requirements.txt
           uv pip install -r .ci/docker/requirements-vlm.txt
 
+          # torchao is not a torchtitan dependency, so the quantization
+          # recipes need it installed explicitly, as the other lanes do.
+          USE_CPP=0 uv pip install --pre --upgrade torchao \
+            --index-url https://download.pytorch.org/whl/nightly/cu130
+
           python - <<'PY'
           import torch
 

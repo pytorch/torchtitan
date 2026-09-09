@@ -137,6 +137,7 @@ def apply_fsdp_to_vision_encoder(
     reduce_dtype: torch.dtype,
     reshard_after_forward_policy: str = "default",
     pp_enabled: bool = False,
+    cpu_offload: bool = False,
     *,
     dp_mesh_dims: DataParallelMeshDims | None = None,
 ) -> None:
@@ -145,18 +146,27 @@ def apply_fsdp_to_vision_encoder(
     One all-gather for all vision params is more efficient than per-layer sharding
     (the vision encoder is small relative to the decoder). Call before
     ``apply_fsdp_to_decoder`` so the encoder is already sharded.
+
+    ``cpu_offload`` must match what the caller passes to ``apply_fsdp_to_decoder``.
+    Under ``training.enable_cpu_offload`` the trainer materializes the whole model
+    on CPU, so a vision encoder sharded without ``CPUOffloadPolicy`` keeps CPU
+    parameters while FSDP produces CUDA gradients for them, and backward dies with
+    "attempting to assign a gradient with device type 'cuda' to a tensor with
+    device type 'cpu'".
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled=pp_enabled
     )
-    fully_shard(
-        vision_encoder,
-        mesh=dp_mesh,
-        mp_policy=mp_policy,
-        reshard_after_forward=reshard_after_forward,
-        dp_mesh_dims=dp_mesh_dims,
-    )
+    fsdp_config: dict[str, Any] = {
+        "mesh": dp_mesh,
+        "mp_policy": mp_policy,
+        "reshard_after_forward": reshard_after_forward,
+        "dp_mesh_dims": dp_mesh_dims,
+    }
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    fully_shard(vision_encoder, **fsdp_config)
 
 
 def apply_fsdp_to_decoder(

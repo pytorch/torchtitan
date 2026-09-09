@@ -11,11 +11,12 @@ import spmd_types as spmd
 
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -176,7 +177,7 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: Linear.Config
+        gate: RouterGateLinear.Config
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
         top_k: int = 1
@@ -291,12 +292,10 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             scores_TE: Full routing scores ``(T, E)``.
         """
-        # Compute gate in float32 to help stability of expert load balancing.
-        with torch.autocast(device_type=x_TD.device.type, dtype=torch.float32):
-            scores_TE = self.gate(x_TD)
+        scores_TE = self.gate(x_TD)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
-        # scores_TE is already float32 from the autocast above.
+        # RouterGateLinear returns scores_TE in FP32.
         if self.score_func == "sigmoid":
             scores_TE = torch.sigmoid(scores_TE)
         elif self.score_func == "softmax":
@@ -306,20 +305,22 @@ class TokenChoiceTopKRouter(Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        topk_expert_ids_TK = self._select_experts(
-            scores_TE, expert_bias_E, **router_kwargs
-        )
-
-        # NOTE: The expert_bias is only used for routing. The gating value
-        #       topk_scores_TK is still derived from the original scores.
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-
-        # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
-            (
-                topk_expert_ids_TK,
-                topk_scores_TK,
-            ) = self._debug_force_load_balance_routing(scores_TE)
+            topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
+                scores_TE
+            )
+        else:
+            # Routing choices must remain identical between forward and replay.
+            topk_expert_ids_TK = remat.region(
+                self._select_experts,
+                "routing_decision",
+                recompute=False,
+            )(scores_TE, expert_bias_E, **router_kwargs)
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
+
+            # The expert bias is only used for routing. The gating value is
+            # still derived from the original scores.
+            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
             denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20

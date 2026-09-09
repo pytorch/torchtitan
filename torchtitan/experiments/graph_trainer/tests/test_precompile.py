@@ -196,7 +196,7 @@ class TestConfigFingerprint(unittest.TestCase):
         cfg_a = _StubCompileConfig(memory_policy="full")
         cfg_b = _StubCompileConfig(
             memory_policy="full",
-            full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+            full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.dtype"),
         )
 
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
@@ -304,6 +304,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
             run_traced,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
+            flatten_runtime_inputs,
             precompile_fx_trace_load,
             precompile_fx_trace_save,
         )
@@ -328,7 +329,22 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             storage = DiskStorageAdapter(tmpdir)
             precompile_fx_trace_save(traced, storage)
-            loaded = precompile_fx_trace_load(storage, expected_fingerprint="")
+            example_inputs = flatten_runtime_inputs(model, (x, unused), {})
+            loaded = precompile_fx_trace_load(
+                storage,
+                expected_fingerprint="",
+                example_inputs=example_inputs,
+            )
+
+        self.assertEqual(len(loaded.example_inputs), len(example_inputs))
+        self.assertTrue(
+            all(
+                loaded_input is example_input
+                for loaded_input, example_input in zip(
+                    loaded.example_inputs, example_inputs, strict=True
+                )
+            )
+        )
 
         with patch(
             "torch._inductor.standalone_compile",
@@ -457,6 +473,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                 precompile_fx_trace_load(
                     storage,
                     expected_fingerprint="new_fp",
+                    example_inputs=(),
                 )
 
 
