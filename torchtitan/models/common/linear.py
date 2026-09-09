@@ -52,20 +52,13 @@ class Linear(nn.Linear, Module):
         )
 
 
-def _make_interleaved_linear_config(
+def _validate_interleaved_linear_configs(
     first_config: Linear.Config,
     second_config: Linear.Config,
-    *,
-    param_init: dict[str, Callable] | None,
-) -> Linear.Config:
-    """Merge two compatible logical projections into one Linear config.
-
-    Every option except output size and initialization must match so the result
-    can be represented by one physical GEMM without changing either projection's
-    requested behavior.
-    """
-    merged_config_type = type(first_config)
-    if type(second_config) is not merged_config_type:
+) -> None:
+    """Validate that two configs can share one physical Linear."""
+    config_type = type(first_config)
+    if type(second_config) is not config_type:
         raise ValueError(
             "Cannot fuse logical Linear projections with different "
             "implementations: the first uses "
@@ -75,7 +68,7 @@ def _make_interleaved_linear_config(
 
     comparable_fields = {
         field.name
-        for field in fields(merged_config_type)
+        for field in fields(config_type)
         if field.init and field.name not in ("out_features", "param_init")
     }
     for field_name in comparable_fields:
@@ -85,16 +78,27 @@ def _make_interleaved_linear_config(
                 f"{field_name} values."
             )
 
+
+def _make_interleaved_linear_config(
+    first_config: Linear.Config,
+    second_config: Linear.Config,
+    *,
+    param_init: dict[str, Callable] | None,
+) -> Linear.Config:
+    """Merge two compatible logical projections into one Linear config."""
+    _validate_interleaved_linear_configs(first_config, second_config)
+
+    config_type = type(first_config)
     config_kwargs = {
         field.name: getattr(first_config, field.name)
-        for field in fields(merged_config_type)
+        for field in fields(config_type)
         if field.init
     }
     config_kwargs["out_features"] = (
         first_config.out_features + second_config.out_features
     )
     config_kwargs["param_init"] = param_init
-    return merged_config_type(**config_kwargs)
+    return config_type(**config_kwargs)
 
 
 def _build_interleaved_linear(

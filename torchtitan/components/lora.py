@@ -21,8 +21,7 @@ from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
 # Shape suffix legend for merged output projections:
-#   T = token dimensions, F = one logical output dimension,
-#   N = number of merged logical projections
+#   T = token dimensions, F = one logical output dimension
 
 
 def _lora_adapter_sharding(
@@ -60,54 +59,53 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
-_logical_slice_lora_class_cache: dict[type, type] = {}
+_fused_gate_up_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
 
 
 @dataclass(frozen=True, slots=True)
-class _LogicalSliceLoRASpec:
-    """LoRA settings for one logical output of an interleaved Linear."""
+class _GateUpLoRASpec:
+    """LoRA settings for one logical projection of a fused gate-up Linear."""
 
     name: str
     rank: int
     alpha: float
-    base_sharding: ShardingConfig | None
 
 
-def _get_logical_slice_lora_cls(parent_cls: type) -> type:
-    """Return a fused-output Linear with independent logical LoRA adapters.
+def _get_fused_gate_up_lora_cls(parent_cls: type) -> type:
+    """Return a fused gate-up Linear with independent LoRA adapters.
 
     A single adapter over the merged outputs would couple the ranks of the
     logical w1 and w3 updates. Keeping one adapter pair per slice preserves the
     behavior of targeting either projection independently while the frozen base
     weight still uses one physical GEMM.
     """
-    if parent_cls in _logical_slice_lora_class_cache:
-        return _logical_slice_lora_class_cache[parent_cls]
+    if parent_cls in _fused_gate_up_lora_class_cache:
+        return _fused_gate_up_lora_class_cache[parent_cls]
 
     parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
 
-    class LogicalSliceLoRALinear(parent_cls):  # type: ignore[valid-type, misc]
+    class FusedGateUpLoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
-            logical_output_slices: tuple[tuple[str, int], ...]
-            lora_specs: tuple[_LogicalSliceLoRASpec, ...]
+            logical_names: tuple[str, str]
+            # One spec targets either w1 or w3; two specs target both.
+            lora_specs: tuple[_GateUpLoRASpec, ...]
 
         def __init__(self, config: Config) -> None:
             super().__init__(config)
             for param in nn.Module.parameters(self, recurse=False):
                 param.requires_grad_(False)
 
-            self.logical_output_slices = config.logical_output_slices
-            logical_output_sizes = dict(config.logical_output_slices)
+            self.logical_names = config.logical_names
+            logical_output_size = config.out_features // 2
+            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+                config.sharding_config
+            )
             self.lora_a = nn.ModuleDict()
             self.lora_b = nn.ModuleDict()
             self._lora_scaling = {}
             for spec in config.lora_specs:
-                output_size = logical_output_sizes[spec.name]
-                lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
-                    spec.base_sharding
-                )
                 self.lora_a[spec.name] = Linear.Config(
                     in_features=config.in_features,
                     out_features=spec.rank,
@@ -121,7 +119,7 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
                 ).build()
                 self.lora_b[spec.name] = Linear.Config(
                     in_features=spec.rank,
-                    out_features=output_size,
+                    out_features=logical_output_size,
                     bias=False,
                     sharding_config=lora_b_sharding,
                     param_init={"weight": nn.init.zeros_},
@@ -129,13 +127,10 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
                 self._lora_scaling[spec.name] = spec.alpha / spec.rank
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            base_out_TFN = (
-                super()
-                .forward(input)
-                .unflatten(-1, (-1, len(self.logical_output_slices)))
+            logical_outputs_TF = list(
+                super().forward(input).unflatten(-1, (-1, 2)).unbind(-1)
             )
-            logical_outputs_TF = list(base_out_TFN.unbind(-1))
-            for index, (name, _) in enumerate(self.logical_output_slices):
+            for index, name in enumerate(self.logical_names):
                 if name in self.lora_a:
                     lora_out_TF = self.lora_b[name](self.lora_a[name](input))
                     logical_outputs_TF[index] = (
@@ -153,7 +148,7 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
         ) -> None:
             """Expose adapters under their logical projection checkpoint keys."""
             for adapter_name in ("lora_a", "lora_b"):
-                for logical_name, _ in self.logical_output_slices:
+                for logical_name in self.logical_names:
                     physical_key = (
                         f"{physical_prefix}{adapter_name}.{logical_name}.weight"
                     )
@@ -171,7 +166,7 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
         ) -> None:
             """Restore logical adapter keys under the physical projection."""
             for adapter_name in ("lora_a", "lora_b"):
-                for logical_name, _ in self.logical_output_slices:
+                for logical_name in self.logical_names:
                     logical_key = (
                         f"{logical_prefix}{logical_name}.{adapter_name}.weight"
                     )
@@ -180,10 +175,10 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
                             f"{physical_prefix}{adapter_name}.{logical_name}.weight"
                         ] = state_dict.pop(logical_key)
 
-    LogicalSliceLoRALinear.__name__ = f"LogicalSliceLoRA{parent_cls.__name__}"
-    LogicalSliceLoRALinear.__qualname__ = f"LogicalSliceLoRA{parent_cls.__name__}"
-    _logical_slice_lora_class_cache[parent_cls] = LogicalSliceLoRALinear
-    return LogicalSliceLoRALinear
+    FusedGateUpLoRALinear.__name__ = f"FusedGateUpLoRA{parent_cls.__name__}"
+    FusedGateUpLoRALinear.__qualname__ = f"FusedGateUpLoRA{parent_cls.__name__}"
+    _fused_gate_up_lora_class_cache[parent_cls] = FusedGateUpLoRALinear
+    return FusedGateUpLoRALinear
 
 
 def _get_lora_cls(parent_cls: type) -> type:
@@ -237,7 +232,7 @@ def _get_lora_cls(parent_cls: type) -> type:
     LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
 
-    def build_interleaved_lora_linear(
+    def build_fused_gate_up_lora_linear(
         first_config: Linear.Config,
         second_config: Linear.Config,
         *,
@@ -257,11 +252,10 @@ def _get_lora_cls(parent_cls: type) -> type:
                 )
             if isinstance(config, LoRALinear.Config):
                 lora_specs.append(
-                    _LogicalSliceLoRASpec(
+                    _GateUpLoRASpec(
                         name=name,
                         rank=config.rank,
                         alpha=config.alpha,
-                        base_sharding=config.sharding_config,
                     )
                 )
             return parent_config_cls(
@@ -279,22 +273,21 @@ def _get_lora_cls(parent_cls: type) -> type:
             second_base_config,
             param_init=param_init,
         )
-        logical_slice_lora_cls = _get_logical_slice_lora_cls(parent_cls)
-        merged_config_cls = vars(logical_slice_lora_cls)["Config"]
+        fused_gate_up_lora_cls = _get_fused_gate_up_lora_cls(parent_cls)
+        merged_config_cls = vars(fused_gate_up_lora_cls)["Config"]
         return merged_config_cls(
             **{
                 field.name: getattr(merged_base_config, field.name)
                 for field in fields(parent_config_cls)
                 if field.init
             },
-            logical_output_slices=(
-                (first_name, first_config.out_features),
-                (second_name, second_config.out_features),
-            ),
+            logical_names=logical_names,
             lora_specs=tuple(lora_specs),
         ).build()
 
-    LoRALinear.Config._custom_interleaved_linear_builder = build_interleaved_lora_linear
+    LoRALinear.Config._custom_interleaved_linear_builder = (
+        build_fused_gate_up_lora_linear
+    )
     _lora_class_cache[parent_cls] = LoRALinear
     return LoRALinear
 

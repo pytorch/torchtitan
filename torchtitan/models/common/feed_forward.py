@@ -92,8 +92,7 @@ class FeedForward(Module):
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up_TF = self.w13(x)
-        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
+        gate_TF, up_TF = self.w13(x).unflatten(-1, (-1, 2)).unbind(-1)
         return self.w2(self._activation(gate_TF, up_TF))
 
     def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:
@@ -110,6 +109,7 @@ class FeedForward(Module):
             state_dict[f"{prefix}w1.{param_name}"] = param[:, 0].contiguous()
             state_dict[f"{prefix}w3.{param_name}"] = param[:, 1].contiguous()
 
+        # LoRA uses this hook to expose separate w1 and w3 adapter keys.
         if hasattr(module.w13, "_expose_logical_state_dict"):
             module.w13._expose_logical_state_dict(
                 state_dict,
@@ -128,6 +128,7 @@ class FeedForward(Module):
                     [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
                 ).flatten(0, 1)
 
+        # LoRA uses this hook to restore separate w1 and w3 adapter keys.
         if hasattr(module.w13, "_restore_logical_state_dict"):
             module.w13._restore_logical_state_dict(
                 state_dict,
