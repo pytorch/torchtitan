@@ -321,13 +321,13 @@ def set_dense_ffn_sharding(
     attn_x_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
-    """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
+    """Standard dense FFN (physical ``w13``/``w2``) TP sharding.
 
     Shared by llama3, qwen3, and deepseek_v3. ``attn_x_layout`` should match
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    # Same two differences as the dist-GEMM attention block: the fused w1/w3
+    # Same two differences as the dist-GEMM attention block: the fused w13
     # consume the sequence shard directly, so there is no boundary all-gather to
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute

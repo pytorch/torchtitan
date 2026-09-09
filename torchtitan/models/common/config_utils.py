@@ -292,8 +292,8 @@ def make_ffn_config(
     """Build a fully-specified FeedForward.Config.
 
     ``tp_gemm_backend="dist_gemm"`` overlaps the TP collectives with the GEMMs by
-    folding them in: one all-gather feeds w1 and w3, and w2 reduce-scatters. A bias
-    on w1/w3 is rejected by the config. See make_gqa_config.
+    folding them in: one all-gather feeds w13, and w2 reduce-scatters. See
+    make_gqa_config.
     """
     ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
