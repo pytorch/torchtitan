@@ -216,11 +216,16 @@ class TestFTCheckpointManager(unittest.TestCase):
         os.makedirs(checkpoint_id)
         open(os.path.join(checkpoint_id, ".metadata"), "w").close()
         calls = []
+        ft_grad_enabled = []
+
+        def load_ft_checkpoint():
+            calls.append("ft")
+            ft_grad_enabled.append(torch.is_grad_enabled())
 
         with mock.patch.object(
             manager,
             "_ft_load",
-            side_effect=lambda: calls.append("ft"),
+            side_effect=load_ft_checkpoint,
         ), mock.patch.object(
             manager,
             "_load_checkpoint",
@@ -229,6 +234,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             self.assertTrue(manager.load())
 
         self.assertEqual(["ft", "main"], calls)
+        self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
     def test_disabled_load_does_not_restore_ft_checkpoint(self):

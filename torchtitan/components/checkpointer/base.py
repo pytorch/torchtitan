@@ -226,12 +226,13 @@ class BaseCheckpointManager(Configurable, ABC):
     # state, so none of its attributes exist. Public entry points must perform
     # this check before accessing manager state; overrides must preserve it.
 
+    @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
         if not self.enable:
             return False
 
-        with sl.log_trace_span("checkpoint_load"), torch.no_grad():
+        with sl.log_trace_span("checkpoint_load"):
             model_only = False
             from_hf = False
             from_quantized = False
@@ -316,11 +317,13 @@ class BaseCheckpointManager(Configurable, ABC):
             )
             return True
 
+    @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Persist state for ``curr_step``."""
         if not self.enable:
             return False
-        return self._save(curr_step, last_step)
+        with sl.log_trace_span("checkpoint_save"):
+            return self._save(curr_step, last_step)
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
