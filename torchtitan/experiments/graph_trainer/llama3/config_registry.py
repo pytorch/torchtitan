@@ -65,6 +65,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
     base = llama3_debugmodel()
     base.model_spec = llama3_model_registry(
         "debugmodel",
+        seq_len=base.training.max_context_length,
         converters=[
             llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
         ],

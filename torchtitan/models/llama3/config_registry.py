@@ -35,6 +35,9 @@ from . import model_registry
 from .model import Llama3Model
 
 
+_DEFAULT_DEBUGMODEL_SEQ_LEN = 2048
+
+
 def llama3_mxfp8_linear_converter_config(
     *, model_compile_enabled: bool
 ) -> MXFP8LinearConverter.Config:
@@ -57,7 +60,9 @@ def llama3_mxfp8_linear_converter_config(
     )
 
 
-def llama3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
@@ -102,7 +107,9 @@ def llama3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_varlen_attn(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend="varlen"
@@ -111,7 +118,9 @@ def llama3_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_dist_gemm(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_dist_gemm(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     """Async-TP: the attention TP collectives are folded into their GEMMs.
 
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
@@ -129,7 +138,9 @@ def llama3_debugmodel_dist_gemm(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_float8(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -144,7 +155,9 @@ def llama3_debugmodel_float8(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_mxfp8(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
     config.model_spec = model_registry(
@@ -157,7 +170,9 @@ def llama3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_nvfp4(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
@@ -180,7 +195,7 @@ def llama3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
 
 
 def llama3_debugmodel_first_85_pct_layers_nvfp4(
-    seq_len: int | None = None,
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
@@ -206,7 +221,9 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     return config
 
 
-def llama3_debugmodel_float8_emulate_lora(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_float8_emulate_lora(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     from torchtitan.components.lora import LoRAConverter
 
     config = llama3_debugmodel(seq_len=seq_len)
@@ -224,7 +241,9 @@ def llama3_debugmodel_float8_emulate_lora(seq_len: int | None = None) -> Trainer
     return config
 
 
-def llama3_debugmodel_ce_loss(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_ce_loss(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
     config = llama3_debugmodel(seq_len=seq_len)
     assert config.model_spec is not None
@@ -402,7 +421,9 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def sft_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def sft_debugmodel(
+    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+) -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
 
     def process_sample(sample):
