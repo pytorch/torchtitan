@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -28,8 +29,8 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols.module import Module
 import spmd_types as spmd
-from torchtitan.distributed.utils import get_spmd_backend
 
 
 class Gemma4QKVLinear(BaseQKVLinear):
@@ -108,6 +109,85 @@ class Gemma4RoPE(CosSinRoPE):
         return torch.cat([cos, sin], dim=-1)
 
 
+class Gemma4GlobalSDPA(Module):
+    """Causal ScaledDotProductAttention for Gemma-4 global layers (head_dim=512).
+
+    Adapts packed [T, H, K] tokens to [1, H, T, K] for F.scaled_dot_product_attention,
+    matching the exact polymorphic tensor interface of FlexAttention.
+
+    Architectural Rationale & Upstream Paper Trail:
+        1. SRAM/LDS Dimension Ceiling (Cross-Vendor):
+           FlashAttention and FlexAttention Triton kernel templates (e.g. flex_backwards.py.jinja)
+           tile Q/K/V into on-chip SRAM/LDS scratchpad buffers. Tile accumulators sized
+           [BLOCK_M2, QK_HEAD_DIM_ROUNDED] at head_dim=512 require 128 KiB of scratchpad memory
+           per accumulator tile alone. When combined with K/V/DO/DK/DV staging buffers, this
+           exceeds per-SM/per-CU shared memory limits across all current hardware:
+             - NVIDIA Hopper/Blackwell and Ada (SM89, SM90)
+             - AMD CDNA2/3/4 (gfx90a, gfx942, gfx950)
+           Inductor autotuning consequently fails with NoValidChoicesError.
+
+        2. Upstream Ecosystem Status (Cross-Framework Consensus):
+           This constraint and the per-layer dispatch solution are actively tracked and validated:
+             - huggingface/transformers#45201: "[Gemma 4] Support per-layer FlashAttention: FA2
+               for sliding layers, SDPA for global layers" (Details how FA2 fails on global
+               layers with RuntimeError: FlashAttention only supports head dimensions up to 256,
+               proposing per-layer dispatch as the canonical solution).
+             - Dao-AILab/flash-attention#2427: "Support head_dim=512 for Gemma 4 global attention layers"
+               (Identifies Gemma-4 as the first production model requiring multi-head GQA at
+               head_dim=512, recommending FA2/FlexAttention for sliding layers and SDPA for global layers).
+             - Dao-AILab/flash-attention#2581: "Support head_dim=512 on SM89 (Ada) for Gemma 4 global attention layers"
+               (Notes flash_attn_varlen_func rejects head_dim=512 outright on Ada GPUs).
+             - Dao-AILab/flash-attention#2318: (FA4 Hopper head_dim=256 supported, 512 still unsupported).
+             - Dao-AILab/flash-attention#801: "May support headdim>256? such as 512" (Closed unresolved).
+
+        3. Dispatch Solution:
+           Global layers have no sliding-window constraint and execute standard causal attention.
+           Static layer construction dispatch routes global layers to PyTorch's native C++ SDPA,
+           preserving FlexAttention for sliding-window layers without any runtime branching in forward().
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config | None = None) -> None:
+        super().__init__()
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
+        attention_masks: Any = None,
+        scale: float | None = None,
+        enable_gqa: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        # Adapt 3D packed tokens [T, H, K] to 4D kernel layout [1, H, T, K]
+        q_1HTK = q_THK.transpose(0, 1).unsqueeze(0)
+        k_1HTK = k_THK.transpose(0, 1).unsqueeze(0)
+        v_1HTV = v_THV.transpose(0, 1).unsqueeze(0)
+
+        # Handle Grouped-Query Attention if key/value heads are fewer than query heads
+        if q_1HTK.shape[1] != k_1HTK.shape[1]:
+            n_rep = q_1HTK.shape[1] // k_1HTK.shape[1]
+            k_1HTK = k_1HTK.repeat_interleave(n_rep, dim=1)
+            v_1HTV = v_1HTV.repeat_interleave(n_rep, dim=1)
+
+        # Gemma-4 specifies unit attention scaling (scale=1.0) because of QK RMSNorm.
+        # If scale is explicitly passed (self.scaling), F.sdpa respects it;
+        # otherwise it defaults to standard 1 / sqrt(head_dim).
+        out_1HTV = F.scaled_dot_product_attention(
+            q_1HTK,
+            k_1HTK,
+            v_1HTV,
+            is_causal=True,
+            scale=scale,
+        )
+        return out_1HTV.squeeze(0).transpose(0, 1).contiguous()
+
+
 class Gemma4Attention(GQAttention):
     """Gemma-4 GQA with unit attention scale, QK RMSNorm, and V RMSNorm."""
 
@@ -134,33 +214,15 @@ class Gemma4Attention(GQAttention):
         xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
         if self.v_norm is not None:
             xv_THV = self.v_norm(xv_THV)
-        if self.head_dim > 256:
-            # Triton FlexAttention on ROCm does not support head_dim > 256.
-            # Global layers use full causal attention, handled directly via SDPA.
-            q_1HTK = xq_THK.transpose(0, 1).unsqueeze(0)
-            k_1HTK = xk_THK.transpose(0, 1).unsqueeze(0)
-            v_1HTV = xv_THV.transpose(0, 1).unsqueeze(0)
-            if self.n_heads != self.n_kv_heads:
-                n_rep = self.n_heads // self.n_kv_heads
-                k_1HTK = k_1HTK.repeat_interleave(n_rep, dim=1)
-                v_1HTV = v_1HTV.repeat_interleave(n_rep, dim=1)
-            out_1HTV = F.scaled_dot_product_attention(
-                q_1HTK,
-                k_1HTK,
-                v_1HTV,
-                is_causal=True,
-                scale=self.scaling,
-            )
-            out_THV = out_1HTV.squeeze(0).transpose(0, 1).contiguous()
-        else:
-            out_THV = self.inner_attention(
-                xq_THK,
-                xk_THK,
-                xv_THV,
-                attention_masks=attention_masks,
-                scale=self.scaling,
-                enable_gqa=self.enable_gqa,
-            ).contiguous()
+
+        out_THV = self.inner_attention(
+            xq_THK,
+            xk_THK,
+            xv_THV,
+            attention_masks=attention_masks,
+            scale=self.scaling,
+            enable_gqa=self.enable_gqa,
+        ).contiguous()
         return self.wo(out_THV.view(out_THV.shape[0], -1))
 
 

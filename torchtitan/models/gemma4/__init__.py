@@ -14,7 +14,6 @@ import torch.nn as nn
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
-    CosSinRoPE,
     Embedding,
     Linear,
     RMSNorm,
@@ -23,13 +22,10 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_gqa_config,
     TpGemmBackend,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.utils import validate_converter_order
-
-import dataclasses
 
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -37,6 +33,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .model import (
     Gemma4Attention,
     Gemma4FeedForward,
+    Gemma4GlobalSDPA,
     Gemma4Model,
     Gemma4QKVLinear,
     Gemma4RoPE,
@@ -136,11 +133,18 @@ def _build_gemma4_layers(
         else:
             actual_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
 
-        layer_inner_attn = copy.deepcopy(inner_attention)
-        if isinstance(layer_inner_attn, VarlenAttention.Config):
-            layer_inner_attn.window_size = (
-                (-1, 0) if use_global_attn else (sliding_window_size, 0)
-            )
+        # Gemma-4 invariant: sliding layers (head_dim=256) use FlexAttention;
+        # global layers (head_dim=512) exceed SRAM/LDS limits for multi-head GQA
+        # across all FlashAttention/FlexAttention backends (see Dao-AILab/flash-attention#2427
+        # and huggingface/transformers#45201) and dispatch to PyTorch's native C++ SDPA.
+        if use_global_attn and actual_head_dim > 256:
+            layer_inner_attn = Gemma4GlobalSDPA.Config()
+        elif use_global_attn:
+            layer_inner_attn = copy.deepcopy(inner_attention)
+        else:
+            layer_inner_attn = copy.deepcopy(inner_attention)
+            if isinstance(layer_inner_attn, VarlenAttention.Config):
+                layer_inner_attn.window_size = (sliding_window_size, 0)
 
         wq = Linear.Config(
             in_features=dim,

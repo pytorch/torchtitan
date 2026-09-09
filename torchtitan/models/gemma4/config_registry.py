@@ -247,8 +247,9 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
         ),
     )
 
-#TODO This is goofy. Improve it.
-gemma4_26b = gemma4_26b_a4b
+def gemma4_26b(seq_len: int | None = None) -> Trainer.Config:
+    """Convenience alias for gemma4_26b_a4b."""
+    return gemma4_26b_a4b(seq_len=seq_len)
 
 
 def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
