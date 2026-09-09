@@ -55,6 +55,5 @@ class TestDistMuonStorageValidation(unittest.TestCase):
             optimizer._validate_parameter_storage()
 
 
-
 if __name__ == "__main__":
     unittest.main()
