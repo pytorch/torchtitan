@@ -12,7 +12,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -79,8 +79,6 @@ def kimi_k3_debugmodel() -> Trainer.Config:
             decay_type="linear",
             min_lr_factor=0.0,
         ),
-        # TODO: Kimi K3 has no spmd_types annotations yet.
-        parallelism=ParallelismConfig(spmd_backend="partial_dtensor"),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=256,
             max_context_length=256,

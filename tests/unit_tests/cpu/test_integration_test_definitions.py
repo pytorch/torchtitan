@@ -82,7 +82,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
         "float8",
-        "fsdp+tp+cp+compile+float8",
+        "fsdp+tp+pp+compile+float8",
         "fsdp_symm_mem",
         "hsdp+cp+compile+float8",
         "qwen3_fsdp+deepep",
@@ -92,7 +92,10 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
 
 
 def test_b200_tests_are_registered_in_separate_suite() -> None:
-    assert {test.test_name for test in build_b200_tests_list()} == {"kimi_k3_mm_fsdp"}
+    assert {test.test_name for test in build_b200_tests_list()} == {
+        "kimi_k3_mm_fsdp",
+        "mxfp8_linear_fsdp",
+    }
     assert "kimi_k3_mm_fsdp" not in {
         test.test_name for test in build_model_tests_list()
     }
@@ -148,7 +151,7 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
 def test_fake_pg_incompatible_test_requires_explicit_marker(
     test_name: str, incompatibility: str
 ) -> None:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     if test_name == "checkpoint":
         config.checkpoint.enable = True
     elif test_name == "pipeline_parallel":

@@ -9,8 +9,9 @@
 Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import ClassVar, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 import spmd_types as spmd
 
@@ -18,50 +19,71 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
+
+if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
 
 __all__ = [
-    "ContextParallelKernel",
-    "AllGatherCPFlexAttention",
-    "UlyssesCPFlexAttention",
+    "CPInnerAttention",
+    "KVAllGatherCPFlexInnerAttention",
+    "UlyssesCPFlexInnerAttention",
 ]
 
 _SEQ_DIM = 0
 _HEAD_DIM = 1
 
 
-class ContextParallelKernel:
-    """Mixin for attention kernels that own their CP collectives."""
+class CPInnerAttention(ABC):
+    """Inner attention that owns its context-parallel behavior."""
 
-    @property
-    def cp_group(self) -> dist.ProcessGroup:
-        """Return the active multi-rank CP process group."""
-        mesh = current_spmd_mesh()
-        if mesh is None:
-            raise RuntimeError(
-                f"{type(self).__name__} requires an active SPMD mesh context."
-            )
-        mesh_axis_names = mesh.mesh_dim_names or ()
-        cp_group = mesh.get_group("cp") if "cp" in mesh_axis_names else None
-        if cp_group is None or cp_group.size() == 1:
-            raise RuntimeError(f"{type(self).__name__} requires an active CP mesh.")
-        return cp_group
+    @classmethod
+    @abstractmethod
+    def cp_shard(
+        cls,
+        input_dict: dict[str, Any],
+        input_shardings: dict[str, Any] | None,
+        cp_mesh: "DeviceMesh",
+        load_balancer_type: str | None,
+        ptrr_mask_key: str | None,
+    ) -> dict[str, Any]:
+        """Shard model inputs for this attention implementation."""
 
 
-class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
-    """FlexAttention with sharded Q and all-gathered K/V."""
+class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
+    """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
-        reduce_dtype: Literal["float32", "bfloat16"] | None = None
-        """Dtype of the backward reduce-scatter. None keeps the input dtype."""
+    class Config(FlexInnerAttention.Config):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.reduce_dtype = (
-            TORCH_DTYPE_MAP[config.reduce_dtype] if config.reduce_dtype else None
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+    @classmethod
+    def cp_shard(
+        cls,
+        input_dict: dict[str, Any],
+        input_shardings: dict[str, Any] | None,
+        cp_mesh: "DeviceMesh",
+        load_balancer_type: str | None,
+        ptrr_mask_key: str | None,
+    ) -> dict[str, Any]:
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        return prepare_context_parallel_input(
+            input_dict,
+            input_shardings,
+            cp_mesh,
+            load_balancer_type,
+            ptrr_mask_key,
         )
 
     def forward(
@@ -71,27 +93,51 @@ class AllGatherCPFlexAttention(ContextParallelKernel, FlexAttention):
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = self.cp_group
+        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
         k_THK, v_THV = (
             spmd.redistribute(
                 x,
                 cp_group,
                 src=spmd.S(_SEQ_DIM),
                 dst=spmd.R,
-                backward_options={"op_dtype": self.reduce_dtype or x.dtype},
+                backward_options={"op_dtype": self.reduce_dtype},
             )
             for x in (k_THK, v_THV)
         )
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
-    """Run FlexAttention with sequence-to-head all-to-all redistribution."""
+class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
+    """Run FlexInnerAttention with sequence-to-head all-to-all redistribution."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
-        shard_attention_mask: ClassVar[bool] = False
-        shard_attention_heads: ClassVar[bool] = True
+    class Config(FlexInnerAttention.Config):
+        pass
+
+    @classmethod
+    def cp_shard(
+        cls,
+        input_dict: dict[str, Any],
+        input_shardings: dict[str, Any] | None,
+        cp_mesh: "DeviceMesh",
+        load_balancer_type: str | None,
+        ptrr_mask_key: str | None,
+    ) -> dict[str, Any]:
+        from torchtitan.distributed.context_parallel.api import (
+            prepare_context_parallel_input,
+        )
+
+        attention_masks = input_dict.pop("attention_masks", None)
+        prepare_context_parallel_input(
+            input_dict,
+            input_shardings,
+            cp_mesh,
+            None,
+            None,
+        )
+        if attention_masks is not None:
+            input_dict["attention_masks"] = attention_masks
+        return input_dict
 
     @staticmethod
     def _reshard(
@@ -112,7 +158,7 @@ class UlyssesCPFlexAttention(ContextParallelKernel, FlexAttention):
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = self.cp_group
+        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
         # Shard heads instead of tokens: (T/cp, H, *) -> (T, H/cp, *).
         q_THK, k_THK, v_THV = (
             self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)

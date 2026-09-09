@@ -25,9 +25,6 @@ from torch import nn
 
 
 def _build_config_modules():
-    # torchtitan.models.qwen3_5 imports the FLA (flash-linear-attention)
-    # kernels at module scope. FLA is a triton/CUDA-only optional dependency,
-    # so skip instead of erroring on environments without it.
     try:
         from torchtitan.config import ParallelismConfig
         from torchtitan.distributed.parallel_dims import ParallelDims
@@ -43,8 +40,8 @@ class _RecordingLayer(nn.Module):
     """Layer stub that records the positions it is handed and passes x through.
 
     The mrope/positions resolution is independent of the layer internals, so
-    stubbing the layers keeps these tests on CPU without the FLA kernels while
-    still exercising the real ``preprocess_inputs`` and ``forward`` glue.
+    stubbing the layers keeps these tests on CPU while still exercising the real
+    ``preprocess_inputs`` and ``forward`` glue.
     """
 
     def __init__(self, sink: dict):
@@ -97,8 +94,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         # No mrope: layers see the plain 1D positions.
         self.assertTrue(torch.equal(sink["positions"], positions))
         # Masks come from the 1D positions.
-        self.assertEqual(
-            batch["attention_masks"]["deltanet"].cu_seq_q_host, (0, 3, 5, 10)
+        torch.testing.assert_close(
+            batch["attention_masks"]["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
     def test_multimodal_batch_routes_mrope_to_layers(self):
@@ -125,8 +123,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertEqual(sink["positions"].shape[-1], 3)
         self.assertTrue(torch.equal(sink["positions"], mrope_positions))
         # Masks are still built from the 1D positions, not the mrope positions.
-        self.assertEqual(
-            batch["attention_masks"]["deltanet"].cu_seq_q_host, (0, 3, 5, 10)
+        torch.testing.assert_close(
+            batch["attention_masks"]["deltanet"].cu_seq_q,
+            torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
 

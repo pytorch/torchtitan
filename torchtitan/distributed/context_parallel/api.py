@@ -42,8 +42,6 @@ def prepare_context_parallel_input(
     cp_mesh: DeviceMesh,
     load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
-    *,
-    shard_attention_mask: bool = True,
 ) -> dict[str, Any]:
     """Shard named tensors and attention masks for Context Parallel.
 
@@ -70,7 +68,6 @@ def prepare_context_parallel_input(
         ptrr_mask_key: When ``load_balancer_type`` is "ptrr" and the attention
             masks are a dict[str, BlockMask], selects which mask the
             PTRRLoadBalancer is built from. Ignored otherwise.
-        shard_attention_mask: Whether to shard each mask's query dimension.
 
     Returns:
         The same ``input_dict`` object, mutated in place with its sharded tensor
@@ -101,7 +98,6 @@ def prepare_context_parallel_input(
         load_balancer_type,
         input_seq_dims=seq_dims,
         ptrr_mask_key=ptrr_mask_key,
-        shard_attention_mask=shard_attention_mask,
     )
 
     for n, buf in zip(shard_names, sharded_buffers):
@@ -118,8 +114,6 @@ def cp_shard(
     load_balancer_type: str | None = "headtail",
     input_seq_dims: int | tuple[int, ...] = 0,
     ptrr_mask_key: str | None = None,
-    *,
-    shard_attention_mask: bool = True,
 ) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
     """
     Shard inputs and attention masks across the context parallel mesh.
@@ -136,7 +130,7 @@ def cp_shard(
             BlockMask, or dict[str, BlockMask]
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
-            - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
+            - "ptrr": Use PTRRLoadBalancer (for FlexInnerAttention)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dims: Sequence dimension(s) for sharding. An int applies the
@@ -148,7 +142,6 @@ def cp_shard(
             the dict the PTRRLoadBalancer is built from. The resulting balancer
             is used to shard every mask in the dict as well as the inputs.
             Required (must be a valid key) in that case; ignored otherwise.
-        shard_attention_mask: Whether to shard each mask's query dimension.
 
     Returns:
         Tuple of (sharded_inputs, attention_masks) where:
@@ -178,7 +171,7 @@ def cp_shard(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # For FlexAttention, we use _PTRRLoadBalancer.
+                # For FlexInnerAttention, we use _PTRRLoadBalancer.
                 # _PTRRLoadBalancer is built from a single BlockMask. When the
                 # attention masks are a dict[str, BlockMask], the caller must
                 # specify which mask to build the balancer from via
@@ -230,7 +223,7 @@ def cp_shard(
 
     # BlockMask has shape [B, H, Q, KV]. Only Q can be sequence-sharded.
     MASK_Q_SEQ_DIM = 2
-    if attention_masks is not None and shard_attention_mask:
+    if attention_masks is not None:
         assert isinstance(attention_masks, (BlockMask, dict))
         masks: list[BlockMask] = []
         for mask in (

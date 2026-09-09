@@ -553,6 +553,7 @@ def _make_spec():
         name="m",
         flavor="f",
         model=_Model.Config(),
+        max_context_length=4096,
         parallelize_fn=lambda: None,
         pipelining_fn=None,
         post_optimizer_build_fn=None,
