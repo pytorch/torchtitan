@@ -261,6 +261,9 @@ def _precompile_aot_fx_trace(
             % config.training.max_context_length
         )
         extra_kwargs["positions"] = positions
+        extra_kwargs["padding_mask"] = torch.zeros(
+            num_tokens, dtype=torch.bool, device=dummy_inputs.device
+        )
 
         if isinstance(
             inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
