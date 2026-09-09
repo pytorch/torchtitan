@@ -181,6 +181,64 @@ def _get_fused_gate_up_lora_cls(parent_cls: type) -> type:
     return FusedGateUpLoRALinear
 
 
+def _build_fused_gate_up_lora_linear(
+    first_config: Linear.Config,
+    second_config: Linear.Config,
+    *,
+    logical_names: tuple[str, str],
+    param_init: dict[str, Callable] | None,
+    parent_cls: type,
+    lora_config_cls: type[Linear.Config],
+):
+    """Build a fused gate-up Linear with independent logical LoRA adapters."""
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
+    lora_specs = []
+    parent_field_names = {
+        field.name for field in fields(parent_config_cls) if field.init
+    }
+
+    def make_base_config(name: str, config: Linear.Config):
+        if not isinstance(config, parent_config_cls):
+            raise ValueError(
+                "Cannot fuse LoRA projections backed by different Linear "
+                f"implementations: {name} uses {type(config).__name__}."
+            )
+        if isinstance(config, lora_config_cls):
+            lora_specs.append(
+                _GateUpLoRASpec(
+                    name=name,
+                    rank=config.rank,  # pyrefly: ignore[missing-attribute]
+                    alpha=config.alpha,  # pyrefly: ignore[missing-attribute]
+                )
+            )
+        return parent_config_cls(
+            **{
+                field_name: getattr(config, field_name)
+                for field_name in parent_field_names
+            }
+        )
+
+    first_name, second_name = logical_names
+    first_base_config = make_base_config(first_name, first_config)
+    second_base_config = make_base_config(second_name, second_config)
+    merged_base_config = _make_interleaved_linear_config(
+        first_base_config,
+        second_base_config,
+        param_init=param_init,
+    )
+    fused_gate_up_lora_cls = _get_fused_gate_up_lora_cls(parent_cls)
+    merged_config_cls = vars(fused_gate_up_lora_cls)["Config"]
+    return merged_config_cls(
+        **{
+            field.name: getattr(merged_base_config, field.name)
+            for field in fields(parent_config_cls)
+            if field.init
+        },
+        logical_names=logical_names,
+        lora_specs=tuple(lora_specs),
+    ).build()
+
+
 def _get_lora_cls(parent_cls: type) -> type:
     """Get or create a LoRA subclass for *parent_cls* (e.g. Linear, Float8Linear).
 
@@ -198,6 +256,24 @@ def _get_lora_cls(parent_cls: type) -> type:
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
+
+            @staticmethod
+            def _custom_interleaved_linear_builder(
+                first_config: Linear.Config,
+                second_config: Linear.Config,
+                *,
+                logical_names: tuple[str, str],
+                param_init: dict[str, Callable] | None,
+            ):
+                """Build fused gate-up LoRA when this config is interleaved."""
+                return _build_fused_gate_up_lora_linear(
+                    first_config,
+                    second_config,
+                    logical_names=logical_names,
+                    param_init=param_init,
+                    parent_cls=parent_cls,
+                    lora_config_cls=LoRALinear.Config,
+                )
 
         def __init__(self, config: Config) -> None:
             super().__init__(config)
@@ -231,63 +307,6 @@ def _get_lora_cls(parent_cls: type) -> type:
 
     LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-
-    def build_fused_gate_up_lora_linear(
-        first_config: Linear.Config,
-        second_config: Linear.Config,
-        *,
-        logical_names: tuple[str, str],
-        param_init: dict[str, Callable] | None,
-    ):
-        lora_specs = []
-        parent_field_names = {
-            field.name for field in fields(parent_config_cls) if field.init
-        }
-
-        def make_base_config(name: str, config: Linear.Config):
-            if not isinstance(config, parent_config_cls):
-                raise ValueError(
-                    "Cannot fuse LoRA projections backed by different Linear "
-                    f"implementations: {name} uses {type(config).__name__}."
-                )
-            if isinstance(config, LoRALinear.Config):
-                lora_specs.append(
-                    _GateUpLoRASpec(
-                        name=name,
-                        rank=config.rank,
-                        alpha=config.alpha,
-                    )
-                )
-            return parent_config_cls(
-                **{
-                    field_name: getattr(config, field_name)
-                    for field_name in parent_field_names
-                }
-            )
-
-        first_name, second_name = logical_names
-        first_base_config = make_base_config(first_name, first_config)
-        second_base_config = make_base_config(second_name, second_config)
-        merged_base_config = _make_interleaved_linear_config(
-            first_base_config,
-            second_base_config,
-            param_init=param_init,
-        )
-        fused_gate_up_lora_cls = _get_fused_gate_up_lora_cls(parent_cls)
-        merged_config_cls = vars(fused_gate_up_lora_cls)["Config"]
-        return merged_config_cls(
-            **{
-                field.name: getattr(merged_base_config, field.name)
-                for field in fields(parent_config_cls)
-                if field.init
-            },
-            logical_names=logical_names,
-            lora_specs=tuple(lora_specs),
-        ).build()
-
-    LoRALinear.Config._custom_interleaved_linear_builder = (
-        build_fused_gate_up_lora_linear
-    )
     _lora_class_cache[parent_cls] = LoRALinear
     return LoRALinear
 
