@@ -24,7 +24,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="llama3_fsdp+tp+cp",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/llama3_{gpu_arch}.txt"
             ),
         ),
         OverrideDefinitions(
@@ -41,7 +41,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="Llama 3 FSDP+TP+PP",
             test_name="llama3_fsdp+tp+pp",
             ngpu=8,
-            golden_numerics_path="tests/assets/losses/real_pg/llama3_pp_a10g.txt",
+            golden_numerics_path="tests/assets/losses/real_pg/llama3_pp_{gpu_arch}.txt",
             use_real_pg=True,
         ),
         # Integration Test Cases for DeepSeek V3
@@ -60,7 +60,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="deepseek_v3_fsdp+ep",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/deepseek_v3_{gpu_arch}.txt"
             ),
         ),
         OverrideDefinitions(
@@ -69,7 +69,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="deepseek_v3_fsdp+cp+pp+ep",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
+                "tests/assets/losses/real_pg/deepseek_v3_cp_pp_{gpu_arch}.txt"
             ),
             use_real_pg=True,
         ),
@@ -93,7 +93,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="qwen3_moe_fsdp+tp+cp+ep_param_groups",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/qwen3_{gpu_arch}.txt"
             ),
         ),
         OverrideDefinitions(
@@ -160,7 +160,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_oss_fsdp+tp+ep",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/gpt_oss_a10g.txt"
+                "tests/assets/losses/{execution_mode}/gpt_oss_{gpu_arch}.txt"
             ),
         ),
         OverrideDefinitions(
@@ -168,7 +168,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="GPT-OSS PP+FSDP+CP+EP+SACOP",
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
-            golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
+            golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_{gpu_arch}.txt",
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -200,7 +200,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="muse_glimmer_text_fsdp",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"
+                "tests/assets/losses/{execution_mode}/muse_glimmer_{gpu_arch}.txt"
             ),
         ),
         OverrideDefinitions(

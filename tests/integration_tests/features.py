@@ -310,7 +310,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="SFT ChatDataset integration and numerics test",
             test_name="sft",
             ngpu=2,
-            golden_numerics_path=("tests/assets/losses/{execution_mode}/sft_a10g.txt"),
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/sft_{gpu_arch}.txt"
+            ),
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_seed_checkpoint],
