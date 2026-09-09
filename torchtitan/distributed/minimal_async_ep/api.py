@@ -85,10 +85,8 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     """Validate and fill MinimalAsyncEP dispatcher configs from runtime config."""
     from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP
     from torchtitan.distributed.activation_checkpoint import FullAC
-    from torchtitan.models.common.token_dispatcher import (
-        MinimalAsyncEPTokenDispatcher,
-        _iter_moe_configs,
-    )
+    from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
+    from torchtitan.models.common.moe import MoE
 
     assert hasattr(
         config, "parallelism"
@@ -100,7 +98,7 @@ def maybe_update_minimal_async_ep_config(model_config: Any, config: Any) -> None
     )
 
     dispatcher_cfgs = []
-    for moe_cfg in _iter_moe_configs(model_config):
+    for _, moe_cfg, _, _ in model_config.traverse(MoE.Config):
         token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
         if isinstance(token_dispatcher_cfg, MinimalAsyncEPTokenDispatcher.Config):
             dispatcher_cfgs.append(token_dispatcher_cfg)
