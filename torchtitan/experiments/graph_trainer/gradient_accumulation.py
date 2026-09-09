@@ -222,9 +222,8 @@ class GraphGradientState:
             raise RuntimeError(
                 "GraphTrainer gradient-state names or order changed after tracing"
             )
-        for fqn, parameter, buffer, storage_key in zip(
+        for fqn, buffer, storage_key in zip(
             self.parameter_fqns,
-            self.parameters,
             self.buffers,
             self.buffer_storage_keys,
             strict=True,
@@ -234,15 +233,25 @@ class GraphGradientState:
                     "GraphTrainer requires a stable graph-state buffer for "
                     f"{fqn!r}; the mapping value was replaced"
                 )
-            if parameter.grad is not buffer:
-                raise RuntimeError(
-                    "GraphTrainer requires a stable parameter.grad buffer for "
-                    f"{fqn!r}; an optimizer or hook replaced it"
-                )
             if _storage_keys(buffer) != storage_key:
                 raise RuntimeError(
                     "GraphTrainer requires stable gradient-buffer storage for "
                     f"{fqn!r}; its data pointer changed"
+                )
+        self.validate_grad_bindings()
+
+    def validate_grad_bindings(self) -> None:
+        """Validate that parameter gradients still use the graph-owned buffers."""
+        for fqn, parameter, buffer in zip(
+            self.parameter_fqns,
+            self.parameters,
+            self.buffers,
+            strict=True,
+        ):
+            if parameter.grad is not buffer:
+                raise RuntimeError(
+                    "GraphTrainer requires a stable parameter.grad buffer for "
+                    f"{fqn!r}; an optimizer or hook replaced it"
                 )
 
 
