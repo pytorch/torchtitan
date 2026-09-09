@@ -273,44 +273,33 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
 
 
 def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
-    """Install a ``LocalMapConfig`` on an inner-attention config.
+    """Localize TNH attention inputs without changing their placements.
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
-    shards H.
+    shards H. CP collectives run inside the CP kernels; TP collectives still
+    run at module boundaries.
     ``local_map`` converts DTensors to local tensors before the kernel runs,
     then wraps outputs back.
 
-    Declares placements over the full dense SPMD axis set (DP/CP/TP) so
-    the LocalMap composes under ``spmd_types`` (where the surrounding mesh
-    is multi-axis); under ``partial_dtensor``, the (tp,)-only mesh only
-    consumes the ``TP`` placement and the rest are ignored.
+    Placements include every SPMD axis. ``partial_dtensor`` uses only TP.
 
-    With CP, q stays token-sharded on the CP axis while k/v are
-    unsharded (``R``) on CP -- the local_map boundary all-gathers k/v so the
-    kernel sees full-length keys (matching the BlockMask's kv dimension).
-    Q's local grad is naturally token-sharded; k/v's local grads accumulate as
-    partial (``P``) on CP and are reduced on the way out.
+    TODO(fegin): drop the TP caveat once TP moves to the same mechanism.
     """
-    q_placements = attention_activation_placement()
-    kv_src_placements = attention_activation_placement()
-    kv_dst_placements = attention_activation_placement(cp=spmd.R)
-    kv_grad_placements = attention_activation_placement(cp=spmd.P)
-
-    out_src: SpmdType = q_placements
+    placements = attention_activation_placement()
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={
-            "q_THK": q_placements,
-            "k_THK": kv_src_placements,
-            "v_THV": kv_src_placements,
+            "q_THK": placements,
+            "k_THK": placements,
+            "v_THV": placements,
         },
         in_dst_shardings={
-            "q_THK": q_placements,
-            "k_THK": kv_dst_placements,
-            "v_THV": kv_dst_placements,
+            "q_THK": placements,
+            "k_THK": placements,
+            "v_THV": placements,
         },
-        out_src_shardings=out_src,
+        out_src_shardings=placements,
         local_map=LocalMapConfig(
-            in_grad_placements=(q_placements, kv_grad_placements, kv_grad_placements),
+            in_grad_placements=(placements, placements, placements),
         ),
     )
 

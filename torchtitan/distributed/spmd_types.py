@@ -38,6 +38,7 @@ __all__ = [
     "spmd_axes",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
+    "require_spmd_mesh_axis_group",
     "spmd_dense_mesh",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -155,6 +156,24 @@ def spmd_mesh_size(axis_name: str) -> int:
     if axis_name not in names:
         return 1
     return mesh.size(names.index(axis_name))
+
+
+def require_spmd_mesh_axis_group(
+    axis_name: MeshAxisName,
+) -> torch.distributed.ProcessGroup:
+    """Return an active multi-rank SPMD mesh axis group."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        raise RuntimeError("No active SPMD mesh.")
+    mesh_axis_names = mesh.mesh_dim_names or ()
+    if axis_name not in mesh_axis_names:
+        raise RuntimeError(f"The active SPMD mesh has no {axis_name.value!r} axis.")
+    group = mesh.get_group(axis_name)
+    if group.size() == 1:
+        raise RuntimeError(
+            f"The {axis_name.value!r} mesh axis must have multiple ranks."
+        )
+    return group
 
 
 @contextlib.contextmanager
@@ -353,7 +372,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # 3) If one side has no PartitionSpec, synthesize the simple
         # one-axis-per-dim form from its S(dim) local types.
         ndim = (
-            len(src.partition_spec)  # pyrefly: ignore [bad-argument-type]
+            len(src.partition_spec)
             if dst.partition_spec is None
             else len(dst.partition_spec)
         )
