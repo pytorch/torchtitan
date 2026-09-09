@@ -373,5 +373,7 @@ def set_moe_sharding_config(
         enable_sp=enable_sp,
         expert_param_layout=expert_param_layout,
     )
-    moe_cfg.routed_experts.sharding_config = routed_experts_config
-    moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
+    moe_cfg.routed_experts.set_sharding_configs(
+        routed_experts_config,
+        inner_experts_config,
+    )

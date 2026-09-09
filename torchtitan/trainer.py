@@ -16,6 +16,7 @@ from typing import Annotated, Any, cast
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.distributed.config as dist_config
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.pipelining.schedules import (
@@ -28,6 +29,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.dist_moe import cleanup_dist_moe, setup_dist_moe
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
@@ -51,9 +53,9 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
-    LocalTokenDispatcher,
     MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
@@ -190,17 +192,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
                 )
                 if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
+                    if not self.parallelism.pipeline_parallel_per_direction_p2p:
+                        raise ValueError(
+                            "Looped pipeline CUDA graphs require independent "
+                            "forward and backward P2P process groups. Set "
+                            "parallelism.pipeline_parallel_per_direction_p2p=True "
+                            "or disable CUDA graphs."
+                        )
 
             if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
                 return
 
-            for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
-                LocalTokenDispatcher.Config
+            for _, experts_config, _, _ in self.model_spec.model.traverse(
+                RoutedExperts.Config
             ):
+                assert isinstance(experts_config, RoutedExperts.Config)
+                if experts_config.supports_cuda_graphs:
+                    continue
+                dispatcher_config = experts_config.token_dispatcher
                 if isinstance(
                     dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
                 ) or (
@@ -210,8 +219,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     continue
 
                 raise ValueError(
-                    "CUDA graphs support only expert parallel token dispatcher "
-                    "configurations without CPU synchronization. "
+                    "CUDA graphs support only routed-expert configurations "
+                    "without CPU synchronization or dynamic shapes. "
                     "Set HybridEP non_blocking_capacity_factor, or use "
                     "MinimalAsyncEP, or set --training.disable_cuda_graphs. "
                     "Unsupported token "
@@ -504,6 +513,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # model_parts is used instead
                 del model
 
+                setup_dist_moe(
+                    config=config,
+                    model_parts=self.model_parts,
+                    parallel_dims=parallel_dims,
+                    device=self.device,
+                    pp_schedule=self.pp_schedule,
+                )
+
                 for m in self.model_parts:
                     m.to_empty(device=init_device)
                     with torch.no_grad():
@@ -532,14 +549,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
+                self.model_parts = [model]
+                setup_dist_moe(
+                    config=config,
+                    model_parts=self.model_parts,
+                    parallel_dims=parallel_dims,
+                    device=self.device,
+                    pp_schedule=None,
+                )
                 model.to_empty(device=init_device)
                 with torch.no_grad():
                     # TODO: Change this back to init_weights once
                     # autoparallel contains the wrap_init_states
                     cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
-
-                self.model_parts = [model]
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
@@ -708,13 +731,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
         config = self.config
+        dist_config.pipeline_per_direction_p2p = (
+            config.parallelism.pipeline_parallel_per_direction_p2p
+        )
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
         )
-
-        return ParallelDims.from_config(config.parallelism, world_size)
+        pp_mesh_override = (
+            dist_utils.get_real_pp_mesh(config.parallelism.pipeline_parallel_degree)
+            if config.comm.mode == "real_pp_fake_spmd_backend"
+            else None
+        )
+        return ParallelDims.from_config(
+            config.parallelism,
+            world_size,
+            pp_mesh_override=pp_mesh_override,
+        )
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
@@ -1132,6 +1166,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
             cudagraph_teardown()
+        if hasattr(self, "model_parts"):
+            cleanup_dist_moe(self.model_parts)
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:

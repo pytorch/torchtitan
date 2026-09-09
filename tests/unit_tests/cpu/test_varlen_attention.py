@@ -37,6 +37,26 @@ class TestPackedVarlenMetadata(unittest.TestCase):
         self.assertEqual(metadata.max_q, 4)
         self.assertEqual(metadata.max_k, 4)
 
+    def test_fixed_capacity_pads_with_empty_sequences(self):
+        positions_T = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3])
+        metadata = create_varlen_metadata_for_document(
+            positions_T,
+            max_num_documents=5,
+        )
+
+        expected_cu_seq = torch.tensor([0, 3, 5, 9, 9, 9], dtype=torch.int32)
+        torch.testing.assert_close(metadata.cu_seq_q, expected_cu_seq)
+        torch.testing.assert_close(metadata.cu_seq_k, expected_cu_seq)
+        self.assertEqual(metadata.max_q, positions_T.numel())
+        self.assertEqual(metadata.max_k, positions_T.numel())
+
+    def test_fixed_capacity_rejects_invalid_bound(self):
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            create_varlen_metadata_for_document(
+                torch.tensor([0, 1]),
+                max_num_documents=0,
+            )
+
 
 class TestPackedVarlenAttention(unittest.TestCase):
     def test_gqa_preserves_td_shape(self):
