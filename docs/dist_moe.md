@@ -1,9 +1,9 @@
 # Distributed MoE
 
 TorchTitan can replace the stock routed-experts module with the CuTe DSL
-[`dist_moe`](https://github.com/meta-pytorch/dist_moe) backend. The router stays
-in TorchTitan: it computes top-k expert IDs and scores, then Dist-MoE fuses
-dispatch, local expert compute, and combine into its distributed kernels.
+`dist_moe` backend. The router stays in TorchTitan: it computes top-k expert
+IDs and scores, then Dist-MoE fuses dispatch, local expert compute, and combine
+into its distributed kernels.
 
 ## Requirements
 
