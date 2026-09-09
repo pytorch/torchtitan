@@ -16,7 +16,7 @@ import unittest
 
 import torch
 
-from torchtitan.components.quantile_balance import (
+from torchtitan.models.kimi_k3.quantile_balance import (
     expert_loads,
     margin_histogram,
     quantile_balance_bias,
@@ -164,7 +164,7 @@ class TestQuantileBalancerRuntime(unittest.TestCase):
         return moe
 
     def test_installed_bias_moves_loads_toward_the_target(self):
-        from torchtitan.components.quantile_balance import (
+        from torchtitan.models.kimi_k3.quantile_balance import (
             expert_loads,
             QuantileBalancer,
         )
@@ -203,7 +203,7 @@ class TestQuantileBalancerRuntime(unittest.TestCase):
             history.append(cv()[0])
 
         # The histogram estimator reaches a resolution-limited fixed point
-        # (module docstring has the bins-vs-plateau table); assert it gets a
+        # a coarse histogram leaves residual imbalance; assert it gets a
         # large fraction of the way there and then stays put, which is the
         # behaviour that distinguishes it from the sign rule's oscillation.
         self.assertLess(
@@ -217,7 +217,7 @@ class TestQuantileBalancerRuntime(unittest.TestCase):
         balancer.remove()
 
     def test_bias_is_overwritten_not_accumulated(self):
-        from torchtitan.components.quantile_balance import QuantileBalancer
+        from torchtitan.models.kimi_k3.quantile_balance import QuantileBalancer
 
         torch.manual_seed(0)
         moe = self._fake_moe()
@@ -243,7 +243,7 @@ class TestQuantileBalancerRuntime(unittest.TestCase):
         balancer.remove()
 
     def test_step_without_a_forward_is_a_noop(self):
-        from torchtitan.components.quantile_balance import QuantileBalancer
+        from torchtitan.models.kimi_k3.quantile_balance import QuantileBalancer
 
         moe = self._fake_moe()
 
@@ -259,7 +259,7 @@ class TestQuantileBalancerRuntime(unittest.TestCase):
         balancer.remove()
 
     def test_missing_expert_bias_buffer_is_rejected(self):
-        from torchtitan.components.quantile_balance import QuantileBalancer
+        from torchtitan.models.kimi_k3.quantile_balance import QuantileBalancer
 
         moe = self._fake_moe()
         moe.expert_bias_E = None

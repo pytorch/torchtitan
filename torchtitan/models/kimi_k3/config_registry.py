@@ -24,6 +24,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
+from .quantile_balance import register_quantile_balancing
 
 
 def _kimi_k3_multimodal_dataloader(
@@ -61,6 +62,8 @@ def _kimi_k3_multimodal_dataloader(
 
 def kimi_k3_debugmodel() -> Trainer.Config:
     model_spec = model_registry("debugmodel")
+    # The report balances the router bias by solving it, not by stepping it.
+    model_spec.post_optimizer_build_fn = register_quantile_balancing
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -93,18 +96,3 @@ def kimi_k3_debugmodel() -> Trainer.Config:
         activation_checkpoint=SelectiveAC.Config(),
     )
 
-
-def kimi_k3_debugmodel_qb() -> Trainer.Config:
-    """The debug model with quantile balancing on the MoE router bias.
-
-    K3 runs sparsity (report sec 2.3) beyond where the auxiliary-loss-free
-    bias NUDGE still balances; quantile balancing SOLVES for the bias from
-    the accumulated per-expert load histograms instead. The hook replaces
-    the default load-balancing hook on the optimizer.
-    """
-    from torchtitan.components.quantile_balance import register_quantile_balancing
-
-    config = kimi_k3_debugmodel()
-    assert config.model_spec is not None
-    config.model_spec.post_optimizer_build_fn = register_quantile_balancing
-    return config
