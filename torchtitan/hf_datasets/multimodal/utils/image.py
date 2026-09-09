@@ -29,17 +29,8 @@ from PIL import Image
 from torchtitan.tools.logging import logger
 
 
-def _is_blocked_ip(ip: ipaddress.ip_address) -> bool:
-    """Return True if the IP should be blocked for SSRF protection.
-
-     .. note::
-        DNS rebinding (TOCTOU) is a known limitation: ``_is_safe_url``
-        resolves the hostname, then the caller resolves it again
-        independently when fetching. A malicious DNS server could return
-        a public IP for the check and a private IP for the fetch. Full
-        protection requires DNS pinning, which should be addressed in a
-        future PR.
-    """
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if the IP should be blocked for SSRF protection."""
     mapped = getattr(ip, "ipv4_mapped", None)
     if mapped is not None:
         ip = mapped  # unwrap ::ffff:a.b.c.d before classifying
@@ -71,7 +62,7 @@ def _is_safe_url(url: str) -> bool:
         if parsed.scheme not in ("http", "https"):
             return False
         addrinfo = socket.getaddrinfo(hostname, None)
-        resolved_ips: list[ipaddress.ip_address] = []
+        resolved_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
         for family, _, _, _, sockaddr in addrinfo:
             ip = ipaddress.ip_address(socket.inet_ntop(family, sockaddr[4]))
             resolved_ips.append(ip)
@@ -110,7 +101,10 @@ def _fetch_url_safe(image_url: str, timeout: float = 10.0) -> bytes:
         if not _is_safe_url(full_url):
             raise ValueError(f"Blocked redirect to unsafe URL: {full_url}")
         response = session.get(full_url, timeout=timeout, allow_redirects=False)
-    # Final response is either the target or the last safe hop
+    # If we exhausted redirects and the last response is still a redirect,
+    # the redirect chain exceeded max_redirects (potential loop).
+    if response.is_redirect and response.headers.get("Location"):
+        raise ValueError(f"Redirect limit exceeded (max_redirects={max_redirects})")
     return response.content
 
 
@@ -120,7 +114,7 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     Uses torchvision.io.decode_image for bytes/paths (faster SIMD decode),
     falls back to TVF.pil_to_tensor for PIL Image inputs.
     """
-    if isinstance(image, str) and image.startswith("http"):
+    if isinstance(image, str) and image.startswith(("http://", "https://")):
         image = _fetch_url_safe(image)
     if isinstance(image, bytes):
         raw = torch.frombuffer(bytearray(image), dtype=torch.uint8)

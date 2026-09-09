@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import ipaddress
+import socket
 from unittest import mock
 
 import pytest
-import requests
 
 from torchtitan.hf_datasets.multimodal.utils.image import _is_blocked_ip, _is_safe_url
 
@@ -66,15 +66,14 @@ class TestIsSafeURL:
     @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.socket.getaddrinfo")
     def test_https_url_safe(self, mock_getaddrinfo):
         mock_getaddrinfo.return_value = [
-            (socket_AF_INET := __import__("socket").AF_INET, None, None, None,
-             ("8.8.8.8", 0)),
+            (socket.AF_INET, None, None, None, ("8.8.8.8", 0)),
         ]
         assert _is_safe_url("https://example.com/image.png")
 
     @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.socket.getaddrinfo")
     def test_http_url_safe(self, mock_getaddrinfo):
         mock_getaddrinfo.return_value = [
-            (__import__("socket").AF_INET, None, None, None, ("8.8.4.4", 0)),
+            (socket.AF_INET, None, None, None, ("8.8.4.4", 0)),
         ]
         assert _is_safe_url("http://example.com/page")
 
@@ -98,15 +97,13 @@ class TestIsSafeURL:
 
     @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.socket.getaddrinfo")
     def test_dns_resolution_failure_blocked(self, mock_getaddrinfo):
-        import socket as sock
-        mock_getaddrinfo.side_effect = sock.gaierror("DNS resolution failed")
+        mock_getaddrinfo.side_effect = socket.gaierror("DNS resolution failed")
         assert not _is_safe_url("http://nonexistent.invalid/image.png")
 
     @mock.patch("torchtitan.hf_datasets.multimodal.utils.image.socket.getaddrinfo")
     def test_ipv6_resolved_safe(self, mock_getaddrinfo):
-        import socket as sock
         mock_getaddrinfo.return_value = [
-            (sock.AF_INET6, None, None, None,
+            (socket.AF_INET6, None, None, None,
              ("2001:4860:4860::8888", 0, 0, 0)),
         ]
         assert _is_safe_url("https://example.com/image.png")
@@ -121,9 +118,8 @@ class TestFetchURLSafe:
     def test_redirect_chain_validated(
         self, mock_session_cls, mock_getaddrinfo, mock_is_safe
     ):
-        import socket as sock
         mock_getaddrinfo.return_value = [
-            (sock.AF_INET, None, None, None, ("8.8.8.8", 0)),
+            (socket.AF_INET, None, None, None, ("8.8.8.8", 0)),
         ]
         mock_is_safe.return_value = True
 
@@ -151,9 +147,8 @@ class TestFetchURLSafe:
     def test_unsafe_redirect_blocked(
         self, mock_session_cls, mock_getaddrinfo, mock_is_safe
     ):
-        import socket as sock
         mock_getaddrinfo.return_value = [
-            (sock.AF_INET, None, None, None, ("8.8.8.8", 0)),
+            (socket.AF_INET, None, None, None, ("8.8.8.8", 0)),
         ]
         # Allow initial URL, block redirect
         mock_is_safe.side_effect = [True, False]
@@ -177,9 +172,8 @@ class TestFetchURLSafe:
         self, mock_session_cls, mock_getaddrinfo, mock_is_safe
     ):
         """Verify infinite redirect loops are bounded (max_redirects = 10)."""
-        import socket as sock
         mock_getaddrinfo.return_value = [
-            (sock.AF_INET, None, None, None, ("8.8.8.8", 0)),
+            (socket.AF_INET, None, None, None, ("8.8.8.8", 0)),
         ]
         mock_is_safe.return_value = True
 
