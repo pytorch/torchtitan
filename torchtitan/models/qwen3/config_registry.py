@@ -379,14 +379,6 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_non_fused_qkv(seq_len: int | None = None) -> Trainer.Config:
-    # Reverse test: exercise the separate wq/wk/wv path now that fused QKV is
-    # the debugmodel default.
-    config = qwen3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry("debugmodel_non_fused_qkv", seq_len=seq_len)
-    return config
-
-
 def qwen3_moe_debug(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(

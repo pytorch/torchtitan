@@ -17,8 +17,11 @@ import torch_remat as remat
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
+from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.overrides.fused_swiglu import DistGEMMFusedSwiGLU, FusedSwiGLU
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -66,7 +69,7 @@ class _CountingGQAttention(GQAttention):
         self.n_kv_heads = 1
         self.head_dim = 4
         self.enable_gqa = False
-        self.rope = _CountingOp(_identity_rope)
+        self.rope = _CountingOp(_identity_rope)  # pyrefly: ignore [bad-assignment]
         self.qkv_linear = _CountingOp(_qkv_projection)
         self.wo = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
         self.inner_attention = _CountingOp(_inner_attention)
@@ -82,6 +85,15 @@ class _AttentionBlock(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.attention(x_TD, attention_masks=None).sum()
+
+
+class _FeedForwardBlock(Module):
+    def __init__(self, feed_forward: Module):
+        super().__init__()
+        self.feed_forward = feed_forward
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.feed_forward(x_TD).sum()
 
 
 class _RematModel(Module):
@@ -106,6 +118,24 @@ def _run_forward_backward(
         assert parameter.grad is not None
         parameter_grads.append(parameter.grad.detach().clone())
     return output.detach(), input_BD.grad.detach().clone(), parameter_grads
+
+
+def _trace_region_names(forward: Callable[[], Any]) -> list[str]:
+    with remat.collect_trace() as trace:
+        forward()
+    return [entry.name for entry in trace.entries]
+
+
+def _linear_config(in_features: int, out_features: int) -> Linear.Config:
+    return Linear.Config(in_features=in_features, out_features=out_features)
+
+
+def _feed_forward_config() -> FeedForward.Config:
+    return FeedForward.Config(
+        w1=_linear_config(4, 8),
+        w2=_linear_config(8, 4),
+        w3=_linear_config(4, 8),
+    )
 
 
 class TestRematRegions(unittest.TestCase):
@@ -175,6 +205,97 @@ class TestRematRegions(unittest.TestCase):
                     ),
                     expected_counts,
                 )
+
+    def test_feed_forward_save_regions_control_recomputation(self):
+        for save_regions, expected_counts in (
+            ([], (2, 2)),
+            (["feed_forward.*"], (1, 1)),
+            (["feed_forward.w13"], (1, 2)),
+            (["feed_forward.w2"], (2, 1)),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                feed_forward = _feed_forward_config().build()
+                feed_forward.w13 = _CountingOp(feed_forward.w13)
+                feed_forward.w2 = _CountingOp(feed_forward.w2)
+                baseline = _RematModel(_FeedForwardBlock(feed_forward))
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                actual = _run_forward_backward(remat_model, x_TD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
+                block = remat_model.layers["0"]
+                assert isinstance(block, _FeedForwardBlock)
+                feed_forward = block.feed_forward
+                assert isinstance(feed_forward, FeedForward)
+                self.assertEqual(
+                    (
+                        feed_forward.w13.num_forwards,
+                        feed_forward.w2.num_forwards,
+                    ),
+                    expected_counts,
+                )
+
+    def test_feed_forward_variants_use_expected_region_boundaries(self):
+        feed_forward_config = _feed_forward_config()
+        sigmoid_config = SigmoidGatedFeedForward.Config(
+            w1=feed_forward_config.w1,
+            w2=feed_forward_config.w2,
+            w3=feed_forward_config.w3,
+            gate=_linear_config(4, 4),
+        )
+        variants = (
+            (sigmoid_config.build(), ["w13", "w2", "gate"]),
+            (
+                DistGEMMFeedForward.Config(
+                    w1=feed_forward_config.w1,
+                    w2=feed_forward_config.w2,
+                    w3=feed_forward_config.w3,
+                ).build(),
+                ["w13", "w2"],
+            ),
+            (
+                FusedSwiGLU.Config(
+                    w1=feed_forward_config.w1,
+                    w2=feed_forward_config.w2,
+                    w3=feed_forward_config.w3,
+                ).build(),
+                ["w13", "w2"],
+            ),
+            (
+                DistGEMMFusedSwiGLU.Config(
+                    w1=feed_forward_config.w1,
+                    w2=feed_forward_config.w2,
+                    w3=feed_forward_config.w3,
+                ).build(),
+                ["w13", "w2"],
+            ),
+        )
+
+        def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.silu(gate) * up
+
+        with patch(
+            "torchtitan.overrides.fused_swiglu._fused_silu_and_mul",
+            side_effect=silu_and_mul,
+        ):
+            for feed_forward, expected_names in variants:
+                with self.subTest(feed_forward=type(feed_forward).__name__):
+                    model = _RematModel(_FeedForwardBlock(feed_forward))
+                    RegionAC.Config(save_regions=[]).build().apply(model)
+                    self.assertEqual(
+                        _trace_region_names(lambda: model(torch.randn(3, 4))),
+                        [f"feed_forward.{name}" for name in expected_names],
+                    )
 
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
