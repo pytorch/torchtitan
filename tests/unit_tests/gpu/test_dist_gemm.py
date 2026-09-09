@@ -41,7 +41,6 @@ from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedQKVLinear,
-    DistGEMMFeedForward,
     RowParallelLinear,
 )
 
@@ -139,23 +138,6 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
                 set_gqa_attention_sharding(attn, enable_sp=False)
 
-    def test_bias_on_w1_w3_is_rejected(self):
-        """A bias must fail at config time, not silently disable dist-GEMM.
-
-        The dist-GEMM path does not support bias. Accepting the config and
-        quietly running the standard FFN would look exactly like the feature
-        working.
-        """
-        from torchtitan.models.common.linear import Linear
-
-        kw = {"in_features": DIM, "out_features": 4 * DIM}
-        with self.assertRaisesRegex(ValueError, "does not support a bias"):
-            DistGEMMFeedForward.Config(
-                w1=Linear.Config(**kw, bias=True),
-                w2=Linear.Config(in_features=4 * DIM, out_features=DIM),
-                w3=Linear.Config(**kw),
-            )
-
     def test_sharding_setup_declares_the_fused_contracts(self):
         """set_gqa_attention_sharding declares different contracts for dist-GEMM.
 
@@ -246,12 +228,13 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
-class TestFusedFeedForwardNumerics(DTensorTestBase):
+class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
     """The dist-GEMM FFN must match the standard one under TP+SP.
 
-    Proves the fused path actually runs (a silent fallback would still match, so
-    the weights are sharded per rank -- the standard module could not consume them)
-    and that the flat token layout is preserved through both collectives.
+    The test manually shards w13 colwise and w2 rowwise. DistGEMM must
+    all-gather the sequence-sharded input before w13 and reduce-scatter w2's
+    output. The standard forward can execute on these local shards, but it would
+    produce an incorrect local partial result.
     """
 
     @property
@@ -276,7 +259,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
             .build()
             .to(dev)
         )
-        fused = (
+        dist_gemm = (
             make_ffn_config(
                 dim=dim,
                 hidden_dim=hidden,
@@ -289,7 +272,7 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         )
 
         with torch.no_grad():
-            for m in (standard, fused):
+            for m in (standard, dist_gemm):
                 for w in (m.w13.weight, m.w2.weight):
                     torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                     w.copy_(torch.randn_like(w) * 0.1)
@@ -297,12 +280,12 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         x = torch.randn(num_tokens, dim, device=dev)
         ref = standard(x)
 
-        # Shard the fused module's weights: w13 colwise, w2 rowwise.
+        # Shard the dist-GEMM module's weights: w13 colwise, w2 rowwise.
         with torch.no_grad():
-            fused.w13.weight = torch.nn.Parameter(
+            dist_gemm.w13.weight = torch.nn.Parameter(
                 standard.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
-            fused.w2.weight = torch.nn.Parameter(
+            dist_gemm.w2.weight = torch.nn.Parameter(
                 standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
@@ -311,9 +294,9 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
         with use_spmd_backend("spmd_types"):
             with set_current_spmd_mesh(mesh):
                 x_shard = x.chunk(R, 0)[self.rank].contiguous()
-                out_shard = fused(x_shard)
+                out_shard = dist_gemm(x_shard)
 
-        # fused returns this rank's sequence shard of the full-sequence result
+        # DistGEMM returns this rank's sequence shard of the full result.
         torch.testing.assert_close(
             out_shard, ref.chunk(R, 0)[self.rank], atol=2e-3, rtol=2e-3
         )
@@ -322,12 +305,12 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
-class TestFusedSwigluOverlapNumerics(DTensorTestBase):
+class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
     """The Triton-activation FFN with TP overlap must match native SwiGLU.
 
-    Same argument as TestFusedFeedForwardNumerics: the weights are sharded per
-    rank, so a silent fallback to the standard path could not consume them. Lives
-    here rather than in test_fused_swiglu.py, which is CPU-only by design.
+    Same communication contract as TestDistGEMMFeedForwardNumerics, with the
+    Triton SiLU-and-multiply override composed on top. Lives here rather than in
+    test_fused_swiglu.py, which is CPU-only by design.
     """
 
     @property

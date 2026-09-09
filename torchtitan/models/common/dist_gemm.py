@@ -179,9 +179,7 @@ class DistGEMMFeedForward(FeedForward):
     ``w2`` is row-parallel and reduce-scatters back to a sequence shard. Logical
     checkpoint FQNs remain the logical ``w1``/``w2``/``w3``.
 
-    Falls back to the standard forward when TP is off. A bias on the logical
-    ``w1``/``w3`` projections is rejected because the dist-GEMM path does not
-    support it (torchtitan's dense FFNs use ``bias=False``).
+    Falls back to the standard forward when TP is off.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -190,33 +188,20 @@ class DistGEMMFeedForward(FeedForward):
         binds ``Config.build()`` to this module rather than the standard one, so it
         cannot be deleted as empty."""
 
-        def __post_init__(self) -> None:
-            # Rejected at config construction rather than falling back silently in
-            # forward: a silent fallback means asking for the fused FFN, getting
-            # the standard one, and having no way to tell. TorchTitan's dense FFN
-            # builds these with bias=False, so this is a misconfiguration rather
-            # than a gap.
-            if self.w1.bias or self.w3.bias:
-                raise ValueError(
-                    "DistGEMMFeedForward does not support a bias on w1/w3; "
-                    "the fused all-gather takes no bias. Use the standard "
-                    "FeedForward, or build w1/w3 with bias=False."
-                )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super().forward(x)
 
-        gate_up_TF2 = AllGatherLinear.apply(
+        gate_up_TF = AllGatherLinear.apply(
             x,
             self.w13.weight,
             self.w13.bias,
             tp_group,
             tp_group.group_name,
-        ).unflatten(-1, (-1, 2))
-        gate_TF, up_TF = gate_up_TF2.unbind(-1)
+        )
+        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         # Elementwise on feature-sharded activations: no collective.
         h_TF = self._activation(gate_TF, up_TF)
         return LinearReduceScatter.apply(

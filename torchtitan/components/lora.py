@@ -64,11 +64,11 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
-_merged_lora_class_cache: dict[type, type] = {}
+_logical_slice_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
 
 
-def _get_merged_lora_cls(parent_cls: type) -> type:
+def _get_logical_slice_lora_cls(parent_cls: type) -> type:
     """Return a fused-output Linear with independent logical LoRA adapters.
 
     A single adapter over the merged outputs would couple the ranks of the
@@ -76,8 +76,8 @@ def _get_merged_lora_cls(parent_cls: type) -> type:
     behavior of targeting either projection independently while the frozen base
     weight still uses one physical GEMM.
     """
-    if parent_cls in _merged_lora_class_cache:
-        return _merged_lora_class_cache[parent_cls]
+    if parent_cls in _logical_slice_lora_class_cache:
+        return _logical_slice_lora_class_cache[parent_cls]
 
     parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
 
@@ -137,7 +137,7 @@ def _get_merged_lora_cls(parent_cls: type) -> type:
 
     MergedLoRALinear.__name__ = f"MergedLoRA{parent_cls.__name__}"
     MergedLoRALinear.__qualname__ = f"MergedLoRA{parent_cls.__name__}"
-    _merged_lora_class_cache[parent_cls] = MergedLoRALinear
+    _logical_slice_lora_class_cache[parent_cls] = MergedLoRALinear
     return MergedLoRALinear
 
 
@@ -234,8 +234,10 @@ def _get_lora_cls(parent_cls: type) -> type:
             param_init,
             config_type=parent_config_cls,
         )
-        merged_lora_cls = _get_merged_lora_cls(parent_cls)
-        merged_config_cls = merged_lora_cls.Config  # pyrefly: ignore[missing-attribute]
+        logical_slice_lora_cls = _get_logical_slice_lora_cls(parent_cls)
+        merged_config_cls = (  # pyrefly: ignore[missing-attribute]
+            logical_slice_lora_cls.Config
+        )
         return merged_config_cls(
             **{
                 field.name: getattr(merged_base_config, field.name)

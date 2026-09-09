@@ -94,8 +94,8 @@ class FeedForward(Module):
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up_TF2 = self.w13(x).unflatten(-1, (-1, 2))
-        gate_TF, up_TF = gate_up_TF2.unbind(-1)
+        gate_up_TF = self.w13(x)
+        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         return self.w2(self._activation(gate_TF, up_TF))
 
     def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:

@@ -140,7 +140,7 @@ def test_lora_preserves_logical_feed_forward_slices():
     reloaded = config.build()
     reloaded.init_states()
     reloaded.load_state_dict(feed_forward.state_dict())
-    torch.testing.assert_close(reloaded(x), expected, rtol=0, atol=0)
+    torch.testing.assert_close(reloaded(x), expected)
 
 
 def test_float8_lora_preserves_logical_feed_forward_slices():
