@@ -109,6 +109,8 @@ class KimiK25Model(DeepSeekV3Model):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
         # Function-local import avoids a circular import.
@@ -118,10 +120,16 @@ class KimiK25Model(DeepSeekV3Model):
 
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
+        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         if parallel_dims.cp_enabled:

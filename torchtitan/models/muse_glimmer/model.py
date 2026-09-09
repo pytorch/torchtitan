@@ -368,6 +368,8 @@ class MuseGlimmerModel(Decoder):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
         # Function-local import avoids a circular import.
@@ -413,10 +415,16 @@ class MuseGlimmerModel(Decoder):
         batch.pop("special_tokens", None)
 
         positions = batch.get("positions", None)
+        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
 
         input_sharding = {
             **decoder_input_sharding(),
@@ -538,6 +546,10 @@ class MuseGlimmerModel(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> AttentionMasksType:
         attn_config = self.config.first_attention
         assert attn_config is not None
@@ -546,7 +558,12 @@ class MuseGlimmerModel(Decoder):
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
         if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
         if not isinstance(inner_attn, FlexAttention.Config):
             raise TypeError(
                 "Muse Glimmer requires FlexAttention or VarlenAttention for "

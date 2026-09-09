@@ -68,6 +68,12 @@ class Batcher(Configurable):
         """When non-zero, pad each sample to a multiple of this value
         before packing. Used by flex attention in batch-invariant mode
         so that block boundaries align regardless of batch composition."""
+        max_num_documents: int | None = None
+        """Maximum non-padding document segments per local trainer microbatch."""
+
+        def __post_init__(self) -> None:
+            if self.max_num_documents is not None and self.max_num_documents <= 0:
+                raise ValueError("max_num_documents must be positive")
 
     def __init__(
         self,
@@ -80,7 +86,7 @@ class Batcher(Configurable):
         pad_id: int,
     ) -> None:
         self.seq_len = max_context_length
-        self.local_batch_size, remainder = divmod(
+        self._num_rows_per_microbatch, remainder = divmod(
             num_tokens_per_microbatch_per_dp_rank,
             max_context_length,
         )
@@ -92,6 +98,7 @@ class Batcher(Configurable):
             )
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
+        self._max_num_documents = config.max_num_documents
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
@@ -169,8 +176,9 @@ class Batcher(Configurable):
         num_response_tokens = sum(
             int(row["loss_mask"].sum().item()) for row in packed_rows
         )
+        microbatches = self._build_microbatch_grid(packed_rows)
         return TrainingBatch(
-            microbatches=self._build_microbatch_grid(packed_rows),
+            microbatches=microbatches,
             num_global_valid_tokens=num_global_valid_tokens,
             metrics=[
                 *metrics,
@@ -188,6 +196,7 @@ class Batcher(Configurable):
                     training_samples,
                     num_rollout_groups,
                     num_metric_only_groups,
+                    num_microbatches=len(microbatches),
                 ),
             ],
             # Trainer computes policy_age from these at consume time (faithful to what it trains on).
@@ -230,7 +239,7 @@ class Batcher(Configurable):
     def _assign_training_samples_to_rows(
         self, training_samples: list[TrainingSample]
     ) -> list[list[TrainingSample]]:
-        """Next-fit training_samples into rows of <= ``seq_len`` tokens (the caller already capped the count).
+        """Next-fit samples into context-length rows.
 
         Example:
 
@@ -245,8 +254,15 @@ class Batcher(Configurable):
         for training_sample in training_samples:
             num_tokens_to_pack = self.num_tokens_to_pack(training_sample)
 
-            # doesn't fit, close the row
-            if current_row and current_len + num_tokens_to_pack > self.seq_len:
+            # A row must fit in one local microbatch, so the full microbatch
+            # document limit is also a valid upper bound for one row.
+            if current_row and (
+                current_len + num_tokens_to_pack > self.seq_len
+                or (
+                    self._max_num_documents is not None
+                    and len(current_row) >= self._max_num_documents
+                )
+            ):
                 rows.append(current_row)
                 current_row, current_len = [], 0
 
@@ -280,14 +296,18 @@ class Batcher(Configurable):
     ) -> list[list[TrainingMicrobatch]]:
         """Build `[num_microbatches][dp_degree]` from however many rows packing produced (variable count).
 
-        Each (microbatch, rank) takes its rows round-robin. Pad-only rows are appended last, so dealing them round-robin
-        spreads them across microbatches/ranks instead of all landing on the last one.
+        Without a document cap, rows are dealt round-robin so padding is spread
+        across cells. With a cap, rows are first grouped into cells that satisfy
+        both the row and document capacities.
 
         Example:
-            # local_batch_size=2, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
+            # 2 rows/rank, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
             # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
         """
-        rows_per_microbatch = self.local_batch_size * self._dp_degree
+        if self._max_num_documents is not None:
+            return self._build_document_limited_microbatch_grid(packed_rows)
+
+        rows_per_microbatch = self._num_rows_per_microbatch * self._dp_degree
         num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
 
         # Pad up to a full grid
@@ -308,6 +328,53 @@ class Batcher(Configurable):
                 )
             grid.append(ranks)
         return grid
+
+    def _build_document_limited_microbatch_grid(
+        self, packed_rows: list[dict]
+    ) -> list[list[TrainingMicrobatch]]:
+        """Pack rows into local microbatch cells within both capacities."""
+        assert self._max_num_documents is not None
+        cells: list[list[dict]] = []
+        current_cell: list[dict] = []
+        current_num_documents = 0
+        for row in packed_rows:
+            num_documents = len(row["seq_lens"])
+            assert num_documents <= self._max_num_documents
+            if current_cell and (
+                len(current_cell) >= self._num_rows_per_microbatch
+                or current_num_documents + num_documents > self._max_num_documents
+            ):
+                cells.append(current_cell)
+                current_cell = []
+                current_num_documents = 0
+            current_cell.append(row)
+            current_num_documents += num_documents
+        if current_cell:
+            cells.append(current_cell)
+
+        num_microbatches = max(1, math.ceil(len(cells) / self._dp_degree))
+        cells.extend([] for _ in range(num_microbatches * self._dp_degree - len(cells)))
+
+        empty_cells = [cell for cell in cells if not cell]
+        for empty_cell in empty_cells:
+            donor = next((cell for cell in cells if len(cell) > 1), None)
+            if donor is None:
+                break
+            empty_cell.append(donor.pop())
+
+        empty_row = self._pack_training_sample_row([])
+        for cell in cells:
+            cell.extend(
+                empty_row for _ in range(self._num_rows_per_microbatch - len(cell))
+            )
+
+        return [
+            [
+                self.collate(cells[microbatch * self._dp_degree + rank])
+                for rank in range(self._dp_degree)
+            ]
+            for microbatch in range(num_microbatches)
+        ]
 
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality (images, ...).
@@ -330,6 +397,7 @@ class Batcher(Configurable):
         keys = list(pad_values)
         row: dict[str, list] = {key: [] for key in keys}
         positions: list[int] = []
+        padding_mask: list[bool] = []
         seq_lens: list[int] = []
 
         # Shift labals/logits + pad to per_sample_pad_multiple.
@@ -342,6 +410,7 @@ class Batcher(Configurable):
                 "advantages": training_sample.advantage[1:],
             }
             sample_len = len(sample["input_ids"])
+            unpadded_len = sample_len
 
             # pad to multiple
             if self._per_sample_pad_multiple:
@@ -357,6 +426,8 @@ class Batcher(Configurable):
             for key in keys:
                 row[key].extend(sample[key])
             positions.extend(range(sample_len))
+            padding_mask.extend([False] * unpadded_len)
+            padding_mask.extend([True] * (sample_len - unpadded_len))
             seq_lens.append(sample_len)
 
         # Pad the row up to seq_len.
@@ -364,18 +435,19 @@ class Batcher(Configurable):
         if pad_len > 0:
             for key in keys:
                 row[key].extend([pad_values[key]] * pad_len)
-            positions.extend(range(pad_len))
+            positions.extend(index % self.seq_len for index in range(pad_len))
+            padding_mask.extend([True] * pad_len)
 
         packed = {key: torch.tensor(row[key], dtype=_DTYPES[key]) for key in keys}
         packed["positions"] = torch.tensor(positions, dtype=torch.long)
+        packed["padding_mask"] = torch.tensor(padding_mask, dtype=torch.bool)
         packed["seq_lens"] = seq_lens
         return packed
 
     # TODO: accept a collate_fn on Batcher.Config (like the pre-trainer's
     # dataloader) and wire a non-pretraining collate only when a caller actually
     # needs one.
-    @staticmethod
-    def collate(rows: list[dict]) -> TrainingMicrobatch:
+    def collate(self, rows: list[dict]) -> TrainingMicrobatch:
         """Concatenate packed rows into a single flat microbatch."""
         return TrainingMicrobatch(
             token_ids=torch.cat([row["input_ids"] for row in rows]),
@@ -384,6 +456,7 @@ class Batcher(Configurable):
             generator_logprobs=torch.cat([row["generator_logprobs"] for row in rows]),
             loss_mask=torch.cat([row["loss_mask"] for row in rows]),
             advantages=torch.cat([row["advantages"] for row in rows]),
+            padding_mask=torch.cat([row["padding_mask"] for row in rows]),
         )
 
     def _packing_metrics(
@@ -392,10 +465,18 @@ class Batcher(Configurable):
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
         num_metric_only_groups: int,
+        num_microbatches: int,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
-        total_slots = len(packed_rows) * self.seq_len
-        non_padded = sum(sum(row["seq_lens"]) for row in packed_rows)
+        total_slots = (
+            num_microbatches
+            * self._dp_degree
+            * self._num_rows_per_microbatch
+            * self.seq_len
+        )
+        non_padded = sum(
+            int((~row["padding_mask"]).sum().item()) for row in packed_rows
+        )
         return [
             m.Metric(
                 "train_batch/padding_frac",
@@ -403,9 +484,7 @@ class Batcher(Configurable):
             ),
             m.Metric(
                 "train_batch/num_microbatches",
-                m.NoReduce(
-                    float(len(packed_rows) // (self.local_batch_size * self._dp_degree))
-                ),
+                m.NoReduce(float(num_microbatches)),
             ),
             m.Metric(
                 "train_batch/num_rollout_groups", m.NoReduce(float(num_rollout_groups))

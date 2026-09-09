@@ -215,7 +215,15 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
-    def get_attention_masks(self, positions):
+    def get_attention_masks(
+        self,
+        positions,
+        *,
+        padding_mask=None,
+        max_num_documents=None,
+        max_context_length=None,
+    ):
+        del positions, padding_mask, max_num_documents, max_context_length
         return None
 
     def forward(
