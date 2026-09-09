@@ -155,9 +155,7 @@ def _process_mm_sample(
                     width=processed_img.shape[2],
                     patch_size=patch_size,
                     spatial_merge_size=spatial_merge_size,
-                    # TODO(data-mm-temporal-patches): Unify image/video token counting;
-                    # the configured temporal patch size is unused by this image path.
-                    temporal_patch_size=1,
+                    temporal_patch_size=temporal_patch_size,
                 )
                 processed_images.append(processed_img)
                 num_image_tokens.append(num_tokens)
