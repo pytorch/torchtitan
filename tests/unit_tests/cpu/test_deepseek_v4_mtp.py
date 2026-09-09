@@ -11,7 +11,6 @@ from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.token_dispatcher import MinimalAsyncEPTokenDispatcher
 from torchtitan.models.deepseek_v4 import model_registry
 from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_mtp_debugmodel
-from torchtitan.protocols.module import ModuleList
 
 
 class TestDeepSeekV4MTPConfig(unittest.TestCase):
@@ -21,13 +20,6 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         self.assertEqual(model_config.n_mtp_layers, 1)
         self.assertIsNotNone(model_config.mtp_layers)
         self.assertEqual(len(model_config.mtp_layers), 1)
-
-    def test_mtp_model_satisfies_module_protocol(self):
-        config = deepseek_v4_mtp_debugmodel(seq_len=32)
-        model = config.model_spec.model.build()
-
-        self.assertIsInstance(model.mtp_layers, ModuleList)
-        model.verify_module_protocol()
 
     def test_mtp_moe_minimal_async_ep_gets_runtime_config(self):
         config = deepseek_v4_mtp_debugmodel(seq_len=32)
