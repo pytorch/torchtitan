@@ -11,7 +11,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.tools.profiler import Profiler
@@ -39,6 +39,7 @@ def gemma4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
+            dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10,
@@ -93,6 +94,7 @@ def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
+            dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10000,
@@ -128,6 +130,7 @@ def gemma4_e4b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=2e-4),
         training=TrainingConfig(
+            dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10000,
@@ -163,6 +166,7 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1e-4),
         training=TrainingConfig(
+            dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10000,
@@ -171,7 +175,7 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
         validator=Validator.Config(
             freq=500,
             steps=1200,
@@ -227,6 +231,7 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1e-4),
         training=TrainingConfig(
+            dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10000,
@@ -235,14 +240,14 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
         validator=Validator.Config(
             freq=500,
             steps=1200,
         ),
     )
 
-
+#TODO This is goofy. Improve it.
 gemma4_26b = gemma4_26b_a4b
 
 
@@ -265,6 +270,7 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=1e-4),
         training=TrainingConfig(
+            dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10000,
@@ -273,7 +279,7 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpoint=CheckpointManager.Config(interval=500),
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
         validator=Validator.Config(
             freq=500,
             steps=1200,

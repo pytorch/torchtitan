@@ -78,7 +78,7 @@ def _set_gemma4_layer_sharding(
         qkv.wk.sharding_config = colwise_config()
     if hasattr(qkv, "wv") and qkv.wv is not None:
         qkv.wv.sharding_config = colwise_config()
-    layer_cfg.attention.wo.sharding_config = rowwise_config(enable_sp=enable_sp)
+    layer_cfg.attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
     set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
     # Shard qk_norm if present

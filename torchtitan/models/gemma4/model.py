@@ -134,7 +134,6 @@ class Gemma4Attention(GQAttention):
         xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
         if self.v_norm is not None:
             xv_THV = self.v_norm(xv_THV)
-
         if self.head_dim > 256:
             # Triton FlexAttention on ROCm does not support head_dim > 256.
             # Global layers use full causal attention, handled directly via SDPA.

@@ -93,23 +93,30 @@ class Gemma4StateDictAdapter(StateDictAdapter):
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert HuggingFace checkpoint to TorchTitan format."""
         self._validate_hf_rope_config(CosSinRoPE.Config)
-        if (
-            self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
-            and "lm_head.weight" not in hf_state_dict
-        ):
-            if "model.embed_tokens.weight" not in hf_state_dict:
-                raise ValueError(
-                    "Weight tying enabled but 'model.embed_tokens.weight' is missing from HF state dict."
-                )
-            hf_state_dict["lm_head.weight"] = hf_state_dict["model.embed_tokens.weight"]
-
         state_dict = {}
 
+        # 1. Strip prefixes first
+        stripped_hf_dict = {}
         for key, value in hf_state_dict.items():
             if key.startswith("model.language_model."):
                 key = "model." + key[len("model.language_model."):]
             elif key.startswith("language_model."):
                 key = "model." + key[len("language_model."):]
+            stripped_hf_dict[key] = value
+
+        # 2. Handle Weight Tying
+        if (
+            self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
+            and "lm_head.weight" not in stripped_hf_dict
+        ):
+            if "model.embed_tokens.weight" not in stripped_hf_dict:
+                raise ValueError(
+                    "Weight tying enabled but 'model.embed_tokens.weight' is missing from HF state dict."
+                )
+            stripped_hf_dict["lm_head.weight"] = stripped_hf_dict["model.embed_tokens.weight"]
+
+        # 3. Map Keys
+        for key, value in stripped_hf_dict.items():
 
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)

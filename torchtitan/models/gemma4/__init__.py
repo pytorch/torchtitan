@@ -262,10 +262,10 @@ def _debugmodel(
             dim=dim,
             n_heads=n_heads,
             hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            rope=CosSinRoPE.Config(
+            rope=Gemma4RoPE.Config(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
-                theta=500000,
+                theta=10000.0,
                 scaling="none",
             ),
             attn_backend=attn_backend,
@@ -316,10 +316,10 @@ def _e2b(
             global_head_dim=512,
             global_kv_heads=1,
             attention_k_eq_v=False,
-            rope=CosSinRoPE.Config(
+            rope=Gemma4RoPE.Config(
                 dim=256,
                 max_context_length=seq_len,
-                theta=500000,
+                theta=10000.0,
                 scaling="none",
             ),
             attn_backend=attn_backend,
@@ -372,10 +372,10 @@ def _e4b(
             global_head_dim=512,
             global_kv_heads=2,
             attention_k_eq_v=False,
-            rope=CosSinRoPE.Config(
+            rope=Gemma4RoPE.Config(
                 dim=256,
                 max_context_length=seq_len,
-                theta=500000,
+                theta=10000.0,
                 scaling="none",
             ),
             attn_backend=attn_backend,
@@ -484,10 +484,10 @@ def _26b_a4b(
             global_head_dim=512,
             global_kv_heads=2,
             attention_k_eq_v=True,
-            rope=CosSinRoPE.Config(
+            rope=Gemma4RoPE.Config(
                 dim=256,
                 max_context_length=seq_len,
-                theta=500000,
+                theta=10000.0,
                 scaling="none",
             ),
             attn_backend=attn_backend,
@@ -540,10 +540,10 @@ def _31b(
             global_head_dim=512,
             global_kv_heads=4,
             attention_k_eq_v=True,
-            rope=CosSinRoPE.Config(
+            rope=Gemma4RoPE.Config(
                 dim=256,
                 max_context_length=seq_len,
-                theta=500000,
+                theta=10000.0,
                 scaling="none",
             ),
             attn_backend=attn_backend,
