@@ -44,6 +44,24 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_routed_experts_expose_parameter_owner(self):
+        config = make_routed_experts_config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+            top_k=1,
+            param_init={},
+            comm_backend="standard",
+        )
+        routed_experts = config.build()
+        original_owner = routed_experts.expert_parameters_module()
+        wrapped_owner = nn.Sequential(original_owner)
+
+        result = routed_experts.replace_expert_parameters_module(wrapped_owner)
+
+        self.assertIs(result, routed_experts)
+        self.assertIs(routed_experts.expert_parameters_module(), wrapped_owner)
+
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
         dim = 4
