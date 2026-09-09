@@ -45,6 +45,10 @@ from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
+from .quantile_balance import (
+    QuantileBalancedTopKRouter,
+    register_moe_quantile_balancing_hook,
+)
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -243,7 +247,7 @@ def _latent_moe_config(
 ) -> KimiLatentMoE.Config:
     return KimiLatentMoE.Config(
         num_experts=num_experts,
-        router=TokenChoiceTopKRouter.Config(
+        router=QuantileBalancedTopKRouter.Config(
             num_experts=num_experts,
             top_k=top_k,
             gate=RouterGateLinear.Config(
@@ -255,6 +259,7 @@ def _latent_moe_config(
             score_func=Sigmoid.Config(),
             route_norm=True,
             route_scale=1.0,
+            num_bins=1000,
         ),
         routed_down=_linear(dim, latent_dim),
         routed_experts=RoutedExperts.Config(
@@ -287,7 +292,7 @@ def _latent_moe_config(
             dim=dim,
             hidden_dim=num_shared_experts * expert_hidden_dim,
         ),
-        load_balance_coeff=1e-3,
+        load_balance_coeff=None,
     )
 
 
@@ -594,6 +599,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k3,
         pipelining_fn=None,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=register_moe_quantile_balancing_hook,
         state_dict_adapter=KimiK3StateDictAdapter,
     )
