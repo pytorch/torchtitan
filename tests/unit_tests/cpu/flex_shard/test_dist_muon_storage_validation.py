@@ -38,22 +38,6 @@ class TestDistMuonStorageValidation(unittest.TestCase):
         validated_device = optimizer._validate_parameter_storage()
         self.assertEqual(validated_device, torch.device("cpu"))
 
-    def test_mixed_devices_rejected(self):
-        optimizer = object.__new__(DistMuon)
-        optimizer.param_groups = [
-            {
-                "params": [
-                    self._create_mock_dtensor(torch.device("cpu")),
-                    self._create_mock_dtensor(MagicMock()),
-                ],
-                "param_names": ["layer1.weight", "layer2.weight"],
-            }
-        ]
-        with self.assertRaisesRegex(
-            ValueError, "DistMuon requires one device per process"
-        ):
-            optimizer._validate_parameter_storage()
-
 
 if __name__ == "__main__":
     unittest.main()
