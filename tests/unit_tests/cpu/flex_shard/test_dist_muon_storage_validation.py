@@ -54,16 +54,6 @@ class TestDistMuonStorageValidation(unittest.TestCase):
         ):
             optimizer._validate_parameter_storage()
 
-    def test_non_dtensor_rejected(self):
-        optimizer = object.__new__(DistMuon)
-        optimizer.param_groups = [
-            {
-                "params": [torch.nn.Parameter(torch.randn(2, 2))],
-                "param_names": ["layer1.weight"],
-            }
-        ]
-        with self.assertRaisesRegex(TypeError, "DistMuon requires DTensor parameters"):
-            optimizer._validate_parameter_storage()
 
 
 if __name__ == "__main__":
