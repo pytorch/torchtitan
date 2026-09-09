@@ -20,7 +20,6 @@ from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan.models.qwen3.config_registry import (
     qwen3_debugmodel,
     qwen3_debugmodel_moe_param_groups,
-    qwen3_debugmodel_non_fused_qkv,
 )
 from torchtitan.trainer import Trainer
 
@@ -185,15 +184,6 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     config.compile.enable = True
     config.override.imports = ["torchtitan.overrides.helion_rope.helion_cos_sin_rope"]
-    return config
-
-
-def qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2() -> Trainer.Config:
-    config = qwen3_debugmodel_non_fused_qkv(seq_len=2048)
-    _use_spmd_types(config, typechecking=True)
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.context_parallel_degree = 2
     return config
 
 

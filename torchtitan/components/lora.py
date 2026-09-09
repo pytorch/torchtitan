@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 import spmd_types as spmd
@@ -13,11 +14,14 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import _make_interleaved_linear_config, Linear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
+
+# Shape suffix legend for merged output projections:
+#   T = token dimensions, F = one logical output dimension
 
 
 def _lora_adapter_sharding(
@@ -55,7 +59,184 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
+_fused_gate_up_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class _GateUpLoRASpec:
+    """LoRA settings for one logical projection of a fused gate-up Linear."""
+
+    name: str
+    rank: int
+    alpha: float
+
+
+def _get_fused_gate_up_lora_cls(parent_cls: type) -> type:
+    """Return a fused gate-up Linear with independent LoRA adapters.
+
+    A single adapter over the merged outputs would couple the ranks of the
+    logical w1 and w3 updates. Keeping one adapter pair per slice preserves the
+    behavior of targeting either projection independently while the frozen base
+    weight still uses one physical GEMM.
+    """
+    if parent_cls in _fused_gate_up_lora_class_cache:
+        return _fused_gate_up_lora_class_cache[parent_cls]
+
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
+
+    class FusedGateUpLoRALinear(parent_cls):  # type: ignore[valid-type, misc]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            logical_names: tuple[str, str]
+            # One spec targets either w1 or w3; two specs target both.
+            lora_specs: tuple[_GateUpLoRASpec, ...]
+
+        def __init__(self, config: Config) -> None:
+            super().__init__(config)
+            for param in nn.Module.parameters(self, recurse=False):
+                param.requires_grad_(False)
+
+            self.logical_names = config.logical_names
+            logical_output_size = config.out_features // 2
+            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+                config.sharding_config
+            )
+            self.lora_a = nn.ModuleDict()
+            self.lora_b = nn.ModuleDict()
+            self._lora_scaling = {}
+            for spec in config.lora_specs:
+                self.lora_a[spec.name] = Linear.Config(
+                    in_features=config.in_features,
+                    out_features=spec.rank,
+                    bias=False,
+                    sharding_config=lora_a_sharding,
+                    param_init={
+                        "weight": lambda weight: nn.init.kaiming_uniform_(
+                            weight, a=math.sqrt(5)
+                        ),
+                    },
+                ).build()
+                self.lora_b[spec.name] = Linear.Config(
+                    in_features=spec.rank,
+                    out_features=logical_output_size,
+                    bias=False,
+                    sharding_config=lora_b_sharding,
+                    param_init={"weight": nn.init.zeros_},
+                ).build()
+                self._lora_scaling[spec.name] = spec.alpha / spec.rank
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            logical_outputs_TF = list(
+                super().forward(input).unflatten(-1, (-1, 2)).unbind(-1)
+            )
+            for index, name in enumerate(self.logical_names):
+                if name in self.lora_a:
+                    lora_out_TF = self.lora_b[name](self.lora_a[name](input))
+                    logical_outputs_TF[index] = (
+                        logical_outputs_TF[index]
+                        + self._lora_scaling[name] * lora_out_TF
+                    )
+            return torch.stack(logical_outputs_TF, dim=-1).flatten(-2)
+
+        def _expose_logical_state_dict(
+            self,
+            state_dict,
+            *,
+            physical_prefix: str,
+            logical_prefix: str,
+        ) -> None:
+            """Expose adapters under their logical projection checkpoint keys."""
+            for adapter_name in ("lora_a", "lora_b"):
+                for logical_name in self.logical_names:
+                    physical_key = (
+                        f"{physical_prefix}{adapter_name}.{logical_name}.weight"
+                    )
+                    if physical_key in state_dict:
+                        state_dict[
+                            f"{logical_prefix}{logical_name}.{adapter_name}.weight"
+                        ] = state_dict.pop(physical_key)
+
+        def _restore_logical_state_dict(
+            self,
+            state_dict,
+            *,
+            physical_prefix: str,
+            logical_prefix: str,
+        ) -> None:
+            """Restore logical adapter keys under the physical projection."""
+            for adapter_name in ("lora_a", "lora_b"):
+                for logical_name in self.logical_names:
+                    logical_key = (
+                        f"{logical_prefix}{logical_name}.{adapter_name}.weight"
+                    )
+                    if logical_key in state_dict:
+                        state_dict[
+                            f"{physical_prefix}{adapter_name}.{logical_name}.weight"
+                        ] = state_dict.pop(logical_key)
+
+    FusedGateUpLoRALinear.__name__ = f"FusedGateUpLoRA{parent_cls.__name__}"
+    FusedGateUpLoRALinear.__qualname__ = f"FusedGateUpLoRA{parent_cls.__name__}"
+    _fused_gate_up_lora_class_cache[parent_cls] = FusedGateUpLoRALinear
+    return FusedGateUpLoRALinear
+
+
+def _build_fused_gate_up_lora_linear(
+    first_config: Linear.Config,
+    second_config: Linear.Config,
+    *,
+    logical_names: tuple[str, str],
+    param_init: dict[str, Callable] | None,
+    parent_cls: type,
+    lora_config_cls: type[Linear.Config],
+):
+    """Build a fused gate-up Linear with independent logical LoRA adapters."""
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
+    lora_specs = []
+    parent_field_names = {
+        field.name for field in fields(parent_config_cls) if field.init
+    }
+
+    def make_base_config(name: str, config: Linear.Config):
+        if not isinstance(config, parent_config_cls):
+            raise ValueError(
+                "Cannot fuse LoRA projections backed by different Linear "
+                f"implementations: {name} uses {type(config).__name__}."
+            )
+        if isinstance(config, lora_config_cls):
+            lora_specs.append(
+                _GateUpLoRASpec(
+                    name=name,
+                    rank=config.rank,  # pyrefly: ignore[missing-attribute]
+                    alpha=config.alpha,  # pyrefly: ignore[missing-attribute]
+                )
+            )
+        return parent_config_cls(
+            **{
+                field_name: getattr(config, field_name)
+                for field_name in parent_field_names
+            }
+        )
+
+    first_name, second_name = logical_names
+    first_base_config = make_base_config(first_name, first_config)
+    second_base_config = make_base_config(second_name, second_config)
+    merged_base_config = _make_interleaved_linear_config(
+        first_base_config,
+        second_base_config,
+        param_init=param_init,
+    )
+    fused_gate_up_lora_cls = _get_fused_gate_up_lora_cls(parent_cls)
+    merged_config_cls = vars(fused_gate_up_lora_cls)["Config"]
+    return merged_config_cls(
+        **{
+            field.name: getattr(merged_base_config, field.name)
+            for field in fields(parent_config_cls)
+            if field.init
+        },
+        logical_names=logical_names,
+        lora_specs=tuple(lora_specs),
+    ).build()
 
 
 def _get_lora_cls(parent_cls: type) -> type:
@@ -75,6 +256,24 @@ def _get_lora_cls(parent_cls: type) -> type:
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
+
+            @staticmethod
+            def _custom_interleaved_linear_builder(
+                first_config: Linear.Config,
+                second_config: Linear.Config,
+                *,
+                logical_names: tuple[str, str],
+                param_init: dict[str, Callable] | None,
+            ):
+                """Build fused gate-up LoRA when this config is interleaved."""
+                return _build_fused_gate_up_lora_linear(
+                    first_config,
+                    second_config,
+                    logical_names=logical_names,
+                    param_init=param_init,
+                    parent_cls=parent_cls,
+                    lora_config_cls=LoRALinear.Config,
+                )
 
         def __init__(self, config: Config) -> None:
             super().__init__(config)

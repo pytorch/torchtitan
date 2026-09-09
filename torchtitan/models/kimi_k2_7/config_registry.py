@@ -360,7 +360,7 @@ def _dist_muon_optimizer(
             shardings.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": owned
-                    for projection in ("w1", "w2", "w3")
+                    for projection in ("w13", "w2")
                 }
             )
         else:
@@ -374,7 +374,7 @@ def _dist_muon_optimizer(
             shardings.update(
                 {
                     f"{prefix}.moe.shared_experts.{projection}.weight": owned
-                    for projection in ("w1", "w2", "w3")
+                    for projection in ("w13", "w2")
                 }
             )
         return shardings

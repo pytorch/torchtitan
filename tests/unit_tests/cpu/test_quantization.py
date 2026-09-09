@@ -398,7 +398,7 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     model_config = config.model_spec.model
     model = model_config.build()
     model.init_states()
-    assert isinstance(model.get_submodule("layers.0.feed_forward.w1"), NVFP4Linear)
+    assert isinstance(model.get_submodule("layers.0.feed_forward.w13"), NVFP4Linear)
 
     sd = model.state_dict()
     # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector
