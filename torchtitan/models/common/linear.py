@@ -13,8 +13,11 @@
   from ``Configurable.Config``.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass, fields
+from typing import ClassVar, Protocol
 
 import spmd_types as spmd
 import torch
@@ -34,6 +37,7 @@ class Linear(nn.Linear, Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        _interleaved_linear_builder: ClassVar[_InterleavedLinearBuilder | None] = None
         in_features: int
         out_features: int
         bias: bool = False
@@ -46,22 +50,21 @@ class Linear(nn.Linear, Module):
         )
 
 
-_MergedLinearBuilder = Callable[
-    [tuple[tuple[str, Linear.Config], ...], dict[str, Callable] | None], Linear
+class _InterleavedLinear(Protocol):
+    """Interface required from a built interleaved output projection."""
+
+    weight: torch.Tensor
+    bias: torch.Tensor | None
+    _logical_output_slices: tuple[tuple[str, int], ...]
+
+    def __call__(self, input: torch.Tensor) -> torch.Tensor:
+        ...
+
+
+_InterleavedLinearBuilder = Callable[
+    [tuple[tuple[str, Linear.Config], ...], dict[str, Callable] | None],
+    _InterleavedLinear,
 ]
-_merged_linear_builders: dict[type[Linear.Config], _MergedLinearBuilder] = {}
-
-
-def _register_merged_linear_builder(
-    config_type: type[Linear.Config], builder: _MergedLinearBuilder
-) -> None:
-    """Register how a transformed Linear config participates in one GEMM.
-
-    Most converters can use the default merge below because both logical
-    projections become the same Linear implementation. LoRA registers a custom
-    builder because its adapters must remain independent logical projections.
-    """
-    _merged_linear_builders[config_type] = builder
 
 
 def _merge_linear_configs(
@@ -118,20 +121,29 @@ def _merge_linear_configs(
     return merged_config_type(**config_kwargs)
 
 
-def _build_merged_linear(
+def _build_interleaved_linear(
     logical_configs: tuple[tuple[str, Linear.Config], ...],
     param_init: dict[str, Callable] | None,
-) -> Linear:
-    """Build one physical Linear while retaining its logical output slices.
+) -> _InterleavedLinear:
+    """Build equal-sized logical projections as one interleaved Linear.
 
     ``_logical_output_slices`` lets checkpoint and serving integrations recover
     the logical projection names even though ``named_parameters()`` sees only the
     merged module.
     """
+    if not logical_configs:
+        raise ValueError("At least one logical Linear config is required")
+
+    output_sizes = {config.out_features for _, config in logical_configs}
+    if len(output_sizes) != 1:
+        raise ValueError(
+            "Interleaved logical Linear projections must have matching out_features"
+        )
+
     builders = {
         builder
         for _, config in logical_configs
-        if (builder := _merged_linear_builders.get(type(config))) is not None
+        if (builder := type(config)._interleaved_linear_builder) is not None
     }
     if len(builders) > 1:
         raise ValueError("Logical Linear projections require incompatible mergers")
@@ -141,7 +153,7 @@ def _build_merged_linear(
     else:
         merged = _merge_linear_configs(logical_configs, param_init).build()
 
-    merged._logical_output_slices = tuple(  # pyrefly: ignore[bad-argument-type]
+    merged._logical_output_slices = tuple(
         (name, config.out_features) for name, config in logical_configs
     )
     return merged

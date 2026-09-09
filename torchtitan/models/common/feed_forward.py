@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from torchtitan.models.common.linear import _build_merged_linear, Linear
+from torchtitan.models.common.linear import _build_interleaved_linear, Linear
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
@@ -81,11 +81,7 @@ class FeedForward(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if config.w1.out_features != config.w3.out_features:
-            raise ValueError(
-                "FeedForward requires w1 and w3 to have the same out_features"
-            )
-        self.w13 = _build_merged_linear(
+        self.w13 = _build_interleaved_linear(
             (("w1", config.w1), ("w3", config.w3)),
             _merge_gate_up_param_init(config.w1, config.w3),
         )
@@ -112,13 +108,12 @@ class FeedForward(Module):
             state_dict[f"{prefix}w1.{param_name}"] = param[:, 0].contiguous()
             state_dict[f"{prefix}w3.{param_name}"] = param[:, 1].contiguous()
 
-        for adapter_name in ("lora_a", "lora_b"):
-            for logical_name in ("w1", "w3"):
-                key = f"{prefix}w13.{adapter_name}.{logical_name}.weight"
-                if key in state_dict:
-                    state_dict[
-                        f"{prefix}{logical_name}.{adapter_name}.weight"
-                    ] = state_dict.pop(key)
+        if hasattr(module.w13, "_expose_logical_state_dict"):
+            module.w13._expose_logical_state_dict(
+                state_dict,
+                physical_prefix=f"{prefix}w13.",
+                logical_prefix=prefix,
+            )
 
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
@@ -131,13 +126,12 @@ class FeedForward(Module):
                     [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
                 ).flatten(0, 1)
 
-        for adapter_name in ("lora_a", "lora_b"):
-            for logical_name in ("w1", "w3"):
-                key = f"{prefix}{logical_name}.{adapter_name}.weight"
-                if key in state_dict:
-                    state_dict[
-                        f"{prefix}w13.{adapter_name}.{logical_name}.weight"
-                    ] = state_dict.pop(key)
+        if hasattr(module.w13, "_restore_logical_state_dict"):
+            module.w13._restore_logical_state_dict(
+                state_dict,
+                physical_prefix=f"{prefix}w13.",
+                logical_prefix=prefix,
+            )
 
         native_key = f"{prefix}w13"
         if native_key in state_dict:

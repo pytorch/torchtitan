@@ -14,11 +14,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import (
-    _merge_linear_configs,
-    _register_merged_linear_builder,
-    Linear,
-)
+from torchtitan.models.common.linear import _merge_linear_configs, Linear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -68,6 +64,16 @@ _logical_slice_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
 
 
+@dataclass(frozen=True, slots=True)
+class _LogicalSliceLoRASpec:
+    """LoRA settings for one logical output of an interleaved Linear."""
+
+    name: str
+    rank: int
+    alpha: float
+    base_sharding: ShardingConfig | None
+
+
 def _get_logical_slice_lora_cls(parent_cls: type) -> type:
     """Return a fused-output Linear with independent logical LoRA adapters.
 
@@ -81,11 +87,11 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
 
     parent_config_cls = parent_cls.Config  # pyrefly: ignore[missing-attribute]
 
-    class MergedLoRALinear(parent_cls):  # type: ignore[valid-type, misc]
+    class LogicalSliceLoRALinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             logical_output_slices: tuple[tuple[str, int], ...]
-            lora_specs: tuple[tuple[str, int, float, ShardingConfig | None], ...]
+            lora_specs: tuple[_LogicalSliceLoRASpec, ...]
 
         def __init__(self, config: Config) -> None:
             super().__init__(config)
@@ -93,15 +99,18 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
                 param.requires_grad_(False)
 
             self.logical_output_slices = config.logical_output_slices
+            logical_output_sizes = dict(config.logical_output_slices)
             self.lora_a = nn.ModuleDict()
             self.lora_b = nn.ModuleDict()
             self._lora_scaling = {}
-            for name, rank, alpha, base_sharding in config.lora_specs:
-                output_size = dict(config.logical_output_slices)[name]
-                lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(base_sharding)
-                self.lora_a[name] = Linear.Config(
+            for spec in config.lora_specs:
+                output_size = logical_output_sizes[spec.name]
+                lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+                    spec.base_sharding
+                )
+                self.lora_a[spec.name] = Linear.Config(
                     in_features=config.in_features,
-                    out_features=rank,
+                    out_features=spec.rank,
                     bias=False,
                     sharding_config=lora_a_sharding,
                     param_init={
@@ -110,14 +119,14 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
                         ),
                     },
                 ).build()
-                self.lora_b[name] = Linear.Config(
-                    in_features=rank,
+                self.lora_b[spec.name] = Linear.Config(
+                    in_features=spec.rank,
                     out_features=output_size,
                     bias=False,
                     sharding_config=lora_b_sharding,
                     param_init={"weight": nn.init.zeros_},
                 ).build()
-                self._lora_scaling[name] = alpha / rank
+                self._lora_scaling[spec.name] = spec.alpha / spec.rank
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             base_out_TFN = (
@@ -135,10 +144,46 @@ def _get_logical_slice_lora_cls(parent_cls: type) -> type:
                     )
             return torch.stack(logical_outputs_TF, dim=-1).flatten(-2)
 
-    MergedLoRALinear.__name__ = f"MergedLoRA{parent_cls.__name__}"
-    MergedLoRALinear.__qualname__ = f"MergedLoRA{parent_cls.__name__}"
-    _logical_slice_lora_class_cache[parent_cls] = MergedLoRALinear
-    return MergedLoRALinear
+        def _expose_logical_state_dict(
+            self,
+            state_dict,
+            *,
+            physical_prefix: str,
+            logical_prefix: str,
+        ) -> None:
+            """Expose adapters under their logical projection checkpoint keys."""
+            for adapter_name in ("lora_a", "lora_b"):
+                for logical_name, _ in self.logical_output_slices:
+                    physical_key = (
+                        f"{physical_prefix}{adapter_name}.{logical_name}.weight"
+                    )
+                    if physical_key in state_dict:
+                        state_dict[
+                            f"{logical_prefix}{logical_name}.{adapter_name}.weight"
+                        ] = state_dict.pop(physical_key)
+
+        def _restore_logical_state_dict(
+            self,
+            state_dict,
+            *,
+            physical_prefix: str,
+            logical_prefix: str,
+        ) -> None:
+            """Restore logical adapter keys under the physical projection."""
+            for adapter_name in ("lora_a", "lora_b"):
+                for logical_name, _ in self.logical_output_slices:
+                    logical_key = (
+                        f"{logical_prefix}{logical_name}.{adapter_name}.weight"
+                    )
+                    if logical_key in state_dict:
+                        state_dict[
+                            f"{physical_prefix}{adapter_name}.{logical_name}.weight"
+                        ] = state_dict.pop(logical_key)
+
+    LogicalSliceLoRALinear.__name__ = f"LogicalSliceLoRA{parent_cls.__name__}"
+    LogicalSliceLoRALinear.__qualname__ = f"LogicalSliceLoRA{parent_cls.__name__}"
+    _logical_slice_lora_class_cache[parent_cls] = LogicalSliceLoRALinear
+    return LogicalSliceLoRALinear
 
 
 def _get_lora_cls(parent_cls: type) -> type:
@@ -191,12 +236,11 @@ def _get_lora_cls(parent_cls: type) -> type:
 
     LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-    _lora_class_cache[parent_cls] = LoRALinear
 
-    def build_merged_lora_linear(
+    def build_interleaved_lora_linear(
         logical_configs: tuple[tuple[str, Linear.Config], ...],
         param_init: dict[str, Callable] | None,
-    ) -> Linear:
+    ):
         base_configs = []
         lora_specs = []
         parent_field_names = {
@@ -221,11 +265,11 @@ def _get_lora_cls(parent_cls: type) -> type:
             )
             if isinstance(config, LoRALinear.Config):
                 lora_specs.append(
-                    (
-                        name,
-                        config.rank,
-                        config.alpha,
-                        config.sharding_config,
+                    _LogicalSliceLoRASpec(
+                        name=name,
+                        rank=config.rank,
+                        alpha=config.alpha,
+                        base_sharding=config.sharding_config,
                     )
                 )
 
@@ -235,9 +279,7 @@ def _get_lora_cls(parent_cls: type) -> type:
             config_type=parent_config_cls,
         )
         logical_slice_lora_cls = _get_logical_slice_lora_cls(parent_cls)
-        merged_config_cls = (  # pyrefly: ignore[missing-attribute]
-            logical_slice_lora_cls.Config
-        )
+        merged_config_cls = vars(logical_slice_lora_cls)["Config"]
         return merged_config_cls(
             **{
                 field.name: getattr(merged_base_config, field.name)
@@ -250,7 +292,8 @@ def _get_lora_cls(parent_cls: type) -> type:
             lora_specs=tuple(lora_specs),
         ).build()
 
-    _register_merged_linear_builder(LoRALinear.Config, build_merged_lora_linear)
+    LoRALinear.Config._interleaved_linear_builder = build_interleaved_lora_linear
+    _lora_class_cache[parent_cls] = LoRALinear
     return LoRALinear
 
 

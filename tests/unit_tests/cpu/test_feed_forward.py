@@ -115,3 +115,14 @@ def test_feed_forward_rejects_mismatched_gate_up_implementations():
 
     with pytest.raises(ValueError, match="different implementations"):
         config.build()
+
+
+def test_feed_forward_rejects_mismatched_gate_up_output_sizes():
+    config = FeedForward.Config(
+        w1=Linear.Config(in_features=4, out_features=8),
+        w2=Linear.Config(in_features=8, out_features=4),
+        w3=Linear.Config(in_features=4, out_features=16),
+    )
+
+    with pytest.raises(ValueError, match="matching out_features"):
+        config.build()
