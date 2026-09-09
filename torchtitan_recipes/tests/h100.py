@@ -6,7 +6,10 @@
 
 """Configurations for the ``h100`` integration test suite."""
 
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import FullAC
+
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -58,7 +61,10 @@ def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
 
 
 def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
@@ -75,7 +81,10 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 8
     config.activation_checkpoint = FullAC.Config()
-    return config
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
 
 
 def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
