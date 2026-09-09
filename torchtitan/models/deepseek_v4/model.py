@@ -13,6 +13,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.protocols.module import ModuleList
 
 from .attention import dsv4_mask_key, DSV4FlexAttention
 from .mhc import HcHead, HcPost, HcPre
@@ -171,9 +172,9 @@ class DeepSeekV4Model(Decoder):
         self.n_main_layers = cfg.n_layers
 
         self.hc_head = cfg.hc_head.build()
-        self.mtp_layers = torch.nn.ModuleList()
+        self.mtp_layers = ModuleList()
         if cfg.mtp_layers is not None:
-            self.mtp_layers = torch.nn.ModuleList(
+            self.mtp_layers = ModuleList(
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
