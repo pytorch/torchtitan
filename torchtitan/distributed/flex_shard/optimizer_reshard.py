@@ -164,8 +164,14 @@ class ComputeLayout:
 
     shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
     shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
+    matrix_layout: str = "standard"
 
     def __post_init__(self) -> None:
+        if self.matrix_layout not in ("standard", "interleaved_gated"):
+            raise ValueError(
+                "ComputeLayout.matrix_layout must be 'standard' or "
+                "'interleaved_gated'"
+            )
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
         if not shardings_by_mesh_axis:
             raise ValueError("ComputeLayout must declare a compute sharding")
