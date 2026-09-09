@@ -231,7 +231,10 @@ def test_packing_preserves_ordered_media_when_merging_rows():
         row["labels"],
         torch.tensor([1, 2, 3, 4] + [IGNORE_INDEX] * (CONTEXT.max_context_length - 4)),
     )
-    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 0, 0, 0, 0]
+    # Padding is numbered like the collator's tail padding, so it forms one
+    # segment instead of one document start per padded token.
+    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 1, 2, 3, 4]
+    assert row["padding_mask"].tolist() == [False] * 4 + [True] * 5
     assert len(row["pixel_values"]) == 2
     assert torch.equal(row["pixel_values"][0], first_image)
     assert torch.equal(row["pixel_values"][1], second_image)
