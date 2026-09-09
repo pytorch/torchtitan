@@ -28,6 +28,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ),
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
+            test_descr="Llama 3 FSDP+TP+CP+RegionAC",
+            test_name="llama3_fsdp+tp+cp+region_ac",
+            ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+            ),
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
             test_descr="Llama 3 FSDP+TP+PP",
             test_name="llama3_fsdp+tp+pp",
@@ -164,7 +173,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenInnerAttention",
             test_name="gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
             use_real_pg=True,

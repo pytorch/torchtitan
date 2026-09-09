@@ -11,8 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint
-from torchtitan.experiments.rl.renderer import RendererConfig
 
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
 from torchtitan.observability import structured_logger as sl
@@ -36,10 +37,12 @@ class RolloutWorkerActor(Actor):
     async def setup_async(
         self,
         *,
+        tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
     ) -> None:
         await self._worker.setup_async(
+            tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
         )

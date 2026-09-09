@@ -210,7 +210,7 @@ def set_determinism(
 
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.common.attention import FlexAttention
+        from torchtitan.models.common.attention import FlexInnerAttention
 
         if torch.version.hip is not None:
             # Compiled ROCm flex attention is not deterministic.
@@ -218,17 +218,17 @@ def set_determinism(
             logger.info(
                 "Using eager (non-compiled) flex_attention for determinism on ROCm."
             )
-            FlexAttention._compiled_flex_attn = flex_attention
+            FlexInnerAttention._compiled_flex_attn = flex_attention
         else:
             # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
             # reproducibility, since the autotune results may not be deterministic. We disable
-            # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
+            # autotune in-place on FlexInnerAttention.inductor_configs (rather than recompiling with
             # no options) so the regional-inductor scoop configs are preserved.
-            FlexAttention.inductor_configs["max_autotune"] = False
-            FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
+            FlexInnerAttention.inductor_configs["max_autotune"] = False
+            FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
             # pyrefly: ignore [no-matching-overload]
-            FlexAttention._compiled_flex_attn = torch.compile(
-                flex_attention, options=FlexAttention.inductor_configs
+            FlexInnerAttention._compiled_flex_attn = torch.compile(
+                flex_attention, options=FlexInnerAttention.inductor_configs
             )
 
     if debug_config.detect_anomaly:
@@ -313,6 +313,28 @@ _batch_invariant_enabled: bool = False
 def is_in_batch_invariant_mode() -> bool:
     """Return whether batch-invariant mode is active."""
     return _batch_invariant_enabled
+
+
+def enable_fp32_matmul_emulation_with_bf16x9() -> None:
+    """Enable BF16x9 emulation for FP32 CUDA matmuls where supported."""
+    if (
+        device_type != "cuda"
+        or not torch.cuda.is_available()
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability() < (10, 0)
+    ):
+        return
+
+    try:
+        torch.backends.cuda.matmul.fp32_precision = "bfx9"
+    except (AttributeError, RuntimeError, ValueError) as exc:
+        raise ValueError(
+            "TorchTitan on NVIDIA GPUs with compute capability 10.0 or later "
+            "requires PyTorch with CUDA BFX9 matmul support "
+            "(pytorch/pytorch#195301) and CUDA 12.9 or later."
+        ) from exc
+
+    logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
 
 
 def set_batch_invariance(enable: bool) -> None:
@@ -449,6 +471,8 @@ def init_distributed(
     base_folder: str = "",
     ranks: list[int] | None = None,
 ) -> int:
+    enable_fp32_matmul_emulation_with_bf16x9()
+
     # Skip initialization if already initialized
     if torch.distributed.is_initialized():
         logger.warning(

@@ -26,7 +26,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 from torchtitan.models.common.attention import (
     BaseAttention,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -372,7 +372,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
         )
         attn_config = BaseAttention.Config(
             n_heads=1,
-            inner_attention=FlexAttention.Config(block_size=4),
+            inner_attention=FlexInnerAttention.Config(block_size=4),
         )
 
         decoder = Decoder.__new__(Decoder)

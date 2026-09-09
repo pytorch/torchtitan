@@ -70,7 +70,10 @@ def has_quantization(model_config) -> bool:
         _float8_experts_cache,
         Float8Linear,
     )
-    from torchtitan.components.quantization.mx import _mxfp8_experts_cache, MXFP8Linear
+    from torchtitan.components.quantization.mxfp8.converter import (
+        _mxfp8_experts_cache,
+        MXFP8Linear,
+    )
     from torchtitan.components.quantization.nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []

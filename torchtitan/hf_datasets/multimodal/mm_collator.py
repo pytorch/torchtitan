@@ -326,6 +326,7 @@ class MultiModalCollator(Collator):
                 f"{name}_id": getattr(self.tokenizer, f"{name}_id")
                 for name in self.tokenizer.TOKEN_FIELDS
             },
+            "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
         }
 
         # Build multimodal RoPE positions.

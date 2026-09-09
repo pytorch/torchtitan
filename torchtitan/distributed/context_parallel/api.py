@@ -130,7 +130,7 @@ def cp_shard(
             BlockMask, or dict[str, BlockMask]
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
-            - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
+            - "ptrr": Use PTRRLoadBalancer (for FlexInnerAttention)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dims: Sequence dimension(s) for sharding. An int applies the
@@ -171,7 +171,7 @@ def cp_shard(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # For FlexAttention, we use _PTRRLoadBalancer.
+                # For FlexInnerAttention, we use _PTRRLoadBalancer.
                 # _PTRRLoadBalancer is built from a single BlockMask. When the
                 # attention masks are a dict[str, BlockMask], the caller must
                 # specify which mask to build the balancer from via

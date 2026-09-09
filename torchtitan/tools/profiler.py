@@ -6,6 +6,7 @@
 
 """Kineto profiler + memory-snapshot lifecycle."""
 
+import inspect
 import os
 import pickle
 import time
@@ -13,10 +14,18 @@ from dataclasses import dataclass
 
 import torch
 from torchtitan.config import Configurable
-from torchtitan.distributed.cudagraph import cudagraph_annotate_trace_post_processor
+from torchtitan.distributed.cudagraph import get_cudagraph_annotations
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
+
+# torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
+# (torch.cuda._annotate_cuda_graph_trace) was removed. Older versions still export, just
+# without the CUDA graph annotations baked in.
+_EXPORT_SUPPORTS_ANNOTATIONS = (
+    "cuda_graph_annotations"
+    in inspect.signature(torch.profiler.profile.export_chrome_trace).parameters
+)
 
 # Paths expects by meta internal tooling
 PROFILE_DIR = "profiling/traces"  # Profiler.Config.save_traces_folder default
@@ -295,8 +304,19 @@ class Profiler(Configurable):
             begin = time.monotonic()
 
             output_file = os.path.join(curr_trace_dir, PROFILE_FILE.format(rank=rank))
-            prof.export_chrome_trace(output_file)
-            cudagraph_annotate_trace_post_processor(output_file)
+            # CUDA graph annotations are baked in during the export rather than
+            # joined onto the written file afterwards: re-reading and rewriting a
+            # gzipped trace paid the compression cost twice.
+            annotations = get_cudagraph_annotations()
+            if annotations and not _EXPORT_SUPPORTS_ANNOTATIONS:
+                logger.warning(
+                    "This torch does not support cuda_graph_annotations on "
+                    "export_chrome_trace; the trace will have no CUDA graph kernel "
+                    "annotations."
+                )
+                annotations = None
+            extra = {"cuda_graph_annotations": annotations} if annotations else {}
+            prof.export_chrome_trace(output_file, **extra)
 
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"

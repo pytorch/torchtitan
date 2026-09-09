@@ -20,7 +20,7 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
@@ -29,20 +29,16 @@ from torchtitan.models.common.rope import ComplexRoPE
 class TestPackedVarlenMetadata(unittest.TestCase):
     def test_document_boundaries(self):
         positions_T = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3])
-        metadata = create_varlen_metadata_for_document(
-            positions_T,
-            include_host_offsets=True,
-        )
+        metadata = create_varlen_metadata_for_document(positions_T)
 
         expected_cu_seq = torch.tensor([0, 3, 5, 9], dtype=torch.int32)
         torch.testing.assert_close(metadata.cu_seq_q, expected_cu_seq)
         torch.testing.assert_close(metadata.cu_seq_k, expected_cu_seq)
         self.assertEqual(metadata.max_q, 4)
         self.assertEqual(metadata.max_k, 4)
-        self.assertEqual(metadata.cu_seq_q_host, (0, 3, 5, 9))
 
 
-class TestPackedVarlenAttention(unittest.TestCase):
+class TestPackedVarlenInnerAttention(unittest.TestCase):
     def test_gqa_preserves_td_shape(self):
         torch.manual_seed(42)
         num_tokens, dim, num_heads, head_dim = 6, 8, 2, 4
@@ -57,7 +53,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
                 wkv=Linear.Config(in_features=dim, out_features=dim),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
-            inner_attention=VarlenAttention.Config(),
+            inner_attention=VarlenInnerAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
         ).build()
         x_TD = torch.randn(num_tokens, dim)
@@ -82,7 +78,8 @@ class TestPackedVarlenAttention(unittest.TestCase):
         from torchtitan.models.llama3 import llama3_configs
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-        model_config = llama3_configs["debugmodel"]("varlen")
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        model_config = build_config("varlen", seq_len=max_context_length)
         set_llama3_sharding_config(model_config, enable_sp=False)
 
         sharding = model_config.layers[0].attention.inner_attention.sharding_config
@@ -108,7 +105,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
         q_THK = torch.randn(num_tokens, num_heads, head_dim)
         positions_T = torch.tensor([0, 1, 0, 1, 2])
         metadata = create_varlen_metadata_for_document(positions_T)
-        inner_attention = VarlenAttention.Config().build()
+        inner_attention = VarlenInnerAttention.Config().build()
 
         def _varlen_with_lse(q, k, v, *args, **kwargs):
             lse_HT = torch.randn(num_heads, num_tokens)
@@ -136,7 +133,8 @@ class TestPackedVarlenAttention(unittest.TestCase):
     def test_llama_decoder_preserves_td_shape(self):
         from torchtitan.models.llama3 import llama3_configs
 
-        model = llama3_configs["debugmodel"]("varlen").build()
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        model = build_config("varlen", seq_len=max_context_length).build()
         model.init_states()
         num_tokens = 6
         tokens_T = torch.randint(0, 2048, (num_tokens,))

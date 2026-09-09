@@ -8,7 +8,7 @@ Attention (MLA) decoder with LatentMoE and a MoonViT-V2 vision encoder.
 Install the additional dependencies:
 
 ```bash
-pip install av einops pillow torchvision flash-linear-attention
+pip install -r .ci/docker/requirements-vlm.txt
 ```
 
 ## Architecture
@@ -57,4 +57,4 @@ Test scripts:
 
 - `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
   TorchTitan comparison
-- `tests/unit_tests/test_kimi_k3.py` -- KDA and FSDP2 correctness
+- `tests/unit_tests/gpu/test_kimi_k3.py` -- KDA and FSDP2 correctness
