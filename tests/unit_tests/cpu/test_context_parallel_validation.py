@@ -24,7 +24,7 @@ class _NoAttentionModel(Module):
 
 
 class TestBackendGate(unittest.TestCase):
-    """CP requires the backend that implements it."""
+    """Validate the SPMD backend requirement."""
 
     def _validate(self, *, spmd_backend: str, cp: int) -> None:
         validate_context_parallel(
@@ -113,6 +113,147 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             layer.attention.inner_attention = LocalOnlyAttention.Config()
         with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
             config.__post_init__()
+
+
+class TestUlyssesConfigValidation(unittest.TestCase):
+    """Validate Ulysses configuration requirements."""
+
+    @staticmethod
+    def _config(
+        *,
+        cp: int = 2,
+        tp: int = 1,
+        load_balancer: str | None = None,
+        n_heads: int | None = None,
+        n_kv_heads: int | None = None,
+    ):
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+
+        config = llama3_debugmodel()
+        attention = config.model_spec.model.layers[0].attention
+        if n_heads is not None:
+            attention.n_heads = n_heads
+        if n_kv_heads is not None:
+            attention.n_kv_heads = n_kv_heads
+        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
+            config.model_spec.model
+        )
+        config.parallelism.context_parallel_degree = cp
+        config.parallelism.tensor_parallel_degree = tp
+        config.parallelism.context_parallel_load_balancer = load_balancer
+        config.training.max_context_length = 512
+        return config
+
+    def test_rejects_the_default_load_balancer(self):
+        default = ParallelismConfig().context_parallel_load_balancer
+        self.assertIsNotNone(default, "the default must stay a reordering balancer")
+        config = self._config(load_balancer=default)
+        with self.assertRaisesRegex(ValueError, "load_balancer must be"):
+            config.__post_init__()
+
+    def test_allows_load_balancing_disabled(self):
+        config = self._config(load_balancer=None)
+        config.__post_init__()
+
+    def test_rejects_kv_heads_indivisible_by_cp(self):
+        config = self._config(cp=4, tp=1, n_heads=8, n_kv_heads=2)
+        with self.assertRaisesRegex(ValueError, r"n_kv_heads \(2\)"):
+            config.__post_init__()
+
+    def test_rejects_heads_indivisible_by_tp_times_cp(self):
+        config = self._config(cp=8, tp=2, n_heads=8, n_kv_heads=8)
+        with self.assertRaisesRegex(ValueError, r"n_heads \(8\)"):
+            config.__post_init__()
+
+    def test_allows_heads_divisible_by_tp_times_cp(self):
+        config = self._config(cp=4, tp=2, n_heads=8, n_kv_heads=8)
+        config.__post_init__()
+
+    def test_rejects_different_cp_backends(self):
+        from dataclasses import fields
+
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+            UlyssesCPFlexInnerAttention,
+        )
+
+        config = self._config(cp=2, tp=1)
+        layer = config.model_spec.model.layers[1]
+        existing = layer.attention.inner_attention
+        self.assertIsInstance(existing, UlyssesCPFlexInnerAttention.Config)
+        layer.attention.inner_attention = KVAllGatherCPFlexInnerAttention.Config(
+            **{f.name: getattr(existing, f.name) for f in fields(existing)}
+        )
+        with self.assertRaisesRegex(ValueError, "different CP backends"):
+            config.__post_init__()
+
+
+class TestGptOssUlysses(unittest.TestCase):
+    def test_rejected_during_parallelization(self):
+        from types import SimpleNamespace
+
+        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+        from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
+
+        config = gpt_oss_debugmodel_flex()
+        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
+            config.model_spec.model
+        )
+        config.parallelism.spmd_backend = "spmd_types"
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = None
+        config.__post_init__()
+
+        with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
+            parallelize_gptoss(
+                SimpleNamespace(config=config.model_spec.model),
+                parallel_dims=SimpleNamespace(cp_enabled=True),
+                training=None,
+                parallelism=None,
+                compile_config=None,
+                ac_config=None,
+                dump_folder="",
+            )
+
+
+class TestHeadDivisibility(unittest.TestCase):
+    """Validate when CP adds to head sharding."""
+
+    @staticmethod
+    def _config(
+        *, inner_attention=None, cp: int = 1, tp: int = 1, n_heads: int, n_kv_heads: int
+    ):
+        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+
+        config = llama3_debugmodel()
+        attention = config.model_spec.model.layers[0].attention
+        attention.n_heads = n_heads
+        attention.n_kv_heads = n_kv_heads
+        if inner_attention is not None:
+            ContextParallelTransform(inner_attention=inner_attention).transform(
+                config.model_spec.model
+            )
+        config.parallelism.context_parallel_degree = cp
+        config.parallelism.tensor_parallel_degree = tp
+        config.parallelism.context_parallel_load_balancer = None
+        config.training.max_context_length = 512
+        return config
+
+    def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPFlexInnerAttention,
+            cp=4,
+            tp=1,
+            n_heads=2,
+            n_kv_heads=2,
+        )
+        config.__post_init__()
 
 
 class TestShippedCpRecipes(unittest.TestCase):
