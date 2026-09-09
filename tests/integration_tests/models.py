@@ -55,6 +55,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_mtp_tp2_cp2],
+            test_descr="DeepSeek V3 MTP TP+CP with SP",
+            test_name="deepseek_v3_mtp_tp+cp",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_fsdp8_ep8],
             test_descr="DeepSeek V3 FSDP+EP",
             test_name="deepseek_v3_fsdp+ep",

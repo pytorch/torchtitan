@@ -1,6 +1,6 @@
 # DeepSeek-V3 MTP Design Note
 
-This document describes the current DeepSeek-V3 Multi-Token Prediction (MTP) implementation in torchtitan. It covers how the MTP module is configured and integrated, how inputs are handled under TP/SP, how the module is sharded under FSDP/TP/EP, and how MTP loss is computed. The goal is to align on the current implementation boundary first, then explicitly list the remaining TODO items.
+This document describes the current DeepSeek-V3 Multi-Token Prediction (MTP) implementation in torchtitan. It covers how the MTP module is configured and integrated, how inputs are handled under CP/TP/SP, how the module is sharded under FSDP/CP/TP/EP, and how MTP loss is computed. The goal is to align on the current implementation boundary first, then explicitly list the remaining TODO items.
 
 ## 1. MTP Configuration and Integration
 
@@ -45,7 +45,9 @@ batch before forward.
 
 `update_from_config()` currently reuses the normal decoder layer config update path by temporarily appending `mtp_layers` to `layers`, calling the parent config update, and then removing the appended layers. This keeps the implementation aligned with the existing decoder config flow, but the shape is indirect. A future cleanup can factor the shared layer config update logic into a helper that works for both normal decoder layers and MTP layers.
 
-The current implementation explicitly rejects CP and PP when MTP is enabled, because end-to-end semantics and communication paths for these modes are not integrated yet.
+MTP supports CP by constructing shifted inputs before CP sharding. PP remains
+unsupported because its stage ownership and communication paths are not yet
+integrated.
 
 ## 2. MTP Input Handling
 
@@ -175,7 +177,9 @@ MTP TP/SP sharding is configured in `_set_deepseek_v3_mtp_sharding()`. The main 
 - MTP attention/feed-forward/MoE submodules reuse the normal DeepSeek-V3 layer sharding policy.
 - `enorm`, `hnorm`, and `mtp_norm` use norm sharding that matches the activation layout.
 - `eh_proj` input and output activations are aligned with the dense activation placement.
-- When SP is enabled, `mtp_input_valid_mask` is aligned from a replicated mask to the sequence-parallel activation layout through the block-level `ShardingConfig`.
+- When SP is enabled, `mtp_input_valid_mask` is redistributed from the
+  decoder token-ID placement (DP/CP-sharded and TP-replicated) to the 1D
+  sequence-parallel token-ID placement through the block-level `ShardingConfig`.
 
 This keeps the MTP block forward code independent from explicit redistribution details. Placement is described by sharding config instead.
 
@@ -188,6 +192,13 @@ If an MTP layer contains MoE, the current implementation reuses the normal DeepS
 - Router, shared experts, and token dispatch/combine paths follow the normal layer configuration.
 
 The intended behavior is that MTP layers under EP match normal decoder layers, instead of introducing a separate expert-parallel semantics for MTP.
+
+### 3.4 Context Parallelism
+
+MTP preprocessing constructs shifted tokens, labels, and validity masks before
+the common CP sharding step. The same load balancer then shards the main and
+MTP tensors together, so corresponding local positions remain aligned without
+boundary exchange between CP ranks.
 
 ## 4. MTP Loss Handling
 
@@ -240,20 +251,7 @@ auxiliary cross-entropy objectives.
 
 ## TODO
 
-### 1. CP Integration
-
-MTP preprocessing now constructs shifted tokens, labels, and validity masks
-before the common CP sharding step, so all aligned tensors can use the same
-load balancer without boundary exchange. The following validation is still
-needed before enabling MTP with CP:
-
-- Verify aligned token, label, position, and validity-mask shards across CP ranks.
-- Validate input and block-level placements under combined CP + SP/TP.
-- Add end-to-end numerical tests for packed and unpacked sequences.
-
-Until CP integration is complete, enabling MTP with CP should remain unsupported.
-
-### 2. PP Integration
+### 1. PP Integration
 
 Under PP, the ownership of MTP layers across pipeline stages must be defined, and auxiliary logits/loss must be routed to the loss stage. The following pieces are still needed:
 

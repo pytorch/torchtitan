@@ -18,7 +18,11 @@ from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    current_spmd_mesh,
+)
+from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexAttention,
@@ -200,11 +204,6 @@ class MTPDecoder(Decoder):
             if parallelism.pipeline_parallel_degree > 1:
                 raise NotImplementedError(
                     "MTP does not support pipeline parallelism yet."
-                )
-            # TODO: Add Context Parallel support for MTP.
-            if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "MTP does not support context parallelism yet."
                 )
 
     def __init__(self, config: Config):
@@ -457,10 +456,21 @@ class MTPLoss(CrossEntropyLoss):
         mtp_weight = self.mtp_scale / num_mtp_layers
         main_loss, _ = super().__call__(pred[0], labels[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
+        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            mtp_loss = spmd.mutate_type(
+                mtp_loss,
+                src=spmd.R,
+                dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
+            )
         for mtp_pred, mtp_labels in zip(pred[1:], labels[1:], strict=True):
             depth_loss, _ = super().__call__(mtp_pred, mtp_labels)
             mtp_loss = mtp_loss + depth_loss * mtp_weight
         loss = main_loss + mtp_loss
         if global_valid_tokens is not None:
+            if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
+                spmd.assert_type(
+                    global_valid_tokens,
+                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+                )
             loss = loss / global_valid_tokens
         return loss, {}
