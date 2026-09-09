@@ -37,6 +37,9 @@ if [ "$COMM_MODE" = "fake_backend" ]; then
     # have to precede the caller-provided arguments.
     NGPU="${NGPU}" LOCAL_RANK=0 python3 -m torchtitan.train --module ${MODULE} --config ${CONFIG} --comm.mode=fake_backend --training.steps 1 "$@"
 else
+    # Clear stale NCCL shm segments leaked by prior abnormal exits.
+    rm -f /dev/shm/nccl-* 2>/dev/null || true
+
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
