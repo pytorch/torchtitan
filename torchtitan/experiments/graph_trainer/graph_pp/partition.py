@@ -327,11 +327,12 @@ def _forward_mutations_to_materialize(
 
 
 def _backward_passthrough_placeholders(
+    joint: fx.GraphModule,
     *,
     bwd_outputs: Sequence[object],
     backward_only_names: set[str],
 ) -> list[fx.Node]:
-    """Preserve metadata placeholders returned by backward directly.
+    """Preserve forward placeholders needed by backward.
 
     minimal_fx_tracer unwraps tensor subclasses into plain graph values. A
     DTensor gradient, for example, may flatten to ``(local_grad, device_mesh)``,
@@ -341,12 +342,11 @@ def _backward_passthrough_placeholders(
     will not select them; they still must be available to the extracted
     backward graph.
     """
+    backward_placeholders = placeholder_dependencies(bwd_outputs)
     return unique_in_order(
         node
-        for node in bwd_outputs
-        if isinstance(node, fx.Node)
-        and node.op == "placeholder"
-        and node.name not in backward_only_names
+        for node in joint.graph.find_nodes(op="placeholder")
+        if node in backward_placeholders and node.name not in backward_only_names
     )
 
 
@@ -508,9 +508,10 @@ def partition_joint_graph(
         backward_only_names=backward_only_names,
     )
 
-    # 2. Add metadata-only placeholders needed to rewrap backward outputs.
+    # 2. Add forward placeholders needed by backward.
     saved_values.extend(
         _backward_passthrough_placeholders(
+            joint,
             bwd_outputs=bwd_outputs,
             backward_only_names=backward_only_names,
         )
