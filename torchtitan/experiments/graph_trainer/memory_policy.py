@@ -308,7 +308,16 @@ def _eager_memory_policy_pass(
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
-    tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
+    force_save_nodes = (
+        _find_autoparallel_a2a_linear_save_nodes(gm)
+        if config.compile.enable_autoparallel
+        else None
+    )
+    tag_sac_policy(
+        gm,
+        policy_fn=_make_eager_memory_policy(),
+        force_save_nodes=force_save_nodes,
+    )
     return gm
 
 
@@ -353,3 +362,81 @@ def tag_with_memory_policy_pass(
     gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm
+
+
+def _follow_forward_view_chain(
+    node: torch.fx.Node,
+) -> tuple[torch.fx.Node, torch.fx.Node] | None:
+    """Follow a single-user view chain to its first non-view consumer."""
+    current = node
+    while True:
+        users = [user for user in current.users if not _is_backward_node(user)]
+        if len(users) != 1:
+            return None
+        user = users[0]
+        if not (
+            user.op == "call_function"
+            and isinstance(user.target, torch._ops.OpOverload)
+            and user.target.is_view
+        ):
+            return current, user
+        current = user
+
+
+def _find_autoparallel_a2a_linear_save_nodes(
+    gm: torch.fx.GraphModule,
+) -> set[torch.fx.Node]:
+    """Find save boundaries for AutoParallel all-to-all followed by a linear.
+
+    A row-sharded linear followed by reduce-scatter already saves its logical
+    output through the collective policy. For the inverse ordering, save both
+    the pre-linear all-to-all and the final post-linear view. This prevents
+    rematerializing either expensive op without changing eager's stateful
+    linear-op counter.
+    """
+    save_nodes: set[torch.fx.Node] = set()
+    num_matches = 0
+    for a2a in gm.graph.nodes:
+        if (
+            a2a.op != "call_function"
+            or _is_backward_node(a2a)
+            or a2a.target is not torch.ops._dtensor.shard_dim_alltoall.default
+        ):
+            continue
+
+        pre_linear = _follow_forward_view_chain(a2a)
+        if pre_linear is None:
+            continue
+        linear_input, linear = pre_linear
+        if (
+            linear.target
+            not in (
+                torch.ops.aten.mm.default,
+                torch.ops.aten.linear.default,
+            )
+            or linear.args[0] is not linear_input
+        ):
+            continue
+
+        post_linear = _follow_forward_view_chain(linear)
+        if post_linear is None:
+            continue
+        output, consumer = post_linear
+        if output is linear or consumer.target is not torch.ops.aten.add.Tensor:
+            continue
+
+        a2a_fqn = a2a.meta.get("custom", {}).get(_MODULE_FQN, "")
+        linear_fqn = linear.meta.get("custom", {}).get(_MODULE_FQN, "")
+        output_fqn = output.meta.get("custom", {}).get(_MODULE_FQN, "")
+        consumer_fqn = consumer.meta.get("custom", {}).get(_MODULE_FQN, "")
+        if not a2a_fqn or not (
+            a2a_fqn == linear_fqn == output_fqn
+            and a2a_fqn.startswith(consumer_fqn + ".")
+        ):
+            continue
+
+        save_nodes.update((a2a, output))
+        num_matches += 1
+
+    logger.info("Found %d AutoParallel all-to-all/linear SAC boundaries", num_matches)
+    return save_nodes
