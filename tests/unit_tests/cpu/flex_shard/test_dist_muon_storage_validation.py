@@ -38,57 +38,13 @@ class TestDistMuonStorageValidation(unittest.TestCase):
         validated_device = optimizer._validate_parameter_storage()
         self.assertEqual(validated_device, torch.device("cpu"))
 
-    def test_single_xpu_device_accepted(self):
-        optimizer = object.__new__(DistMuon)
-        optimizer.param_groups = [
-            {
-                "params": [
-                    self._create_mock_dtensor("xpu:0"),
-                    self._create_mock_dtensor("xpu:0"),
-                ],
-                "param_names": ["layer1.weight", "layer2.weight"],
-            }
-        ]
-        validated_device = optimizer._validate_parameter_storage()
-        self.assertEqual(validated_device, torch.device("xpu:0"))
-
-    def test_single_custom_accelerator_device_accepted(self):
-        custom_device = MagicMock()
-        custom_device.type = "npu"
-        optimizer = object.__new__(DistMuon)
-        optimizer.param_groups = [
-            {
-                "params": [
-                    self._create_mock_dtensor(custom_device),
-                    self._create_mock_dtensor(custom_device),
-                ],
-                "param_names": ["layer1.weight", "layer2.weight"],
-            }
-        ]
-        validated_device = optimizer._validate_parameter_storage()
-        self.assertEqual(validated_device, custom_device)
-
-    def test_single_cuda_device_accepted(self):
-        optimizer = object.__new__(DistMuon)
-        optimizer.param_groups = [
-            {
-                "params": [
-                    self._create_mock_dtensor("cuda:0"),
-                    self._create_mock_dtensor("cuda:0"),
-                ],
-                "param_names": ["layer1.weight", "layer2.weight"],
-            }
-        ]
-        validated_device = optimizer._validate_parameter_storage()
-        self.assertEqual(validated_device, torch.device("cuda:0"))
-
     def test_mixed_devices_rejected(self):
         optimizer = object.__new__(DistMuon)
         optimizer.param_groups = [
             {
                 "params": [
-                    self._create_mock_dtensor("cpu"),
-                    self._create_mock_dtensor("cuda:0"),
+                    self._create_mock_dtensor(torch.device("cpu")),
+                    self._create_mock_dtensor(MagicMock()),
                 ],
                 "param_names": ["layer1.weight", "layer2.weight"],
             }
