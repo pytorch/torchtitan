@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
+    local_head_split,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.feed_forward import FeedForward
@@ -30,7 +31,6 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
-import spmd_types as spmd
 
 
 class Gemma4QKVLinear(BaseQKVLinear):
@@ -51,16 +51,14 @@ class Gemma4QKVLinear(BaseQKVLinear):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_tokens = x.shape[0]
         xq = self.wq(x)
         xk = self.wk(x)
         xv = self.wv(x) if self.wv is not None else xk
-
-        def local_qkv_head_split(t):
-            with spmd.local():
-                return t.view(num_tokens, -1, self.head_dim)
-
-        return local_qkv_head_split(xq), local_qkv_head_split(xk), local_qkv_head_split(xv)
+        return (
+            local_head_split(xq, self.head_dim),
+            local_head_split(xk, self.head_dim),
+            local_head_split(xv, self.head_dim),
+        )
 
 
 class Gemma4RoPE(CosSinRoPE):
@@ -211,6 +209,10 @@ class Gemma4Attention(GQAttention):
         if self.q_norm is not None and self.k_norm is not None:
             xq_THK = self.q_norm(xq_THK)
             xk_THK = self.k_norm(xk_THK)
+        if positions is not None and positions.shape[0] != xq_THK.shape[0]:
+            # Under TP Sequence Parallelism, query tokens are sharded across TP ranks.
+            # Slice positions locally to match this rank's token count.
+            positions = positions[: xq_THK.shape[0]]
         xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
         if self.v_norm is not None:
             xv_THV = self.v_norm(xv_THV)
@@ -292,6 +294,25 @@ class Gemma4Model(Decoder):
 
         def update_from_config(self, *, config, **kwargs) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
+            tp = config.parallelism.tensor_parallel_degree
+            if tp > 1:
+                for idx, layer in enumerate(self.layers):
+                    attn = layer.attention
+                    n_heads = attn.n_heads
+                    n_kv_heads = getattr(attn, "n_kv_heads", None) or n_heads
+                    if n_heads % tp != 0:
+                        raise ValueError(
+                            f"tensor_parallel_degree ({tp}) must divide "
+                            f"n_heads ({n_heads}) on layer {idx}."
+                        )
+                    if n_kv_heads % tp != 0:
+                        is_global = getattr(layer, "use_global_attention", False)
+                        layer_type = "global" if is_global else "sliding"
+                        raise ValueError(
+                            f"tensor_parallel_degree ({tp}) must divide "
+                            f"{layer_type} attention n_kv_heads ({n_kv_heads}) "
+                            f"on layer {idx}."
+                        )
             from torchtitan.models.gemma4.sharding import set_gemma4_sharding_config
 
             set_gemma4_sharding_config(

@@ -6,6 +6,7 @@
 #
 # Gemma-4 Model Registry and Configs
 
+import copy
 from collections.abc import Callable
 from functools import partial
 
@@ -118,7 +119,6 @@ def _build_gemma4_layers(
     according to global_attn_interval (default 6 for 5:1 ratio).
     """
     inner_attention = get_attention_config(attn_backend)
-    import copy
 
     layers: list[Gemma4TransformerBlock.Config] = []
     for layer_id in range(n_layers):
@@ -566,8 +566,6 @@ gemma4_configs = {
     "E4B": (_e4b, 262144),
     "12b": (_12b, 262144),
     "12B": (_12b, 262144),
-    "26b": (_26b_a4b, 262144),
-    "26B": (_26b_a4b, 262144),
     "26b_a4b": (_26b_a4b, 262144),
     "26B_A4B": (_26b_a4b, 262144),
     "31b": (_31b, 262144),

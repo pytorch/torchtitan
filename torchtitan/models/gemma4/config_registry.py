@@ -10,7 +10,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -64,15 +64,6 @@ def gemma4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
     )
-
-
-def gemma4_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
-    )
-    config.training.disable_cuda_graphs = True
-    return config
 
 
 def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
@@ -183,35 +174,6 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def gemma4_12b_1node_full(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_12b(seq_len=seq_len)
-    config.compile = CompileConfig(enable=True, components=["model"])
-    config.parallelism = ParallelismConfig(
-        tensor_parallel_degree=1,
-    )
-    return config
-
-
-def gemma4_12b_multinode(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_12b(seq_len=seq_len)
-    config.compile = CompileConfig(enable=True, components=["model"])
-    config.parallelism = ParallelismConfig(
-        tensor_parallel_degree=2,
-    )
-    return config
-
-
-def gemma4_12b_long_context(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_12b(seq_len=seq_len)
-    config.training.max_context_length = 16384
-    config.training.num_tokens_per_microbatch_per_dp_rank = 1 * 16384
-    config.parallelism = ParallelismConfig(
-        enable_sequence_parallel=True,
-        tensor_parallel_degree=2,
-    )
-    return config
-
-
 def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("26b_a4b", seq_len=seq_len)
     return Trainer.Config(
@@ -246,10 +208,6 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
             steps=1200,
         ),
     )
-
-def gemma4_26b(seq_len: int | None = None) -> Trainer.Config:
-    """Convenience alias for gemma4_26b_a4b."""
-    return gemma4_26b_a4b(seq_len=seq_len)
 
 
 def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
@@ -286,32 +244,3 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
             steps=1200,
         ),
     )
-
-
-def gemma4_31b_1node_full(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_31b(seq_len=seq_len)
-    config.compile = CompileConfig(enable=True, components=["model"])
-    config.parallelism = ParallelismConfig(
-        tensor_parallel_degree=1,
-    )
-    return config
-
-
-def gemma4_31b_multinode(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_31b(seq_len=seq_len)
-    config.compile = CompileConfig(enable=True, components=["model"])
-    config.parallelism = ParallelismConfig(
-        tensor_parallel_degree=2,
-    )
-    return config
-
-
-def gemma4_31b_long_context(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_31b(seq_len=seq_len)
-    config.training.max_context_length = 16384
-    config.training.num_tokens_per_microbatch_per_dp_rank = 1 * 16384
-    config.parallelism = ParallelismConfig(
-        enable_sequence_parallel=True,
-        tensor_parallel_degree=2,
-    )
-    return config

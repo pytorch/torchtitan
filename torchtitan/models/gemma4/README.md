@@ -16,9 +16,6 @@ The recipes expect tokenizer assets under `./assets/hf/gemma-4-<flavor>` (e.g. `
 # Debug model (used for functionality tests)
 MODULE=gemma4 CONFIG=gemma4_debugmodel ./run_train.sh
 
-# Debug model with varlen attention
-MODULE=gemma4 CONFIG=gemma4_debugmodel_varlen_attn ./run_train.sh
-
 # Gemma-4 E2B (Edge 2B)
 MODULE=gemma4 CONFIG=gemma4_e2b ./run_train.sh
 
@@ -35,7 +32,7 @@ MODULE=gemma4 CONFIG=gemma4_26b_a4b ./run_train.sh
 MODULE=gemma4 CONFIG=gemma4_31b ./run_train.sh
 ```
 
-Other recipes include `gemma4_12b_1node_full`, `gemma4_12b_multinode`, `gemma4_12b_long_context`, `gemma4_31b_1node_full`, `gemma4_31b_multinode`, and `gemma4_31b_long_context`. See [`config_registry.py`](./config_registry.py).
+See [`config_registry.py`](./config_registry.py) for the complete list of model configurations.
 
 ## Supported Parallelisms
 

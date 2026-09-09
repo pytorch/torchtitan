@@ -70,6 +70,18 @@ def _set_gemma4_layer_sharding(
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
+    layer_cfg.attention.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "x_TD": attn_x_layout,
+        },
+        in_dst_shardings={
+            "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+        },
+    )
+    if layer_cfg.attention.rope is not None:
+        layer_cfg.attention.rope.sharding_config = ShardingConfig(
+            state_shardings={"cache": dense_param_placement(tp=spmd.R)},
+        )
 
     qkv = layer_cfg.attention.qkv_linear
     if hasattr(qkv, "wq"):
