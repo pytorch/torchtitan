@@ -1935,6 +1935,201 @@ class TestTraceFSDP(FSDPTest):
             for gr, gt in zip(grads_ref, grads_tr, strict=True):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
+    def test_chunked_loss_lm_head_reduces_once(self):
+        from torch.distributed.fsdp import (
+            fully_shard,
+            MixedPrecisionPolicy as FSDPMixedPrecisionPolicy,
+        )
+
+        from torchtitan.components.loss import ChunkedLossWrapper
+        from torchtitan.distributed.fsdp import disable_fsdp_gradient_division
+        from torchtitan.experiments.graph_trainer.chunked_loss_local_map import (
+            LocalMapChunkedLossWrapperWithParamGrads,
+        )
+        from torchtitan.experiments.graph_trainer.simple_fsdp import (
+            data_parallel,
+            MixedPrecisionPolicy,
+        )
+
+        torch.manual_seed(42)
+        torch.cuda.manual_seed(42)
+        self._setup()
+        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        dim, vocab_size, num_chunks = 32, 64, 8
+
+        lm_head_fsdp_ref = nn.Linear(dim, vocab_size, bias=False, device="cuda")
+        lm_head_eager = nn.Linear(dim, vocab_size, bias=False, device="cuda")
+        lm_head_test = nn.Linear(dim, vocab_size, bias=False, device="cuda")
+        lm_head_local_map = nn.Linear(dim, vocab_size, bias=False, device="cuda")
+        lm_head_eager.load_state_dict(lm_head_fsdp_ref.state_dict())
+        lm_head_test.load_state_dict(lm_head_fsdp_ref.state_dict())
+        lm_head_local_map.load_state_dict(lm_head_fsdp_ref.state_dict())
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+        )
+        fully_shard(
+            lm_head_fsdp_ref,
+            mesh=fsdp_mesh,
+            mp_policy=FSDPMixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.float32,
+            ),
+        )
+        disable_fsdp_gradient_division(lm_head_fsdp_ref)
+        lm_head_eager = data_parallel(
+            lm_head_eager,
+            device_mesh=fsdp_mesh,
+            mode="fully_shard",
+            mp_policy=mp_policy,
+        )
+        lm_head_test = data_parallel(
+            lm_head_test,
+            device_mesh=fsdp_mesh,
+            mode="fully_shard",
+            mp_policy=mp_policy,
+        )
+        lm_head_local_map = data_parallel(
+            lm_head_local_map,
+            device_mesh=fsdp_mesh,
+            mode="fully_shard",
+            mp_policy=mp_policy,
+        )
+
+        hidden_states = torch.randn(
+            2,
+            16,
+            dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        labels = torch.randint(0, vocab_size, (2, 16), device="cuda")
+
+        hidden_states_ref = hidden_states.detach().clone().requires_grad_(True)
+        unsupported_loss_fn = ChunkedLossWrapperWithParamGrads(
+            ChunkedLossWrapperWithParamGrads.Config(num_chunks=num_chunks)
+        )
+        unsupported_loss_fn.set_lm_head(lm_head_fsdp_ref)
+        with self.assertRaisesRegex(
+            AssertionError,
+            "does not support FSDPModule",
+        ):
+            unsupported_loss_fn(hidden_states_ref, labels)
+
+        loss_fn_ref = ChunkedLossWrapper(
+            ChunkedLossWrapper.Config(num_chunks=num_chunks)
+        )
+        loss_fn_ref.set_lm_head(lm_head_fsdp_ref)
+        loss_ref, _ = loss_fn_ref(hidden_states_ref, labels)
+        loss_ref.backward()
+        reference_out = [
+            loss_ref,
+            hidden_states_ref.grad,
+            *[param.grad for param in lm_head_fsdp_ref.parameters()],
+        ]
+
+        def train_step(lm_head, hidden_states, labels):
+            loss_fn = ChunkedLossWrapperWithParamGrads(
+                ChunkedLossWrapperWithParamGrads.Config(num_chunks=num_chunks)
+            )
+            loss_fn.set_lm_head(lm_head)
+            loss, _ = loss_fn(hidden_states, labels)
+            grads = torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])
+            return [loss, *grads]
+
+        eager_out = train_step(lm_head_eager, hidden_states, labels)
+        for value_idx, (reference_value, eager_value) in enumerate(
+            zip(reference_out, eager_out, strict=True)
+        ):
+            self.assertTrue(
+                torch.equal(reference_value, eager_value),
+                f"Reference mismatch at output {value_idx}",
+            )
+
+        def train_step_closure(hidden_states, labels):
+            return train_step(lm_head_test, hidden_states, labels)
+
+        def assert_trace_structure(traced):
+            all_gathers = [
+                node
+                for node in traced.gm.graph.nodes
+                if node.target
+                is torch.ops._c10d_functional.all_gather_into_tensor.default
+            ]
+            reduce_scatters = [
+                node
+                for node in traced.gm.graph.nodes
+                if node.target
+                is torch.ops._c10d_functional.reduce_scatter_tensor.default
+            ]
+            self.assertEqual(len(all_gathers), 1)
+            self.assertEqual(len(reduce_scatters), 1)
+
+            reduce_scatter_ancestors = set()
+            work = [reduce_scatters[0]]
+            while work:
+                node = work.pop()
+                for input_node in node.all_input_nodes:
+                    if input_node not in reduce_scatter_ancestors:
+                        reduce_scatter_ancestors.add(input_node)
+                        work.append(input_node)
+            local_grad_adds = [
+                node
+                for node in reduce_scatter_ancestors
+                if node.target is torch.ops.aten.add_.Tensor
+                and isinstance((value := node.meta.get("val")), torch.Tensor)
+                and tuple(value.shape) == (vocab_size, dim)
+                and value.dtype == torch.float32
+            ]
+            self.assertEqual(len(local_grad_adds), num_chunks - 1)
+
+        traced = minimal_fx_tracer(train_step_closure, module=lm_head_test)(
+            hidden_states, labels
+        )
+        assert_trace_structure(traced)
+
+        replay_out = run_traced(traced, module=lm_head_test)(hidden_states, labels)
+        for eager_value, replay_value in zip(eager_out, replay_out, strict=True):
+            self.assertTrue(torch.equal(eager_value, replay_value))
+
+        def local_map_train_step(hidden_states, labels):
+            loss_fn = LocalMapChunkedLossWrapperWithParamGrads(
+                LocalMapChunkedLossWrapperWithParamGrads.Config(num_chunks=num_chunks)
+            )
+            loss_fn.set_lm_head(lm_head_local_map)
+            loss, _ = loss_fn(hidden_states, labels)
+            grads = torch.autograd.grad(
+                loss,
+                [hidden_states, *lm_head_local_map.parameters()],
+            )
+            return [loss, *grads]
+
+        local_map_eager_out = local_map_train_step(hidden_states, labels)
+        for value_idx, (reference_value, local_map_value) in enumerate(
+            zip(reference_out, local_map_eager_out, strict=True)
+        ):
+            self.assertTrue(
+                torch.equal(reference_value, local_map_value),
+                f"Local-map reference mismatch at output {value_idx}",
+            )
+
+        local_map_traced = minimal_fx_tracer(
+            local_map_train_step,
+            module=lm_head_local_map,
+        )(hidden_states, labels)
+        assert_trace_structure(local_map_traced)
+        local_map_replay_out = run_traced(
+            local_map_traced,
+            module=lm_head_local_map,
+        )(hidden_states, labels)
+        for eager_value, replay_value in zip(
+            local_map_eager_out,
+            local_map_replay_out,
+            strict=True,
+        ):
+            self.assertTrue(torch.equal(eager_value, replay_value))
+
     def test_llama3_fsdp(self):
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
