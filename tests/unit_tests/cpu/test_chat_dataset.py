@@ -56,18 +56,20 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
-def _runtime(max_context_length):
+def _runtime(max_context_length, tokenizer=None):
     return DatasetBuildContext(
-        tokenizer=_load_tokenizer(),
+        tokenizer=tokenizer if tokenizer is not None else _load_tokenizer(),
         max_context_length=max_context_length,
         num_tokens_per_batch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
     )
 
 
-def _build_processor(max_context_length=2048, messages_fn=_process_sample):
+def _build_processor(
+    max_context_length=2048, messages_fn=_process_sample, tokenizer=None
+):
     return ChatProcessor.Config(messages_fn=messages_fn).build(
-        context=_runtime(max_context_length)
+        context=_runtime(max_context_length, tokenizer)
     )
 
 
@@ -339,11 +341,54 @@ class TestChatDatasetMultiTurn(unittest.TestCase):
         {"role": "assistant", "content": "9"},
     )
 
+    # Same as the asset tokenizer's template, but ends every turn with a
+    # newline so the turn separator sits next to the following role header.
+    _NEWLINE_SEPARATED_TEMPLATE = (
+        "{{ bos_token }}"
+        "{% for msg in messages %}{{ msg.role }}\n{{ msg.content }}{{ eos_token }}\n"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}assistant\n{% endif %}"
+    )
+
     def test_four_message_masks_user_spans_only(self):
         messages = list(self._FOUR_TURN)
         processor = _build_processor(messages_fn=lambda _sample: messages)
         sequence = processor({}, np.random.default_rng(0))
         tokenizer = _load_tokenizer()
+
+        first_prompt = _encode_chat_prefix(
+            tokenizer, messages[:1], add_generation_prompt=True
+        )
+        first_turn = _encode_chat_prefix(tokenizer, messages[:2])
+        second_prompt = _encode_chat_prefix(
+            tokenizer, messages[:3], add_generation_prompt=True
+        )
+
+        labels = sequence.labels
+        self.assertTrue((labels[: len(first_prompt) - 1] == IGNORE_INDEX).all())
+        self.assertTrue(
+            (labels[len(first_prompt) - 1 : len(first_turn) - 1] != IGNORE_INDEX).all()
+        )
+        self.assertTrue(
+            (labels[len(first_turn) - 1 : len(second_prompt) - 1] == IGNORE_INDEX).all()
+        )
+        self.assertTrue((labels[len(second_prompt) - 1 :] != IGNORE_INDEX).all())
+
+    def test_newline_separated_turns_keep_exact_prefixes(self):
+        """A newline between turns must not break the per-turn prefix check.
+
+        The full conversation is rstripped before encoding while the per-turn
+        prefix renders are not, so this template exercises the seam where a
+        standalone prefix could tokenize differently from the full render.
+        """
+        messages = list(self._FOUR_TURN)
+        tokenizer = _load_tokenizer()
+        tokenizer.set_chat_template(self._NEWLINE_SEPARATED_TEMPLATE)
+        processor = _build_processor(
+            messages_fn=lambda _sample: messages, tokenizer=tokenizer
+        )
+
+        sequence = processor({}, np.random.default_rng(0))
 
         first_prompt = _encode_chat_prefix(
             tokenizer, messages[:1], add_generation_prompt=True

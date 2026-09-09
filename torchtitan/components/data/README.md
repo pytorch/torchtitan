@@ -215,7 +215,10 @@ config.dataloader = GrainDataLoader.Config(
 
 `ChatProcessor` applies the tokenizer's chat template to even-length
 alternating user/assistant conversations, creates next-token input and
-label pairs, and masks each user-turn prompt with `IGNORE_INDEX`.
+label pairs, and masks each user-turn prompt with `IGNORE_INDEX`. It finds
+each prompt/response boundary by re-rendering the conversation prefix, so the
+chat template and tokenizer must not merge characters across a turn boundary;
+`ChatProcessor` raises a `ValueError` when they do.
 
 # Mixing datasets
 

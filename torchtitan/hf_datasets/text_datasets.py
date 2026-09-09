@@ -59,10 +59,27 @@ class TextProcessor(SampleProcessor):
 
 
 def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> None:
-    """Raise if prompt_tokens is not an exact prefix of full_tokens."""
+    """Raise if prompt_tokens is not an exact prefix of full_tokens.
+
+    ChatProcessor locates the prompt/response boundary by re-rendering the
+    conversation prefix and requiring it to tokenize to a prefix of the full
+    conversation. That holds only when the chat template and the tokenizer do
+    not merge characters across a turn boundary, which is a property of the
+    template and tokenizer together rather than of an individual sample.
+
+    Raise instead of dropping the sample: a mismatch means the label boundary
+    is unknown, and because the cause is systematic it would fire for most
+    samples, so dropping would silently train on a fraction of the dataset.
+    The overflow path drops because an oversized example really is per-sample.
+    """
     if full_tokens[: len(prompt_tokens)] != prompt_tokens:
         raise ValueError(
-            "Prompt tokens are not an exact prefix of the full conversation tokens"
+            "Prompt tokens are not an exact prefix of the full conversation "
+            "tokens, so the prompt/response boundary cannot be located. "
+            "ChatProcessor requires a chat template and tokenizer that do not "
+            "merge characters across a turn boundary. Use a template whose "
+            "turn separators tokenize on their own, or a tokenizer that does "
+            "not merge across them."
         )
 
 
@@ -159,6 +176,10 @@ class ChatProcessor(SampleProcessor):
         tokens = np.asarray(full_tokens, dtype=np.int64)
         input_ids = tokens[:-1]
         labels = tokens[1:].copy()
+        # TODO(data-sft-turn-encode): Each user turn re-renders and re-encodes the
+        # whole conversation prefix, so a T-turn chat does O(T^2) encoding work.
+        # Fine for typical SFT lengths; cache the previous render if long
+        # conversations become common.
         for turn in range(0, len(messages), 2):
             prompt_tokens = self._encode_chat_messages(
                 messages[: turn + 1], add_generation_prompt=True
