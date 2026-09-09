@@ -27,15 +27,15 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 from .model import Llama3Model
-
-
-_DEFAULT_DEBUGMODEL_SEQ_LEN = 2048
 
 
 def llama3_mxfp8_linear_converter_config(
@@ -61,7 +61,7 @@ def llama3_mxfp8_linear_converter_config(
 
 
 def llama3_debugmodel(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
@@ -108,7 +108,7 @@ def llama3_debugmodel(
 
 
 def llama3_debugmodel_varlen_attn(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
@@ -119,7 +119,7 @@ def llama3_debugmodel_varlen_attn(
 
 
 def llama3_debugmodel_dist_gemm(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     """Async-TP: the attention TP collectives are folded into their GEMMs.
 
@@ -139,7 +139,7 @@ def llama3_debugmodel_dist_gemm(
 
 
 def llama3_debugmodel_float8(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     model_compile_enabled = (
@@ -156,7 +156,7 @@ def llama3_debugmodel_float8(
 
 
 def llama3_debugmodel_mxfp8(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
@@ -171,7 +171,7 @@ def llama3_debugmodel_mxfp8(
 
 
 def llama3_debugmodel_nvfp4(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
@@ -195,7 +195,7 @@ def llama3_debugmodel_nvfp4(
 
 
 def llama3_debugmodel_first_85_pct_layers_nvfp4(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
@@ -222,7 +222,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
 
 
 def llama3_debugmodel_float8_emulate_lora(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     from torchtitan.components.lora import LoRAConverter
 
@@ -242,7 +242,7 @@ def llama3_debugmodel_float8_emulate_lora(
 
 
 def llama3_debugmodel_ce_loss(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
     config = llama3_debugmodel(seq_len=seq_len)
@@ -422,7 +422,7 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def sft_debugmodel(
-    seq_len: int | None = _DEFAULT_DEBUGMODEL_SEQ_LEN,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
 

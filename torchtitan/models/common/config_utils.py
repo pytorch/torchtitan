@@ -52,6 +52,9 @@ from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 
+DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
+
+
 def decoder_vocab_size(model_spec: ModelSpec) -> int:
     """Assert Decoder.Config type so lint is not annoyed."""
     model_config = model_spec.model

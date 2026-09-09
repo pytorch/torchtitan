@@ -15,7 +15,10 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -107,7 +110,9 @@ def _muse_glimmer_mm_dataloader(
     )
 
 
-def muse_glimmer_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def muse_glimmer_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len, attn_backend="flex")
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
@@ -146,7 +151,9 @@ def muse_glimmer_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def muse_glimmer_debugmodel_mm(seq_len: int | None = None) -> Trainer.Config:
+def muse_glimmer_debugmodel_mm(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     """Multimodal debug training config.
 
     Trains the ``debugmodel_mm`` flavor (debug text decoder that owns a
