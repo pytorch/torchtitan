@@ -121,10 +121,12 @@ class PairCollator(Collator):
         return self._num_rows
 
     def __call__(self, rows) -> TrainerBatch:
-        inputs, labels = zip(*rows)
-        return {
-            key: torch.stack([row[key] for row in inputs]) for key in inputs[0]
-        }, torch.stack(labels)
+        row_inputs, labels = zip(*rows)
+        inputs = {
+            key: torch.stack([row[key] for row in row_inputs]) for key in row_inputs[0]
+        }
+        inputs["labels"] = torch.stack(labels)
+        return inputs
 
 
 class VerifyFilterOrder(SampleProcessor):
@@ -895,9 +897,9 @@ def test_packing_yields_rows_and_loader_batches(packing_type):
         max_context_length=8,
         num_tokens_per_batch=16,
     )
-    inputs, labels = next(iter(loader))
+    inputs = next(iter(loader))
     assert inputs["input"].shape == (16,)
-    assert labels.shape == (16,)
+    assert inputs["labels"].shape == (16,)
 
 
 @pytest.mark.parametrize(
@@ -1142,7 +1144,8 @@ def test_unpacked_text_collator_creates_range_positions():
         labels=np.asarray([2, 3, 4]),
     )
 
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
+    labels = inputs["labels"]
 
     assert inputs["input"][:3].tolist() == [1, 2, 3]
     assert inputs["positions"][:3].tolist() == [0, 1, 2]
@@ -1160,7 +1163,7 @@ def test_unpacked_text_collator_pads_positions_within_context_window():
         labels=np.asarray([2, 3, 4]),
     )
 
-    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
     assert len(inputs["positions"]) == CONTEXT.num_tokens_per_batch
     assert int(inputs["positions"].max()) < CONTEXT.max_context_length
@@ -1172,7 +1175,7 @@ def test_text_collator_counts_unmasked_labels():
         labels=np.asarray([2, 3, IGNORE_INDEX]),
     )
 
-    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
     assert inputs["num_valid_tokens"] == 2
     assert inputs["input"][:3].tolist() == [1, 2, 3]
@@ -1190,10 +1193,10 @@ def test_text_collator_falls_back_to_pageable_without_accelerator(monkeypatch):
     # which is how CPU-only test runs and CI execute this path.
     monkeypatch.setattr(collators, "HAS_PIN_MEMORY", False)
 
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
+    inputs = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
 
     assert not inputs["input"].is_pinned()
-    assert not labels.is_pinned()
+    assert not inputs["labels"].is_pinned()
     assert inputs["input"][:3].tolist() == [1, 2, 3]
 
 
@@ -1202,11 +1205,11 @@ def test_text_collator_falls_back_to_pageable_without_accelerator(monkeypatch):
     reason="page-locking host memory requires an accelerator",
 )
 def test_text_collator_allocates_page_locked_batches():
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
+    inputs = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
 
     assert inputs["input"].is_pinned()
     assert inputs["positions"].is_pinned()
-    assert labels.is_pinned()
+    assert inputs["labels"].is_pinned()
 
 
 def test_loader_batches_carry_valid_token_count():
@@ -1226,7 +1229,8 @@ def test_loader_batches_carry_valid_token_count():
         num_tokens_per_batch=CONTEXT.num_tokens_per_batch,
     )
 
-    input_dict, labels = next(iter(loader))
+    input_dict = next(iter(loader))
+    labels = input_dict["labels"]
 
     assert input_dict["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 3
     loader.close()
@@ -1254,7 +1258,8 @@ def test_pack_then_pack_then_collate_preserves_aligned_pairs():
         )
     )
 
-    inputs, labels = TextCollator.Config().build(context=context)([packed])
+    inputs = TextCollator.Config().build(context=context)([packed])
+    labels = inputs["labels"]
 
     assert inputs["input"][:3].tolist() == [1, 3, 4]
     assert labels[:3].tolist() == [2, 4, 5]
@@ -1291,7 +1296,7 @@ def test_sft_labels_survive_packing_and_collation():
             )
         )
     )
-    _, labels = TextCollator.Config().build(context=CONTEXT)([packed])
+    labels = TextCollator.Config().build(context=CONTEXT)([packed])["labels"]
 
     assert labels[0].item() == IGNORE_INDEX
     assert labels[1].item() == IGNORE_INDEX
@@ -1485,8 +1490,8 @@ def test_loader_restores_configured_random_map():
     restored.load_state_dict(state)
     actual = next(iter(restored))
 
-    assert torch.equal(expected[0]["input"], actual[0]["input"])
-    assert torch.equal(expected[1], actual[1])
+    assert torch.equal(expected["input"], actual["input"])
+    assert torch.equal(expected["labels"], actual["labels"])
 
 
 def test_loader_exact_restore_with_nonempty_packing_buffers():
@@ -1529,9 +1534,9 @@ def test_loader_exact_restore_with_nonempty_packing_buffers():
     restored.load_state_dict(state)
     actual = next(iter(restored))
 
-    assert torch.equal(expected[0]["input"], actual[0]["input"])
-    assert torch.equal(expected[0]["positions"], actual[0]["positions"])
-    assert torch.equal(expected[1], actual[1])
+    assert torch.equal(expected["input"], actual["input"])
+    assert torch.equal(expected["positions"], actual["positions"])
+    assert torch.equal(expected["labels"], actual["labels"])
 
 
 def test_loader_exact_restore_with_map_mix_before_first_fit():
@@ -1597,9 +1602,9 @@ def test_loader_exact_restore_with_map_mix_before_first_fit():
     actual = [next(restored_iterator) for _ in range(8)]
 
     for expected_batch, actual_batch in zip(expected, actual, strict=True):
-        assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
-        assert torch.equal(expected_batch[0]["positions"], actual_batch[0]["positions"])
-        assert torch.equal(expected_batch[1], actual_batch[1])
+        assert torch.equal(expected_batch["input"], actual_batch["input"])
+        assert torch.equal(expected_batch["positions"], actual_batch["positions"])
+        assert torch.equal(expected_batch["labels"], actual_batch["labels"])
 
 
 def test_loader_exact_restore_with_nested_weighted_mix():
@@ -1659,9 +1664,9 @@ def test_loader_exact_restore_with_nested_weighted_mix():
     actual = [next(restored_iterator) for _ in range(8)]
 
     for expected_batch, actual_batch in zip(expected, actual):
-        assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
-        assert torch.equal(expected_batch[0]["positions"], actual_batch[0]["positions"])
-        assert torch.equal(expected_batch[1], actual_batch[1])
+        assert torch.equal(expected_batch["input"], actual_batch["input"])
+        assert torch.equal(expected_batch["positions"], actual_batch["positions"])
+        assert torch.equal(expected_batch["labels"], actual_batch["labels"])
 
 
 def test_empty_shard_rejected():
@@ -1753,7 +1758,8 @@ def test_concat_then_split_normalizes_split_continuation_positions():
     collator = TextCollator.Config().build(
         context=replace(CONTEXT, max_context_length=5, num_tokens_per_batch=5)
     )
-    first_inputs, first_labels = collator([rows[0]])
+    first_inputs = collator([rows[0]])
+    first_labels = first_inputs["labels"]
 
     assert first_inputs["input"].tolist() == [0, 1, 2, 3, 4]
     assert first_labels.tolist() == [1, 2, 3, 4, 5]
@@ -1877,12 +1883,12 @@ def test_loader_batches_exact_rows_and_preserves_finite_tail(finite_rows_loader)
     batches = list(finite_rows_loader)
 
     assert len(batches) == 3
-    assert batches[0][0]["input"].tolist() == [[0], [1]]
-    assert batches[0][1].tolist() == [[0], [1]]
-    assert batches[1][0]["input"].tolist() == [[2], [3]]
-    assert batches[1][1].tolist() == [[2], [3]]
-    assert batches[2][0]["input"].tolist() == [[4]]
-    assert batches[2][1].tolist() == [[4]]
+    assert batches[0]["input"].tolist() == [[0], [1]]
+    assert batches[0]["labels"].tolist() == [[0], [1]]
+    assert batches[1]["input"].tolist() == [[2], [3]]
+    assert batches[1]["labels"].tolist() == [[2], [3]]
+    assert batches[2]["input"].tolist() == [[4]]
+    assert batches[2]["labels"].tolist() == [[4]]
 
 
 def mock_grain_loader():
@@ -1950,12 +1956,12 @@ def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
         actual = [next(restored_iterator) for _ in range(4)]
 
         for expected_batch, actual_batch in zip(expected, actual):
-            assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
+            assert torch.equal(expected_batch["input"], actual_batch["input"])
             assert torch.equal(
-                expected_batch[0]["positions"],
-                actual_batch[0]["positions"],
+                expected_batch["positions"],
+                actual_batch["positions"],
             )
-            assert torch.equal(expected_batch[1], actual_batch[1])
+            assert torch.equal(expected_batch["labels"], actual_batch["labels"])
 
 
 def test_first_fit_oversized_row_preserves_chunks_and_buffered_rows():

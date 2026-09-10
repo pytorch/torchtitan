@@ -2161,8 +2161,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
         # One forward_backward_step triggers _make_fx_forward_backward_step
         # which traces the model and applies all graph passes.
         trainer.forward_backward_step(
-            input_dict={"input": inputs, "positions": positions},
-            labels=labels,
+            input_dict={"input": inputs, "positions": positions, "labels": labels},
             global_valid_tokens=global_valid_tokens,
         )
 

@@ -79,10 +79,11 @@ def _generic_validator(loader):
 def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     # A fresh dict per row: the validator pops num_valid_tokens.
     def row():
-        return (
-            {"input": torch.ones(1, 1), "num_valid_tokens": 1},
-            torch.ones(1, 1, dtype=torch.long),
-        )
+        return {
+            "input": torch.ones(1, 1),
+            "labels": torch.ones(1, 1, dtype=torch.long),
+            "num_valid_tokens": 1,
+        }
 
     loader = _ClosableLoader([row(), row()])
     validator = _generic_validator(loader)
@@ -137,13 +138,11 @@ def _flux_validator(loader):
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
-    row = (
-        {
-            "prompt": "test",
-            "timestep": torch.tensor([0.5]),
-        },
-        torch.zeros(1, 1, 2, 2),
-    )
+    row = {
+        "prompt": "test",
+        "timestep": torch.tensor([0.5]),
+        "labels": torch.zeros(1, 1, 2, 2),
+    }
     loader = _ClosableLoader([row, row])
     validator = _flux_validator(loader)
 
@@ -180,13 +179,11 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
     labels = torch.zeros(1, 3, 6, 10)
     loader = _ClosableLoader(
         [
-            (
-                {
-                    "prompt": "test",
-                    "timestep": torch.tensor([0.5]),
-                },
-                labels,
-            )
+            {
+                "prompt": "test",
+                "timestep": torch.tensor([0.5]),
+                "labels": labels,
+            }
         ]
     )
     validator = _flux_validator(loader)
