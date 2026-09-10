@@ -109,6 +109,12 @@ intermediate in the activation arena or recompute it during backward according
 to the capacity available in the selected slot; this does not change kernel
 topology under CUDA graphs.
 
+A VMM prefetch is a single-use owner, not a device-global hint. TorchTitan owns
+it until context creation transfers the exact matching region to the annex and
+closes it if initialization or trainer teardown happens first. A failed,
+closed, consumed, or mismatched prefetch is an error; it never silently falls
+back to a second synchronous VMM allocation.
+
 ## Pipeline parallelism
 
 For a multi-stage pipeline schedule, TorchTitan asks PyTorch to analyze the
