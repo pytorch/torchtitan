@@ -63,9 +63,7 @@ class TestDistMuonConfig(unittest.TestCase):
     def _config(self):
         from torchtitan.distributed.flex_shard import DistMuon
 
-        return DistMuon.Config(
-            lr=1e-3, compute_sharding_by_fqn={}, bucket_configs=()
-        )
+        return DistMuon.Config(lr=1e-3, compute_sharding_by_fqn={}, bucket_configs=())
 
     def test_factory_fields_are_not_param_group_kwargs(self):
         config = self._config()
