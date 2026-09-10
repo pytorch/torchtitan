@@ -84,8 +84,8 @@ def test_lora_forward():
     assert output.shape == (num_tokens, vocab_size)
 
 
-def test_lora_preserves_logical_feed_forward_slices():
-    """A fused w13 keeps independent w1 and w3 LoRA adapters."""
+def test_lora_targets_fused_feed_forward_projection():
+    """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
         w1=Linear.Config(in_features=4, out_features=8, param_init=init),
@@ -96,7 +96,7 @@ def test_lora_preserves_logical_feed_forward_slices():
         LoRAConverter.Config(
             rank=2,
             alpha=4.0,
-            target_modules=["w1", "w3"],
+            target_modules=["w13"],
         )
     ).convert(config)
     feed_forward = config.build()
@@ -104,36 +104,29 @@ def test_lora_preserves_logical_feed_forward_slices():
 
     assert set(feed_forward.state_dict()) == {
         "w1.weight",
-        "w1.lora_a.weight",
-        "w1.lora_b.weight",
         "w2.weight",
         "w3.weight",
-        "w3.lora_a.weight",
-        "w3.lora_b.weight",
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
     }
     assert {
         name
         for name, parameter in feed_forward.named_parameters()
         if parameter.requires_grad
     } == {
-        "w13.lora_a.w1.weight",
-        "w13.lora_a.w3.weight",
-        "w13.lora_b.w1.weight",
-        "w13.lora_b.w3.weight",
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
     }
 
     with torch.no_grad():
-        for adapter in (
-            *feed_forward.w13.lora_a.values(),
-            *feed_forward.w13.lora_b.values(),
-        ):
+        for adapter in (feed_forward.w13.lora_a, feed_forward.w13.lora_b):
             adapter.weight.copy_(torch.randn_like(adapter.weight))
 
     x = torch.randn(3, 4)
-    gate_up = F.linear(x, feed_forward.w13.weight).unflatten(-1, (8, 2))
+    gate_up = F.linear(x, feed_forward.w13.weight)
+    gate_up = gate_up + 2 * feed_forward.w13.lora_b(feed_forward.w13.lora_a(x))
+    gate_up = gate_up.unflatten(-1, (8, 2))
     gate, up = gate_up.unbind(-1)
-    gate = gate + 2 * feed_forward.w13.lora_b["w1"](feed_forward.w13.lora_a["w1"](x))
-    up = up + 2 * feed_forward.w13.lora_b["w3"](feed_forward.w13.lora_a["w3"](x))
     expected = feed_forward.w2(F.silu(gate) * up)
     torch.testing.assert_close(feed_forward(x), expected)
 
@@ -143,8 +136,8 @@ def test_lora_preserves_logical_feed_forward_slices():
     torch.testing.assert_close(reloaded(x), expected)
 
 
-def test_float8_lora_preserves_logical_feed_forward_slices():
-    """Quantized w13 keeps independent logical LoRA adapters."""
+def test_float8_lora_targets_fused_feed_forward_projection():
+    """Quantized w13 uses one LoRA adapter."""
     pytest.importorskip("torchao")
     from torchtitan.components.quantization import Float8Linear
 
@@ -164,7 +157,7 @@ def test_float8_lora_preserves_logical_feed_forward_slices():
         LoRAConverter.Config(
             rank=4,
             alpha=8.0,
-            target_modules=["w1", "w3"],
+            target_modules=["w13"],
         )
     ).convert(config)
     feed_forward = config.build()
@@ -173,39 +166,26 @@ def test_float8_lora_preserves_logical_feed_forward_slices():
     assert isinstance(feed_forward.w13, Float8Linear)
     assert set(feed_forward.state_dict()) == {
         "w1.weight",
-        "w1.lora_a.weight",
-        "w1.lora_b.weight",
         "w2.weight",
         "w3.weight",
-        "w3.lora_a.weight",
-        "w3.lora_b.weight",
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
     }
     assert feed_forward(torch.randn(2, 16)).shape == (2, 16)
 
 
 @pytest.mark.parametrize("target", ["w1", "w3"])
-def test_lora_can_target_one_logical_feed_forward_slice(target):
+def test_lora_rejects_logical_feed_forward_projection(target):
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
         w1=Linear.Config(in_features=4, out_features=8, param_init=init),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
         w3=Linear.Config(in_features=4, out_features=8, param_init=init),
     )
-    config = LoRAConverter(
-        LoRAConverter.Config(rank=2, alpha=4.0, target_modules=[target])
-    ).convert(config)
-    feed_forward = config.build()
-    feed_forward.init_states()
-
-    trainable = {
-        name
-        for name, parameter in feed_forward.named_parameters()
-        if parameter.requires_grad
-    }
-    assert trainable == {
-        f"w13.lora_a.{target}.weight",
-        f"w13.lora_b.{target}.weight",
-    }
+    with pytest.raises(ValueError, match="part of the fused w13 projection"):
+        LoRAConverter(
+            LoRAConverter.Config(rank=2, alpha=4.0, target_modules=[target])
+        ).convert(config)
 
 
 def test_validate_converter_order():
