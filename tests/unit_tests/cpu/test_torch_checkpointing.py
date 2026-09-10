@@ -591,30 +591,30 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         the writer names, that is where the shards are, so the callback must
         consolidate from it verbatim.
         """
-        received: list[str] = []
+
+        def _pre_finalize_callback_ensure_nonempty_dir(path, _logger) -> None:
+            self.assertTrue(os.path.isdir(path))
+            self.assertGreater(
+                len(os.listdir(path)),
+                0,
+                msg=f"callback was handed {path!r}, which holds no shards",
+            )
+
         with tempfile.TemporaryDirectory() as root:
             checkpoint_id = os.path.join(root, "step-1", "sharded")
             config = BackendCheckpointManager.Config(
                 default=ItemSpec(requires_copy=False),
-                save=SyncCheckpointSaverConfig(
-                    writer_config=CheckpointWriterConfig(barrier_config=None)
-                ),
+                save=SyncCheckpointSaverConfig(writer_config=CheckpointWriterConfig()),
                 # O_DIRECT alignment support varies across CI filesystems and
                 # is unrelated to the callback-path contract under test.
                 storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
-                pre_finalize_callback=lambda path, _logger: received.append(path),
+                pre_finalize_callback=_pre_finalize_callback_ensure_nonempty_dir,
             )
             manager = config.build()
             try:
                 manager.save(checkpoint_id, {MODEL: torch.ones(2)})
             finally:
                 manager.close()
-
-            self.assertEqual(1, len(received))
-            self.assertTrue(
-                os.listdir(received[0]),
-                f"callback was handed {received[0]!r}, which holds no shards",
-            )
 
     def test_a_finished_hf_export_is_a_valid_checkpoint(self) -> None:
         # A final HF export keeps the backend's metadata in its nested "sharded"
