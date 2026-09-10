@@ -35,8 +35,8 @@ MODULE=gemma4 CONFIG=gemma4_12b ./run_train.sh
 
 | Feature | Notes |
 |---------|-------|
-| FSDP / HSDP | Recommended default; decoder sharded per layer |
-| Context Parallel (CP) | Recommended for scaling sequences up to 256k |
+| FSDP2 / HSDP | Recommended for batch scaling at standard context (e.g. 8k); shards per layer across `dp_shard` with optional replication across `dp_replicate` |
+| Context Parallel (CP) | Recommended for long sequences (32k–256k) by sharding the sequence dimension |
 | Tensor Parallel (TP) | Supported when `global_kv_heads % tp == 0` (e.g. `tp=2` for E4B/26B-A4B; `tp=2,4` for 31B) |
 | Pipeline Parallel (PP) | Standard `pipeline_llm` schedule |
 | Activation Checkpointing | Selective (`SelectiveAC`) and Full (`FullAC`) |

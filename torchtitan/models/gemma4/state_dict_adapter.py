@@ -36,24 +36,25 @@ class Gemma4StateDictAdapter(StateDictAdapter):
         self.hf_assets_path = hf_assets_path
 
         # Mapping from HuggingFace keys to TorchTitan keys
+        # Official Google Gemma-4 checkpoints namespace language model weights under model.language_model.*
         self.from_hf_map = {
-            "model.embed_tokens.weight": "tok_embeddings.weight",
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
-            "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
-            "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
-            "model.layers.{}.post_attention_layernorm.weight": "layers.{}.post_attention_norm.weight",
-            "model.layers.{}.pre_feedforward_layernorm.weight": "layers.{}.ffn_norm.weight",
-            "model.layers.{}.post_feedforward_layernorm.weight": "layers.{}.post_ffn_norm.weight",
-            "model.layers.{}.layer_scalar": "layers.{}.layer_scalar",
-            "model.norm.weight": "norm.weight",
+            "model.language_model.embed_tokens.weight": "tok_embeddings.weight",
+            "model.language_model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.qkv_linear.wq.weight",
+            "model.language_model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.qkv_linear.wk.weight",
+            "model.language_model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.qkv_linear.wv.weight",
+            "model.language_model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "model.language_model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
+            "model.language_model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
+            "model.language_model.layers.{}.self_attn.rotary_emb.inv_freq": None,
+            "model.language_model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
+            "model.language_model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
+            "model.language_model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
+            "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
+            "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.post_attention_norm.weight",
+            "model.language_model.layers.{}.pre_feedforward_layernorm.weight": "layers.{}.ffn_norm.weight",
+            "model.language_model.layers.{}.post_feedforward_layernorm.weight": "layers.{}.post_ffn_norm.weight",
+            "model.language_model.layers.{}.layer_scalar": "layers.{}.layer_scalar",
+            "model.language_model.norm.weight": "norm.weight",
             "lm_head.weight": "lm_head.weight",
         }
 
@@ -75,10 +76,7 @@ class Gemma4StateDictAdapter(StateDictAdapter):
                     continue
                 new_key = new_key.format(layer_num)
             else:
-                if (
-                    self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
-                    and key == "lm_head.weight"
-                ):
+                if key == "lm_head.weight" and getattr(self.model_config, "enable_weight_tying", True):
                     if self.fqn_to_index_mapping:
                         self.fqn_to_index_mapping.pop("lm_head.weight", None)
                     continue
@@ -95,29 +93,16 @@ class Gemma4StateDictAdapter(StateDictAdapter):
         self._validate_hf_rope_config(CosSinRoPE.Config)
         state_dict = {}
 
-        # 1. Strip prefixes first
-        stripped_hf_dict = {}
+        # 1. Handle Weight Tying (lm_head is tied to embed_tokens if omitted in HF checkpoint)
+        if "lm_head.weight" not in hf_state_dict:
+            embed_key = "model.language_model.embed_tokens.weight"
+            if embed_key not in hf_state_dict and "model.embed_tokens.weight" in hf_state_dict:
+                embed_key = "model.embed_tokens.weight"
+            if embed_key in hf_state_dict:
+                hf_state_dict["lm_head.weight"] = hf_state_dict[embed_key]
+
+        # 2. Map Keys
         for key, value in hf_state_dict.items():
-            if key.startswith("model.language_model."):
-                key = "model." + key[len("model.language_model."):]
-            elif key.startswith("language_model."):
-                key = "model." + key[len("language_model."):]
-            stripped_hf_dict[key] = value
-
-        # 2. Handle Weight Tying
-        if (
-            self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]
-            and "lm_head.weight" not in stripped_hf_dict
-        ):
-            if "model.embed_tokens.weight" not in stripped_hf_dict:
-                raise ValueError(
-                    "Weight tying enabled but 'model.embed_tokens.weight' is missing from HF state dict."
-                )
-            stripped_hf_dict["lm_head.weight"] = stripped_hf_dict["model.embed_tokens.weight"]
-
-        # 3. Map Keys
-        for key, value in stripped_hf_dict.items():
-
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 m = re.search(r"\d+", key)

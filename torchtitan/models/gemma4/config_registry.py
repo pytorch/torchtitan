@@ -74,7 +74,6 @@ def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="/mnt/powerscale/models/google/gemma-4-e2b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -83,7 +82,13 @@ def gemma4_e2b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_spec,
-        optimizer=default_adamw(lr=3e-4),
+        optimizer=default_adamw(lr=5e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
         training=TrainingConfig(
             dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
@@ -110,7 +115,6 @@ def gemma4_e4b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="/mnt/powerscale/models/google/gemma-4-e4b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -119,7 +123,13 @@ def gemma4_e4b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_spec,
-        optimizer=default_adamw(lr=2e-4),
+        optimizer=default_adamw(lr=5e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
         training=TrainingConfig(
             dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
@@ -146,7 +156,6 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="/mnt/powerscale/models/google/gemma-4-12B",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -155,7 +164,13 @@ def gemma4_12b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_spec,
-        optimizer=default_adamw(lr=1e-4),
+        optimizer=default_adamw(lr=2e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
         training=TrainingConfig(
             dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
@@ -182,7 +197,6 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="/mnt/powerscale/models/google/gemma-4-26b-a4b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -191,7 +205,13 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_spec,
-        optimizer=default_adamw(lr=1e-4),
+        optimizer=default_adamw(lr=2e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
         training=TrainingConfig(
             dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
@@ -218,7 +238,6 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         ),
-        hf_assets_path="/mnt/powerscale/models/google/gemma-4-31b",
         profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
@@ -227,7 +246,13 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model_spec=model_spec,
-        optimizer=default_adamw(lr=1e-4),
+        optimizer=default_adamw(lr=2e-5),
+        lr_scheduler=LRSchedulersContainer.Config(
+            warmup_steps=200,
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
         training=TrainingConfig(
             dtype="bfloat16",
             num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
@@ -244,3 +269,4 @@ def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:
             steps=1200,
         ),
     )
+
