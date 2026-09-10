@@ -11,15 +11,15 @@ from __future__ import annotations
 import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, cast, NoReturn, overload
+from typing import Any, cast, ClassVar, NoReturn, overload
 
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
-from torch.optim import Optimizer
+from torchtitan.components.optimizer.base import Optimizer
 
 from ._optimizer_reshard_runtime import _BucketedRedistributionRuntime
 
@@ -51,34 +51,8 @@ from .optimizer_reshard import (
 
 
 __all__ = [
-    "build_dist_muon",
+    "DistMuon",
 ]
-
-
-def build_dist_muon(
-    params: Iterable[dict[str, Any]],
-    *,
-    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
-    bucket_configs: Sequence[BucketConfig],
-    **kwargs: Any,
-) -> DistMuon:
-    """Construct a DistMuon optimizer with FlexShard redistribution.
-
-    DistMuon's ``BlockShard`` path accepts only a 2D parameter stored as
-    ``[M * R, C]`` with contiguous local DTensor storage. The placement must
-    target tensor dimension 0 with ``block_size=R``; the leading dimension
-    must be nonzero and divisible by ``R``. Each consecutive ``R`` rows forms
-    one independent ``[R, C]`` matrix for local Muon compute. A native
-    batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
-    complete matrices. A single 2D matrix without ``BlockShard`` uses
-    whole-matrix compute such as ``Owned``.
-    """
-    return DistMuon(
-        _normalize_param_groups(params),
-        compute_sharding_by_fqn=compute_sharding_by_fqn,
-        bucket_configs=bucket_configs,
-        **kwargs,
-    )
 
 
 def _normalize_param_groups(
@@ -250,12 +224,21 @@ def _initialize_dist_muon(
 
 
 class DistMuon(Optimizer):
-    """Muon optimizer constructed by ``build_dist_muon``.
+    """Muon optimizer with FlexShard redistribution.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after resharding is applied. Every configured parameter must
     have a layout-compatible DTensor gradient before each rank enters
     ``step()``.
+
+    The ``BlockShard`` path accepts only a 2D parameter stored as ``[M * R, C]``
+    with contiguous local DTensor storage. The placement must target tensor
+    dimension 0 with ``block_size=R``; the leading dimension must be nonzero and
+    divisible by ``R``. Each consecutive ``R`` rows forms one independent
+    ``[R, C]`` matrix for local Muon compute. A native batch-first 3D
+    ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute complete matrices. A
+    single 2D matrix without ``BlockShard`` uses whole-matrix compute such as
+    ``Owned``.
 
     Matrix-batch compute views use batched BF16 kernels. They implement the
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
@@ -268,40 +251,48 @@ class DistMuon(Optimizer):
     _redistribution_runtime: _BucketedRedistributionRuntime[_ParameterComputeLayout]
     _param_groups_frozen: bool
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Optimizer.Config):
+        _FACTORY_FIELDS: ClassVar[frozenset[str]] = frozenset(
+            {"compute_sharding_by_fqn", "bucket_configs"}
+        )
+
+        lr: float = 1e-3
+        weight_decay: float = 0.1
+        momentum: float = 0.95
+        nesterov: bool = True
+        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+        eps: float = 1e-7
+        ns_steps: int = 5
+        adjust_lr_fn: str | None = None
+        # DistMuon has no fused or foreach kernels; _validate_groups rejects a
+        # truthy value, so this overrides a globally configured foreach.
+        foreach: bool = False
+
+        compute_sharding_by_fqn: Mapping[str, ComputeLayout] = field(
+            default_factory=dict
+        )
+        bucket_configs: Sequence[BucketConfig] = ()
+
     def __init__(
         self,
-        params: Iterable[dict[str, Any]],
+        config: DistMuon.Config,
         *,
-        compute_sharding_by_fqn: Mapping[str, ComputeLayout],
-        bucket_configs: Sequence[BucketConfig],
-        lr: float = 1e-3,
-        weight_decay: float = 0.1,
-        momentum: float = 0.95,
-        nesterov: bool = True,
-        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
-        eps: float = 1e-7,
-        ns_steps: int = 5,
-        adjust_lr_fn: str | None = None,
+        params: Iterable[dict[str, Any]],
     ) -> None:
-        defaults = {
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "momentum": momentum,
-            "nesterov": nesterov,
-            "ns_coefficients": ns_coefficients,
-            "eps": eps,
-            "ns_steps": ns_steps,
-            "adjust_lr_fn": adjust_lr_fn,
-        }
         self._first_step_validated = False
         self._param_groups_frozen = False
-        super().__init__(params, defaults)
+        # Skip the Configurable base, which defines no __init__, and hand the
+        # parameter groups plus their defaults to torch.optim.Optimizer.
+        super(Optimizer, self).__init__(
+            _normalize_param_groups(params), config.to_param_group_kwargs()
+        )
         self._validate_groups()
         self._param_groups_frozen = True
         _initialize_dist_muon(
             self,
-            compute_sharding_by_fqn=compute_sharding_by_fqn,
-            bucket_configs=bucket_configs,
+            compute_sharding_by_fqn=config.compute_sharding_by_fqn,
+            bucket_configs=config.bucket_configs,
         )
 
     @overload

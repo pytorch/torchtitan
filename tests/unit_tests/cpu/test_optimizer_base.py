@@ -57,5 +57,44 @@ class TestOptimizerConfigSplit(unittest.TestCase):
         self.assertEqual(optimizer.param_groups[0]["lr"], 1e-3)
 
 
+class TestDistMuonConfig(unittest.TestCase):
+    """DistMuon is the case that motivates the two-channel Config."""
+
+    def _config(self):
+        from torchtitan.distributed.flex_shard import DistMuon
+
+        return DistMuon.Config(
+            lr=1e-3, compute_sharding_by_fqn={}, bucket_configs=()
+        )
+
+    def test_factory_fields_are_not_param_group_kwargs(self):
+        config = self._config()
+        param_group_kwargs = config.to_param_group_kwargs()
+        self.assertNotIn("compute_sharding_by_fqn", param_group_kwargs)
+        self.assertNotIn("bucket_configs", param_group_kwargs)
+        self.assertEqual(
+            set(config.to_factory_kwargs()),
+            {"compute_sharding_by_fqn", "bucket_configs"},
+        )
+
+    def test_defaults_match_the_previous_constructor_defaults(self):
+        # to_param_group_kwargs emits every field, whereas the old signature
+        # let unset keys fall through to constructor defaults. The values must
+        # agree or saved parameter groups shift.
+        config = self._config()
+        self.assertEqual(config.weight_decay, 0.1)
+        self.assertEqual(config.momentum, 0.95)
+        self.assertTrue(config.nesterov)
+        self.assertEqual(config.ns_coefficients, (3.4445, -4.7750, 2.0315))
+        self.assertEqual(config.eps, 1e-7)
+        self.assertEqual(config.ns_steps, 5)
+        self.assertIsNone(config.adjust_lr_fn)
+
+    def test_foreach_defaults_false_so_a_global_foreach_is_overridden(self):
+        # _validate_groups rejects a truthy foreach, and Kimi K2.7 sets
+        # implementation="foreach" for the container as a whole.
+        self.assertIs(self._config().to_param_group_kwargs()["foreach"], False)
+
+
 if __name__ == "__main__":
     unittest.main()

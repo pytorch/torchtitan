@@ -6,11 +6,11 @@
 
 """Flexible storage-to-compute redistribution APIs."""
 
-from .dist_muon import build_dist_muon
+from .dist_muon import DistMuon
 from .optimizer_reshard import BlockShard, BucketConfig, ComputeLayout, Owned
 
 __all__ = [
-    "build_dist_muon",
+    "DistMuon",
     "BlockShard",
     "BucketConfig",
     "ComputeLayout",
