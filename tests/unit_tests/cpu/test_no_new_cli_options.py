@@ -336,7 +336,7 @@ def _declared_cli_options(
     union members it happens to hold, so everything else would go unguarded.
 
     ``seen`` breaks the cycles that subclass expansion creates:
-    ``ChunkedLossWrapper.Config.loss_fn`` is a ``BaseLoss.Config``, which
+    ``ChunkedLossWrapper.Config.loss_fn`` is a ``LossConfig``, which
     expands back to the wrapper.
     """
     if config_cls in seen:
