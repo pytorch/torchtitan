@@ -130,6 +130,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
+            # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4],
