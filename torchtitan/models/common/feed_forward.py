@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
-from typing import Any
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -20,83 +19,41 @@ from torchtitan.protocols.module import Module
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
 
 
-def _make_fused_linear_init(
-    gate_init: Callable, up_init: Callable
-) -> Callable[[torch.Tensor], None]:
-    """Initialize the gate and up slices of an interleaved linear parameter."""
-
-    def init(param: torch.Tensor) -> None:
-        logical_param = param.unflatten(0, (-1, 2))
-        gate_init(logical_param[:, 0])
-        up_init(logical_param[:, 1])
-
-    return init
-
-
-def _merge_gate_up_param_init(
-    w1: Linear.Config, w3: Linear.Config
-) -> dict[str, Callable] | None:
-    """Preserve the logical w1 and w3 initializers in an interleaved w13."""
-    if w1.param_init is None and w3.param_init is None:
-        return None
-    if w1.param_init is None or w3.param_init is None:
-        raise ValueError("w1 and w3 must either both define param_init or neither")
-    if w1.param_init.keys() != w3.param_init.keys():
-        raise ValueError("w1 and w3 param_init must initialize the same parameters")
-    return {
-        name: _make_fused_linear_init(w1.param_init[name], w3.param_init[name])
-        for name in w1.param_init
-    }
-
-
-def _validate_fused_gate_up_configs(
-    w1: Linear.Config,
-    w3: Linear.Config,
-) -> None:
-    """Validate that w1 and w3 can build one physical projection."""
-    config_type = type(w1)
-    if type(w3) is not config_type:
-        raise ValueError(
-            "Cannot fuse w1 and w3 with different implementations: "
-            f"w1 uses {type(w1).__qualname__}, but w3 uses "
-            f"{type(w3).__qualname__}."
-        )
-    if w1.out_features != w3.out_features:
-        raise ValueError("Fused w1 and w3 must have matching out_features")
-
-    comparable_fields = {
-        field.name
-        for field in fields(config_type)
-        if field.init and field.name not in ("out_features", "param_init")
-    }
-    for field_name in comparable_fields:
-        if getattr(w3, field_name) != getattr(w1, field_name):
-            raise ValueError(f"Fused w1 and w3 have different {field_name} values")
-
-
-def _build_fused_gate_up_linear(
-    w1: Linear.Config,
-    w3: Linear.Config,
+def _make_fused_gate_up_init(
+    gate_init: Callable,
+    up_init: Callable,
     *,
-    param_init: dict[str, Callable] | None,
-) -> Any:
-    """Build logical w1 and w3 configs as one interleaved w13 Linear."""
-    _validate_fused_gate_up_configs(w1, w3)
+    gate_up_axis: int,
+) -> Callable:
+    """Build an initializer for a fused gate/up weight from per-half initializers.
 
-    config_type = type(w1)
-    config_kwargs = {
-        field.name: getattr(w1, field.name)
-        for field in fields(config_type)
-        if field.init
-    }
-    config_kwargs["out_features"] = w1.out_features + w3.out_features
-    config_kwargs["param_init"] = param_init
-    w13 = config_type(**config_kwargs).build()
-    w13._logical_output_slices = (
-        ("w1", w1.out_features),
-        ("w3", w3.out_features),
-    )
-    return w13
+    The fused weight has a size-2 ``gate_up_axis`` (index 0 = gate / stock w1,
+    index 1 = up / stock w3). Each half is initialized with its own initializer
+    because the gate and up projections differ (e.g. up shares w2's depth-scaled
+    init), so initializing the whole tensor at once would mis-init the up half.
+    Used by the grouped FusedGroupedExperts ``(E, F, 2, D)`` override and by
+    the logical 3D view of the dense fused linear weight.
+    """
+
+    def _init(t: torch.Tensor) -> None:
+        gate_idx: list[int | slice] = [slice(None)] * t.ndim
+        up_idx: list[int | slice] = [slice(None)] * t.ndim
+        gate_idx[gate_up_axis] = 0
+        up_idx[gate_up_axis] = 1
+        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
+        up_init(t[tuple(up_idx)])  # up (stock w3)
+
+    return _init
+
+
+def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
+    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    init_logical_weight = _make_fused_gate_up_init(gate_init, up_init, gate_up_axis=1)
+
+    def _init(t: torch.Tensor) -> None:
+        init_logical_weight(t.unflatten(0, (-1, 2)))
+
+    return _init
 
 
 def compute_ffn_hidden_dim(
@@ -137,10 +94,22 @@ class FeedForward(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w13 = _build_fused_gate_up_linear(
+        w1_init = (config.w1.param_init or {}).get("weight")
+        w3_init = (config.w3.param_init or {}).get("weight")
+        w13_param_init = None
+        if w1_init is not None and w3_init is not None:
+            w13_param_init = {"weight": _make_fused_linear_init(w1_init, w3_init)}
+
+        w13_config = replace(
             config.w1,
-            config.w3,
-            param_init=_merge_gate_up_param_init(config.w1, config.w3),
+            out_features=2 * config.w1.out_features,
+            bias=False,
+            param_init=w13_param_init,
+        )
+        self.w13 = w13_config.build()
+        self.w13._logical_output_slices = (
+            ("w1", config.w1.out_features),
+            ("w3", config.w3.out_features),
         )
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
