@@ -109,14 +109,6 @@ class FeedForward(Module):
             state_dict[f"{prefix}w1.{param_name}"] = param[:, 0].contiguous()
             state_dict[f"{prefix}w3.{param_name}"] = param[:, 1].contiguous()
 
-        # LoRA uses this hook to expose separate w1 and w3 adapter keys.
-        if hasattr(module.w13, "_expose_logical_state_dict"):
-            module.w13._expose_logical_state_dict(
-                state_dict,
-                physical_prefix=f"{prefix}w13.",
-                logical_prefix=prefix,
-            )
-
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
         """Merge logical w1 and w3 checkpoint keys into the physical w13."""
@@ -128,14 +120,6 @@ class FeedForward(Module):
                     [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
                 ).flatten(0, 1)
 
-        # LoRA uses this hook to restore separate w1 and w3 adapter keys.
-        if hasattr(module.w13, "_restore_logical_state_dict"):
-            module.w13._restore_logical_state_dict(
-                state_dict,
-                physical_prefix=f"{prefix}w13.",
-                logical_prefix=prefix,
-            )
-
         native_key = f"{prefix}w13"
         if native_key in state_dict:
             state_dict[f"{prefix}w13.weight"] = state_dict.pop(native_key).flatten(0, 1)
@@ -144,8 +128,8 @@ class FeedForward(Module):
 class SigmoidGatedFeedForward(FeedForward):
     """SwiGLU feed-forward with a per-token sigmoid gate.
 
-    The output is ``sigmoid(gate(x)) * ffn(x)``. Inherits ``w1/w2/w3`` from
-    FeedForward so logical checkpoint FQNs remain flat.
+    The output is ``sigmoid(gate(x)) * ffn(x)``. It uses FeedForward's fused
+    ``w13`` and ``w2`` projections and adds a separate ``gate`` projection.
     """
 
     @dataclass(kw_only=True, slots=True)
