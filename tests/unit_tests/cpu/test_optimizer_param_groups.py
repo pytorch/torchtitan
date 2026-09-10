@@ -154,27 +154,23 @@ class TestFactoryKwargAgreement(unittest.TestCase):
     """Batched groups share one constructor, so factory kwargs must agree."""
 
     def test_disagreeing_factory_kwargs_raise(self):
-        @dataclass(kw_only=True, slots=True)
-        class _FakeConfig(Optimizer.Config):
-            _FACTORY_FIELDS: ClassVar[frozenset[str]] = frozenset({"widget"})
-
-            lr: float = 1e-3
-            widget: str = "a"
-
         class _Fake(Optimizer):
-            Config = _FakeConfig
+            @dataclass(kw_only=True, slots=True)
+            class Config(Optimizer.Config):
+                _FACTORY_FIELDS: ClassVar[frozenset[str]] = frozenset({"widget"})
+
+                lr: float = 1e-3
+                widget: str = "a"
 
             def __init__(self, config, *, params):
                 torch.optim.Optimizer.__init__(self, params, {"lr": config.lr})
 
-        _FakeConfig._owner = _Fake
-
         config = OptimizersContainer.Config(
             param_groups=[
                 ParamGroupConfig(
-                    pattern=r".*norm.*", optimizer=_FakeConfig(widget="a")
+                    pattern=r".*norm.*", optimizer=_Fake.Config(widget="a")
                 ),
-                ParamGroupConfig(pattern=r".*", optimizer=_FakeConfig(widget="b")),
+                ParamGroupConfig(pattern=r".*", optimizer=_Fake.Config(widget="b")),
             ]
         )
         with self.assertRaisesRegex(ValueError, "factory arguments"):
