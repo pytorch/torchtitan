@@ -11,6 +11,7 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
@@ -18,13 +19,14 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
-from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
+    create_varlen_metadata_for_document,
     FlexAttention,
     VarlenAttention,
+    VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -44,6 +46,8 @@ from torchtitan.protocols.module import Module
 from .kda import KDA
 from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
+
+KimiK3AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels, H = heads,
@@ -207,6 +211,9 @@ class KimiK3TransformerBlock(Module):
         )
         self.moe = config.moe.build() if config.moe is not None else None
         self.moe_enabled = self.moe is not None
+        self.attn_mask_key = (
+            "quadratic_attention" if self.attention is not None else "kda"
+        )
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -226,7 +233,7 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: KimiK3AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum_TD = x_TD
@@ -252,11 +259,14 @@ class KimiK3TransformerBlock(Module):
             )
 
         h_TD = self.attention_norm(x_TD)
+        layer_mask = (
+            attention_masks[self.attn_mask_key] if attention_masks is not None else None
+        )
         if self.attention is not None:
-            h_TD = self.attention(h_TD, attention_masks, positions)
+            h_TD = self.attention(h_TD, layer_mask, positions)
         else:
             assert self.delta_attention is not None
-            h_TD = self.delta_attention(h_TD, None, positions)
+            h_TD = self.delta_attention(h_TD, layer_mask, positions)
         prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
 
         h_TD = _apply_attention_residual(
@@ -283,11 +293,6 @@ class KimiK3Model(Decoder):
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            dataset = config.dataloader.dataset
-            # TODO: Support sample packing by resetting the Q/K/V causal-convolution
-            # and KDA recurrent states at document boundaries.
-            if isinstance(dataset, MMSamplePackingConfig):
-                raise ValueError("Kimi K3 does not yet support sample packing.")
             set_kimi_k3_sharding_config(
                 self, enable_ep=config.parallelism.expert_parallel_degree > 1
             )
@@ -373,6 +378,41 @@ class KimiK3Model(Decoder):
         labels = batch.pop("labels")
         return inputs, labels, batch
 
+    def get_attention_masks(
+        self,
+        positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> KimiK3AttentionMaskDict:
+        attn_config = self.config.first_attention
+
+        kda_metadata = create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+        )
+
+        if attn_config is None:
+            quadratic_attention = None
+        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
+            # Under varlen both consumers read the same document offsets.
+            quadratic_attention = kda_metadata
+        else:
+            quadratic_attention = super().get_attention_masks(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+        # pyrefly: ignore [bad-return]
+        return {
+            "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
+            "kda": kda_metadata,
+        }
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -424,7 +464,7 @@ class KimiK3Model(Decoder):
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: KimiK3AttentionMaskDict | None = None,
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
