@@ -47,8 +47,6 @@ from .kda import KDA
 from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
-# MLA layers read "quadratic_attention" (a BlockMask under flex, shared offsets
-# under varlen); KDA layers read "kda" (document offsets).
 KimiK3AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 # Shape suffixes:

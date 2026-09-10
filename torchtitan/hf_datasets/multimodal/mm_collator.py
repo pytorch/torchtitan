@@ -86,8 +86,6 @@ class MultiModalCollator(Collator):
         input_ids = torch.cat([sample["input_ids"] for sample in batch])
         labels = torch.cat([sample["labels"] for sample in batch])
         positions = torch.cat([sample["positions"] for sample in batch])
-        # Sample packing pads inside each row, so carry the packer's own mask
-        # through and extend it with this batch's tail padding.
         padding_mask = torch.cat(
             [
                 (
