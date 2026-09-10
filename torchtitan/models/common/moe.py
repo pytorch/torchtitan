@@ -508,11 +508,11 @@ class QuantileBalancer(Module):
 
     def estimate_expert_bias(
         self,
+        histogram_EB: torch.Tensor,
         expert_bias_E: torch.Tensor,
     ) -> torch.Tensor:
         """Estimate the next mean-centered expert bias from the histogram."""
         local_expert_bias_E = self._local_tensor(expert_bias_E)
-        histogram_EB = self.required_bias_histogram_EB
 
         counts_E = histogram_EB.sum(dim=-1, dtype=torch.int64)
         target_count_E = counts_E.float() * (self.top_k / self.num_experts)
