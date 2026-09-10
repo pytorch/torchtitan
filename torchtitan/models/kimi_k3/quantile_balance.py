@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Quantile-balanced routing for Kimi K3's mixture-of-experts layers."""
-
 from dataclasses import dataclass
 
 import torch
@@ -34,10 +32,6 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         super().__init__(config)
         if self.score_func != "sigmoid":
             raise ValueError("Quantile balancing requires sigmoid router scores.")
-        if self.top_k >= self.num_experts:
-            raise ValueError(
-                "Quantile balancing requires top_k to be smaller than num_experts."
-            )
         if self.num_expert_groups is not None:
             raise ValueError(
                 "Quantile balancing does not support group-limited routing."
@@ -56,9 +50,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         self,
         scores_TE: torch.Tensor,
         expert_bias_E: torch.Tensor,
-        **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        del router_kwargs
         biased_scores_TE = scores_TE + expert_bias_E
         topk_plus_one_scores, topk_plus_one_expert_ids = torch.topk(
             biased_scores_TE,
@@ -83,16 +75,13 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         if not self.training:
             return super().forward(x_TD, expert_bias_E, **router_kwargs)
 
-        # RouterGateLinear returns FP32. Keep sigmoid in FP32 to avoid loss
-        # explosions.
         scores_TE = torch.sigmoid(self.gate(x_TD))
         topk_expert_ids_TK, cutoff_T1 = remat.region(
             self._select_experts_and_cutoff,
             "routing_decision",
             recompute=False,
-        )(scores_TE, expert_bias_E, **router_kwargs)
-        remat.recompute_needs_tensor(topk_expert_ids_TK)
-        remat.recompute_needs_tensor(cutoff_T1)
+        )(scores_TE, expert_bias_E)
+        remat.recompute_needs_tensor(topk_expert_ids_TK, cutoff_T1)
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
         if self.route_norm:
             denominator_T1 = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
@@ -152,20 +141,6 @@ class QuantileBalancer(Module):
             local_scores_TE = self._local_tensor(scores_TE)
             local_cutoff_T1 = self._local_tensor(cutoff_T1)
             local_expert_bias_E = self._local_tensor(expert_bias_E)
-            if (
-                local_scores_TE.ndim != 2
-                or local_scores_TE.shape[1] != self.num_experts
-            ):
-                raise ValueError("scores_TE must have shape (num_tokens, num_experts).")
-            if local_cutoff_T1.shape != (local_scores_TE.shape[0], 1):
-                raise ValueError("cutoff_T1 must have shape (num_tokens, 1).")
-            if local_expert_bias_E.shape != (self.num_experts,):
-                raise ValueError("expert_bias_E must have shape (num_experts,).")
-            if self.required_bias_histogram_EB.device != local_scores_TE.device:
-                raise ValueError(
-                    "Quantile-balancing histogram and router scores must be on "
-                    "the same device."
-                )
 
             lower_bound = local_expert_bias_E.min() - 1.0
             bin_width = (
@@ -194,43 +169,27 @@ class QuantileBalancer(Module):
         """Estimate the next mean-centered expert bias from the histogram."""
         local_expert_bias_E = self._local_tensor(expert_bias_E)
         histogram_EB = self.required_bias_histogram_EB
-        if histogram_EB.shape != (self.num_experts, self.num_bins):
-            raise ValueError(
-                "required_bias_histogram_EB must have shape " "(num_experts, num_bins)."
-            )
 
         counts_E = histogram_EB.sum(dim=-1, dtype=torch.int64)
-        target_count = counts_E.float() * (self.top_k / self.num_experts)
+        target_count_E = counts_E.float() * (self.top_k / self.num_experts)
         cumulative_counts_EB = histogram_EB.cumsum(dim=-1, dtype=torch.int64)
-        target_bin_E = (
-            (cumulative_counts_EB >= target_count.ceil().to(torch.int64).unsqueeze(-1))
-            .to(torch.int64)
-            .argmax(dim=-1)
-        )
-        previous_bin_E = (target_bin_E - 1).clamp_min(0)
-        counts_before_E = cumulative_counts_EB.gather(
-            -1, previous_bin_E.unsqueeze(-1)
-        ).squeeze(-1)
-        counts_before_E = torch.where(
-            target_bin_E == 0,
-            torch.zeros_like(counts_before_E),
-            counts_before_E,
-        )
-        counts_in_bin_E = histogram_EB.gather(-1, target_bin_E.unsqueeze(-1)).squeeze(
-            -1
+        target_rank_E = target_count_E.ceil().to(torch.int64)
+        target_bin_E = (cumulative_counts_EB < target_rank_E.unsqueeze(-1)).sum(dim=-1)
+
+        target_bin_E1 = target_bin_E.unsqueeze(-1)
+        counts_in_bin_E = histogram_EB.gather(-1, target_bin_E1).squeeze(-1)
+        counts_before_E = (
+            cumulative_counts_EB.gather(-1, target_bin_E1).squeeze(-1) - counts_in_bin_E
         )
         fraction_E = (
-            (target_count - counts_before_E.float()) / counts_in_bin_E.float()
-        ).clamp_(0.0, 1.0)
+            target_count_E - counts_before_E.float()
+        ) / counts_in_bin_E.float()
 
-        lower_bound = local_expert_bias_E.min() - 1.0
         bin_width = (
             local_expert_bias_E.max() - local_expert_bias_E.min() + 2.0
         ) / self.num_bins
-        next_expert_bias_E = (
-            lower_bound + (target_bin_E.float() + fraction_E) * bin_width
-        )
-        return next_expert_bias_E - next_expert_bias_E.mean()
+        quantile_position_E = target_bin_E.float() + fraction_E
+        return (quantile_position_E - quantile_position_E.mean()) * bin_width
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
@@ -256,8 +215,6 @@ def register_moe_quantile_balancing_hook(
                 continue
             if not isinstance(module.router, QuantileBalancedTopKRouter):
                 raise ValueError("All Kimi K3 MoE layers must use quantile balancing.")
-            if module.expert_bias_E is None:
-                raise ValueError("Quantile balancing requires an expert bias.")
             moe_layers.append((module, module.router))
 
     if not moe_layers:
@@ -286,9 +243,6 @@ def register_moe_quantile_balancing_hook(
         if loss_mesh is not None:
             _all_reduce_histograms(loss_mesh.get_group())
 
-        if not moe_layers[0][1].quantile_balancer.required_bias_histogram_EB.any():
-            return
-
         for moe, router in moe_layers:
             expert_bias_E = moe.expert_bias_E
             assert expert_bias_E is not None
@@ -298,6 +252,5 @@ def register_moe_quantile_balancing_hook(
                 expert_bias_E = expert_bias_E.to_local()
             expert_bias_E.copy_(next_expert_bias_E)
             quantile_balancer.required_bias_histogram_EB.zero_()
-            moe.tokens_per_expert_E.zero_()
 
     optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())

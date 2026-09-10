@@ -147,9 +147,6 @@ class KimiLatentMoE(MoE):
             x_TD, self.expert_bias_E, **router_kwargs
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
         routed_TD = self.routed_experts(
             self.routed_down(x_TD),
