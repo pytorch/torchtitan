@@ -334,7 +334,10 @@ def _get_lora_cls(parent_cls: type) -> type:
             block_size(64) * scaler_block_size(256) = 16384; dims that do
             not divide stay bf16 (returns False).
             """
-            from torchao.dtypes.nf4tensor import NF4Tensor, to_nf4
+            from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import (
+                NF4Tensor,
+                to_nf4,
+            )
 
             if isinstance(self.weight, NF4Tensor):
                 self._quantize_base = "nf4"
@@ -449,7 +452,9 @@ def _get_lora_cls(parent_cls: type) -> type:
                 if getattr(self, "bias", None) is not None:
                     base_out = base_out + self.bias
             elif self._quantize_base == "nf4":
-                from torchao.dtypes.nf4tensor import linear_nf4
+                from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import (
+                    linear_nf4,
+                )
 
                 # linear_nf4 takes the weight only; a bias is added here,
                 # exactly as the unquantized branch's F.linear would.
@@ -897,10 +902,16 @@ def merge_lora_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
                 # No weight param exists on a packed module: the merged
                 # weight goes in as a fresh one and the restore removes it.
                 base_w = module._dequant_base_mxfp4()
+            elif module._quantize_base == "nf4":
+                from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import (
+                    NF4Tensor,
+                )
+
+                weight = module.weight
+                assert isinstance(weight, NF4Tensor)
+                base_w = weight.get_original_weight()
             else:
                 base_w = module.weight
-            if module._quantize_base == "nf4":
-                base_w = base_w.get_original_weight()  # pyrefly: ignore [missing-attribute]
             # fp32 delta for deployable precision, cast back to the base dtype.
             delta = module._lora_scaling * (
                 module.lora_b.weight.float() @ module.lora_a.weight.float()

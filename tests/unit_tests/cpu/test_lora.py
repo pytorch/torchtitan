@@ -359,8 +359,8 @@ def test_qlora_nf4_pack_forward_merge():
     """Packed bases: forward runs on NF4, and with zero-init lora_b the merge
     equals the DEQUANTIZED base exactly (QLoRA is lossy vs bf16 by design)."""
     torch.manual_seed(0)
-    pytest.importorskip("torchao.dtypes.nf4tensor")
-    from torchao.dtypes.nf4tensor import NF4Tensor
+    pytest.importorskip("torchao.quantization.quantize_.workflows.nf4.nf4_tensor")
+    from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import NF4Tensor
 
     from torchtitan.components.lora import (
         LoRALinearBase,
@@ -384,7 +384,7 @@ def test_qlora_nf4_pack_forward_merge():
     assert y.shape == (3, module.lora_b.weight.shape[0])
 
     merged = merge_lora_state_dict(model)
-    dequant = module.weight.get_original_weight()  # pyrefly: ignore [missing-attribute]
+    dequant = module.weight.get_original_weight()
     torch.testing.assert_close(merged[f"{name}.weight"], dequant, rtol=0, atol=0)
     # The NF4 param object is back in place after the export.
     assert isinstance(module.weight, NF4Tensor)
@@ -393,8 +393,8 @@ def test_qlora_nf4_pack_forward_merge():
 def test_qlora_config_packs_at_init():
     """quantize_base='nf4' on the converter packs the bases when init_states
     runs (unparallelized build; FSDP-managed bases are refused by design)."""
-    pytest.importorskip("torchao.dtypes.nf4tensor")
-    from torchao.dtypes.nf4tensor import NF4Tensor
+    pytest.importorskip("torchao.quantization.quantize_.workflows.nf4.nf4_tensor")
+    from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import NF4Tensor
 
     from torchtitan.components.lora import LoRALinearBase
 
