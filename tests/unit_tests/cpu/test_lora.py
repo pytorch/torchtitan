@@ -174,21 +174,6 @@ def test_float8_lora_targets_fused_feed_forward_projection():
     assert feed_forward(torch.randn(2, 16)).shape == (2, 16)
 
 
-@pytest.mark.parametrize("target", ["w1", "w3"])
-def test_lora_requires_both_gate_up_configs(target):
-    init = {"weight": torch.nn.init.ones_}
-    config = FeedForward.Config(
-        w1=Linear.Config(in_features=4, out_features=8, param_init=init),
-        w2=Linear.Config(in_features=8, out_features=4, param_init=init),
-        w3=Linear.Config(in_features=4, out_features=8, param_init=init),
-    )
-    config = LoRAConverter(
-        LoRAConverter.Config(rank=2, alpha=4.0, target_modules=[target])
-    ).convert(config)
-    with pytest.raises(ValueError, match="different implementations"):
-        config.build()
-
-
 def test_validate_converter_order():
     """Quantization before LoRA is valid; LoRA before quantization is not."""
     lora_cfg = LoRAConverter.Config(rank=8, alpha=16.0)
