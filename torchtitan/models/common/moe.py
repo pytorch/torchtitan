@@ -103,12 +103,8 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        gate_RF = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E
-        )
-        up_RF = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
-        )
+        gate_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
+        up_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E)
         h_RF = self._activation(gate_RF, up_RF, offsets_E)
         return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
 
