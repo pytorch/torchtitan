@@ -51,6 +51,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
@@ -912,6 +913,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             global_valid_tokens = local_valid_tokens_tensor
 
+        # Auxiliary losses normalize by the same per-step token count as the
+        # main loss, so their scale is independent of parallelism degrees.
+        AuxLoss.set_step_denominator(global_valid_tokens)
+
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
         # int32 is supported by NCCL reductions, unlike bool.
@@ -1055,6 +1060,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **collect_aux_loss_metrics(parallel_dims),
         }
         self.metrics_processor.log(
             self.step,

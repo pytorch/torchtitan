@@ -14,7 +14,10 @@ from torch import nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    spmd_local_context,
+)
 from torchtitan.hf_datasets.multimodal.mm_datasets import MMSamplePackingConfig
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -27,7 +30,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
-    multimodal_context,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -427,7 +429,7 @@ class KimiK3Model(Decoder):
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
         if self.tok_embeddings is not None:
-            with multimodal_context():
+            with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
                     tokens,
                     pixel_values=pixel_values,
