@@ -220,7 +220,14 @@ class DeepSeekV4Model(Decoder):
 
         self.mask_cache: dict[tuple[str, int, torch.device], BlockMask] = {}
 
-    def get_attention_masks(self, positions):
+    def get_attention_masks(
+        self,
+        positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ):
         seqlen = positions.shape[0]
         device = positions.device
         masks: dict[str, BlockMask] = {}
