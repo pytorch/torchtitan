@@ -30,7 +30,7 @@ from torchtitan.models.common.dist_gemm import (
     DistGEMMFeedForward,
     RowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import _make_fused_linear_init, FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
@@ -177,6 +177,22 @@ def fused_qkv_param_init(
         if base_init is not None:
             out[param] = _make_init(base_init)
     return out
+
+
+def fused_grouped_experts_param_init(
+    param_init: dict[str, Callable],
+) -> dict[str, Callable]:
+    """Pack logical grouped-expert initializers for the physical w13 weight."""
+    if not param_init:
+        return param_init
+    return {
+        "w13": _make_fused_linear_init(
+            param_init["w1_EFD"],
+            param_init["w3_EFD"],
+            output_axis=1,
+        ),
+        "w2_EDF": param_init["w2_EDF"],
+    }
 
 
 def make_gqa_config(
@@ -415,7 +431,7 @@ def make_routed_experts_config(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
-            param_init=param_init,
+            param_init=fused_grouped_experts_param_init(param_init),
         ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,

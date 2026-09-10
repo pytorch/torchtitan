@@ -32,8 +32,7 @@ def _make_fused_gate_up_init(
     index 1 = up / stock w3). Each half is initialized with its own initializer
     because the gate and up projections differ (e.g. up shares w2's depth-scaled
     init), so initializing the whole tensor at once would mis-init the up half.
-    Used by the grouped FusedGroupedExperts ``(E, F, 2, D)`` override and by
-    the logical 3D view of the dense fused linear weight.
+    Used through logical views of dense and grouped fused linear weights.
     """
 
     def _init(t: torch.Tensor) -> None:
@@ -47,12 +46,21 @@ def _make_fused_gate_up_init(
     return _init
 
 
-def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
-    """Build an initializer for an interleaved 2D gate/up linear weight."""
-    init_logical_weight = _make_fused_gate_up_init(gate_init, up_init, gate_up_axis=1)
+def _make_fused_linear_init(
+    gate_init: Callable,
+    up_init: Callable,
+    *,
+    output_axis: int = 0,
+) -> Callable:
+    """Build an initializer for an interleaved gate/up linear weight."""
+    init_logical_weight = _make_fused_gate_up_init(
+        gate_init,
+        up_init,
+        gate_up_axis=output_axis + 1,
+    )
 
     def _init(t: torch.Tensor) -> None:
-        init_logical_weight(t.unflatten(0, (-1, 2)))
+        init_logical_weight(t.unflatten(output_axis, (-1, 2)))
 
     return _init
 

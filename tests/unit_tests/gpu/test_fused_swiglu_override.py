@@ -9,6 +9,7 @@ import unittest
 import spmd_types as spmd
 import torch
 
+from torchtitan.models.common.config_utils import fused_grouped_experts_param_init
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -35,9 +36,13 @@ def _build_fused_swiglu_grouped_experts() -> FusedSwiGLUGroupedExperts:
         num_experts=_E,
     ).build()
     with torch.no_grad():
-        fused.w13.copy_(torch.randn(_E, _HIDDEN, 2, _DIM))
+        fused.w13.copy_(torch.randn(_E, 2 * _HIDDEN, _DIM))
         fused.w2_EDF.copy_(torch.randn(_E, _DIM, _HIDDEN))
     return fused
+
+
+def _logical_w13(experts: GroupedExperts) -> torch.Tensor:
+    return experts.w13.unflatten(1, (_HIDDEN, 2))
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
@@ -70,8 +75,9 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
         sd = src.state_dict()
 
         self.assertEqual(set(sd), {"w1_EFD", "w3_EFD", "w2_EDF"})
-        self.assertTrue(torch.equal(sd["w1_EFD"], src.w13[:, :, 0, :]))
-        self.assertTrue(torch.equal(sd["w3_EFD"], src.w13[:, :, 1, :]))
+        logical_w13 = _logical_w13(src)
+        self.assertTrue(torch.equal(sd["w1_EFD"], logical_w13[:, :, 0, :]))
+        self.assertTrue(torch.equal(sd["w3_EFD"], logical_w13[:, :, 1, :]))
 
         dst = _build_fused_swiglu_grouped_experts()
         dst.load_state_dict(sd)
@@ -83,7 +89,7 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
         fused = _build_fused_swiglu_grouped_experts()
         names = {name for name, _ in fused.named_parameters(recurse=False)}
         self.assertEqual(names, {"w13", "w2_EDF"})
-        self.assertEqual(tuple(fused.w13.shape), (_E, _HIDDEN, 2, _DIM))
+        self.assertEqual(tuple(fused.w13.shape), (_E, 2 * _HIDDEN, _DIM))
 
     def test_param_init_and_sharding_remapped_to_w13(self):
         """Building remaps logical initialization and sharding onto w13."""
@@ -102,11 +108,13 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
             dim=_DIM,
             hidden_dim=_HIDDEN,
             num_experts=_E,
-            param_init={
-                "w1_EFD": lambda t: torch.nn.init.constant_(t, 1.0),
-                "w2_EDF": lambda t: torch.nn.init.constant_(t, 0.0),
-                "w3_EFD": lambda t: torch.nn.init.constant_(t, 2.0),
-            },
+            param_init=fused_grouped_experts_param_init(
+                {
+                    "w1_EFD": lambda t: torch.nn.init.constant_(t, 1.0),
+                    "w2_EDF": lambda t: torch.nn.init.constant_(t, 0.0),
+                    "w3_EFD": lambda t: torch.nn.init.constant_(t, 2.0),
+                }
+            ),
             sharding_config=base_sharding,
         )
 
@@ -116,8 +124,9 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
         assert module._param_init is not None
         self.assertEqual(set(module._param_init), {"w13", "w2_EDF"})
         module.init_states()
-        self.assertTrue(torch.all(module.w13[:, :, 0, :] == 1.0))
-        self.assertTrue(torch.all(module.w13[:, :, 1, :] == 2.0))
+        logical_w13 = _logical_w13(module)
+        self.assertTrue(torch.all(logical_w13[:, :, 0, :] == 1.0))
+        self.assertTrue(torch.all(logical_w13[:, :, 1, :] == 2.0))
         self.assertTrue(torch.all(module.w2_EDF == 0.0))
 
         # state_shardings: w13 inherits w1_EFD's placement; w2_EDF kept; the
@@ -151,8 +160,9 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
         w2_EDF = (0.1 * torch.randn(_E, _DIM, _HIDDEN, device="cuda")).requires_grad_()
         w3_EFD = (0.1 * torch.randn(_E, _HIDDEN, _DIM, device="cuda")).requires_grad_()
         with torch.no_grad():
-            experts.w13[:, :, 0, :].copy_(w1_EFD)
-            experts.w13[:, :, 1, :].copy_(w3_EFD)
+            logical_w13 = _logical_w13(experts)
+            logical_w13[:, :, 0, :].copy_(w1_EFD)
+            logical_w13[:, :, 1, :].copy_(w3_EFD)
             experts.w2_EDF.copy_(w2_EDF)
 
         num_tokens_per_expert_E = torch.tensor([3, 2, 1, 2], device="cuda")
@@ -192,11 +202,12 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
         torch.testing.assert_close(
             actual_input_RD.grad, expected_input_RD.grad, atol=2e-2, rtol=2e-2
         )
+        logical_w13_grad = experts.w13.grad.unflatten(1, (_HIDDEN, 2))
         torch.testing.assert_close(
-            experts.w13.grad[:, :, 0, :], w1_EFD.grad, atol=2e-2, rtol=2e-2
+            logical_w13_grad[:, :, 0, :], w1_EFD.grad, atol=2e-2, rtol=2e-2
         )
         torch.testing.assert_close(
-            experts.w13.grad[:, :, 1, :], w3_EFD.grad, atol=2e-2, rtol=2e-2
+            logical_w13_grad[:, :, 1, :], w3_EFD.grad, atol=2e-2, rtol=2e-2
         )
         torch.testing.assert_close(
             experts.w2_EDF.grad, w2_EDF.grad, atol=2e-2, rtol=2e-2
@@ -227,11 +238,13 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
             w1 = 0.1 * torch.randn(_E, _HIDDEN, _DIM, device="cuda")
             w3 = 0.1 * torch.randn(_E, _HIDDEN, _DIM, device="cuda")
             w2 = 0.1 * torch.randn(_E, _DIM, _HIDDEN, device="cuda")
-            stock.w13[:, :, 0, :].copy_(w1)
-            stock.w13[:, :, 1, :].copy_(w3)
+            stock_logical_w13 = _logical_w13(stock)
+            stock_logical_w13[:, :, 0, :].copy_(w1)
+            stock_logical_w13[:, :, 1, :].copy_(w3)
             stock.w2_EDF.copy_(w2)
-            fused.w13[:, :, 0, :].copy_(w1)
-            fused.w13[:, :, 1, :].copy_(w3)
+            fused_logical_w13 = _logical_w13(fused)
+            fused_logical_w13[:, :, 0, :].copy_(w1)
+            fused_logical_w13[:, :, 1, :].copy_(w3)
             fused.w2_EDF.copy_(w2)
 
         # Tokens grouped by expert (positional), summing to the row count.
