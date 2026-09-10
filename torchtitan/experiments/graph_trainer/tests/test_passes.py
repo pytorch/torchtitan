@@ -88,7 +88,12 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     schedule_fsdp_comms_to_dense_regions_pass,
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
+from torchtitan.experiments.graph_trainer.gradient_accumulation import (
+    finalize_graph_gradient_accumulation,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    GraphStateMapping,
+    GraphStateSpec,
     minimal_fx_tracer,
     run_traced,
 )
@@ -150,7 +155,10 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 parallelism=SimpleNamespace(),
             )
 
-        traced_result = SimpleNamespace(state_fqns=[])
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         with patch(
             "torchtitan.experiments.graph_trainer.common_utils."
             "get_default_transformer_block_buckets",
@@ -3607,6 +3615,27 @@ class TestChunkPasses(TestCase):
             )
         )
 
+    def test_chunk_batch_preserves_gradient_output_position_for_terminal_sink(self):
+        gm, _ = self._build_backward_grad_chain_gm()
+        traced_result = SimpleNamespace(
+            num_static_inputs=1,
+            num_flat_outputs=2,
+            state_fqns=(),
+            graph_state=GraphStateSpec(
+                mappings=(GraphStateMapping("weight", (0,), 1),)
+            ),
+            input_subclass_layouts={},
+            output_subclass_layouts={},
+            output_spec=None,
+        )
+
+        self._chunk_batch(gm, module_patterns=["layers.*"], num_static_inputs=1)
+        finalize_graph_gradient_accumulation(gm, traced_result=traced_result)
+        sinks = self._nodes_by_target(gm, torch.ops.aten.add_.Tensor)
+        self.assertEqual(len(sinks), 1)
+        self.assertEqual(sinks[0].meta["graph_gradient_fqn"], "weight")
+        self.assertIs(sinks[0].args[0], next(iter(gm.graph.nodes)))
+
     def test_chunk_batch_preserves_buffer_mutation_order(self):
         gm = self._build_buffer_mutation_gm()
         self._chunk_batch(gm, module_patterns=["layers.*"], num_static_inputs=1)
@@ -3648,7 +3677,11 @@ class TestChunkPasses(TestCase):
     def _compile_config_for_ep_overlap_test(self):
         from types import SimpleNamespace
 
-        traced_result = SimpleNamespace(num_static_inputs=2, state_fqns=[])
+        traced_result = SimpleNamespace(
+            num_static_inputs=2,
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(
@@ -3737,6 +3770,19 @@ class TestChunkPasses(TestCase):
         self.assertLess(
             names.index("concretize_ep_chunk_symbolic_shapes_pass"),
             names.index("full_inductor_compilation_pass"),
+        )
+
+    def test_gradient_finalizer_precedes_terminal_inductor_pass(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        traced_result.graph_state = GraphStateSpec(
+            mappings=(GraphStateMapping("weight", (0,), 1),)
+        )
+        config.compile.inductor_compilation = "regional"
+
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("finalize_graph_gradient_accumulation"),
+            names.index("regional_inductor_pass"),
         )
 
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
