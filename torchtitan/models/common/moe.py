@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -40,42 +39,6 @@ from .token_dispatcher import LocalTokenDispatcher
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
-def _interleaved_grouped_init(
-    gate_init: Callable,
-    up_init: Callable,
-) -> Callable[[torch.Tensor], None]:
-    """Initialize the logical gate and up slices of an interleaved weight."""
-
-    def init(param_EF2D: torch.Tensor) -> None:
-        with torch.no_grad():
-            gate_init(param_EF2D[:, :, 0, :])
-            up_init(param_EF2D[:, :, 1, :])
-
-    return init
-
-
-def _fuse_grouped_experts_param_init(param_init: dict | None) -> dict | None:
-    """Map logical w1/w3 initializers onto the physical w13 parameter."""
-    if param_init is None:
-        return None
-    gate_init = param_init.get("w1_EFD")
-    up_init = param_init.get("w3_EFD")
-    if (gate_init is None) != (up_init is None):
-        raise ValueError("w1_EFD and w3_EFD must both define parameter initializers")
-    if gate_init is None or up_init is None:
-        return param_init
-    if "w13" in param_init:
-        raise ValueError("param_init cannot define both w13 and w1_EFD/w3_EFD")
-
-    fused = {
-        name: init
-        for name, init in param_init.items()
-        if name not in ("w1_EFD", "w3_EFD")
-    }
-    fused["w13"] = _interleaved_grouped_init(gate_init, up_init)
-    return fused
-
-
 def _fuse_grouped_experts_sharding(
     sharding_config: ShardingConfig | None,
 ) -> ShardingConfig | None:
@@ -103,9 +66,10 @@ def _fuse_grouped_experts_sharding(
 class GroupedExperts(Module):
     """SwiGLU experts with one physical interleaved gate-up parameter.
 
-    ``w13`` has shape ``(E, F, 2, D)`` and is flattened to ``(E, 2F, D)`` for
-    one grouped GEMM. Checkpoints retain the logical ``w1_EFD`` and ``w3_EFD``
-    keys used by model state-dict adapters.
+    ``w13`` has shape ``(E, 2F, D)`` for one grouped GEMM. Its logical view is
+    ``(E, F, 2, D)``, with gate and up interleaved on the size-2 axis.
+    Checkpoints retain the logical ``w1_EFD`` and ``w3_EFD`` keys used by model
+    state-dict adapters.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -122,7 +86,6 @@ class GroupedExperts(Module):
         def build(self, **kwargs):
             physical_config = replace(
                 self,
-                param_init=_fuse_grouped_experts_param_init(self.param_init),
                 sharding_config=_fuse_grouped_experts_sharding(self.sharding_config),
             )
             return Module.Config.build(physical_config, **kwargs)
@@ -133,8 +96,7 @@ class GroupedExperts(Module):
         self.w13 = nn.Parameter(
             torch.empty(
                 config.num_experts,
-                config.hidden_dim,
-                2,
+                2 * config.hidden_dim,
                 config.dim,
             )
         )
@@ -161,11 +123,11 @@ class GroupedExperts(Module):
         if isinstance(self.w13, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w13_EF2D = self.w13.to_local()
+            w13_E2FD = self.w13.to_local()
             assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
         else:
-            w13_EF2D = self.w13
+            w13_E2FD = self.w13
             w2_EDF = self.w2_EDF
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
@@ -181,14 +143,15 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        E, F, _, D = w13_EF2D.shape
+        E, F2, D = w13_E2FD.shape
+        F = F2 // 2
         gate_up_R2F = remat.region(
             self._grouped_mm,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(
             A=x_RD.bfloat16(),
-            weight_EOI=w13_EF2D.bfloat16().reshape(E, F * 2, D),
+            weight_EOI=w13_E2FD.bfloat16(),
             offs=offsets_E,
         )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
@@ -214,7 +177,7 @@ class GroupedExperts(Module):
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
         """Expose the physical w13 parameter as logical w1 and w3 keys."""
-        w13_EF2D = state_dict.pop(f"{prefix}w13")
+        w13_EF2D = state_dict.pop(f"{prefix}w13").unflatten(1, (-1, 2))
         state_dict[f"{prefix}w1_EFD"] = w13_EF2D[:, :, 0, :].contiguous()
         state_dict[f"{prefix}w3_EFD"] = w13_EF2D[:, :, 1, :].contiguous()
 
@@ -226,7 +189,7 @@ class GroupedExperts(Module):
         if w1_key in state_dict and w3_key in state_dict:
             state_dict[f"{prefix}w13"] = torch.stack(
                 [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
-            )
+            ).flatten(1, 2)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
