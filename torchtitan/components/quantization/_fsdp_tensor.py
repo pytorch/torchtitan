@@ -288,6 +288,16 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         del logical_metadata
         self._tensor = tensor
 
+    def __repr__(self) -> str:  # noqa: D401
+        # Same reason as _UnshardedFSDPTensor.__repr__: the default printer
+        # indexes into the data, which AOTAutograd's ``dataclass_repr`` of the
+        # graph metadata under structured logging does on a fake ``_tensor``
+        # and aborts the compile. Report the logical metadata instead.
+        return (
+            f"{type(self).__name__}(shape={tuple(self.shape)}, "
+            f"dtype={self.dtype}, device={self.device})"
+        )
+
     def __tensor_flatten__(self):
         return ["_tensor"], (self.dtype,)
 
