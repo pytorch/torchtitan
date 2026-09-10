@@ -249,12 +249,27 @@ class Profiler(Configurable):
         )
         return self
 
+    @staticmethod
+    def _caused_by_oom(exc: BaseException | None) -> bool:
+        """Whether an OutOfMemoryError appears anywhere in the cause chain.
+
+        Pipeline parallelism does not re-raise the OOM it catches; it wraps the
+        failure in a plain RuntimeError
+        """
+        seen: set[int] = set()
+        while exc is not None and id(exc) not in seen:
+            if isinstance(exc, torch.OutOfMemoryError):
+                return True
+            seen.add(id(exc))
+            exc = exc.__cause__ or exc.__context__
+        return False
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         if self.torch_profiler is not None:
             self.torch_profiler.__exit__(exc_type, exc_val, exc_tb)
             self.torch_profiler = None
         if self.memory_profiler is not None:
-            if isinstance(exc_val, torch.OutOfMemoryError):
+            if self._caused_by_oom(exc_val):
                 self.memory_profiler.step(exit_ctx=True)
             self.memory_profiler = None
         return False
