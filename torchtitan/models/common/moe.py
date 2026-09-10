@@ -104,6 +104,23 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
+        return self._grouped_mlp(
+            x_RD=x_RD, w1_EFD=w1_EFD, w2_EDF=w2_EDF, w3_EFD=w3_EFD, offsets_E=offsets_E
+        )
+
+    def _grouped_mlp(
+        self,
+        *,
+        x_RD: torch.Tensor,
+        w1_EFD: torch.Tensor,
+        w2_EDF: torch.Tensor,
+        w3_EFD: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """SwiGLU expert MLP ``silu(x @ w1.T) * (x @ w3.T) @ w2.T`` over the routed
+        rows, in ``x_RD``'s dtype. Each grouped GEMM goes through ``_grouped_mm``;
+        overridable seam for variants that fuse across the GEMMs.
+        """
         h_RF = F.silu(
             self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
         )
