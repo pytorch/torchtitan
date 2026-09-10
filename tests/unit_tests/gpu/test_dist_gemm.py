@@ -40,6 +40,7 @@ from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedQKVLinear,
+    DistGEMMFeedForward,
     RowParallelLinear,
 )
 
@@ -303,10 +304,7 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
     def test_matches_native_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.config_utils import make_ffn_config
-        from torchtitan.overrides.fused_swiglu import (
-            dist_gemm_fused_swiglu,
-            DistGEMMFusedSwiGLU,
-        )
+        from torchtitan.overrides.fused_swiglu import dist_gemm_fused_swiglu
 
         R = self.world_size
         dev = self.device_type
@@ -327,7 +325,7 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
         fused = (
             dist_gemm_fused_swiglu(make(tp_gemm_backend="dist_gemm")).build().to(dev)
         )
-        self.assertIsInstance(fused, DistGEMMFusedSwiGLU)
+        self.assertIsInstance(fused, DistGEMMFeedForward)
 
         with torch.no_grad():
             for w in (native.w13.weight, native.w2.weight):

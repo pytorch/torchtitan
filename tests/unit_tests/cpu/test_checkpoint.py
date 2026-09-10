@@ -1501,7 +1501,7 @@ class TestModelWrapper(unittest.TestCase):
     def test_hook_tensor_storage_stable_and_refreshed(self):
         class HookedModule(nn.Module):
             # Slice a non-leading dim so .contiguous() allocates new storage
-            # disconnected from the parameter, mirroring FusedSwiGLU's split.
+            # disconnected from the parameter, mirroring FeedForward's split.
             def __init__(self):
                 super().__init__()
                 self.w = nn.Parameter(torch.zeros(4, 2, 3))
