@@ -10,12 +10,13 @@ from functools import partial
 import torch
 import torch.nn as nn
 
+from torchtitan.components.optimizer import register_moe_quantile_balancing_hook
 from torchtitan.models.common import Conv1d, Embedding, Linear, RouterGateLinear
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe import QuantileBalancedTopKRouter, RoutedExperts
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -31,10 +32,6 @@ from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
-from .quantile_balance import (
-    QuantileBalancedTopKRouter,
-    register_moe_quantile_balancing_hook,
-)
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 

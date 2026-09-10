@@ -10,6 +10,7 @@ from .optimizer import (
     OptimizersContainer,
     ParamGroupConfig,
     register_moe_load_balancing_hook,
+    register_moe_quantile_balancing_hook,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "ParamGroupConfig",
     "default_adamw",
     "register_moe_load_balancing_hook",
+    "register_moe_quantile_balancing_hook",
 ]
