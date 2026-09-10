@@ -6,9 +6,9 @@
 
 """Checkpoint interop tests for the fused-activation SwiGLU override.
 
-FeedForward and FusedSwiGLU both store a single ``w13`` Linear and checkpoint in
-the logical ``w1.weight`` / ``w3.weight`` layout. The override changes only the
-SiLU-and-multiply implementation. These tests run on CPU unless marked CUDA.
+The override replaces ``FeedForward.activation_fn`` while preserving the module
+and its logical ``w1.weight`` / ``w3.weight`` checkpoint layout. These tests run
+on CPU unless marked CUDA.
 
 ``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on
 ``tp_gemm_backend="dist_gemm"``, which must keep the TP overlap rather than
@@ -20,15 +20,17 @@ from dataclasses import dataclass
 
 import torch
 
+from torchtitan.models.common.activation import ActivationFn, SiTUGLU
+from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.overrides.fused_swiglu import (
+    _fused_silu_and_mul,
     dist_gemm_fused_swiglu,
     fused_swiglu,
-    FusedSwiGLU,
 )
 
 _DIM = 16
@@ -41,7 +43,7 @@ class _ConvertedLinear(Linear):
         pass
 
 
-def _build_fused() -> FusedSwiGLU:
+def _build_fused() -> FeedForward:
     fused = fused_swiglu(_feed_forward_config()).build()
     with torch.no_grad():
         fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
@@ -70,6 +72,21 @@ def _build_native() -> FeedForward:
 
 
 class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
+    def test_replaces_only_activation(self):
+        fused = fused_swiglu(_feed_forward_config())
+
+        self.assertIs(type(fused), FeedForward.Config)
+        self.assertIs(fused.activation_fn.fn, _fused_silu_and_mul)
+
+    def test_rejects_non_swiglu_activation(self):
+        config = _feed_forward_config()
+        config.activation_fn = ActivationFn.Config(
+            fn=SiTUGLU()  # pyrefly: ignore[bad-argument-type]
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires the default SwiGLU"):
+            fused_swiglu(config)
+
     def test_gate_up_projection_is_linear(self):
         fused = _build_fused()
         self.assertIsInstance(fused.w13, Linear)
@@ -118,7 +135,7 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_native_checkpoint_loads_into_triton(self):
-        """A native checkpoint loads into FusedSwiGLU, weights + output."""
+        """A native checkpoint loads into fused SwiGLU, weights + output."""
         native = _build_native().cuda()
         fused = _build_fused().cuda()
         fused.load_state_dict(native.state_dict())
@@ -176,15 +193,14 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
     """
 
     def test_dist_gemm_config_keeps_overlap(self):
-        from torchtitan.overrides.fused_swiglu import DistGEMMFusedSwiGLU
-
         self.assertIsInstance(
-            fused_swiglu(_dist_gemm_ffn_config()).build(), FusedSwiGLU
+            fused_swiglu(_dist_gemm_ffn_config()).build(), FeedForward
         )
         fused = dist_gemm_fused_swiglu(
             _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         ).build()
-        self.assertIsInstance(fused, DistGEMMFusedSwiGLU)
+        self.assertIsInstance(fused, DistGEMMFeedForward)
+        self.assertIs(fused.activation_fn.fn, _fused_silu_and_mul)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
         fused = dist_gemm_fused_swiglu(
@@ -221,7 +237,8 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         model = Llama3Model(config)
         model.init_states()
         ffn = model.get_submodule("layers.0.feed_forward")
-        self.assertIsInstance(ffn, FusedSwiGLU)
+        self.assertIsInstance(ffn, FeedForward)
+        self.assertIs(ffn.activation_fn.fn, _fused_silu_and_mul)
 
         sd = model.state_dict()
         # The FFN presents logical checkpoint FQNs, not its physical w13.
