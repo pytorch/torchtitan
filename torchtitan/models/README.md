@@ -32,13 +32,13 @@ The folder should be organized as follows
 - `parallelize.py`
   - apply training techniques in the following order
     - `model.parallelize(parallel_dims)` — auto-recursive declarative sharding driven by `sharding_config` (TP, SP, attention `local_map`). Replaces per-model `parallelize_module` plan dicts.
-    - (MoE models) expert-parallel sharding via `apply_fsdp_to_decoder` plus `sharding_config` / expert meshes (there is no `apply_moe_ep_tp` helper).
+    - (MoE models) routed expert weights follow the sparse mesh axes declared in `sharding_config`; `apply_fsdp_to_decoder` takes `ep_degree` and `edp_mesh` to shard them over the expert FSDP mesh.
     - activation checkpointing
     - `torch.compile`
     - FSDP /  HSDP
     - NOTE: language-model CP goes through `Decoder.preprocess_inputs` -> `prepare_context_parallel_input`. Ideally no extra work is needed to enable CP.
-- Pipeline parallelism (optional if model size is small)
-  - apply PP via `pipeline_llm` / `pipeline_vlm` in `torchtitan/distributed/pipeline_parallel.py` (no per-model `pipeline.py`)
+- `pipeline.py` (optional if model size is small)
+  - apply PP
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: Model.Config]`.
   - Define `model_registry(flavor)` to return a [`ModelSpec`](/torchtitan/protocols/model_spec.py), consisting of
