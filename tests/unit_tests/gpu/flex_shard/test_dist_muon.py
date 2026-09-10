@@ -26,14 +26,11 @@ from torchtitan.components.optimizer.utils import (
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
-    DistMuon,
     ComputeLayout,
+    DistMuon,
     Owned,
 )
-from torchtitan.distributed.flex_shard.dist_muon import (
-    _adjust_muon_learning_rate,
-    DistMuon,
-)
+from torchtitan.distributed.flex_shard.dist_muon import _adjust_muon_learning_rate
 
 
 pytestmark = pytest.mark.multi_gpu

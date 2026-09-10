@@ -499,9 +499,7 @@ def _align_dist_muon_expert_compute_layouts(
         aligned_param_groups.append(
             replace(
                 param_group,
-                optimizer=replace(
-                    optimizer, compute_sharding_by_fqn=aligned_shardings
-                ),
+                optimizer=replace(optimizer, compute_sharding_by_fqn=aligned_shardings),
             )
         )
     if not changed:

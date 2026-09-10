@@ -91,9 +91,9 @@ def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
             ParamGroupConfig(
                 pattern=r".*",
                 optimizer=AdamW.Config(
-                    lr=0.0008,
+                    lr=8e-4,
                     betas=(0.9, 0.95),
-                    eps=1e-08,
+                    eps=1e-8,
                     weight_decay=0.1,
                 ),
             )

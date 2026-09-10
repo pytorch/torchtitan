@@ -47,8 +47,7 @@ class Optimizer(Configurable, torch.optim.Optimizer):
             return {
                 f.name: getattr(self, f.name)
                 for f in fields(self)
-                if not f.name.startswith("_")
-                and f.name not in self._FACTORY_FIELDS
+                if not f.name.startswith("_") and f.name not in self._FACTORY_FIELDS
             }
 
         def to_factory_kwargs(self) -> dict[str, Any]:

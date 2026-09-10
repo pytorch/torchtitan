@@ -19,7 +19,11 @@ import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from torchtitan.components.optimizer import LRSchedulersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import (
+    AdamW,
+    LRSchedulersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 
@@ -261,8 +265,7 @@ class TestFTCheckpointManager(unittest.TestCase):
                 param_groups=[
                     ParamGroupConfig(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 0.08, "weight_decay": 0.0},
+                        optimizer=AdamW.Config(lr=0.08, weight_decay=0.0),
                     )
                 ],
             ),

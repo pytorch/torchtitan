@@ -11,7 +11,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, cast, ClassVar, NoReturn, overload
 
@@ -19,6 +19,7 @@ import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
+
 from torchtitan.components.optimizer.base import Optimizer
 
 from ._optimizer_reshard_runtime import _BucketedRedistributionRuntime
@@ -269,10 +270,8 @@ class DistMuon(Optimizer):
         # truthy value, so this overrides a globally configured foreach.
         foreach: bool = False
 
-        compute_sharding_by_fqn: Mapping[str, ComputeLayout] = field(
-            default_factory=dict
-        )
-        bucket_configs: Sequence[BucketConfig] = ()
+        compute_sharding_by_fqn: Mapping[str, ComputeLayout]
+        bucket_configs: Sequence[BucketConfig]
 
     def __init__(
         self,
