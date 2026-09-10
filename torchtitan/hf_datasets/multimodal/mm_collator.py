@@ -317,6 +317,7 @@ class MultiModalCollator(Collator):
         input_ids, labels, positions = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
+            "labels": labels,
             "positions": positions,
             "pixel_values": patches,
             "grid_thw": grids,
@@ -343,4 +344,4 @@ class MultiModalCollator(Collator):
                 video_token_id=special_tokens["video_id"],
             )
 
-        return input_dict, labels
+        return input_dict

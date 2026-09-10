@@ -168,10 +168,11 @@ class FluxValidator(Validator):
             num_tokens_per_batch=self.num_tokens_per_batch,
         )
 
-        for input_dict, labels in iterate_and_close_dataloader(validation_dataloader):
+        for input_dict in iterate_and_close_dataloader(validation_dataloader):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
+            labels = input_dict.pop("labels")
             prompt = input_dict.pop("prompt")
             if not isinstance(prompt, list):
                 prompt = [prompt]
