@@ -540,9 +540,16 @@ def combine_tokens(
     )
 
 
+def extract_routed_scores(state: DispatchState) -> torch.Tensor | None:
+    scores = state.permuted_scores
+    state.permuted_scores = None
+    return scores
+
+
 __all__ = [
     "dispatch_tokens",
     "combine_tokens",
+    "extract_routed_scores",
     "DispatchState",
     "DispatchHandle",
 ]

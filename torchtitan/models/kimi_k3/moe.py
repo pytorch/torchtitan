@@ -73,6 +73,8 @@ class KimiGroupedExperts(GroupedExperts):
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if isinstance(self.w1_EFD, DTensor):
             w1_EFD = self.w1_EFD.to_local()
@@ -99,6 +101,8 @@ class KimiGroupedExperts(GroupedExperts):
         )
 
         h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
+        if routed_scores_R is not None:
+            h_RF = (h_RF.float() * routed_scores_R.reshape(-1, 1)).to(h_RF.dtype)
 
         return self._grouped_mm(
             A=h_RF,
