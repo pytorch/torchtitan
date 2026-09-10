@@ -786,12 +786,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         max_num_documents=self.dataloader.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
                     )
-                    self.ntokens_seen += labels_mb.numel()
+                    self.ntokens_seen += (
+                        labels_mb.numel()  # pyrefly: ignore[missing-attribute]
+                    )
                 if self.pp_has_first_stage:
-                    arg_mbs.append((inputs_mb,))
+                    arg_mbs.append((inputs_mb,))  # pyrefly: ignore[bad-argument-type]
                 kwarg_mbs.append(extra_kwargs_mb)
                 if target_mbs is not None:
-                    target_mbs.append(labels_mb)
+                    target_mbs.append(labels_mb)  # pyrefly: ignore[bad-argument-type]
 
             return self.fwd_bwd_fn(
                 arg_mbs if self.pp_has_first_stage else None,
@@ -803,7 +805,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         assert isinstance(input_dict, dict)
         assert isinstance(labels, torch.Tensor)
         with sl.log_trace_span("preprocess_inputs"):
-            inputs, labels, extra_kwargs = cast(
+            inputs, labels, extra_kwargs = cast(  # pyrefly: ignore[bad-assignment]
                 BaseModel, self.model_parts[0]
             ).preprocess_inputs(
                 {**input_dict, "labels": labels},
@@ -812,15 +814,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 max_num_documents=self.dataloader.max_num_documents,
                 max_context_length=self.config.training.max_context_length,
             )
-            self.ntokens_seen += labels.numel()
+            # MTP returns one labels tensor per prediction; index 0 contains
+            # the complete main-model labels used for token accounting.
+            self.ntokens_seen += (
+                labels[0].numel()
+                if isinstance(labels, tuple)
+                else cast(torch.Tensor, labels).numel()
+            )
 
         assert len(model_parts) == 1
         return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
 
     def _forward_backward_body(
         self,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor,
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
@@ -831,7 +839,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_kwargs["positions"] = extra_kwargs["positions"]
             loss, _ = self.loss_fn(
                 pred,
-                labels,
+                labels,  # pyrefly: ignore[bad-argument-type]
                 global_valid_tokens,
                 **loss_kwargs,
             )
