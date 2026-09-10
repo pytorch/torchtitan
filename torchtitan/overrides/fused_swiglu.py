@@ -408,11 +408,6 @@ def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
     return _init
 
 
-def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """``silu(gate) * up`` via the fused ``torchtitan::silu_and_mul`` op."""
-    return _silu_and_mul_2d(gate, up)
-
-
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
     # propagation rule registration system.
@@ -458,7 +453,7 @@ class FusedSwiGLU(FeedForward):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up = self.w13(x).unflatten(-1, (-1, 2))
         gate, up = gate_up.unbind(-1)
-        return self.w2(_fused_silu_and_mul(gate, up))
+        return self.w2(_silu_and_mul_2d(gate, up))
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:

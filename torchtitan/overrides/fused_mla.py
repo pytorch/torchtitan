@@ -719,13 +719,12 @@ def _resolve_positions(
     reference: torch.Tensor,
 ) -> torch.Tensor:
     if positions is not None:
-        pos = positions
-        if pos.ndim == 1:
-            pos = pos.unsqueeze(0)
+        if positions.ndim == 1:
+            positions = positions.unsqueeze(0)
         batch = reference.shape[0]
-        if pos.shape[0] == 1 and batch != 1:
-            pos = pos.expand(batch, -1)
-        return pos.contiguous()
+        if positions.shape[0] == 1 and batch != 1:
+            positions = positions.expand(batch, -1)
+        return positions.contiguous()
     batch, seq_len = reference.shape[:2]
     pos = torch.arange(seq_len, device=reference.device, dtype=torch.int32)
     return pos.unsqueeze(0).expand(batch, -1).contiguous()

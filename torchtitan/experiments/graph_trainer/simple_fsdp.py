@@ -53,7 +53,7 @@ class MixedPrecisionPolicy:
 
 
 """
-[Note: SimpleFSDP and spmd_types]
+[Note: SimpleFSDP parameter sharding]
 
 Params arrive as annotated plain tensors, pre-sharded in module.parallelize,
 instead of DTensors.

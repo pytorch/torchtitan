@@ -283,12 +283,12 @@ class Module(nn.Module, Configurable):
         spmd_validate_redistributions(self._sharding_config)
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
-        fn = self._maybe_wrap_with_local_region(self.forward, parallel_dims)
+        fn = self._maybe_wrap_with_local_region(self.forward)
 
         def forward_with_redistribution(*args, **kwargs):
-            args, kwargs = self._redistribute_inputs(parallel_dims, args, kwargs)
+            args, kwargs = self._redistribute_inputs(args, kwargs)
             outputs = fn(*args, **kwargs)
-            return self._redistribute_outputs(parallel_dims, outputs)
+            return self._redistribute_outputs(outputs)
 
         self.forward = forward_with_redistribution
 
@@ -418,7 +418,6 @@ class Module(nn.Module, Configurable):
     def _maybe_wrap_with_local_region(
         self,
         fn: Callable,
-        parallel_dims: ParallelDims,
     ) -> Callable:
         """Wrap ``fn`` with a local-tensor region if configured.
 
@@ -473,7 +472,6 @@ class Module(nn.Module, Configurable):
 
     def _redistribute_inputs(
         self,
-        parallel_dims: ParallelDims,
         args: tuple,
         kwargs: dict,
     ) -> tuple[tuple, dict]:
@@ -531,7 +529,7 @@ class Module(nn.Module, Configurable):
         new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
         return new_args, new_kwargs
 
-    def _redistribute_outputs(self, parallel_dims: ParallelDims, outputs: Any) -> Any:
+    def _redistribute_outputs(self, outputs: Any) -> Any:
         """Redistribute output to desired placement.
 
         TODO: Currently only handles a single tensor output. Extend to

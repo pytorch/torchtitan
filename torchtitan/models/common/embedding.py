@@ -13,7 +13,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 
@@ -33,6 +33,14 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Run vocab-parallel embedding when the active mesh has a TP group."""
+        if (
+            self._parallelized
+            and self._sharding_config is not None
+            and current_spmd_mesh() is None
+        ):
+            raise RuntimeError(
+                "Embedding requires an ambient DeviceMesh after parallelize()."
+            )
         tp_group = spmd_mesh_group("tp")
         if tp_group is None:
             return F.embedding(

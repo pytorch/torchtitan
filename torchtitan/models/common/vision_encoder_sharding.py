@@ -133,10 +133,10 @@ def vision_colwise_config(
     )
 
 
-def vision_scaled_bias_rowwise_config(
+def vision_partial_bias_rowwise_config(
     *, include_cp_axis: bool = False
 ) -> ShardingConfig:
-    """Scaled-bias rowwise vision linear returning a TP-invariant activation."""
+    """Partial-bias rowwise vision linear returning a TP-invariant activation."""
     input_layout = _vision_activation_placement(
         tp=spmd.S(1), include_cp_axis=include_cp_axis
     )
@@ -198,14 +198,13 @@ def set_vision_transformer_block_sharding_config(
     block.attn.wv.sharding_config = vision_colwise_config(
         input_tp=spmd.R, include_cp_axis=include_cp_axis
     )
-    block.attn.proj.sharding_config = vision_scaled_bias_rowwise_config(
+    block.attn.proj.sharding_config = vision_partial_bias_rowwise_config(
         include_cp_axis=include_cp_axis
     )
     if include_cp_axis:
         attention_layout = _vision_activation_placement(
             tp=spmd.S(1), include_cp_axis=True
         )
-        attention_grad_layout = SpmdType({DP: spmd.V, CP: spmd.P, TP: spmd.S(1)})
         block.attn.inner_attention.sharding_config = ShardingConfig(
             in_src_shardings={
                 "q_THK": attention_layout,
@@ -226,6 +225,6 @@ def set_vision_transformer_block_sharding_config(
     block.mlp.fc1.sharding_config = vision_colwise_config(
         include_cp_axis=include_cp_axis
     )
-    block.mlp.fc2.sharding_config = vision_scaled_bias_rowwise_config(
+    block.mlp.fc2.sharding_config = vision_partial_bias_rowwise_config(
         include_cp_axis=include_cp_axis
     )

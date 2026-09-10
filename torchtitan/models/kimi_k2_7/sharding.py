@@ -35,7 +35,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,
     vision_invariant_linear_config,
-    vision_scaled_bias_rowwise_config,
+    vision_partial_bias_rowwise_config,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -128,4 +128,4 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     proj = ve_cfg.projector
     proj.pre_norm.sharding_config = invariant_norm_config()
     proj.linear_1.sharding_config = vision_colwise_config()
-    proj.linear_2.sharding_config = vision_scaled_bias_rowwise_config()
+    proj.linear_2.sharding_config = vision_partial_bias_rowwise_config()

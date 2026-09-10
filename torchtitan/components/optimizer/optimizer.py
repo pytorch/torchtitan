@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
-import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.stateful import Stateful

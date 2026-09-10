@@ -10,8 +10,9 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.linear import Linear, ScaledBiasRowwiseLinear
+from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestLinear(unittest.TestCase):
@@ -129,17 +130,17 @@ class TestLinear(unittest.TestCase):
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
 
-class TestScaledBiasRowwiseLinear(unittest.TestCase):
+class TestPartialBiasRowwiseLinear(unittest.TestCase):
     def test_requires_bias(self):
         with self.assertRaisesRegex(ValueError, "requires bias=True"):
-            ScaledBiasRowwiseLinear.Config(
+            PartialBiasRowwiseLinear.Config(
                 in_features=4,
                 out_features=2,
                 bias=False,
             ).build()
 
     def test_unparallelized_forward(self):
-        linear = ScaledBiasRowwiseLinear.Config(
+        linear = PartialBiasRowwiseLinear.Config(
             in_features=4,
             out_features=2,
             bias=True,
@@ -150,6 +151,18 @@ class TestScaledBiasRowwiseLinear(unittest.TestCase):
         actual = linear(input)
 
         torch.testing.assert_close(actual, expected)
+
+    def test_parallelized_forward_requires_ambient_mesh(self):
+        linear = PartialBiasRowwiseLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+            sharding_config=ShardingConfig(),
+        ).build()
+        linear._parallelized = True
+
+        with self.assertRaisesRegex(RuntimeError, "ambient DeviceMesh"):
+            linear(torch.randn(3, 4))
 
 
 if __name__ == "__main__":

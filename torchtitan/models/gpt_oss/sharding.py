@@ -35,7 +35,7 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 }
 
 
-def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
+def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
     input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     out_dst = (
         dense_sequence_parallel_placement()
@@ -45,7 +45,7 @@ def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.I),
         },
         in_src_shardings={"input": input_layout},
         in_dst_shardings={"input": input_layout},
@@ -113,7 +113,7 @@ def _set_gpt_oss_layer_sharding(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
     set_qkv_linear_sharding(attention.qkv_linear)
-    attention.wo.sharding_config = scaled_bias_rowwise_config(output_sp=enable_sp)
+    attention.wo.sharding_config = partial_bias_rowwise_config(output_sp=enable_sp)
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 

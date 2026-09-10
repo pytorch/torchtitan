@@ -8,14 +8,14 @@
 
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.tests import _use_spmd_types
+from torchtitan_recipes.tests import _set_spmd_typechecking
 
 
 def kimi_k3_debugmodel_mm_fsdp2() -> Trainer.Config:
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
-    _use_spmd_types(config, typechecking=True)
+    _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     return config
 
