@@ -18,10 +18,10 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexAttention,
-    FusedQKVLinear,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
+    QKVLinear,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -54,7 +54,7 @@ class Attention(BaseAttention):
         n_kv_heads: int = 8
         head_dim: int = 64
         dim: int
-        qkv_linear: FusedQKVLinear.Config
+        qkv_linear: QKVLinear.Config
         wo: Linear.Config  # output projection
         inner_attention: Module.Config = dataclasses.field(
             default_factory=VarlenAttention.Config

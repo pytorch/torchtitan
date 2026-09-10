@@ -17,7 +17,7 @@ from torchtitan.models.common import (
     Linear,
     ScaledBiasRowwiseLinear,
 )
-from torchtitan.models.common.attention import FusedQKVLinear, VarlenAttention
+from torchtitan.models.common.attention import QKVLinear, VarlenAttention
 from torchtitan.models.common.config_utils import (
     fused_qkv_param_init,
     get_attention_config,
@@ -163,7 +163,7 @@ def _build_muse_glimmer_attention(
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        qkv_linear=FusedQKVLinear.Config(
+        qkv_linear=QKVLinear.Config(
             head_dim=head_dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,

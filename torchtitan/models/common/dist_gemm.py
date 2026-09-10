@@ -34,7 +34,7 @@ from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
 
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
@@ -107,11 +107,11 @@ def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class AllGatherFusedQKVLinear(FusedQKVLinear):
+class AllGatherFusedQKVLinear(QKVLinear):
     """Fused QKV projection whose forward all-gathers the TP sequence shard."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FusedQKVLinear.Config):
+    class Config(QKVLinear.Config):
         """Same fields as the stock fused QKV. The subclass exists because it is
         what binds ``Config.build()`` to this module rather than the stock one, so
         it cannot be deleted as empty."""

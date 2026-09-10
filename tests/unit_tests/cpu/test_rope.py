@@ -12,8 +12,8 @@ from unittest.mock import patch
 import torch
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
-    FusedQKVLinear,
     GQAttention,
+    QKVLinear,
     VarlenAttention,
 )
 from torchtitan.models.common.linear import Linear
@@ -304,7 +304,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
             n_kv_heads=2,
             head_dim=head_dim,
             dim=dim,
-            qkv_linear=FusedQKVLinear.Config(
+            qkv_linear=QKVLinear.Config(
                 head_dim=head_dim,
                 n_heads=2,
                 n_kv_heads=2,
