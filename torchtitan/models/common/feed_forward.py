@@ -21,19 +21,6 @@ from torchtitan.protocols.module import Module
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
 
 
-def _interleaved_init(
-    first_init: Callable, second_init: Callable
-) -> Callable[[torch.Tensor], None]:
-    """Initialize two logical output slices of one interleaved parameter."""
-
-    def init(param: torch.Tensor) -> None:
-        logical_param = param.unflatten(0, (-1, 2))
-        first_init(logical_param[:, 0])
-        second_init(logical_param[:, 1])
-
-    return init
-
-
 def _merge_gate_up_param_init(
     w1: Linear.Config, w3: Linear.Config
 ) -> dict[str, Callable] | None:
@@ -44,10 +31,23 @@ def _merge_gate_up_param_init(
         raise ValueError("w1 and w3 must either both define param_init or neither")
     if w1.param_init.keys() != w3.param_init.keys():
         raise ValueError("w1 and w3 param_init must initialize the same parameters")
-    return {
-        name: _interleaved_init(w1.param_init[name], w3.param_init[name])
-        for name in w1.param_init
-    }
+
+    merged_param_init = {}
+    for name in w1.param_init:
+        gate_init = w1.param_init[name]
+        up_init = w3.param_init[name]
+
+        def init(
+            param: torch.Tensor,
+            gate_init: Callable = gate_init,
+            up_init: Callable = up_init,
+        ) -> None:
+            logical_param = param.unflatten(0, (-1, 2))
+            gate_init(logical_param[:, 0])
+            up_init(logical_param[:, 1])
+
+        merged_param_init[name] = init
+    return merged_param_init
 
 
 def _validate_fused_gate_up_configs(
