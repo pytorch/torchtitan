@@ -249,13 +249,18 @@ class _DistMoeRuntime:
     def initialize(self, device: torch.device) -> None:
         """Create the annex context once after module buffers are materialized."""
         if self.context is None:
-            self.context = create_context(
-                group=self.group,
-                config=self.config,
-                device=device,
-                prefetched_vmm=self.prefetch,
-            )
-            self.prefetch = None
+            prefetch = self.prefetch
+            try:
+                self.context = create_context(
+                    group=self.group,
+                    config=self.config,
+                    device=device,
+                    prefetched_vmm=prefetch,
+                )
+            finally:
+                self.prefetch = None
+                if self.context is None and prefetch is not None:
+                    prefetch.close()
 
     def select(self, stage_index: int, microbatch_index: int) -> None:
         """Select the immutable slot and stage depth for one pipeline action."""
@@ -297,6 +302,10 @@ class _DistMoeRuntime:
         for hook in self._pipeline_hooks:
             hook.remove()
         self._pipeline_hooks.clear()
+        prefetch = self.prefetch
+        self.prefetch = None
+        if prefetch is not None:
+            prefetch.close()
         context = self.context
         if context is not None:
             context.close()
