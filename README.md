@@ -168,21 +168,45 @@ MODULE=llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 ### Multi-Node Training
-For training on ParallelCluster/Slurm type configurations, you can use the `multinode_trainer.slurm` file to submit your sbatch job.
 
-To get started adjust the number of nodes and GPUs
-```
-#SBATCH --ntasks=2
-#SBATCH --nodes=2
+The `multinode_trainer.slurm` launcher provides an example four-node
+allocation. Make sure `torchrun` and `torchtitan` are available on every
+compute node, then submit the script with the resource request for your
+cluster:
+
+```bash
+sbatch \
+  --nodes=2 \
+  --gpus-per-node=8 \
+  --cpus-per-task=96 \
+  multinode_trainer.slurm \
+  --training.steps 10
 ```
 
-Then start a run where `nnodes` is your total node count, matching the sbatch node count above.
+The launcher derives the `torchrun` node count and rendezvous settings from
+the Slurm allocation. Select a training configuration with environment
+variables:
 
-```
-srun torchrun --nnodes 2
+```bash
+MODULE=llama3 CONFIG=llama3_8b sbatch \
+  --nodes=2 \
+  --gpus-per-node=8 \
+  --cpus-per-task=96 \
+  multinode_trainer.slurm
 ```
 
-If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
+Pass cluster-specific options such as `--partition`, `--account`, and `--qos`
+to `sbatch` when your Slurm cluster requires them.
+
+The launcher accepts these optional environment variables:
+
+- `OUTPUT_DIR` and `RUN_ID` select the artifact location.
+- `NPROC_PER_NODE` can use fewer workers than the visible GPUs.
+
+The launcher writes `training.log` into the selected output directory. For
+extended scale tests, the runner also asks it to record `environment.json` on a
+compute node before training and ensures that `resolved_config.json` is saved
+for the run.
 
 ## Citation
 

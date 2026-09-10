@@ -122,9 +122,14 @@ def get_log_path(scenario: str, output_folder: str | None) -> str:
     return f"/tmp/{scenario}_training.log"
 
 
-def build_base_command(module: str, config: str, job_dump_folder: str) -> str:
+def build_base_command(
+    module: str,
+    config: str,
+    job_dump_folder: str,
+    launcher_command: str = "./run_train.sh",
+) -> str:
     """Build the base command from module and config."""
-    cmd = f"MODULE='{module}' CONFIG='{config}' ./run_train.sh"
+    cmd = f"MODULE='{module}' CONFIG='{config}' {launcher_command}"
     cmd += f" --dump_folder={job_dump_folder}"
     return cmd
 
@@ -364,6 +369,7 @@ def build_training_command(
     enable_seed_checkpoint: bool,
     job_dump_folder: str,
     tb_folder: str = "tb",
+    launcher_command: str = "./run_train.sh",
 ) -> str:
     """Build the final training command with all options.
 
@@ -371,7 +377,12 @@ def build_training_command(
     ``activation-checkpoint:none`` is a tyro subcommand, and every argument
     after one is parsed inside that subcommand's namespace.
     """
-    cmd = build_base_command(module, config, job_dump_folder)
+    cmd = build_base_command(
+        module,
+        config,
+        job_dump_folder,
+        launcher_command=launcher_command,
+    )
     cmd += f" {FIXED_OPTIONS} --training.steps={steps}"
     cmd += f" --metrics.save_tb_folder={tb_folder}"
     if enable_seed_checkpoint:
@@ -399,6 +410,7 @@ def print_configuration(
     baseline_only_mode: bool = False,
     baseline_tb_folder: str = "tb_baseline",
     test_tb_folder: str = "tb_test",
+    launcher_command: str = "./run_train.sh",
 ) -> None:
     """Print configuration summary."""
     if baseline_only_mode:
@@ -421,6 +433,7 @@ def print_configuration(
         enable_seed_checkpoint,
         job_dump_folder,
         tb_folder=baseline_tb_folder,
+        launcher_command=launcher_command,
     )
 
     log_print("Baseline command:")
@@ -436,6 +449,7 @@ def print_configuration(
             enable_seed_checkpoint,
             job_dump_folder,
             tb_folder=test_tb_folder,
+            launcher_command=launcher_command,
         )
         log_print("Test command:")
         log_print(f"  {test_final_cmd}")
@@ -570,6 +584,7 @@ def run_training(
     job_dump_folder: str,
     ngpus: int,
     tb_folder: str = "tb",
+    launcher_command: str = "./run_train.sh",
 ) -> str:
     """Run training for a specific scenario. Returns the log file path."""
     log_file = get_log_path(scenario, output_folder)
@@ -592,6 +607,7 @@ def run_training(
         enable_seed_checkpoint,
         job_dump_folder,
         tb_folder=tb_folder,
+        launcher_command=launcher_command,
     )
 
     env = os.environ.copy()
@@ -1075,8 +1091,8 @@ Examples:
         "--export-result",
         default="",
         help=(
-            "Export losses to specified file path (requires --assert-equal). "
-            "Exports only when losses match. Format: '{step} {loss}' per line."
+            "Run the baseline only and export its metrics to the specified "
+            "file. Format: one full-precision row per step."
         ),
     )
     parser.add_argument(
@@ -1105,6 +1121,16 @@ Examples:
         type=int,
         default=8,
         help="Number of GPUs for test run (default: 8)",
+    )
+    parser.add_argument(
+        "--launcher-command",
+        default="./run_train.sh",
+        help=(
+            "Command used to launch each training run. Training arguments are "
+            "appended to it. The default runs locally; a synchronous scheduler "
+            "command such as 'sbatch --wait ... multinode_trainer.slurm' can "
+            "be used for remote execution."
+        ),
     )
 
     args = parser.parse_args()
@@ -1149,6 +1175,7 @@ def run_scenario(
     job_dump_folder: str,
     ngpus: int,
     tb_folder: str = "tb",
+    launcher_command: str = "./run_train.sh",
 ) -> str:
     """Run training for a specific scenario (baseline or test).
 
@@ -1181,6 +1208,7 @@ def run_scenario(
         job_dump_folder,
         ngpus,
         tb_folder=tb_folder,
+        launcher_command=launcher_command,
     )
 
     return log_file
@@ -1236,6 +1264,7 @@ def main() -> None:
         baseline_only_mode,
         baseline_tb_folder=baseline_tb_folder,
         test_tb_folder=test_tb_folder,
+        launcher_command=args.launcher_command,
     )
 
     # Check if git working directory is clean before switching commits
@@ -1272,6 +1301,7 @@ def main() -> None:
             args.job_dump_folder,
             args.baseline_ngpus,
             tb_folder=baseline_tb_folder,
+            launcher_command=args.launcher_command,
         )
 
         # Extract baseline metrics from TensorBoard (full precision)
@@ -1295,6 +1325,7 @@ def main() -> None:
                 args.job_dump_folder,
                 args.test_ngpus,
                 tb_folder=test_tb_folder,
+                launcher_command=args.launcher_command,
             )
 
             # Extract test metrics from TensorBoard (full precision)

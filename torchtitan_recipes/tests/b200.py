@@ -26,3 +26,22 @@ def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
     config = llama3_debugmodel_mxfp8()
     config.parallelism.data_parallel_shard_degree = 2
     return config
+
+
+def deepseek_v3_debugmodel_mxfp8_fsdp2_pp2_ep2_loss_compile() -> Trainer.Config:
+    from torchtitan.models.deepseek_v3.config_registry import (
+        deepseek_v3_debugmodel_mxfp8,
+    )
+
+    config = deepseek_v3_debugmodel_mxfp8(seq_len=2048)
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.expert_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.compile.enable = True
+    config.compile.components = ["loss"]
+    config.training.disable_cuda_graphs = True
+    return config

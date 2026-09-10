@@ -17,7 +17,11 @@ from pathlib import Path
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
-from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests import (
+    OverrideDefinitions,
+    read_golden_spec,
+    validate_fake_pg_compatibility,
+)
 from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
@@ -134,23 +138,6 @@ def _join_override_args(override_args: tuple[str, ...]) -> str:
     )
 
 
-def _read_golden_spec(golden_numerics_path: Path) -> tuple[int, tuple[str, ...]]:
-    columns = ("step", "loss")
-    steps: list[int] = []
-    with golden_numerics_path.open() as golden_file:
-        for line in golden_file:
-            fields = line.strip().split()
-            if not fields:
-                continue
-            if fields[0] == "#" and len(fields) > 1 and fields[1] == "step":
-                columns = tuple(fields[1:])
-            elif fields[0] != "#":
-                steps.append(int(fields[0]))
-    if not steps:
-        raise ValueError(f"Numerics golden has no steps: {golden_numerics_path}")
-    return max(steps), columns[1:]
-
-
 def _parallelism_summary(config: Trainer.Config, world_size: int) -> str:
     parallelism = config.parallelism
     fsdp_degree = parallelism.data_parallel_shard_degree
@@ -253,7 +240,7 @@ def run_single_test(
                 result_path = Path(output_dir) / golden_numerics_path.name
                 result_arg = f"--export-result={result_path}"
             else:
-                steps, metrics = _read_golden_spec(golden_numerics_path)
+                steps, metrics = read_golden_spec(golden_numerics_path)
                 result_path = golden_numerics_path
                 result_arg = f"--import-result={golden_numerics_path}"
 

@@ -6,11 +6,13 @@
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from torchtitan.trainer import Trainer
 
 __all__ = [
     "OverrideDefinitions",
+    "read_golden_spec",
     "validate_fake_pg_compatibility",
 ]
 
@@ -60,6 +62,23 @@ class OverrideDefinitions:
 
     def __repr__(self):
         return self.test_descr
+
+
+def read_golden_spec(golden_numerics_path: Path) -> tuple[int, tuple[str, ...]]:
+    columns = ("step", "loss")
+    steps: list[int] = []
+    with golden_numerics_path.open() as golden_file:
+        for line in golden_file:
+            fields = line.strip().split()
+            if not fields:
+                continue
+            if fields[0] == "#" and len(fields) > 1 and fields[1] == "step":
+                columns = tuple(fields[1:])
+            elif fields[0] != "#":
+                steps.append(int(fields[0]))
+    if not steps:
+        raise ValueError(f"Numerics golden has no steps: {golden_numerics_path}")
+    return max(steps), columns[1:]
 
 
 def validate_fake_pg_compatibility(

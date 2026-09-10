@@ -132,7 +132,92 @@ hardware-specific workflows.
   marker. The 1-GPU lane selects `not multi_gpu`, while the multi-GPU lane
   selects `multi_gpu` from the same GPU directory.
 
-## Running Tests
+## Extended scale validation on Slurm
+
+`tests.scale_tests.run_tests` defines reproducible tests that are too large for
+the regular CI lanes. The initial suite exercises DeepSeek V3 on 16 and 256
+GB300 GPUs. Single-node coverage belongs in the regular B200 CI suite. Every
+scale suite runs for at least 10 steps and compares full-precision loss and
+gradient norm with an accepted golden file.
+
+The 256-GPU suite starts from the DeepSeek V3 671B PP4/DP64/EP32 MXFP8
+configuration on this branch. Tests for later optimization stages should be
+added with the changes that introduce those stages.
+
+The suite definitions contain only portable resource and training settings.
+Pass site-specific scheduler arguments, such as partition, account, and QoS,
+at launch time.
+
+### Set up the environment
+
+Create the virtual environment on shared storage that is visible from every
+compute node. Install hardware-compatible PyTorch and TorchAO builds in the
+environment, then install TorchTitan and its dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install -e .
+```
+
+Activate the environment before calling `sbatch`; `--export=ALL` passes that
+environment to the compute nodes.
+
+### List and launch suites
+
+```bash
+python -m tests.scale_tests.run_tests \
+    outputs/scale-validation \
+    --test_suite gb300_dsv3 \
+    --test_name deepseek_v3_mxfp8_pp2_ep8_loss_compile \
+    --launcher slurm \
+    --sbatch-args='--partition=<partition> --account=<account> --exclusive'
+```
+
+Each test definition declares only its total GPU requirement through `ngpu`.
+The runner assumes four GPUs per node and derives the node count. Use
+`--num_gpus_per_node` to match a different Slurm node shape.
+Use `--checkpoint.initial_load_path` to load a Hugging Face checkpoint in
+model-only, load-only mode. `--dataloader.dataset_path` and `--hf_assets_path`
+select shared local dataset and tokenizer assets without embedding
+site-specific paths in a suite.
+
+`--test_name` is required so a lower scale test cannot implicitly continue into
+a more expensive test.
+
+The runner invokes `scripts/loss_compare.py`, which synchronously calls the
+generic `multinode_trainer.slurm` launcher. It does not analyze traces or
+produce a PR report. Those steps intentionally remain outside the compute
+runner.
+
+Before an accepted golden exists, generate a candidate with
+`--export-numerics`. Review the run and commit the candidate under
+`tests/assets/losses/gb300/` before using it as a gate. A candidate is not
+an accepted golden merely because the job completed.
+
+### Run artifacts
+
+Each test output contains the raw facts needed for later review:
+
+- `environment.json`, divided into `source` and live `runtime` sections.
+- `resolved_config.json`, written by TorchTitan after CLI resolution.
+- `training.log` and full-precision TensorBoard metrics.
+- `profiling/traces/` and `profiling/memory_snapshot/`.
+
+`environment.json` is observational. For Slurm tests, the scale-test runner
+sets `TORCHTITAN_COLLECT_ENVIRONMENT=1`, and the launcher records it on its
+compute node before training with the same `python3` command used to start
+torchrun. Direct uses of the launcher do not collect it by default. The
+collector does not validate against another manifest. Its runtime section
+inventories every installed Python distribution instead of relying on a fixed
+package allowlist.
+
+Any source, runtime, recipe, data, or tokenizer change invalidates results from
+an earlier validation ladder. Do not advance to a larger suite while a lower
+suite has an unresolved correctness failure.
+
+## Running Tests Locally
 
 ### Prerequisites
 
