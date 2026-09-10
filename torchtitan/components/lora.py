@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
@@ -148,9 +147,8 @@ class LoRAConverter(ModelConfigConverter):
     frozen config subclasses that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every ``Linear.Config`` is
-    converted. When specified, only configs whose FQN's last segment matches
-    one of the entries are converted (e.g. ``["wq", "wv"]``). The physical
-    fused feed-forward projection is targeted as ``w13``.
+    converted.  When specified, only configs whose FQN's last segment matches
+    one of the entries are converted (e.g. ``["wq", "wv"]``).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -163,8 +161,7 @@ class LoRAConverter(ModelConfigConverter):
 
         target_modules: list[str] | None = None
         """Module names to apply LoRA to (matched against the last segment of the FQN).
-        Use ``w13`` for the fused feed-forward gate-up projection. None means
-        all Linear layers. An empty list means no layers."""
+        None means all Linear layers. An empty list means no layers."""
 
     def __init__(self, config: Config, **kwargs):
         if config.rank <= 0:
@@ -210,26 +207,13 @@ class LoRAConverter(ModelConfigConverter):
         for fqn, cfg, parent, attr in reversed(configs):
             assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
-            is_gate_up_config = isinstance(
-                parent, FeedForward.Config
-            ) and last_segment in ("w1", "w3")
-            if (
-                is_gate_up_config
-                and self.target_modules is not None
-                and last_segment in self.target_modules
-            ):
-                raise ValueError(
-                    f"FeedForward.{last_segment} is part of the fused w13 "
-                    "projection; target w13 instead."
-                )
-            target_name = "w13" if is_gate_up_config else last_segment
             is_target = isinstance(cfg, Linear.Config) and (
-                self.target_modules is None or target_name in self.target_modules
+                self.target_modules is None or last_segment in self.target_modules
             )
 
             if is_target:
                 new_cfg = self._make_lora_config(cfg)
-                matched.add(target_name)
+                matched.add(last_segment)
             else:
                 new_cfg = _make_frozen_config(cfg)
 
