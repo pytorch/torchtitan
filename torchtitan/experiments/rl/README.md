@@ -10,9 +10,29 @@ Together, the unified model, batch-invariant mode, and single training stack pro
 
 Note: Unified-model performance varies by model, input shape, and parallelism: it can trail native vLLM in inference-only workloads but outperform it end to end in some RL configurations. Batch invariance trades throughput for exact numerics and can be used for debugging or controlled on-policy studies.
 
-[Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
+[Model support](#model-support) · [Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
 
 > **Note:** TitanRL is under active development. APIs and configurations may change.
+
+## Model support
+
+Supported entries completed a two-step end-to-end RL run with a representative
+debug model, including rollout generation, training, and weight synchronization.
+Generator DP and TP were tested together at degree 2; EP was tested at degree 4
+for MoE models. Generator sequence parallelism was disabled.
+
+| Model | RL support |
+|---|---|
+| DeepSeek V3 | Support soon |
+| DeepSeek V4 | Support soon |
+| FLUX | Support soon |
+| GPT-OSS | Supported (generator: DP, TP, EP) |
+| Kimi K2.7 | Support soon |
+| Kimi K3 | Support soon |
+| Llama 3 | Supported (generator: DP, TP) |
+| Muse Glimmer | Supported (generator: DP, TP) |
+| Qwen 3 | Supported (text only) |
+| Qwen 3.5/3.6/3.8 | Supported (text only) |
 
 ## Architecture
 
