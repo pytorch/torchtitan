@@ -361,8 +361,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     f"{type(target).__name__}"
                 )
 
-    @sl.log_trace_span("checkpoint_save")
-    @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         should_save = self._should_save(curr_step, last_step)
         # Prewarm on a step we are not saving, so the first real save does not

@@ -248,7 +248,6 @@ class CheckpointManager(BaseCheckpointManager):
         if self.stager is not None:
             self.stager.close()
 
-    @torch.no_grad()
     def dcp_save(
         self,
         state_dict: dict[str, Any],
@@ -402,8 +401,6 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
 
-    @sl.log_trace_span("checkpoint_save")
-    @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
