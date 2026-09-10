@@ -21,10 +21,7 @@ from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
-from torchtitan.overrides.fused_swiglu import (
-    dist_gemm_fused_swiglu,
-    fused_swiglu,
-)
+from torchtitan.overrides.fused_swiglu import dist_gemm_fused_swiglu, fused_swiglu
 from torchtitan.protocols.module import Module, ModuleDict
 
 
