@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from typing import Any, ClassVar
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -37,9 +37,6 @@ class Linear(nn.Linear, Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        # Converters such as LoRA use this hook to preserve independent state
-        # for each logical projection while building one interleaved GEMM.
-        _custom_interleaved_linear_builder: ClassVar[Callable[..., Any] | None] = None
         in_features: int
         out_features: int
         bias: bool = False
@@ -123,32 +120,11 @@ def _build_interleaved_linear(
         )
     first_name, second_name = logical_names
 
-    first_builder = type(first_config)._custom_interleaved_linear_builder
-    second_builder = type(second_config)._custom_interleaved_linear_builder
-    if first_builder is None and second_builder is None:
-        merged = _make_interleaved_linear_config(
-            first_config,
-            second_config,
-            param_init=param_init,
-        ).build()
-    else:
-        if (
-            first_builder is not None
-            and second_builder is not None
-            and first_builder is not second_builder
-        ):
-            raise ValueError(
-                "Logical Linear projections specify different custom "
-                "interleaved builders"
-            )
-        custom_builder = first_builder or second_builder
-        assert custom_builder is not None
-        merged = custom_builder(
-            first_config,
-            second_config,
-            logical_names=logical_names,
-            param_init=param_init,
-        )
+    merged = _make_interleaved_linear_config(
+        first_config,
+        second_config,
+        param_init=param_init,
+    ).build()
 
     merged._logical_output_slices = (
         (first_name, first_config.out_features),
