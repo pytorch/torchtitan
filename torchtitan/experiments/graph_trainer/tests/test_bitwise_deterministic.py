@@ -224,8 +224,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
             loss = trainer.forward_backward_step(
-                input_dict={"input": self.inputs, "positions": self.positions},
-                labels=self.labels,
+                input_dict={
+                    "input": self.inputs,
+                    "positions": self.positions,
+                    "labels": self.labels,
+                },
                 global_valid_tokens=global_valid_tokens,
             )
             optimizer.step()

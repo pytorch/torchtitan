@@ -19,11 +19,12 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import Configurable
 
 
-# The input dict holds the model's forward kwargs plus ``num_valid_tokens``, the
-# number of labels that contribute to the loss. Collators over token labels
-# count them here so the trainer does not rescan every batch on the critical
-# path; the trainer pops the field before the batch reaches the model.
-TrainerBatch: TypeAlias = tuple[dict[str, Any], torch.Tensor]
+# The input dict holds the model's forward kwargs, labels, and
+# ``num_valid_tokens``, the number of labels that contribute to the loss.
+# Collators over token labels count them here so the trainer does not rescan
+# every batch on the critical path; the trainer pops the count before the batch
+# reaches the model.
+TrainerBatch: TypeAlias = dict[str, Any]
 
 # Page-locked batches let the trainer issue an async host-to-device copy; a copy
 # out of pageable memory is synchronous whatever ``non_blocking`` says. There has
@@ -111,7 +112,8 @@ class TextCollator(Collator):
 
         return {
             "input": input_ids,
+            "labels": labels,
             "positions": positions,
             "padding_mask": padding_mask,
             "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
-        }, labels
+        }
