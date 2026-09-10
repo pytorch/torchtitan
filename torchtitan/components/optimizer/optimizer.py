@@ -295,9 +295,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         assert closure is None, "OptimizersContainer does not support closures"
+        self._step_optimizers()
+        return None
+
+    def _step_optimizers(self) -> None:
+        """Update contained optimizers without re-entering container step hooks."""
         for optimizer in self.optimizers:
             optimizer.step()
-        return None
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         for optimizer in self.optimizers:
