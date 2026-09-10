@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import spmd_types as spmd
@@ -18,6 +18,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
@@ -112,6 +113,11 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
+        activation_fn: ActivationFn.Config = field(
+            default_factory=lambda: ActivationFn.Config(
+                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
+            )
+        )
 
         def build(self, **kwargs):
             physical_config = replace(
@@ -135,6 +141,7 @@ class GroupedExperts(Module):
         self.w2_EDF = nn.Parameter(
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
+        self.activation_fn = config.activation_fn.build()
         self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
@@ -201,7 +208,8 @@ class GroupedExperts(Module):
         up_RF: torch.Tensor,
         offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        return F.silu(gate_RF) * up_RF
+        del offsets_E
+        return self.activation_fn(gate_RF, up_RF)
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
