@@ -10,14 +10,11 @@ Handles image decoding, resizing, normalization, and patch extraction for the
 vision encoder.
 """
 
-import ipaddress
 import math
-import socket
 from collections.abc import Callable
-from urllib.parse import urljoin, urlparse
 
 import einops as E
-import requests
+import requests_hardened
 import torch
 
 import torchvision.io
@@ -28,83 +25,33 @@ from PIL import Image
 
 from torchtitan.tools.logging import logger
 
-
-def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return True if the IP should be blocked for SSRF protection."""
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped  # unwrap ::ffff:a.b.c.d before classifying
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_unspecified
-        or ip.is_reserved
+# Module-level hardened HTTP session for SSRF protection.
+#
+# ``requests-hardened`` performs IP-level filtering at the transport adapter,
+# blocking private / loopback / link-local IP ranges (including cloud
+# metadata endpoints such as 169.254.169.254) on every request, including
+# every redirect target.  Redirects are bounded by ``max_redirects`` to
+# prevent infinite redirect loops.
+_http_session = requests_hardened.HTTPSession(
+    requests_hardened.Config(
+        ip_filter_enable=True,
+        ip_filter_allow_loopback_ips=False,
+        never_redirect=False,
+        default_timeout=(5.0, 10.0),
     )
-
-
-def _is_safe_url(url: str) -> bool:
-    """Check if URL is safe from SSRF by resolving and checking all IP addresses.
-
-    .. note::
-        DNS rebinding (TOCTOU) is a known limitation: this function resolves
-        the hostname, then the caller resolves it again independently when
-        fetching. A malicious DNS server could return a public IP for the
-        check and a private IP for the fetch. Full protection requires DNS
-        pinning, which should be addressed in a future PR.
-    """
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        if parsed.scheme not in ("http", "https"):
-            return False
-        addrinfo = socket.getaddrinfo(hostname, None)
-        resolved_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-        for _, _, _, _, sockaddr in addrinfo:
-            ip = ipaddress.ip_address(sockaddr[0])
-            resolved_ips.append(ip)
-        if not resolved_ips:
-            return False
-        if any(_is_blocked_ip(ip) for ip in resolved_ips):
-            return False
-        return True
-    except (socket.gaierror, socket.herror, OSError, ValueError):
-        return False
+)
+_http_session.max_redirects = 10
 
 
 def _fetch_url_safe(image_url: str, timeout: float = 10.0) -> bytes:
-    """Fetch URL content with full SSRF + redirect protection.
+    """Fetch URL content with SSRF + redirect protection via ``requests-hardened``.
 
-    Validates the initial URL and EVERY redirect hop before following it,
-    using ``allow_redirects=False`` + a bounded manual loop so each hop is
-    pre-checked and we avoid unbounded redirect cycles.
+    The hardened session blocks connections to private, loopback, link-local,
+    and other non-routable IP ranges (including AWS/GCP cloud-metadata
+    endpoints) at the transport-adaptor level on **every** request—including
+    each redirect hop—and bounds the redirect chain to a safe length.
     """
-    if not _is_safe_url(image_url):
-        raise ValueError(f"URL not allowed (SSRF protection): {image_url}")
-    session = requests.Session()
-    # First hop
-    response = session.get(image_url, timeout=timeout, allow_redirects=False)
-    # Follow redirects manually, validating each hop before fetching.
-    # Bounded to 10 hops (matching requests' default max_redirects) to prevent
-    # infinite loops from cyclic redirect chains among safe hosts.
-    max_redirects = 10
-    for _ in range(max_redirects):
-        if not response.is_redirect:
-            break
-        location = response.headers.get("Location")
-        if not location:
-            break
-        full_url = urljoin(response.url, location)
-        if not _is_safe_url(full_url):
-            raise ValueError(f"Blocked redirect to unsafe URL: {full_url}")
-        response = session.get(full_url, timeout=timeout, allow_redirects=False)
-    # If we exhausted redirects and the last response is still a redirect,
-    # the redirect chain exceeded max_redirects (potential loop).
-    if response.is_redirect and response.headers.get("Location"):
-        raise ValueError(f"Redirect limit exceeded (max_redirects={max_redirects})")
+    response = _http_session.get(image_url, timeout=timeout)
     return response.content
 
 
