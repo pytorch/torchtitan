@@ -11,6 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from torchtitan.models.common.activation import ActivationFn, SiTUGLU
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
@@ -99,6 +100,32 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     torch.testing.assert_close(w13_grad_H2D[:, 0], w1_HD.grad)
     torch.testing.assert_close(w13_grad_H2D[:, 1], w3_HD.grad)
     torch.testing.assert_close(feed_forward.w2.weight.grad, w2_DH.grad)
+
+
+def test_feed_forward_uses_configured_activation():
+    activation_fn = ActivationFn.Config(
+        fn=SiTUGLU(beta=4.0, linear_beta=25.0)  # pyrefly: ignore[bad-argument-type]
+    )
+    config = FeedForward.Config(
+        w1=Linear.Config(in_features=4, out_features=8),
+        w2=Linear.Config(in_features=8, out_features=4),
+        w3=Linear.Config(in_features=4, out_features=8),
+        activation_fn=activation_fn,
+    )
+    feed_forward = config.build()
+    feed_forward.load_state_dict(
+        {
+            "w1.weight": torch.randn(8, 4),
+            "w2.weight": torch.randn(4, 8),
+            "w3.weight": torch.randn(8, 4),
+        }
+    )
+
+    x_TD = torch.randn(3, 4)
+    gate_up_TF = F.linear(x_TD, feed_forward.w13.weight)
+    gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
+    expected_TD = feed_forward.w2(activation_fn.build()(gate_TF, up_TF))
+    torch.testing.assert_close(feed_forward(x_TD), expected_TD)
 
 
 def test_feed_forward_rejects_mismatched_gate_up_implementations():
