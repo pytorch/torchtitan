@@ -95,21 +95,12 @@ def kimi_k3_debugmodel() -> Trainer.Config:
 
 
 def kimi_k3_debugmodel_lora() -> Trainer.Config:
-    """The multimodal debug model with LoRA adapters on the attention output.
+    """The multimodal debug model with LoRA adapters, through core's LoRAConverter.
 
-    Uses core's LoRAConverter rather than a model-local implementation. The
-    Targets are matched on the last segment of the FQN. The set mirrors the
-    reference tree's DEFAULT_LORA_TARGETS: the MLA projections, and -- the part
-    that matters structurally -- the dense FFN and latent-MoE projections.
-    Every decoder layer carries an FFN or MoE, while only one layer in four is
-    MLA (K3 is 3 KDA : 1 MLA), so an MLA-only target set leaves an all-KDA
-    pipeline stage with zero trainable parameters and the optimizer then raises
-    "param_groups pattern matched no parameters". That is what pp8 hit.
-
-    Not covered: the reference also adapts the MLA output gate. Here that module
-    is named ``gate``, which is also the router's gate in every MoE layer, and
-    last-segment matching cannot separate them -- adding it would silently adapt
-    the routers too. Left out rather than guessed.
+    Targets match on the last FQN segment: the MLA projections, the dense FFN
+    and the latent-MoE projections, so every decoder layer carries an adapter.
+    The MLA output gate is left out: it is named ``gate``, as is every MoE
+    router's gate, and last-segment matching cannot tell them apart.
     """
     config = kimi_k3_debugmodel()
     config.model_spec = model_registry(
@@ -146,29 +137,10 @@ def _kimi_k3_lora_converter(
     )
 
 
-def kimi_k3_debugmodel_qlora_mxfp4_linear() -> Trainer.Config:
-    """QLoRA with only the base LINEARS packed (experts stay bf16).
-
-    The packed-TP forward covers colwise/rowwise linears; packed experts
-    under expert-TP need a shape-preserving layout and refuse -- this
-    flavor is the TP-composable subset.
-    """
-    config = kimi_k3_debugmodel()
-    config.model_spec = model_registry(
-        "debugmodel",
-        converters=[_kimi_k3_lora_converter(quantize_base="mxfp4")],
-    )
-    return config
-
-
 def kimi_k3_debugmodel_qlora_mxfp4() -> Trainer.Config:
-    """The LoRA debug model with MXFP4-packed bases (QLoRA, K3's native
-    weight format).
+    """The LoRA debug model with MXFP4-packed frozen bases (QLoRA).
 
-    The packing swaps the base for split storage AT BUILD, before
-    parallelize, so FSDP2 shards the packed bytes -- this is the
-    pack-then-shard order the nf4 path cannot reach, and the flavor trains
-    under the normal sharded flow.
+    The bases pack at build, before parallelize, so FSDP2 shards packed bytes.
     """
     config = kimi_k3_debugmodel()
     config.model_spec = model_registry(
