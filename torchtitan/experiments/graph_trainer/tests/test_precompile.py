@@ -294,6 +294,31 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    def test_loaded_artifact_supports_graph_runner(self):
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            flatten_runtime_inputs,
+            PrecompiledFxTraceArtifact,
+        )
+        from torchtitan.experiments.graph_trainer.runner import GraphRunner
+
+        model = torch.nn.Linear(3, 2, dtype=torch.float64)
+        inputs = torch.randn(4, 3, dtype=torch.float64)
+
+        def forward(value):
+            return model(value)
+
+        traced = minimal_fx_tracer(forward, module=model)(inputs)
+        example_inputs = flatten_runtime_inputs(model, (inputs,), {})
+        loaded = PrecompiledFxTraceArtifact.from_traced_result(traced).to_traced_result(
+            example_inputs
+        )
+        runner = GraphRunner(loaded, module=model)
+
+        self.assertTrue(torch.equal(model(inputs), runner(inputs)))
+
     def test_rejects_graph_owned_gradient_state(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
@@ -406,6 +431,8 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         self.assertEqual(len(loaded.input_subclass_layouts), 2)
         self.assertEqual(loaded.num_flat_outputs, 2)
         self.assertEqual(loaded.config_fingerprint, "test_fp_123")
+        self.assertEqual(loaded.num_optimizer_state_inputs, 0)
+        self.assertEqual(loaded.num_runtime_mesh_inputs, 0)
 
     def test_artifact_pickle_with_blockmask_treespec(self):
         """Verify artifact pickles when user_inputs_spec contains BlockMask.
