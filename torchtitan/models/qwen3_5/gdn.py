@@ -21,7 +21,7 @@ from torch import nn
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.attention import local_head_split, VarlenMetadata
 from torchtitan.protocols.module import Module
 
 
@@ -442,7 +442,7 @@ class GatedDeltaNet(Module):
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
         )
-        gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
+        gate_THV = local_head_split(gate_TC, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)
         return self.out_proj(out_TD)
