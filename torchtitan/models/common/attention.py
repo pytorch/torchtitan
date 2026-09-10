@@ -53,7 +53,7 @@ from torchtitan.tools.utils import round_up
 
 __all__ = [
     "FlexAttention",
-    "FusedQKVLinear",
+    "QKVLinear",
     "GQAttention",
     "ScaledDotProductAttention",
     "VarlenAttention",
@@ -643,7 +643,7 @@ class BaseAttention(Module):
             assert self.n_heads > 0, "n_heads must be > 0"
 
 
-class FusedQKVLinear(Module):
+class QKVLinear(Module):
     """Single fused linear projection, split along R dimension.
 
     Uses a single linear layer and splits the output along the R dimension,
@@ -805,7 +805,7 @@ class GQAttention(BaseAttention):
     class Config(BaseAttention.Config):
         n_heads: int
         dim: int
-        qkv_linear: FusedQKVLinear.Config
+        qkv_linear: QKVLinear.Config
         wo: Linear.Config
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
