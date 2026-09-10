@@ -108,12 +108,8 @@ class QuantileBalancer(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        if config.num_experts <= 1:
-            raise ValueError("num_experts must be greater than one.")
         if not 0 < config.top_k < config.num_experts:
             raise ValueError("top_k must be between zero and num_experts.")
-        if config.num_bins <= 0:
-            raise ValueError("num_bins must be greater than zero.")
         self.num_experts = config.num_experts
         self.top_k = config.top_k
         self.num_bins = config.num_bins
