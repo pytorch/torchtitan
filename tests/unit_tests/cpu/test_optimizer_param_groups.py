@@ -109,6 +109,28 @@ _DEFAULT_ADAMW = ParamGroupConfig(
 )
 
 
+class TestParamGroupConfigOptimizerName(unittest.TestCase):
+    """Validate optimizer_name at ParamGroupConfig construction, without a model."""
+
+    def test_accepts_known_optimizer_names(self):
+        for name in ("Adam", "AdamW", "DistMuon"):
+            with self.subTest(name=name):
+                pg = ParamGroupConfig(pattern=r".*", optimizer_name=name)
+                self.assertEqual(pg.optimizer_name, name)
+
+    def test_rejects_unknown_optimizer_names(self):
+        for name in ("Adamw", "foo"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError) as ctx:
+                    ParamGroupConfig(pattern=r".*", optimizer_name=name)
+                msg = str(ctx.exception)
+                self.assertIn(name, msg)
+                self.assertIn("Allowed names:", msg)
+                self.assertIn("Adam", msg)
+                self.assertIn("AdamW", msg)
+                self.assertIn("DistMuon", msg)
+
+
 def _get_param_names_in_group(model, group):
     """Return the set of parameter FQNs in an optimizer param group."""
     param_to_name = {p: n for n, p in model.named_parameters()}

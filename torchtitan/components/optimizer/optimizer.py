@@ -38,6 +38,14 @@ __all__ = [
 ]
 
 
+# Single source of truth for supported optimizer names and constructors.
+_OPTIMIZER_FACTORIES: dict[str, Callable[..., Optimizer]] = {
+    "Adam": torch.optim.Adam,
+    "AdamW": torch.optim.AdamW,
+    "DistMuon": build_dist_muon,
+}
+
+
 @dataclass(kw_only=True, slots=True)
 class ParamGroupConfig:
     """Configuration for a parameter group with its own optimizer.
@@ -61,11 +69,19 @@ class ParamGroupConfig:
     E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*', '.*' (catch-all)"""
 
     optimizer_name: str
-    """Optimizer type for this group."""
+    """Optimizer type for this group. Must be one of Adam, AdamW, DistMuon."""
 
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     """Keyword arguments passed to the optimizer constructor.
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
+
+    def __post_init__(self) -> None:
+        if self.optimizer_name not in _OPTIMIZER_FACTORIES:
+            allowed = ", ".join(sorted(_OPTIMIZER_FACTORIES))
+            raise ValueError(
+                f"Unknown optimizer_name {self.optimizer_name!r}. "
+                f"Allowed names: {allowed}."
+            )
 
 
 T = TypeVar("T", bound=Optimizer)
@@ -141,14 +157,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     @staticmethod
     def _resolve_optimizer_factory(name: str) -> Callable[..., Optimizer]:
-        optimizer_factories: dict[str, Callable[..., Optimizer]] = {
-            "Adam": torch.optim.Adam,
-            "AdamW": torch.optim.AdamW,
-            "DistMuon": build_dist_muon,
-        }
-        if name not in optimizer_factories:
+        if name not in _OPTIMIZER_FACTORIES:
             raise NotImplementedError(f"Optimizer {name} not added.")
-        return optimizer_factories[name]
+        return _OPTIMIZER_FACTORIES[name]
 
     @staticmethod
     def _build_impl_kwargs(config: Config) -> dict[str, Any]:
