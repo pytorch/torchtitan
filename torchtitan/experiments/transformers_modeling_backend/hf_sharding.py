@@ -325,11 +325,7 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
         if norm is not None:
             norm._sharding_config = _replicate_config(norm)
 
-    # GLM-5 DSA indexer: replicate the small auxiliary subtree, including its
-    # nested projections such as wq_b/wk.
-    if hasattr(attn, "indexer"):
-        for sub in attn.indexer.modules():
-            sub._sharding_config = _replicate_config(sub)
+    _set_dsa_indexer_sharding(attn, enable_sp=enable_sp)
 
     # V-norm (Gemma4) — parameter-free RMSNorm applied per-head
     if hasattr(attn, "v_norm"):
@@ -371,6 +367,19 @@ def _set_layer_sharding_configs(layer: nn.Module, *, enable_sp: bool) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _set_dsa_indexer_sharding(attn: nn.Module, *, enable_sp: bool) -> None:
+    """Replicate a DSA indexer, rejecting its unsupported TP execution."""
+    if not hasattr(attn, "indexer"):
+        return
+    if enable_sp:
+        raise NotImplementedError(
+            f"{type(attn).__name__}: the DSA indexer is not supported under "
+            "tensor parallelism. Use FSDP/EP without TP."
+        )
+    for sub in attn.indexer.modules():
+        sub._sharding_config = _replicate_config(sub)
 
 
 def _hf_norm_config(*, enable_sp: bool) -> ShardingConfig:

@@ -57,6 +57,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         self.assertIsInstance(
             model._parameters["weight"], torch.distributed.tensor.DTensor
         )
+        self.assertEqual(model._parameters["weight"].dtype, torch.float32)
         self.assertNotIsInstance(model.weight, torch.distributed.tensor.DTensor)
         self.assertEqual(model.weight.dtype, torch.bfloat16)
         self.assertEqual(

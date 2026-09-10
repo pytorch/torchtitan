@@ -7,9 +7,18 @@
 import unittest
 from functools import partial
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import distribute_tensor, Shard
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -163,6 +172,59 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "ambient DeviceMesh"):
             linear(torch.randn(3, 4))
+
+
+class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    def test_tp_forward_and_bias_gradient_match_unsharded(self):
+        mesh = init_device_mesh(self.device_type, (2,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+        torch.manual_seed(42)
+
+        input = torch.randn(3, 4, device=self.device_type)
+        weight = torch.randn(2, 4, device=self.device_type)
+        bias = torch.randn(2, device=self.device_type)
+
+        expected_input = input.detach().clone().requires_grad_()
+        expected_weight = weight.detach().clone().requires_grad_()
+        expected_bias = bias.detach().clone().requires_grad_()
+        expected = F.linear(expected_input, expected_weight, expected_bias)
+        expected.sum().backward()
+
+        input_dtensor = distribute_tensor(input, mesh, (Shard(1),))
+        weight_dtensor = distribute_tensor(weight, mesh, (Shard(1),))
+        local_input = input_dtensor.to_local().detach().requires_grad_()
+        linear = (
+            PartialBiasRowwiseLinear.Config(
+                in_features=4,
+                out_features=2,
+                bias=True,
+            )
+            .build()
+            .to(self.device_type)
+        )
+        linear.weight = nn.Parameter(weight_dtensor.to_local())
+        linear.bias = nn.Parameter(bias.detach().clone())
+
+        with set_current_spmd_mesh(mesh):
+            linear._parameters["bias"] = spmd.assert_type(
+                linear.bias, {tp_group: spmd.I}
+            )
+            local_partial = linear(local_input)
+            actual = spmd.redistribute(
+                local_partial,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.I,
+            )
+            actual.sum().backward()
+
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
 
 
 if __name__ == "__main__":

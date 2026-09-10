@@ -59,8 +59,8 @@ Params arrive as annotated plain tensors, pre-sharded in module.parallelize,
 instead of DTensors.
 
 `data_parallel()` first performs full-mesh DTensor translation & FSDP shards,
-so rest-time params match DTensor backend (mesh is FSDP + TP), this is mostly
-so DCP integration / grad norm impl remains the same.
+so rest-time parameters use the FSDP + model-parallel mesh. This keeps DCP
+integration and grad norm behavior unchanged.
 
 In pre-forward (ReplicateComputation.forward), we additionally handle any BWD reductions
 FSDP is expected to do, as the sharding annotations (R/I@TP for SP on/off) are assuming

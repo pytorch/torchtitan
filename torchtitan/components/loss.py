@@ -332,7 +332,7 @@ def compute_logprobs(
         # ids, so cross_entropy needs full-vocab logits.
         # dst=I, not R: the vocab all-gather's grad is the replicated upstream
         # grad sliced back to this rank's vocab shard (I's backward), not an
-        # all-reduce (R's backward). The latter over-counts by tp_degree and
+        # all-reduce (R's backward), which would over-count by the TP degree.
         logits = spmd.redistribute(
             logits,
             "tp",
