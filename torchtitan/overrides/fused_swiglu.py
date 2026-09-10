@@ -13,12 +13,12 @@ one physical ``w13`` linear. ``fused_swiglu`` only replaces the torch-native
 SiLU and multiply operations with a Triton kernel.
 
 ``dist_gemm_fused_swiglu`` preserves the dist-GEMM collective overlap while
-using the same Triton activation. ``fused_grouped_experts`` similarly replaces
+using the same activation replacement. ``fused_grouped_experts`` similarly replaces
 the grouped experts' torch-native SiLU and multiply with the Triton operation;
 their gate and up projection is already fused by default.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 import torch
@@ -29,14 +29,13 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import derive, override
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts
 
 __all__ = [
-    "DistGEMMFusedSwiGLU",
     "FusedSwiGLUGroupedExperts",
-    "FusedSwiGLU",
     "dist_gemm_fused_swiglu",
     "fused_grouped_experts",
     "silu_and_mul_backward_kernel",
@@ -367,34 +366,17 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     )
 
 
-class FusedSwiGLU(FeedForward):
-    """FeedForward using the fused Triton SiLU-and-multiply operation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        pass
-
-    def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:
-        return _fused_silu_and_mul(gate_TF, up_TF)
-
-
-class DistGEMMFusedSwiGLU(DistGEMMFeedForward, FusedSwiGLU):
-    """:class:`FusedSwiGLU` with the TP collectives also folded into its GEMMs.
-
-    The composition of both FFN optimizations: the fused ``w13`` gate+up GEMM
-    consumes an all-gather of the sequence shard, and ``w2`` reduce-scatters back
-    to a shard, over the autograd Functions in ``torchtitan/distributed/linear.py``.
-    Selected by stacking this override on ``tp_gemm_backend="dist_gemm"``; with TP
-    off it falls back to the inherited (fused but unoverlapped) forward.
-
-    The dist-GEMM schedule comes from :class:`DistGEMMFeedForward`; only the
-    elementwise activation is replaced by the Triton implementation.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(DistGEMMFeedForward.Config):
-        """Binds ``Config.build()`` to this module rather than the parent, so it
-        cannot be deleted as empty."""
+def _replace_swiglu_activation(cfg: FeedForward.Config) -> FeedForward.Config:
+    """Replace the torch-native SwiGLU callable with the fused implementation."""
+    if not isinstance(cfg.activation_fn.fn, SwiGLU):
+        raise ValueError(
+            "The fused_swiglu override requires the default SwiGLU activation, "
+            f"but found {type(cfg.activation_fn.fn).__name__}."
+        )
+    return replace(
+        cfg,
+        activation_fn=ActivationFn.Config(fn=_fused_silu_and_mul),
+    )
 
 
 @override(
@@ -402,8 +384,8 @@ class DistGEMMFusedSwiGLU(DistGEMMFeedForward, FusedSwiGLU):
     exact=True,
     description="Fuse the SwiGLU SiLU and multiply operations with Triton.",
 )
-def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
-    return derive(cfg, FusedSwiGLU.Config)
+def fused_swiglu(cfg: FeedForward.Config) -> FeedForward.Config:
+    return _replace_swiglu_activation(cfg)
 
 
 @override(
@@ -413,8 +395,8 @@ def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
 )
 def dist_gemm_fused_swiglu(
     cfg: DistGEMMFeedForward.Config,
-) -> DistGEMMFusedSwiGLU.Config:
-    return derive(cfg, DistGEMMFusedSwiGLU.Config)
+) -> DistGEMMFeedForward.Config:
+    return _replace_swiglu_activation(cfg)
 
 
 class FusedSwiGLUGroupedExperts(GroupedExperts):

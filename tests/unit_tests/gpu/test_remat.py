@@ -23,8 +23,8 @@ from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.overrides.fused_swiglu import (
-    DistGEMMFusedSwiGLU,
-    FusedSwiGLU,
+    dist_gemm_fused_swiglu,
+    fused_swiglu,
     FusedSwiGLUGroupedExperts,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -288,33 +288,6 @@ class TestRematRegions(unittest.TestCase):
             w3=feed_forward_config.w3,
             gate=_linear_config(4, 4),
         )
-        variants = (
-            (sigmoid_config.build(), ["w13", "w2", "gate"]),
-            (
-                DistGEMMFeedForward.Config(
-                    w1=feed_forward_config.w1,
-                    w2=feed_forward_config.w2,
-                    w3=feed_forward_config.w3,
-                ).build(),
-                ["w13", "w2"],
-            ),
-            (
-                FusedSwiGLU.Config(
-                    w1=feed_forward_config.w1,
-                    w2=feed_forward_config.w2,
-                    w3=feed_forward_config.w3,
-                ).build(),
-                ["w13", "w2"],
-            ),
-            (
-                DistGEMMFusedSwiGLU.Config(
-                    w1=feed_forward_config.w1,
-                    w2=feed_forward_config.w2,
-                    w3=feed_forward_config.w3,
-                ).build(),
-                ["w13", "w2"],
-            ),
-        )
 
         def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
             return torch.nn.functional.silu(gate) * up
@@ -323,6 +296,20 @@ class TestRematRegions(unittest.TestCase):
             "torchtitan.overrides.fused_swiglu._fused_silu_and_mul",
             side_effect=silu_and_mul,
         ):
+            dist_gemm_config = DistGEMMFeedForward.Config(
+                w1=feed_forward_config.w1,
+                w2=feed_forward_config.w2,
+                w3=feed_forward_config.w3,
+            )
+            variants = (
+                (sigmoid_config.build(), ["w13", "w2", "gate"]),
+                (dist_gemm_config.build(), ["w13", "w2"]),
+                (fused_swiglu(feed_forward_config).build(), ["w13", "w2"]),
+                (
+                    dist_gemm_fused_swiglu(dist_gemm_config).build(),
+                    ["w13", "w2"],
+                ),
+            )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):
                     model = _RematModel(_FeedForwardBlock(feed_forward))
