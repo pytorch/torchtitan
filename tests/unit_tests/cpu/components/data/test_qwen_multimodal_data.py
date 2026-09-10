@@ -320,7 +320,8 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    inputs, labels = collator([packed])
+    inputs = collator([packed])
+    labels = inputs["labels"]
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
     assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4

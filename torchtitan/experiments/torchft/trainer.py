@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import cast
+from typing import Any, cast
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -419,9 +419,7 @@ class FaultTolerantTrainer(Trainer):
 
         return ParallelDims.from_config(config.parallelism, world_size)
 
-    def train_step(
-        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ):
+    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
@@ -431,15 +429,15 @@ class FaultTolerantTrainer(Trainer):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
         # All groups form one optimizer step; each group feeds one fwd-bwd call.
-        microbatch_groups: list[list[tuple[dict[str, torch.Tensor], torch.Tensor]]] = []
+        microbatch_groups: list[list[dict[str, Any]]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
-                input_dict, labels = next(data_iterator)
+                batch = next(data_iterator)
                 # Popped so the batch reaching the model holds only its kwargs.
-                local_valid_tokens += input_dict.pop("num_valid_tokens")
-                microbatches.append((input_dict, labels))
+                local_valid_tokens += batch.pop("num_valid_tokens")
+                microbatches.append(batch)
             microbatch_groups.append(microbatches)
 
         # Keep the global token count on device so loss normalization does not
@@ -454,26 +452,21 @@ class FaultTolerantTrainer(Trainer):
         accumulated_loss: torch.Tensor | None = None
         for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
             input_dict_mbs = []
-            label_mbs = []
-            for input_dict, labels in microbatches:
+            for input_dict in microbatches:
                 for key, value in input_dict.items():
                     if isinstance(value, torch.Tensor):
                         input_dict[key] = value.to(self.device)
                 input_dict_mbs.append(input_dict)
-                label_mbs.append(labels.to(self.device))
 
             if parallel_dims.pp_enabled:
                 fwd_bwd_input_dict = input_dict_mbs
-                fwd_bwd_labels = label_mbs
             else:
-                assert len(input_dict_mbs) == len(label_mbs) == 1
+                assert len(input_dict_mbs) == 1
                 fwd_bwd_input_dict = input_dict_mbs[0]
-                fwd_bwd_labels = label_mbs[0]
 
             def fwd_bwd() -> torch.Tensor:
                 return self.forward_backward_step(
                     input_dict=fwd_bwd_input_dict,
-                    labels=fwd_bwd_labels,
                     global_valid_tokens=global_valid_tokens,
                 )
 
