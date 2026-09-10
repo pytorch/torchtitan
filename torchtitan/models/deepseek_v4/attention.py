@@ -408,7 +408,14 @@ class CompressedSparseAttention(DSV4FlexAttention):
             swa_k_b1tk = swa_k.unsqueeze(0).unsqueeze(0)
             cmp_k_b1tk = cmp_k.unsqueeze(0).unsqueeze(0)
 
-            backend = "triton" if q.device.type == "cuda" else "eager"
+            backend = "eager"
+            if q.device.type == "cuda":
+                backend = (
+                    "cute"
+                    if head_dim == 512
+                    and torch.cuda.get_device_capability(q.device) == (10, 0)
+                    else "triton"
+                )
             out_bhtk = selected_attention(
                 q_bhtk,
                 swa_k_b1tk,
