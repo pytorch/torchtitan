@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import spmd_types as spmd
@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
@@ -43,6 +44,11 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
+        activation_fn: ActivationFn.Config = field(
+            default_factory=lambda: ActivationFn.Config(
+                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
+            )
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -56,6 +62,7 @@ class GroupedExperts(Module):
         self.w3_EFD = nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
+        self.activation_fn = config.activation_fn.build()
 
     def forward(
         self,
@@ -96,13 +103,23 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
+        gate_RF = self._grouped_mm(
+            A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E
         )
-        h_RF = h_RF * self._grouped_mm(
+        up_RF = self._grouped_mm(
             A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
         )
+        h_RF = self._activation(gate_RF, up_RF, offsets_E)
         return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
+
+    def _activation(
+        self,
+        gate_RF: torch.Tensor,
+        up_RF: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        del offsets_E
+        return self.activation_fn(gate_RF, up_RF)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
