@@ -25,6 +25,7 @@ from torchtitan.experiments.torchft.manager import (
     TorchFTManager,
 )
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
@@ -445,6 +446,10 @@ class FaultTolerantTrainer(Trainer):
                 global_valid_tokens, batch_mesh
             )
 
+        # Auxiliary losses normalize by the same per-step token count as the
+        # main loss, so their scale is independent of parallelism degrees.
+        AuxLoss.set_step_denominator(global_valid_tokens)
+
         accumulated_loss: torch.Tensor | None = None
         for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
             input_dict_mbs = []
@@ -539,6 +544,7 @@ class FaultTolerantTrainer(Trainer):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
+            **collect_aux_loss_metrics(self.parallel_dims),
         }
         self.metrics_processor.log(
             self.step,
