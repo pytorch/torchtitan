@@ -16,11 +16,8 @@ from collections.abc import Callable
 import einops as E
 import requests_hardened
 import torch
-
 import torchvision.io
-
 import torchvision.transforms.v2.functional as TVF
-
 from PIL import Image
 
 from torchtitan.tools.logging import logger

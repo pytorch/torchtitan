@@ -7,7 +7,6 @@
 from unittest import mock
 
 import pytest
-
 from requests_hardened.ip_filter import InvalidIPAddress
 
 from torchtitan.hf_datasets.multimodal.utils.image import _fetch_url_safe, _http_session
