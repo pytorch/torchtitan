@@ -231,8 +231,8 @@ sharding config on the pre-override modules) and before any component is built:
 6. Log every replacement.
 
 ```
-INFO: [Override] fused_swiglu: model_spec.model.layers.0.feed_forward FeedForward.Config -> FusedSwiGLU.Config
-INFO: [Override] fused_swiglu: model_spec.model.layers.1.feed_forward FeedForward.Config -> FusedSwiGLU.Config
+INFO: [Override] fused_swiglu: model_spec.model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model_spec.model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
 ...
 INFO: Applied 32 override(s)
 ```
