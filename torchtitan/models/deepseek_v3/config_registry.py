@@ -18,11 +18,38 @@ from torchtitan.components.quantization import (
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+
+
+def deepseek_v3_mxfp8_linear_converter_config(
+    *, model_compile_enabled: bool
+) -> MXFP8LinearConverter.Config:
+    """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
+
+    The KV up projection and FFN down projections have single-consumer inputs
+    that are not saved elsewhere for backward, so their columnwise MXFP8
+    representations replace BF16 storage. Shared-input and attention output
+    projections use the conservative BF16 save format. This selection is based
+    on activation ownership, not the activation-checkpointing policy.
+    Checkpointing changes when the selected representation is recreated and how
+    long it remains live.
+    """
+    return MXFP8LinearConverter.Config(
+        model_compile_enabled=model_compile_enabled,
+        fqns=["attention", "shared_experts", "feed_forward"],
+        linears_saving_inputs_for_backward_in_mxfp8=[
+            "attention.wkv_b",
+            "feed_forward.w2",
+            "shared_experts.w2",
+        ],
+    )
 
 
 def enable_fused_swiglu(config: Trainer.Config) -> None:
@@ -36,7 +63,9 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
         config.override.imports.append(override)
 
 
-def deepseek_v3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v3_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -73,16 +102,22 @@ def deepseek_v3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_mtp(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v3_debugmodel_mtp(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
-    config.loss = MTPLoss.Config(
-        global_vocab_size=decoder_vocab_size(config.model_spec),
+    config.loss = ChunkedLossWrapper.Config(
+        loss_fn=MTPLoss.Config(
+            global_vocab_size=decoder_vocab_size(config.model_spec),
+        ),
     )
     return config
 
 
-def deepseek_v3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v3_debugmodel_mxfp8(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     # Quantize the MoE expert grouped GEMMs to MXFP8, plus the dense Linear
     # layers in attention, the shared experts, and the dense-layer feed-forward.
@@ -97,9 +132,8 @@ def deepseek_v3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
         "debugmodel",
         seq_len=seq_len,
         converters=[
-            MXFP8LinearConverter.Config(
+            deepseek_v3_mxfp8_linear_converter_config(
                 model_compile_enabled=model_compile_enabled,
-                fqns=["attention", "shared_experts", "feed_forward"],
             ),
             MXFP8GroupedExpertsConverter.Config(
                 model_compile_enabled=model_compile_enabled,
@@ -110,7 +144,9 @@ def deepseek_v3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def deepseek_v3_debugmodel_hybridep(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v3_debugmodel_hybridep(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel",
@@ -122,7 +158,7 @@ def deepseek_v3_debugmodel_hybridep(seq_len: int | None = None) -> Trainer.Confi
 
 
 def deepseek_v3_debugmodel_minimal_async_ep(
-    seq_len: int | None = None,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(

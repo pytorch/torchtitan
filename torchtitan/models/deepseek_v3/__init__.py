@@ -22,6 +22,7 @@ from torchtitan.models.common import (
     RoPE,
     TransformerBlock,
 )
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -118,7 +119,7 @@ def make_mla_attention_config(
         wq_b = None
         # q_norm is unused when q_lora_rank == 0 (never built), but the field is
         # required on Attention.Config so we supply a placeholder.
-        q_norm = RMSNorm.Config(normalized_shape=1, param_init=norm_init)
+        q_norm = RMSNorm.Config(normalized_shape=1, eps=1e-6, param_init=norm_init)
     else:
         wq = None
         wq_a = Linear.Config(
@@ -131,7 +132,9 @@ def make_mla_attention_config(
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
         )
-        q_norm = RMSNorm.Config(normalized_shape=q_lora_rank, param_init=norm_init)
+        q_norm = RMSNorm.Config(
+            normalized_shape=q_lora_rank, eps=1e-6, param_init=norm_init
+        )
 
     return Attention.Config(
         dim=dim,
@@ -151,7 +154,9 @@ def make_mla_attention_config(
             out_features=kv_lora_rank + qk_rope_head_dim,
             param_init=linear_init,
         ),
-        kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank, param_init=norm_init),
+        kv_norm=RMSNorm.Config(
+            normalized_shape=kv_lora_rank, eps=1e-6, param_init=norm_init
+        ),
         wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
@@ -189,6 +194,7 @@ def build_mla_moe_layers(
     router_num_limited_groups: int | None = None,
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
+    aux_loss_coeff: float | None = None,
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
@@ -265,15 +271,18 @@ def build_mla_moe_layers(
                     w1_param_init=linear_init,
                     w2w3_param_init=depth_init(layer_id),
                 ),
+                aux_loss_coeff=aux_loss_coeff,
             )
 
         layers.append(
             DeepSeekV3TransformerBlock.Config(
                 attention=attn_cfg,
                 attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, param_init=norm_init
+                    normalized_shape=dim, eps=1e-6, param_init=norm_init
                 ),
-                ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=norm_init),
+                ffn_norm=RMSNorm.Config(
+                    normalized_shape=dim, eps=1e-6, param_init=norm_init
+                ),
                 feed_forward=ffn_cfg,
                 moe=moe_cfg,
             )
@@ -307,14 +316,14 @@ def _build_mtp_layers(
                 moe=copy.deepcopy(inner_cfg.moe),
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
                 ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
-                enorm=RMSNorm.Config(normalized_shape=dim),
-                hnorm=RMSNorm.Config(normalized_shape=dim),
+                enorm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
+                hnorm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
                 eh_proj=Linear.Config(
                     in_features=dim * 2,
                     out_features=dim,
                     bias=False,
                 ),
-                mtp_norm=RMSNorm.Config(normalized_shape=dim),
+                mtp_norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
             )
         )
     return mtp_layers
@@ -355,7 +364,9 @@ def _debugmodel(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=3,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
+        router_route_norm=True,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -376,7 +387,7 @@ def _debugmodel(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -427,7 +438,9 @@ def _16b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="softmax",
+        router_score_func="sigmoid",
+        router_route_norm=True,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -448,7 +461,7 @@ def _16b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -504,6 +517,7 @@ def _236b(
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -524,7 +538,7 @@ def _236b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -581,6 +595,7 @@ def _671b(
         router_num_limited_groups=4,
         router_route_scale=2.5,
         router_route_norm=True,
+        aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -601,7 +616,7 @@ def _671b(
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
@@ -623,6 +638,12 @@ deepseekv3_configs = {
     "236B": (_236b, 16384),
     "671B": (_671b, 16384),
 }
+
+
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
 
 
 def model_registry(
@@ -660,6 +681,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

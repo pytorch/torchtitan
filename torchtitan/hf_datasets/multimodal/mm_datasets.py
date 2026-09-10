@@ -63,6 +63,7 @@ Workflow overview::
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Annotated, Any
 
 import grain.python as grain
@@ -155,9 +156,7 @@ def _process_mm_sample(
                     width=processed_img.shape[2],
                     patch_size=patch_size,
                     spatial_merge_size=spatial_merge_size,
-                    # TODO(data-mm-temporal-patches): Unify image/video token counting;
-                    # the configured temporal patch size is unused by this image path.
-                    temporal_patch_size=1,
+                    temporal_patch_size=temporal_patch_size,
                 )
                 processed_images.append(processed_img)
                 num_image_tokens.append(num_tokens)
@@ -427,7 +426,12 @@ class MMSamplePackingConfig:
             seed=dataset_iteration_policy.seed,
             shuffle_bins=dataset_iteration_policy.shuffle,
         )
-        return dataset.map(_packing_output_to_mm_sample)
+        return dataset.map(
+            partial(
+                _packing_output_to_mm_sample,
+                max_context_length=context.max_context_length,
+            )
+        )
 
 
 def _mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:
@@ -443,12 +447,22 @@ def _mm_sample_to_packing_input(sample: dict[str, Any]) -> dict[str, Any]:
 
 def _packing_output_to_mm_sample(
     packing_output: dict[str, Any],
+    *,
+    max_context_length: int,
 ) -> dict[str, Any]:
     """Restore Torch token fields and flatten per-document media lists."""
+    padding_mask = np.asarray(packing_output["input_ids_segment_ids"]) == 0
+    positions = np.asarray(packing_output["positions"]).copy()
+    if np.any(padding_mask):
+        first_padding_token = int(np.flatnonzero(padding_mask)[0])
+        positions[first_padding_token:] = (
+            np.arange(len(positions) - first_padding_token) % max_context_length
+        )
     return {
         "input_ids": torch.from_numpy(packing_output["input_ids"]),
         "labels": torch.from_numpy(packing_output["labels"]),
-        "positions": torch.from_numpy(packing_output["positions"]),
+        "positions": torch.from_numpy(positions),
+        "padding_mask": torch.from_numpy(padding_mask),
         "pixel_values": [
             image
             for document_images in packing_output["pixel_values"]

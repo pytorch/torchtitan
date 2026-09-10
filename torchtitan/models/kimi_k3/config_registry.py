@@ -12,7 +12,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -20,7 +20,10 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MultiModalProcessor,
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
@@ -39,8 +42,6 @@ def _kimi_k3_multimodal_dataloader(
         temporal_patch_size=1,
         spatial_merge_size=2,
         resize_fn=resize_to_navit_patch_grid,
-        min_pixels=56 * 56,
-        max_pixels=224 * 224,
         max_patches=256,
         max_patches_per_side=16,
         image_mean=(0.5, 0.5, 0.5),
@@ -49,7 +50,6 @@ def _kimi_k3_multimodal_dataloader(
     return GrainDataLoader.Config(
         dataset=replace(dataset, processor=processor),
         collator=MultiModalCollator.Config(
-            max_images_per_batch=8,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
             spatial_merge_size=processor.spatial_merge_size,
@@ -59,8 +59,10 @@ def _kimi_k3_multimodal_dataloader(
     )
 
 
-def kimi_k3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def kimi_k3_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -79,11 +81,9 @@ def kimi_k3_debugmodel() -> Trainer.Config:
             decay_type="linear",
             min_lr_factor=0.0,
         ),
-        # TODO: Kimi K3 has no spmd_types annotations yet.
-        parallelism=ParallelismConfig(spmd_backend="partial_dtensor"),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=256,
-            max_context_length=256,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
             dtype="bfloat16",
             disable_cuda_graphs=True,

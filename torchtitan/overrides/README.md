@@ -506,6 +506,11 @@ for the full recipe.
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
   when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
+- `torchtitan/overrides/offset_rmsnorm.py` — replaces Qwen3.5
+  `OffsetRMSNorm` with fused Triton forward and backward kernels while preserving
+  the stock zero-centered weight and checkpoint layout. Activate it with
+  `--override.imports torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm`.
+
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
 shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
 one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom

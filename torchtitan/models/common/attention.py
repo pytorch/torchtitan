@@ -19,6 +19,7 @@ from typing import Any, ClassVar, NamedTuple
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.distributed.tensor import DTensor, Replicate
 from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
@@ -591,6 +592,10 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    padding_mask: torch.Tensor | None = None,
+    max_num_documents: int | None = None,
+    max_context_length: int | None = None,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -600,6 +605,16 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
+        padding_mask: Per-token boolean tensor that is true for padding. This
+            distinguishes padding position resets from real document starts so
+            their fixed metadata capacity can be reserved separately.
+        max_num_documents: Upper bound on non-padding document segments in the
+            local token batch. When set, the device offsets have a fixed shape
+            as required for CUDA graph capture. Padding segments are reserved
+            separately when ``padding_mask`` is provided.
+        max_context_length: Maximum length of one document segment. Required
+            with ``max_num_documents`` so the fixed-shape metadata can avoid a
+            device-to-host synchronization.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -607,25 +622,69 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
-    doc_starts = (positions == 0).nonzero(as_tuple=True)[0].to(torch.int32)
-    packed_cu_seqlens = torch.cat(
-        [
-            doc_starts,
-            torch.tensor([num_tokens], dtype=torch.int32, device=device),
-        ]
-    )
+
+    real_doc_starts = positions == 0
+    padding_doc_starts = None
+    if padding_mask is None:
+        is_doc_start = real_doc_starts
+    else:
+        padding_mask = padding_mask.to(torch.bool)
+        real_doc_starts = real_doc_starts & ~padding_mask
+        padding_doc_starts = (positions == 0) & padding_mask
+        is_doc_start = real_doc_starts | padding_doc_starts
+
+    if max_num_documents is not None:
+        if max_context_length is None:
+            raise ValueError(
+                "max_context_length is required when max_num_documents is set"
+            )
+
+        max_num_padding_segments = (
+            (num_tokens + max_context_length - 1) // max_context_length
+            if padding_mask is not None
+            else 0
+        )
+        max_num_segments = max_num_documents + max_num_padding_segments
+        num_slots = max_num_segments + 1
+        slot = torch.cumsum(is_doc_start, 0) - 1
+        scatter_index = torch.where(
+            is_doc_start & (slot < max_num_segments),
+            slot,
+            torch.full_like(slot, num_slots),
+        )
+        packed_cu_seqlens = torch.full(
+            (num_slots + 1,), num_tokens, dtype=torch.int32, device=device
+        )
+        packed_cu_seqlens.scatter_(
+            0,
+            scatter_index,
+            torch.arange(num_tokens, dtype=torch.int32, device=device),
+        )
+        torch._assert_async(real_doc_starts.sum() <= max_num_documents)
+        if padding_doc_starts is not None:
+            torch._assert_async(padding_doc_starts.sum() <= max_num_padding_segments)
+        packed_cu_seqlens = packed_cu_seqlens[:num_slots]
+        max_seqlen = max_context_length
+    else:
+        doc_starts = is_doc_start.nonzero(as_tuple=True)[0].to(torch.int32)
+        packed_cu_seqlens = torch.cat(
+            [
+                doc_starts,
+                torch.tensor([num_tokens], dtype=torch.int32, device=device),
+            ]
+        )
+        seq_lengths = torch.diff(packed_cu_seqlens)
+
+        if seq_lengths.numel() > 0:
+            # device to host sync but only done once per model forward
+            max_seqlen = int(seq_lengths.max().item())
+        else:
+            max_seqlen = 0
+
     if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
-    seq_lengths = torch.diff(packed_cu_seqlens)
-
-    if seq_lengths.numel() > 0:
-        # device to host sync but only done once per model forward
-        max_seqlen = int(seq_lengths.max().item())
-    else:
-        max_seqlen = 0
-
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
@@ -867,6 +926,11 @@ class GQAttention(BaseAttention):
     The QKV projection strategy is determined by the ``qkv_linear`` config field:
     use :class:`QKVLinear` for three independent projections, or
     :class:`FusedQKVLinear` for a single fused projection.
+
+    ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
+    the inner attention unrotated, and positional information reaches the layer
+    only through the attention mask. Interleaved RoPE/NoPE models (iRoPE) set it
+    per layer.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -879,7 +943,7 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         inner_attention: Module.Config
-        rope: RoPE.Config
+        rope: RoPE.Config | None
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
@@ -908,7 +972,7 @@ class GQAttention(BaseAttention):
             else config.dim // config.n_heads
         )
         self.enable_gqa = self.n_heads > self.n_kv_heads
-        self.rope = config.rope.build()
+        self.rope: RoPE | None = None if config.rope is None else config.rope.build()
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
@@ -931,7 +995,12 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+        xq_THK, xk_THK, xv_THV = remat.region(
+            self.qkv_linear,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
+        remat.recompute_needs_tensor(xq_THK, xk_THK, xv_THV)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -940,15 +1009,28 @@ class GQAttention(BaseAttention):
             xk_THK = self.k_norm(xk_THK)
 
         # Apply rotary embeddings
-        xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+        if self.rope is not None:
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq_THK,
             xk_THK,
             xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        return self.wo(out_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD

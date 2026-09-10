@@ -108,6 +108,7 @@ class TestConfigManager(unittest.TestCase):
 
         assert "alphabet_sort" in _supported_experiments
         assert "search_r1" in _supported_experiments
+        assert "verifiers.dapo_math" in _supported_experiments
 
     def test_cli_overrides(self):
         """CLI args override config defaults."""
@@ -171,7 +172,24 @@ class TestConfigManager(unittest.TestCase):
         assert config.parallelism.pipeline_parallel_degree == 1
         assert config.parallelism.num_pp_microbatches == 3
 
-    def test_cuda_graphs_reject_pipeline_parallelism(self):
+    def test_cuda_graphs_allow_single_stage_pipeline_schedule(self):
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+                "--parallelism.pipeline_parallel_schedule",
+                "1F1B",
+            ]
+        )
+
+        assert config.parallelism.pipeline_parallel_schedule == "1F1B"
+
+    def test_cuda_graphs_reject_looped_pipeline_schedule(self):
         config_manager = ConfigManager()
         with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
             with pytest.raises((ValueError, SystemExit)) as exc_info:
@@ -183,6 +201,8 @@ class TestConfigManager(unittest.TestCase):
                         "llama3_debugmodel",
                         "--parallelism.pipeline_parallel_degree",
                         "2",
+                        "--parallelism.pipeline_parallel_schedule",
+                        "Interleaved1F1B",
                     ]
                 )
 
@@ -191,7 +211,25 @@ class TestConfigManager(unittest.TestCase):
             error = stderr.getvalue()
         else:
             error = str(exc_info.value)
-        assert "do not support pipeline parallelism" in error
+        assert "do not support looped pipeline schedules" in error
+
+    def test_cuda_graphs_reject_pipeline_validation(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.disable_cuda_graphs",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+            ]
+        )
+        config.training.disable_cuda_graphs = False
+        config.validator.enable = True
+
+        with pytest.raises(ValueError, match="do not support validation"):
+            config._validate_cuda_graphs()
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -456,7 +494,12 @@ class TestConfigManager(unittest.TestCase):
         )
 
         # Verify the merged type has both base and custom fields
-        merged = MergedTrainerConfig()
+        model_spec = (
+            ConfigManager()
+            .parse_args(["--module", "llama3", "--config", "llama3_debugmodel"])
+            .model_spec
+        )
+        merged = MergedTrainerConfig(model_spec=model_spec)
         assert hasattr(merged, "checkpoint")
         assert hasattr(merged.checkpoint, "convert_path")
         assert merged.checkpoint.convert_path == "/custom/path"
@@ -484,6 +527,18 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
+
+    def test_suppressed_model_spec_is_opaque_to_tyro(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "torchtitan_recipes.tests.transformers_modeling_backend",
+                "--config",
+                "transformers_backend_dense_cp_pp",
+            ]
+        )
+
+        assert config.model_spec.name == "transformers_modeling_backend"
 
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""

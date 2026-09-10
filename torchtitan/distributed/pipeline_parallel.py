@@ -7,7 +7,7 @@ import copy
 import dataclasses
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 import torch.nn as nn
@@ -33,9 +33,9 @@ from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 from torchtitan.tools.logging import logger
 
-# pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
-# setup. Helpers in this module are implementation details and stay private.
-__all__ = ["pipeline_llm", "pipeline_vlm"]
+# These are the public entrypoints for model-specific PP setup. Helpers in this
+# module are implementation details and stay private.
+__all__ = ["pipeline_llm", "pipeline_with_first_stage_modules"]
 
 
 def _build_get_mesh_callback(
@@ -141,30 +141,26 @@ def pipeline_llm(
     return pp_schedule, model_parts, has_first_stage, has_last_stage
 
 
-def pipeline_vlm(
+def pipeline_with_first_stage_modules(
     model: nn.Module,
     *,
+    first_stage_module_fqns: Sequence[str],
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
     **kwargs,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    """PP entrypoint for vision-language models: co-locate the vision encoder
-    with the first stage, then delegate to ``pipeline_llm``.
+    """Co-locate additional model modules with the first pipeline stage.
 
     The auto-generated LLM stage split only knows about decoder modules
-    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). For a VLM we inject
-    ``vision_encoder`` into the first stage's FQN list so it runs alongside
-    ``tok_embeddings`` (vision features are scattered into the embedding sequence
-    before the decoder layers). On stages other than the first, ``tok_embeddings``
-    and ``vision_encoder`` are pruned to ``None``; each model's ``forward`` must
-    guard on ``self.tok_embeddings is not None`` so the multimodal logic is
-    skipped there.
+    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). This function
+    prepends each present module from ``first_stage_module_fqns`` to the first
+    stage's FQN list before delegating to ``pipeline_llm``. On other stages, the
+    modules are pruned to ``None``; the model's ``forward`` must tolerate that.
 
     NOTE: This adds load to stage 0 that the auto split does not model
-    (``input_weight`` only accounts for ``tok_embeddings``); for a heavy vision
-    encoder, bump ``parallelism.pipeline_parallel_first_stage_less_layers`` to
-    rebalance.
+    (``input_weight`` only accounts for ``tok_embeddings``). Use
+    ``parallelism.pipeline_parallel_first_stage_less_layers`` to rebalance.
     """
     if parallelism.module_fqns_per_model_part is None:
         (
@@ -176,8 +172,12 @@ def pipeline_vlm(
         fqn_per_part = _generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
         )
-        if model.vision_encoder is not None:
-            fqn_per_part[0].insert(0, "vision_encoder")
+        present_module_fqns = [
+            module_fqn
+            for module_fqn in first_stage_module_fqns
+            if getattr(model, module_fqn, None) is not None
+        ]
+        fqn_per_part[0][:0] = present_module_fqns
         parallelism = dataclasses.replace(
             parallelism, module_fqns_per_model_part=fqn_per_part
         )
@@ -208,7 +208,7 @@ def _get_pipeline_metadata(
     if hasattr(model_config, "layers"):
         num_layers = len(model_config.layers)
     else:
-        raise ValueError("Model does not have n_layers attribute.")
+        raise ValueError("Model does not have layers attribute.")
 
     # You can adjust these weights based on the computational cost of embeddings and output layers
     # Higher weights mean these modules are treated as "heavier" in the distribution

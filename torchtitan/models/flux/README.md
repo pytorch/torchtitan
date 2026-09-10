@@ -110,4 +110,3 @@ The `fqns` parameter specifies which fully qualified module names to quantize. T
 
 ## TODO
 - [ ] More parallelism support (Tensor Parallelism, Pipeline Parallelism, etc)
-- [ ] Implement the num_flops_per_token calculation in get_nparams_and_flops() function

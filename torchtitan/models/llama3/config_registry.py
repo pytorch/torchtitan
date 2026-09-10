@@ -27,7 +27,10 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
@@ -35,7 +38,31 @@ from . import model_registry
 from .model import Llama3Model
 
 
-def llama3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def llama3_mxfp8_linear_converter_config(
+    *, model_compile_enabled: bool
+) -> MXFP8LinearConverter.Config:
+    """Build the MXFP8 policy shared by eager and GraphTrainer configs.
+
+    The fused QKV and FFN down projections have single-consumer inputs that are
+    not saved elsewhere for backward, so their columnwise MXFP8 representations
+    replace BF16 storage. Other projections retain the conservative BF16 save
+    format because their inputs are shared or retained elsewhere. This selection
+    is based on activation ownership, not the activation-checkpointing policy.
+    Checkpointing changes when the selected representation is recreated and how
+    long it remains live.
+    """
+    return MXFP8LinearConverter.Config(
+        model_compile_enabled=model_compile_enabled,
+        linears_saving_inputs_for_backward_in_mxfp8=[
+            "attention.qkv_linear.wqkv",
+            "feed_forward.w2",
+        ],
+    )
+
+
+def llama3_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
@@ -80,16 +107,21 @@ def llama3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_varlen_attn(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend="varlen"
     )
-    config.training.disable_cuda_graphs = True
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
     return config
 
 
-def llama3_debugmodel_dist_gemm(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_dist_gemm(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     """Async-TP: the attention TP collectives are folded into their GEMMs.
 
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
@@ -107,7 +139,9 @@ def llama3_debugmodel_dist_gemm(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_float8(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -122,7 +156,24 @@ def llama3_debugmodel_float8(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_mxfp8(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=seq_len)
+    config.compile = CompileConfig(enable=True, components=["model"])
+    config.model_spec = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_nvfp4(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
@@ -145,7 +196,7 @@ def llama3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
 
 
 def llama3_debugmodel_first_85_pct_layers_nvfp4(
-    seq_len: int | None = None,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
@@ -171,7 +222,9 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     return config
 
 
-def llama3_debugmodel_float8_emulate_lora(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_float8_emulate_lora(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     from torchtitan.components.lora import LoRAConverter
 
     config = llama3_debugmodel(seq_len=seq_len)
@@ -189,7 +242,9 @@ def llama3_debugmodel_float8_emulate_lora(seq_len: int | None = None) -> Trainer
     return config
 
 
-def llama3_debugmodel_ce_loss(seq_len: int | None = None) -> Trainer.Config:
+def llama3_debugmodel_ce_loss(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     """Debug model with standard (non-chunked) CrossEntropyLoss."""
     config = llama3_debugmodel(seq_len=seq_len)
     assert config.model_spec is not None
@@ -268,7 +323,7 @@ def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
         "8B",
         seq_len=seq_len,
         converters=[
-            MXFP8LinearConverter.Config(model_compile_enabled=True),
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
         ],
     )
     return config
@@ -367,7 +422,9 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def sft_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def sft_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
 
     def process_sample(sample):

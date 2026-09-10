@@ -8,7 +8,6 @@ from functools import partial
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -23,6 +22,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_8b,
     llama3_debugmodel,
     llama3_debugmodel_dist_gemm,
+    llama3_mxfp8_linear_converter_config,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer
 
@@ -30,7 +30,7 @@ from . import model_registry
 
 
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(llama3_debugmodel(seq_len=2048), model_registry)
+    config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -54,9 +54,23 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     config pins spmd_backend to spmd_types.
     """
     config = to_graph_trainer_config(
-        llama3_debugmodel_dist_gemm(seq_len=2048),
+        llama3_debugmodel_dist_gemm(),
         partial(model_registry, tp_gemm_backend="dist_gemm"),
     )
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
+    base = llama3_debugmodel()
+    base.model_spec = llama3_model_registry(
+        "debugmodel",
+        seq_len=base.training.max_context_length,
+        converters=[
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
+        ],
+    )
+    config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 
@@ -70,7 +84,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     the same machinery without those obstacles. See
     ``build_decoder_config_for_backend``.
     """
-    base = llama3_debugmodel(seq_len=2048)
+    base = llama3_debugmodel()
     base.parallelism.context_parallel_load_balancer = "headtail"
     base.model_spec = model_registry(
         "debugmodel",
@@ -127,7 +141,9 @@ def graph_trainer_llama3_8b_mxfp8() -> GraphTrainer.Config:
     # MXFP8 converter's compile requirement is satisfied.
     base.model_spec = llama3_model_registry(
         "8B",
-        converters=[MXFP8LinearConverter.Config(model_compile_enabled=True)],
+        converters=[
+            llama3_mxfp8_linear_converter_config(model_compile_enabled=True),
+        ],
     )
     config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)

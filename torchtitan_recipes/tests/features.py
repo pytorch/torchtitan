@@ -9,6 +9,7 @@
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -44,13 +45,11 @@ class SDCReplayMismatchTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
+        input_dict: dict[str, Any] | list[dict[str, Any]],
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         loss = super().forward_backward_step(
             input_dict=input_dict,
-            labels=labels,
             global_valid_tokens=global_valid_tokens,
         )
         self._num_forward_backward_calls += 1
@@ -73,7 +72,7 @@ class SDCReplayMismatchTrainer(Trainer):
 
     def train_step(
         self,
-        data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]],
+        data_iterator: Iterator[dict[str, Any]],
     ) -> None:
         try:
             super().train_step(data_iterator)
@@ -236,7 +235,6 @@ def llama3_debugmodel_pp2_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 1
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -248,7 +246,6 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -490,7 +487,6 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     _use_spmd_types(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
-    config.training.disable_cuda_graphs = True
     return config
 
 

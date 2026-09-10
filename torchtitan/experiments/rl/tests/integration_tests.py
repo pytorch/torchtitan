@@ -28,8 +28,13 @@ from tests.integration_tests import OverrideDefinitions
 from torchtitan.tools.logging import logger
 
 
+_KEEP_ZERO_STD_REWARD_GROUPS = (
+    "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups"
+)
+
+
 def build_rl_test_list() -> list[OverrideDefinitions]:
-    return [
+    test_list = [
         OverrideDefinitions(
             [
                 [
@@ -46,7 +51,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
@@ -75,7 +79,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
@@ -104,7 +107,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
@@ -145,7 +147,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
@@ -166,7 +167,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
@@ -199,7 +199,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 128",
                     "--metrics.no-enable-wandb",
                 ],
@@ -220,7 +219,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 256",
                     "--trainer.checkpoint.no-enable",  # use random-init weights
                     "--generator.checkpoint.no-enable",
@@ -247,7 +245,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 1024",
-                    "--renderer.enable-thinking False",
                     "--generator.sampling.max_tokens 128",
                     "--trainer.checkpoint.no-enable",  # random-init weights
                     "--generator.checkpoint.no-enable",
@@ -259,6 +256,23 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
     ]
+
+    # CI can use random-init policies whose rollout groups all receive the same
+    # reward. Keep those groups so the trainer cannot wait forever for a batch.
+    for test in test_list:
+        updated_override_args = []
+        for override_args in test.override_args:
+            if _KEEP_ZERO_STD_REWARD_GROUPS not in override_args:
+                logger.warning(
+                    f"RL integration test {test.test_name} overrides "
+                    "drop_zero_std_reward_groups=False to prevent a random-init "
+                    "policy from stalling the trainer"
+                )
+                override_args = [*override_args, _KEEP_ZERO_STD_REWARD_GROUPS]
+            updated_override_args.append(override_args)
+        test.override_args = updated_override_args
+
+    return test_list
 
 
 def run_single_test(

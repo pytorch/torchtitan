@@ -10,7 +10,7 @@ Together, the unified model, batch-invariant mode, and single training stack pro
 
 Note: Unified-model performance varies by model, input shape, and parallelism: it can trail native vLLM in inference-only workloads but outperform it end to end in some RL configurations. Batch invariance trades throughput for exact numerics and can be used for debugging or controlled on-policy studies.
 
-[Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
+[Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
 
 > **Note:** TitanRL is under active development. APIs and configurations may change.
 
@@ -71,7 +71,9 @@ def my_experiment() -> Controller.Config:
     return Controller.Config(
         model_spec=...,
         rollouter=MyRollouter.Config(),
-        renderer=RendererConfig(...),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
         trainer=PolicyTrainer.Config(...),
         generator=VLLMGenerator.Config(...),
     )
@@ -94,6 +96,12 @@ Train on verifiable math with DAPO loss and Math-Verify rewards.
 
 [Run DAPO Math](./examples/dapo_math)
 
+### Verifiers: optional integration example
+
+Run the DAPO Math workload with Verifiers managing the local rollout environment.
+
+[Run Verifiers](./examples/verifiers/dapo_math)
+
 ### Search-R1: multi-turn tool use
 
 Train a model to issue search queries, consume tool responses, and answer with an exact-match reward.
@@ -110,7 +118,7 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch, TorchStore, and Renderers from main:
+1. Install Monarch, TorchStore, and Renderers:
 ```bash
 uv pip install -r torchtitan/experiments/rl/requirements.txt
 uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"

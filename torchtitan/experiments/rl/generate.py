@@ -119,14 +119,6 @@ def generate() -> None:
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
-    if gen_config.debug.batch_invariant:
-        # batch_invariant_ops doesn't cover bmm; the MoE router gate is a bmm in
-        # the vLLM inference graph, so override it generator-side (not in core).
-        from torchtitan.experiments.rl.batch_invariance import (
-            patch_bmm_for_batch_invariance,
-        )
-
-        patch_bmm_for_batch_invariance()
     enable_ep = gen_config.parallelism.expert_parallel_degree > 1
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
@@ -187,7 +179,8 @@ def generate() -> None:
 
     logger.debug("vLLM LLMEngine initialized successfully")
 
-    renderer = config.renderer.build(tokenizer_path=model_path)
+    tokenizer = config.tokenizer.build(tokenizer_path=model_path)
+    renderer = config.renderer.build(tokenizer=tokenizer)
     stop_token_ids = list(renderer.get_stop_token_ids())
 
     # Create sampling parameters from config

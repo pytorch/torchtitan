@@ -11,6 +11,7 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -38,7 +39,7 @@ from .model import (
     RMSGainCenterNorm,
     SoftCappedLinear,
 )
-from .parallelize import parallelize_muse_glimmer, pipeline_muse_glimmer
+from .parallelize import parallelize_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 from .vision_encoder import (
@@ -49,7 +50,6 @@ from .vision_encoder import (
 
 __all__ = [
     "parallelize_muse_glimmer",
-    "pipeline_muse_glimmer",
     "set_muse_glimmer_vision_sharding_config",
     "MuseGlimmerModel",
     "muse_glimmer_configs",
@@ -178,16 +178,14 @@ def _build_muse_glimmer_attention(
             param_init=_depth_init(layer_id),
         ),
         qk_norm=_scaleless_norm(head_dim, _NORM_EPS),
-        use_rope=_layer_use_rope(layer_id, n_layers),
         inner_attention=inner_attention,
-        # Every layer (incl. NoPE) carries a rope config so the base Decoder's
-        # max_context_length discovery/resize works uniformly; NoPE layers
-        # simply never apply it (guarded by use_rope in Attention.forward).
         rope=ComplexRoPE.Config(
             dim=head_dim,
             max_context_length=max_context_length,
             theta=_ROPE_THETA,
-        ),
+        )
+        if _layer_use_rope(layer_id, n_layers)
+        else None,
         scale_query_by=_SCALE_QUERY_NUMERATOR / math.sqrt(head_dim),
         o_gate=Linear.Config(
             in_features=dim,
@@ -407,8 +405,11 @@ def _muse_glimmer_config(
             output_multiplier=output_multiplier,
             output_soft_cap_temp=20.0,
         ),
-        # Final output norm is gain-centered on 0.0.
-        norm=_gain_norm(dim, _NORM_EPS, gain_center=0.0),
+        # Keep the checkpoint's zero gain center, but initialize to unit scale.
+        norm=dataclasses.replace(
+            _gain_norm(dim, _NORM_EPS, gain_center=0.0),
+            param_init={"weight": nn.init.ones_},
+        ),
         layers=_build_muse_glimmer_layers(
             n_layers=n_layers,
             dim=dim,
@@ -547,7 +548,15 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_muse_glimmer,
-        pipelining_fn=pipeline_muse_glimmer,
+        pipelining_fn=partial(
+            pipeline_with_first_stage_modules,
+            first_stage_module_fqns=(
+                "vision_encoder",
+                "vision_adapter",
+                "vision_projection",
+                "perception_emb_norm",
+            ),
+        ),
         post_optimizer_build_fn=None,
         state_dict_adapter=MuseGlimmerStateDictAdapter,
     )

@@ -32,9 +32,11 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 
 __all__ = [
     "annotate_input_spmd_types",
+    "annotate_replicated_parameters",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
+    "spmd_local_context",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
@@ -156,6 +158,26 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
+def spmd_local_context(
+    *local_axes: str,
+) -> contextlib.AbstractContextManager[None]:
+    """Context manager treating the named mesh axes as local axes.
+
+    Local axes retain per-coordinate SPMD semantics during global type
+    checking: each coordinate selects an independent tensor, and only the
+    remaining axes describe that tensor's global sharding.  This is a no-op
+    outside spmd_types and for axes with size 1.
+    """
+    if get_spmd_backend() != "spmd_types":
+        return contextlib.nullcontext()
+    active_axes = tuple(
+        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
+    )
+    if not active_axes:
+        return contextlib.nullcontext()
+    return spmd.set_current_mesh(local_axes=active_axes)
+
+
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
@@ -226,6 +248,21 @@ def annotate_input_spmd_types(
             "or annotate nested/container tensors at their construction site."
         )
     return input_dict
+
+
+def annotate_replicated_parameters(
+    module: torch.nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Annotate undistributed model parameters as replicated.
+
+    Call this before state-sharding modules with ``Module.parallelize``. That
+    replaces declared parameters with their model-parallel shards, while these
+    annotations remain on parameters without a ``ShardingConfig`` for FSDP.
+    """
+    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+        for param in module.parameters():
+            spmd.assert_type(param, spmd.R)
 
 
 def _per_axis_types(

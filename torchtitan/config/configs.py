@@ -81,9 +81,9 @@ class TrainingConfig:
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
     EP backends synchronize with the host during dispatch. Pipeline parallelism
-    is not supported yet. CUDA graphs are independent of
-    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
-    capture.
+    is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
+    are independent of ``torch.compile(mode="reduce-overhead")``, which performs
+    its own CUDA graph capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -269,6 +269,13 @@ class ParallelismConfig:
                 "context_parallel_load_balancer cannot be an empty string. "
                 "Use None to disable load balancing."
             )
+        allowed = frozenset({None, "headtail", "ptrr"})
+        if self.context_parallel_load_balancer not in allowed:
+            raise ValueError(
+                "parallelism.context_parallel_load_balancer must be one of: "
+                f"None, 'headtail', 'ptrr' "
+                f"(got {self.context_parallel_load_balancer!r})"
+            )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
             or (
@@ -280,6 +287,16 @@ class ParallelismConfig:
                 "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
                 "for compute capability 9.0 or newer."
             )
+        # Import lazily so loading configs.py does not pull in pipelining.
+        from torch.distributed.pipelining.schedules import get_schedule_class
+
+        try:
+            get_schedule_class(self.pipeline_parallel_schedule)
+        except ValueError as e:
+            raise ValueError(
+                "Invalid parallelism.pipeline_parallel_schedule "
+                f"{self.pipeline_parallel_schedule!r}: {e}"
+            ) from e
 
     expert_parallel_degree: int = 1
     """
@@ -306,6 +323,13 @@ class CompileConfig:
     backend: str = "inductor"
 
     def __post_init__(self) -> None:
+        allowed = frozenset({"model", "loss"})
+        unknown = [c for c in self.components if c not in allowed]
+        if unknown:
+            raise ValueError(
+                f"Unknown compile.components entries {unknown}; "
+                f"allowed values are {sorted(allowed)}"
+            )
         if self.enable_async_tensor_parallel and not (
             self.enable and "model" in self.components
         ):

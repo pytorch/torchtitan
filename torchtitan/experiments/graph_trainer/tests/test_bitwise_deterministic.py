@@ -58,6 +58,7 @@ from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
@@ -148,6 +149,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
             debug=DebugConfig(seed=SEED, deterministic=True),
         )
         self.model_config.update_from_config(config=runtime_config)
+        # Auxiliary losses normalize by the step's global valid-token count,
+        # which the trainer sets before the first forward; this test plays that
+        # role so the DeepSeek-v3 flavors' aux loss can run.
+        AuxLoss.set_step_denominator(torch.tensor(NUM_TOKENS))
         vocab_size = self.model_config.vocab_size
         with torch.device("meta"):
             model = self.model_config.build()
@@ -224,8 +229,11 @@ class BitwiseDeterministicBase(unittest.TestCase):
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
             loss = trainer.forward_backward_step(
-                input_dict={"input": self.inputs, "positions": self.positions},
-                labels=self.labels,
+                input_dict={
+                    "input": self.inputs,
+                    "positions": self.positions,
+                    "labels": self.labels,
+                },
                 global_valid_tokens=global_valid_tokens,
             )
             optimizer.step()
@@ -252,6 +260,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             construct_default_graph_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
+            flatten_runtime_inputs,
             precompile_fx_trace_load,
             precompile_fx_trace_save,
         )
@@ -303,7 +312,16 @@ class BitwiseDeterministicBase(unittest.TestCase):
             storage = DiskStorageAdapter(tmpdir)
             precompile_fx_trace_save(traced_result, storage)
 
-            loaded_result = precompile_fx_trace_load(storage, expected_fingerprint="")
+            example_inputs = flatten_runtime_inputs(
+                model,
+                (self.inputs, self.labels, global_valid_tokens, extra_kwargs),
+                {},
+            )
+            loaded_result = precompile_fx_trace_load(
+                storage,
+                expected_fingerprint="",
+                example_inputs=example_inputs,
+            )
 
         # Step 4: Apply load-time passes (cudagraph)
         if enable_passes:

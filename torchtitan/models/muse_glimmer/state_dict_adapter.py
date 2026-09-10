@@ -277,8 +277,6 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        # All Muse Glimmer text layers carry a ComplexRoPE config (NoPE layers
-        # still build one; RoPE is guarded in forward), so this validates cleanly.
         self._validate_hf_rope_config(ComplexRoPE.Config)
 
         n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()
