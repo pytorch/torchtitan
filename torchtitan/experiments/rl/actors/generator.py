@@ -38,7 +38,6 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
-    patch_bmm_for_batch_invariance,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
@@ -857,10 +856,6 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
-            # batch_invariant_ops (via set_batch_invariance) covers
-            # mm/addmm/_log_softmax/mean but not bmm; the MoE router gate lowers
-            # to bmm in the vLLM inference graph, so override it generator-side.
-            patch_bmm_for_batch_invariance()
             # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
             # route it through trainer's function to match the trainer exactly.
             force_logprobs_fn_for_batch_invariance()
