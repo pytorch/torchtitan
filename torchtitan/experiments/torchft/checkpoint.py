@@ -140,7 +140,6 @@ class TorchFTCheckpointManager(CheckpointManager):
             if self.pg is None:
                 self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
-    @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         # FT dataloader checkpoint is saved every step (not gated by interval)
         # to minimize data replay on replica failure.
@@ -165,6 +164,7 @@ class TorchFTCheckpointManager(CheckpointManager):
         # full save reports False.
         return False
 
+    @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         if self.enable and self.enable_ft_dataloader_checkpoints:
             self._ft_load()
@@ -213,7 +213,6 @@ class TorchFTCheckpointManager(CheckpointManager):
         self.save_future = result
         logger.info(f"Staging torchft checkpoint took {time.monotonic() - begin} secs.")
 
-    @torch.no_grad()
     def _ft_load(self) -> None:
         step = self._find_load_step(folder=self._ft_folder())
         if step == -1:
