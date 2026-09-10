@@ -63,3 +63,28 @@ def kimi_k3_debugmodel_pp8_vp4() -> Trainer.Config:
         8 * 4, 33
     )
     return config
+
+
+def kimi_k3_debugmodel_pp8_vp4_vit_dep() -> Trainer.Config:
+    # pp8 x vp4 with the vision tower and the embedding on a stage of their own
+    # (vit_dep): they take one of the 32 stages, and the 33 layers, the head and
+    # the AttnRes aggregation spread over the other 31, spelled out like the
+    # pp8 x vp4 split.
+    import dataclasses
+    from functools import partial
+
+    from torchtitan.models.kimi_k3.parallelize import (
+        kimi_k3_module_fqns_per_model_part,
+        pipeline_kimi_k3,
+    )
+
+    config = kimi_k3_debugmodel_pp8_vp4()
+    text = kimi_k3_module_fqns_per_model_part(8 * 4 - 1, 33, 0, first_stage_modules=())
+    config.parallelism.module_fqns_per_model_part = [
+        ["tok_embeddings", "vision_encoder"]
+    ] + [[n for n in stage if n != "tok_embeddings"] for stage in text]
+    assert config.model_spec is not None
+    config.model_spec = dataclasses.replace(
+        config.model_spec, pipelining_fn=partial(pipeline_kimi_k3, vit_dep=True)
+    )
+    return config
