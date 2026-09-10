@@ -28,10 +28,10 @@ for MoE models. Generator sequence parallelism was disabled.
 | Qwen 3 | ✅ Supported (text only) |
 | Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
 | GPT-OSS | ✅ Supported |
-| DeepSeek V3 | Support soon |
-| DeepSeek V4 | Support soon |
-| FLUX | Support soon |
-| Kimi K2.7 | Support soon |
+| DeepSeek V3 | Not supported |
+| DeepSeek V4 | Not supported |
+| FLUX | Not supported |
+| Kimi K2.7 | Not supported |
 | Kimi K3 | Support soon |
 
 ## Architecture
