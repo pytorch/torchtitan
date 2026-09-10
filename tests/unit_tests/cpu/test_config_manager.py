@@ -400,6 +400,22 @@ class TestConfigManager(unittest.TestCase):
         with pytest.raises(ValueError, match="non_blocking_capacity_factor"):
             dataclasses.replace(config)
 
+    def test_cuda_graphs_reject_minimal_async_ep_with_tp(self):
+        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
+        config.parallelism.data_parallel_shard_degree = 2
+        config.parallelism.tensor_parallel_degree = 2
+        config.parallelism.expert_parallel_degree = 4
+
+        with pytest.raises(ValueError, match="tensor parallelism"):
+            dataclasses.replace(config)
+
+    def test_cuda_graphs_allow_minimal_async_ep_without_tp(self):
+        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
+        config.parallelism.data_parallel_shard_degree = 4
+        config.parallelism.expert_parallel_degree = 4
+
+        dataclasses.replace(config)
+
     def test_cli_override_dump_folder(self):
         """CLI args override config defaults for nested fields."""
         config_manager = ConfigManager()

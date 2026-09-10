@@ -217,9 +217,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
                 LocalTokenDispatcher.Config
             ):
-                if isinstance(
-                    dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
-                ) or (
+                if isinstance(dispatcher_config, MinimalAsyncEPTokenDispatcher.Config):
+                    if self.parallelism.tensor_parallel_degree > 1:
+                        raise ValueError(
+                            "CUDA graphs do not support MinimalAsyncEP with "
+                            "tensor parallelism. Set --training.disable_cuda_graphs."
+                        )
+                    continue
+                if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
                 ):

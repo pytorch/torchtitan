@@ -75,6 +75,8 @@ def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Confi
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 8
     config.activation_checkpoint = FullAC.Config()
+    # MinimalAsyncEP with TP is not supported on the CUDA graph side stream.
+    config.training.disable_cuda_graphs = True
     return config
 
 

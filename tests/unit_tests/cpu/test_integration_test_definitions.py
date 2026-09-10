@@ -11,6 +11,9 @@ import pytest
 
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
+from torchtitan_recipes.tests.h100 import (
+    deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8,
+)
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
@@ -71,6 +74,12 @@ def test_llama3_debug_config_defaults_to_short_context() -> None:
     assert config.model_spec is not None
     assert config.model_spec.max_context_length == 2048
     assert config.training.max_context_length == 2048
+
+
+def test_minimal_async_ep_h100_config_disables_cuda_graphs() -> None:
+    config = deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8()
+
+    assert config.training.disable_cuda_graphs
 
 
 def test_parse_multiple_integration_test_suites() -> None:
