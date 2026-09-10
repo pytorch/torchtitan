@@ -9,16 +9,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import (
-    Annotated,
-    Any,
-    cast,
-    Generic,
-    Literal,
-    overload,
-    Protocol,
-    TypeVar,
-)
+from typing import Annotated, Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
 import torch.nn as nn
@@ -143,7 +134,6 @@ class OptimizersContainer(TorchOptimizer, Stateful, Configurable, Generic[T]):
           torchtitan/components/optimizer/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
-
 
     optimizers: list[T]
     model_parts: list[nn.Module]

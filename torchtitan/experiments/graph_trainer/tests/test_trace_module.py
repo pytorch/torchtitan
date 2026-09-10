@@ -1368,6 +1368,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
 
     def test_titan_optimizers_container(self):
         from torchtitan.components.optimizer import (
+            AdamW,
             OptimizersContainer,
             ParamGroupConfig,
         )
@@ -1379,8 +1380,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
                 param_groups=[
                     ParamGroupConfig(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 1e-3},
+                        optimizer=AdamW.Config(lr=0.001),
                     )
                 ],
                 implementation="for-loop",
