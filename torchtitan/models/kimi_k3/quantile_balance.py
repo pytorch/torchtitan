@@ -231,6 +231,8 @@ def register_moe_quantile_balancing_hook(
 
     @torch.no_grad()
     def _update_expert_bias() -> None:
+        # With EP, the router is token-sharded on the dense TP axis even when
+        # model-wide sequence parallelism is disabled.
         if parallel_dims.ep_enabled and parallel_dims.tp > 1:
             _all_reduce_histograms(
                 parallel_dims.get_dense_tp_mesh().get_group(),
