@@ -16,7 +16,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import DataloaderExhaustedError
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import apply_overrides, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
@@ -113,6 +113,12 @@ class FaultTolerantTrainer(Trainer):
             config=config,
         )
         self.model_config = model_config
+
+        # Apply overrides after model config updates, before building the model.
+        if config.override.imports:
+            apply_overrides(config.override, config)
+        # Overrides can change fields checked during config construction.
+        config.__post_init__()
 
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
