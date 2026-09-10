@@ -35,16 +35,16 @@ from torchtitan.models.common.moe import (
     RoutedExperts,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
-from torchtitan.models.common.vision_encoder import (
-    VisionAttention,
-    VisionMLP,
-    VisionTransformerBlock,
-)
+from torchtitan.models.common.vision_encoder import VisionMLP, VisionTransformerBlock
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
-from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
+from .vision_encoder import (
+    KimiK3VisionCPAttention,
+    KimiK3VisionEncoder,
+    KimiK3VisionProjector,
+)
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
@@ -315,7 +315,7 @@ def _vision_encoder_config(
     block = VisionTransformerBlock.Config(
         norm1=vision_norm,
         norm2=vision_norm,
-        attn=VisionAttention.Config(
+        attn=KimiK3VisionCPAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
             wq=_linear(dim, qkv_dim),

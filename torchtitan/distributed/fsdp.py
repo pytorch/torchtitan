@@ -452,3 +452,19 @@ def apply_fsdp_to_decoder(
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+
+
+def add_zero_valued_dependency(
+    output: torch.Tensor,
+    unused_output: torch.Tensor,
+) -> torch.Tensor:
+    """Keep a conditionally executed FSDP module in the autograd graph.
+
+    FSDP2 issues a module's reduce-scatter from the autograd hooks on its
+    output, so a module only some data-parallel ranks execute would collect on a
+    subset of the group and hang the step. A rank with no real work runs it on a
+    placeholder and routes the result through here: scaling by zero leaves
+    ``output`` unchanged and keeps the graph edge, and zero is also that rank's
+    correct contribution to the average.
+    """
+    return output + unused_output.sum().to(output.dtype) * 0.0
