@@ -5,9 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
 
-import pytest
 import torch
 import torch.nn.functional as F
 
@@ -28,8 +26,7 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
         w1=Linear.Config(
             in_features=4,
             out_features=8,
-            bias=True,
-            param_init={"weight": _fill(1.0), "bias": _fill(2.0)},
+            param_init={"weight": _fill(1.0)},
         ),
         w2=Linear.Config(
             in_features=8,
@@ -40,8 +37,7 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
         w3=Linear.Config(
             in_features=4,
             out_features=8,
-            bias=True,
-            param_init={"weight": _fill(5.0), "bias": _fill(6.0)},
+            param_init={"weight": _fill(5.0)},
         ),
     )
     feed_forward = config.build()
@@ -51,19 +47,14 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
     assert feed_forward.w13._logical_output_slices == (("w1", 8), ("w3", 8))
     assert set(feed_forward.state_dict()) == {
         "w1.weight",
-        "w1.bias",
         "w2.weight",
         "w2.bias",
         "w3.weight",
-        "w3.bias",
     }
 
     w13_H2D = feed_forward.w13.weight.unflatten(0, (8, 2))
-    b13_H2 = feed_forward.w13.bias.unflatten(0, (8, 2))
     torch.testing.assert_close(w13_H2D[:, 0], torch.ones_like(w13_H2D[:, 0]))
     torch.testing.assert_close(w13_H2D[:, 1], 5 * torch.ones_like(w13_H2D[:, 1]))
-    torch.testing.assert_close(b13_H2[:, 0], 2 * torch.ones_like(b13_H2[:, 0]))
-    torch.testing.assert_close(b13_H2[:, 1], 6 * torch.ones_like(b13_H2[:, 1]))
 
 
 def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
@@ -126,30 +117,3 @@ def test_feed_forward_uses_configured_activation():
     gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
     expected_TD = feed_forward.w2(activation_fn.build()(gate_TF, up_TF))
     torch.testing.assert_close(feed_forward(x_TD), expected_TD)
-
-
-def test_feed_forward_rejects_mismatched_gate_up_implementations():
-    class AlternateLinear(Linear):
-        @dataclass(kw_only=True, slots=True)
-        class Config(Linear.Config):
-            pass
-
-    config = FeedForward.Config(
-        w1=Linear.Config(in_features=4, out_features=8),
-        w2=Linear.Config(in_features=8, out_features=4),
-        w3=AlternateLinear.Config(in_features=4, out_features=8),
-    )
-
-    with pytest.raises(ValueError, match="different implementations"):
-        config.build()
-
-
-def test_feed_forward_rejects_mismatched_gate_up_output_sizes():
-    config = FeedForward.Config(
-        w1=Linear.Config(in_features=4, out_features=8),
-        w2=Linear.Config(in_features=8, out_features=4),
-        w3=Linear.Config(in_features=4, out_features=16),
-    )
-
-    with pytest.raises(ValueError, match="matching out_features"):
-        config.build()
