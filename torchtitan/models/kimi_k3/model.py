@@ -324,6 +324,68 @@ class KimiK3Model(Decoder):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def encode_images(
+        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+    ) -> torch.Tensor:
+        """The tower's forward on one micro-batch's images.
+
+        The forward calls this; the pipeline's vision run-ahead calls it too,
+        for a later micro-batch, so the two cannot drift.
+        """
+        assert self.vision_encoder is not None
+        pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
+        return self.vision_encoder(pixel_values, grid_thw=grid_thw)
+
+    def _vision_stream(self) -> torch.cuda.Stream | None:
+        """A side stream for the tower, created once, only outside autograd.
+
+        With gradients recorded, several micro-batches' tower backwards would
+        accumulate into the tower's parameters from two streams with nothing
+        ordering them, so the run-ahead stays on the current stream then.
+        """
+        if not torch.cuda.is_available() or torch.is_grad_enabled():
+            return None
+        stream = getattr(self, "_vision_side_stream", None)
+        if stream is None:
+            stream = torch.cuda.Stream()
+            self._vision_side_stream = stream
+        return stream
+
+    def _issue_on_vision_stream(self, fn, *tensors):
+        """Run ``fn`` on the vision stream; return ``(out, event)`` without waiting.
+
+        The side stream waits for the current one, whose products ``fn`` reads,
+        and each input is ``record_stream``'d so the allocator does not hand its
+        memory on while the side stream still reads it.
+        """
+        side = self._vision_stream()
+        if side is None:
+            return fn(), None
+        current = torch.cuda.current_stream()
+        side.wait_stream(current)
+        for t in tensors:
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                t.record_stream(side)
+        started = torch.cuda.Event(enable_timing=True)
+        finished = torch.cuda.Event(enable_timing=True)
+        with torch.cuda.stream(side):
+            started.record(side)
+            out = fn()
+            finished.record(side)
+        self._last_encode_span = (started, finished)
+        return out, finished
+
+    def _join_vision_stream(self, out, done) -> None:
+        """Make the current stream wait for an issued encode and take its outputs."""
+        if done is None:
+            return
+        current = torch.cuda.current_stream()
+        current.wait_event(done)
+        outs = out if isinstance(out, (list, tuple)) else [out]
+        for t in outs:
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                t.record_stream(current)
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -331,6 +393,7 @@ class KimiK3Model(Decoder):
         pixel_values: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
+        vision_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
         if (pixel_values is None) != (grid_thw is None):
@@ -346,8 +409,8 @@ class KimiK3Model(Decoder):
         if special_tokens is None:
             raise ValueError("special_tokens are required for multimodal inputs.")
 
-        pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        if vision_embeds is None:
+            vision_embeds = self.encode_images(pixel_values, grid_thw)
         # MoonViT collapses time and merges spatially, so the text-side token
         # count per item is (h/kh)*(w/kw), independent of t.
         kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
@@ -377,6 +440,7 @@ class KimiK3Model(Decoder):
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        vision_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -385,11 +449,15 @@ class KimiK3Model(Decoder):
         block_residual_in = block_residual_TND
 
         if self.tok_embeddings is not None:
+            # ``vision_embeds`` are the tower's features when the pipeline
+            # encoded this micro-batch ahead of time (DEP); otherwise the
+            # tower runs here.
             h_TD = self._prepare_multimodal_embeds(
                 tokens,
                 pixel_values=pixel_values,
                 grid_thw=grid_thw,
                 special_tokens=special_tokens,
+                vision_embeds=vision_embeds,
             )
         else:
             h_TD = tokens

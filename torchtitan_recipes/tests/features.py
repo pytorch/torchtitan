@@ -531,3 +531,18 @@ def kimi_k3_debugmodel_pp8_vp4() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 8
     return config
+
+
+def kimi_k3_debugmodel_pp8_vp4_vit_dep() -> Trainer.Config:
+    """pp8 x vp4 with the vision tower and the embedding on a stage of their own."""
+    import dataclasses
+    from functools import partial
+
+    from torchtitan.models.kimi_k3.parallelize import pipeline_kimi_k3
+
+    config = kimi_k3_debugmodel_pp8_vp4()
+    assert config.model_spec is not None
+    config.model_spec = dataclasses.replace(
+        config.model_spec, pipelining_fn=partial(pipeline_kimi_k3, vit_dep=True)
+    )
+    return config
