@@ -367,7 +367,7 @@ def _get_lora_cls(parent_cls: type) -> type:
             bare to_local() would silently skip it.
             """
             import torch.nn.functional as F
-            from torch.distributed.tensor import DTensor, Partial, Replicate, Shard
+            from torch.distributed.tensor import DTensor, Partial, Shard
 
             colwise = self._packed_tp_style == "colwise"
             qdata = self.base_qdata
