@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
@@ -129,6 +129,11 @@ class FeedForward(Module):
         w1: Linear.Config
         w2: Linear.Config
         w3: Linear.Config
+        activation_fn: ActivationFn.Config = field(
+            default_factory=lambda: ActivationFn.Config(
+                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
+            )
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -138,6 +143,7 @@ class FeedForward(Module):
             param_init=_merge_gate_up_param_init(config.w1, config.w3),
         )
         self.w2 = config.w2.build()
+        self.activation_fn = config.activation_fn.build()
         self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
@@ -146,7 +152,7 @@ class FeedForward(Module):
         return self.w2(self._activation(gate_TF, up_TF))
 
     def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:
-        return F.silu(gate_TF) * up_TF
+        return self.activation_fn(gate_TF, up_TF)
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
