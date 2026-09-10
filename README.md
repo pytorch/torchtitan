@@ -71,19 +71,20 @@ We look forward to your contributions!
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](torchtitan/components/quantization/float8.md))
 7. [MXFP8 training for dense and MoE models](torchtitan/components/quantization/mxfp8/README.md) on Blackwell GPUs.
-8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
-9. DDP and HSDP
-10. [TorchFT](https://github.com/pytorch/torchft) integration
-11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
-12. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
-13. Flexible learning rate scheduler (warmup-stable-decay)
-14. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage
-15. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-16. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
+8. [Distributed MoE](docs/dist_moe.md) with fused CuTe DSL dispatch, expert compute, and combine on Blackwell GPUs.
+9. Supervised Fine-Tuning (SFT) with chat-formatted datasets
+10. DDP and HSDP
+11. [TorchFT](https://github.com/pytorch/torchft) integration
+12. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
+13. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
+14. Flexible learning rate scheduler (warmup-stable-decay)
+15. [BF16 optimizer states](docs/bf16_optimizer_states.md) for reduced memory usage
+16. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
+17. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
     - [Deterministic SDC replay](torchtitan/observability/silent_data_corruption.md)
-17. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
-18. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
-19. [Helper scripts](scripts/) to
+18. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
+19. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
+20. [Helper scripts](scripts/) to
     - download tokenizers and other Hugging Face assets (`scripts/download_hf_assets.py`)
     - convert checkpoints between Hugging Face and DCP formats (`scripts/checkpoint_conversion/`)
     - compare training losses across commits or configs (`scripts/loss_compare.py`)
