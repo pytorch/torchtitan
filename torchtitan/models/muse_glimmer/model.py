@@ -504,9 +504,12 @@ class MuseGlimmerModel(Decoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
         vision_bank_indices_T: torch.Tensor | None = None,
+        pipeline_stage_index: int | None = None,
+        pipeline_microbatch_index: int | None = None,
     ):
         # Video inputs are rejected by preprocess_inputs.
         del pixel_values_videos, grid_thw_videos
+        del pipeline_stage_index, pipeline_microbatch_index
 
         # Embedding stage: embed tokens (the scaleless norm is bundled inside
         # tok_embeddings) and inject vision features before the decoder layers.

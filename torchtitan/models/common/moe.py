@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 import spmd_types as spmd
 
@@ -20,6 +20,7 @@ from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -129,13 +130,35 @@ class RoutedExperts(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        supports_cuda_graphs: ClassVar[bool] = False
+        """Whether the complete routed path has a static, host-sync-free graph."""
+
         inner_experts: GroupedExperts.Config
         token_dispatcher: LocalTokenDispatcher.Config
 
+        def set_sharding_configs(
+            self,
+            routed: ShardingConfig,
+            experts: ShardingConfig,
+        ) -> None:
+            """Attach activation sharding and expert-parameter sharding."""
+            self.sharding_config = routed
+            self.inner_experts.sharding_config = experts
+
     def __init__(self, config: Config):
         super().__init__()
+        self.num_experts = config.inner_experts.num_experts
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
+
+    def expert_parameters_module(self) -> nn.Module:
+        """Return the child that owns the routed-expert parameters."""
+        return self.inner_experts
+
+    def replace_expert_parameters_module(self, module: nn.Module) -> nn.Module:
+        """Install a wrapper around the routed-expert parameter owner."""
+        self.inner_experts = module
+        return self
 
     def forward(
         self,
@@ -410,7 +433,11 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        **router_kwargs,
+    ) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
@@ -477,9 +504,9 @@ class MoE(Module):
 
         with torch.device(buffer_device):
             self.tokens_per_expert_E = torch.zeros(
-                self.routed_experts.inner_experts.num_experts, dtype=torch.float32
+                self.routed_experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
                 self.expert_bias_E = torch.zeros(
-                    self.routed_experts.inner_experts.num_experts, dtype=torch.float32
+                    self.routed_experts.num_experts, dtype=torch.float32
                 )
