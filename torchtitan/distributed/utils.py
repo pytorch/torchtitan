@@ -538,6 +538,10 @@ def init_distributed(
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
     device_id: torch.device | None = None
+    if os.environ.get("TORCHTITAN_PIPELINE_NEIGHBOR_P2P") == "1":
+        # Bind the default NCCL PG before creating adjacent PP subgroups.
+        # PyTorch then forms those subgroups eagerly with ncclCommSplit.
+        device_id = get_local_device()
     if comm_config.mode == "torchcomms":
         try:
             import torchcomms  # noqa: F401

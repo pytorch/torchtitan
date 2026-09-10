@@ -8,9 +8,12 @@ import dataclasses
 import math
 import os
 from collections.abc import Callable
+from types import MethodType
+from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch.distributed.pipelining.stage as stage_lib
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
@@ -37,6 +40,298 @@ from torchtitan.tools.logging import logger
 # pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
 # setup. Helpers in this module are implementation details and stay private.
 __all__ = ["pipeline_llm", "pipeline_vlm"]
+
+
+_PIPELINE_NEIGHBOR_P2P_ENV = "TORCHTITAN_PIPELINE_NEIGHBOR_P2P"
+
+
+@dataclasses.dataclass
+class _PipelineTransportGroups:
+    """Control and tensor P2P groups local to one PP replica."""
+
+    metadata_group: dist.ProcessGroup
+    edge_groups: dict[int, dist.ProcessGroup]
+
+
+def _create_pipeline_transport_groups(
+    parallel_dims: ParallelDims,
+    pp_group: dist.ProcessGroup,
+    *,
+    num_stages: int,
+    pp_schedule: str,
+) -> _PipelineTransportGroups | None:
+    """Adapt early-created physical PP-edge groups to logical stages.
+
+    ``ParallelDims`` creates the transport groups before DeviceMesh creates
+    other NCCL subgroups. This preserves PyTorch's required, globally
+    consistent communicator creation order.
+    """
+    if os.environ.get(_PIPELINE_NEIGHBOR_P2P_ENV) != "1":
+        return None
+
+    local_pp_ranks = tuple(dist.get_process_group_ranks(pp_group))
+    pp_degree = len(local_pp_ranks)
+    if pp_degree <= 1:
+        return None
+    if dist.get_backend(pp_group) != "nccl":
+        raise RuntimeError("Pipeline neighbor P2P requires an NCCL PP group")
+
+    transport = parallel_dims.get_pipeline_neighbor_groups(local_pp_ranks)
+    if transport is None:
+        raise RuntimeError(
+            "Pipeline neighbor P2P groups were not created during mesh setup"
+        )
+    metadata_group, edge_groups_by_pp_rank = transport
+    local_pp_rank = dist.get_rank(pp_group)
+
+    stage_to_pp_rank: dict[int, int] = {}
+    for pp_rank in range(pp_degree):
+        for stage_idx in _get_pp_rank_to_stage_indices_mapping(
+            pp_rank, pp_degree, pp_schedule, num_stages
+        ):
+            stage_to_pp_rank[stage_idx] = pp_rank
+    if len(stage_to_pp_rank) != num_stages:
+        raise RuntimeError("Could not map every pipeline stage to a PP rank")
+
+    edge_groups: dict[int, dist.ProcessGroup] = {}
+    for src_stage in range(num_stages - 1):
+        src_pp_rank = stage_to_pp_rank[src_stage]
+        dst_pp_rank = stage_to_pp_rank[src_stage + 1]
+        if src_pp_rank == dst_pp_rank:
+            continue
+        if local_pp_rank not in (src_pp_rank, dst_pp_rank):
+            continue
+        edge_group = edge_groups_by_pp_rank.get(src_pp_rank)
+        if edge_group is None:
+            raise RuntimeError(
+                f"Missing PP edge group for source rank {src_pp_rank}"
+            )
+        edge_groups[src_stage] = edge_group
+
+    return _PipelineTransportGroups(metadata_group, edge_groups)
+
+
+class _NeighborP2PPipelineStage(PipelineStage):
+    """PipelineStage using CPU metadata and two-rank NCCL stage-edge groups."""
+
+    def __init__(
+        self,
+        *args: Any,
+        metadata_group: dist.ProcessGroup,
+        edge_groups: dict[int, dist.ProcessGroup],
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self._metadata_group = metadata_group
+        self._edge_groups = edge_groups
+
+    def _edge_group(self, src_stage: int) -> dist.ProcessGroup | None:
+        group = self._edge_groups.get(src_stage)
+        if group is None and not self._is_same_rank(src_stage):
+            raise RuntimeError(
+                f"Stage {self.stage_index} has no P2P group for edge "
+                f"{src_stage} -> {src_stage + 1}"
+            )
+        return group
+
+    def _previous_edge_group(self) -> dist.ProcessGroup | None:
+        if self.is_first:
+            return None
+        return self._edge_group(self.stage_index - 1)
+
+    def _next_edge_group(self) -> dist.ProcessGroup | None:
+        if self.is_last:
+            return None
+        return self._edge_group(self.stage_index)
+
+    def _recv_edge_ops(
+        self,
+        recv_infos: tuple,
+        group: dist.ProcessGroup | None,
+        expected_source: int,
+        group_peer: int,
+    ) -> list[dist.P2POp]:
+        ops: list[dist.P2POp] = []
+        for info in recv_infos:
+            if info.is_root_arg:
+                continue
+            if info.buffer is None:
+                if info.tensor_meta is not None:
+                    raise AssertionError("missing recv buffer has tensor metadata")
+                continue
+            if info.source != expected_source:
+                raise RuntimeError(
+                    "Pipeline neighbor P2P supports only adjacent stage inputs; "
+                    f"stage {self.stage_index} received from {info.source}"
+                )
+            if group is None:
+                raise RuntimeError("missing adjacent PP receive group")
+            ops.append(
+                dist.P2POp(
+                    dist.irecv, info.buffer, group_peer=group_peer, group=group
+                )
+            )
+        return ops
+
+    def get_fwd_recv_ops(self, fwd_chunk_id: int) -> list[dist.P2POp]:
+        if self.is_first:
+            return []
+        return self._recv_edge_ops(
+            self.args_recv_info[fwd_chunk_id],
+            self._previous_edge_group(),
+            self.stage_index - 1,
+            group_peer=0,
+        )
+
+    def get_bwd_recv_ops(self, bwd_chunk_id: int) -> list[dist.P2POp]:
+        if not self.has_backward or self.is_last:
+            return []
+        return self._recv_edge_ops(
+            self.grad_recv_info[bwd_chunk_id],
+            self._next_edge_group(),
+            self.stage_index + 1,
+            group_peer=1,
+        )
+
+    def get_fwd_send_ops(self, fwd_chunk_id: int) -> list[dist.P2POp]:
+        output_tuple, _ = self.fwd_cache[fwd_chunk_id]
+        if self.is_last:
+            return []
+        group = self._next_edge_group()
+        if group is None:
+            raise RuntimeError("missing adjacent PP forward-send group")
+
+        ops: list[dist.P2POp] = []
+        for idx, out in enumerate(output_tuple):
+            for dst_stage in self.act_send_info[idx]:
+                if dst_stage is None:
+                    continue
+                if dst_stage != self.stage_index + 1:
+                    raise RuntimeError(
+                        "Pipeline neighbor P2P supports only adjacent stage outputs; "
+                        f"stage {self.stage_index} sends to {dst_stage}"
+                    )
+                ops.append(
+                    dist.P2POp(
+                        dist.isend,
+                        stage_lib.to_local_if_dtensor(out, detach=True),
+                        group_peer=1,
+                        group=group,
+                    )
+                )
+        return ops
+
+    def get_bwd_send_ops(self, bwd_chunk_id: int) -> list[dist.P2POp]:
+        if not self.has_backward or self.is_first:
+            return []
+        group = self._previous_edge_group()
+        if group is None:
+            raise RuntimeError("missing adjacent PP backward-send group")
+
+        self._check_chunk_id(bwd_chunk_id)
+        if self.grad_send_info is None:
+            self.grad_send_info = self._create_grad_send_info(self.args_recv_info[0])
+
+        ops: list[dist.P2POp] = []
+        for idx, (grad, dst_stage) in enumerate(
+            zip(self.bwd_cache.pop(bwd_chunk_id), self.grad_send_info, strict=True)
+        ):
+            if dst_stage is None:
+                if grad is not None:
+                    raise stage_lib.PipeliningMetadataError(
+                        f"Stage {self.stage_index} produced an unsent gradient"
+                    )
+                continue
+            if dst_stage != self.stage_index - 1:
+                raise RuntimeError(
+                    "Pipeline neighbor P2P supports only adjacent gradient sends; "
+                    f"stage {self.stage_index} sends to {dst_stage}"
+                )
+            grad_meta = self._get_grad_send_meta(idx)
+            if grad_meta is None:
+                if grad is not None:
+                    raise stage_lib.PipeliningMetadataError(
+                        f"Stage {self.stage_index} has a gradient without metadata"
+                    )
+                continue
+            if grad is None:
+                grad = stage_lib._make_tensor_from_meta(grad_meta, self.device).zero_()
+            if not isinstance(grad, torch.Tensor):
+                raise stage_lib.PipeliningMetadataError(
+                    f"unexpected gradient type {type(grad).__name__}"
+                )
+            ops.append(
+                dist.P2POp(
+                    dist.isend,
+                    stage_lib.to_local_if_dtensor(grad),
+                    group_peer=0,
+                    group=group,
+                )
+            )
+        return ops
+
+    def _send_meta(self, meta: Any, dst_stage: int) -> None:
+        dist.send_object_list(
+            [meta],
+            dst=self._resolve_peer_global_rank(dst_stage),
+            group=self._metadata_group,
+            device=torch.device("cpu"),
+            use_batch=False,
+        )
+
+    def _recv_meta(self, src_stage: int) -> Any:
+        objects: list[Any] = [None]
+        dist.recv_object_list(
+            objects,
+            src=self._resolve_peer_global_rank(src_stage),
+            group=self._metadata_group,
+            device=torch.device("cpu"),
+            use_batch=False,
+        )
+        return objects[0]
+
+
+def _configure_neighbor_p2p_schedule(schedule: _PipelineSchedule) -> None:
+    """Use a collective dynamic/static vote for neighbor-group stages only.
+
+    The stock vote is a serial full-PP P2P chain.  That is the same control
+    plane that can race with Schedule1F1B's tensor P2P.  The group-wide minimum
+    produces the identical mode decision without entering that transport path.
+    The override is bound to this one schedule instance; no global PyTorch
+    method is modified.
+    """
+    original_warmup_p2p = schedule._warmup_p2p
+
+    def _warmup_p2p(
+        _schedule: _PipelineSchedule,
+        stages: list[PipelineStage],
+        has_backward: bool,
+        p2p_done: bool,
+    ) -> None:
+        if not stages or not all(
+            isinstance(stage, _NeighborP2PPipelineStage) for stage in stages
+        ):
+            return original_warmup_p2p(stages, has_backward, p2p_done)
+
+        local_vote = int(
+            all(
+                not stage_lib.InferenceMode.needs_dynamic(
+                    stage._user_meta, has_backward
+                )
+                for stage in stages
+            )
+        )
+        vote = torch.tensor([local_vote], dtype=torch.int32, device=stages[0].device)
+        dist.all_reduce(vote, op=dist.ReduceOp.MIN, group=stages[0].group)
+        mode = (
+            stage_lib.InferenceMode.STATIC
+            if vote.item() == 1
+            else stage_lib.InferenceMode.DYNAMIC
+        )
+        for stage in stages:
+            stage._inference_mode = mode
+
+    schedule._warmup_p2p = MethodType(_warmup_p2p, schedule)
 
 
 def _build_get_mesh_callback(
@@ -78,6 +373,7 @@ def pipeline_llm(
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
+    pp_group = pp_mesh.get_group("pp")
 
     (
         num_virtual_stages,
@@ -94,6 +390,12 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
+    transport_groups = _create_pipeline_transport_groups(
+        parallel_dims,
+        pp_group,
+        num_stages=len(module_names_per_stage),
+        pp_schedule=parallelism.pipeline_parallel_schedule,
+    )
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
     stages, model_parts = _pipeline_module_split(
         model,
@@ -102,6 +404,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        transport_groups=transport_groups,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -129,6 +432,8 @@ def pipeline_llm(
         stages=stages,
         loss_fn=loss_fn,
     )
+    if transport_groups is not None:
+        _configure_neighbor_p2p_schedule(pp_schedule)
     _warmup_pp_edge_communicators(stages)
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
@@ -281,7 +586,8 @@ def _warmup_pp_edge_communicators(stages: list[PipelineStage]) -> None:
     nothing warms the per-direction P2P groups, and STATIC mode warms nothing
     at all. This runs torch's own ``_get_init_p2p_neighbors_ops`` -- the
     non-PipelineStage path already does -- and leaves numerics untouched:
-    single-node PP8 prints identical losses with and without it.
+    single-node PP8 prints identical losses with and without it. The neighbor
+    transport relies on the opt-in eager default NCCL group created at startup.
     """
     from torch.distributed.pipelining.schedules import _batch_p2p, _wait_batch_p2p
 
@@ -618,6 +924,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    transport_groups: _PipelineTransportGroups | None = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -664,14 +971,24 @@ def _pipeline_module_split(
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
-        stage = PipelineStage(
-            model_chunk,
-            stage_idx,
-            num_stages,
-            device,
-            group=pp_mesh.get_group("pp"),
-            get_mesh=get_mesh,
-        )
+        stage_kwargs = {
+            "group": pp_mesh.get_group("pp"),
+            "get_mesh": get_mesh,
+        }
+        if transport_groups is None:
+            stage = PipelineStage(
+                model_chunk, stage_idx, num_stages, device, **stage_kwargs
+            )
+        else:
+            stage = _NeighborP2PPipelineStage(
+                model_chunk,
+                stage_idx,
+                num_stages,
+                device,
+                metadata_group=transport_groups.metadata_group,
+                edge_groups=transport_groups.edge_groups,
+                **stage_kwargs,
+            )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx} "
             f"with modules {module_names}"
