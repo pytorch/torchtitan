@@ -30,6 +30,12 @@ _MXFP8_SCALING_MODE = "rceil"
 _MXFP8_SCALE_GROUP_ALIGNMENT = 128
 """Row alignment each token group needs in the blocked grouped-GEMM scale layout."""
 
+# Contract of the fused expert MLP (grouped_experts.py, TorchAO's
+# cudnn_grouped_mlp ops): the kernels hard-code a 256-row group padding, and
+# the expert dimensions must be multiples of their 128-wide tile.
+_MXFP8_FUSED_MLP_ROW_ALIGNMENT = 256
+_MXFP8_FUSED_MLP_DIM_ALIGNMENT = 128
+
 InputActivationFormatForBackward = Literal["bf16", "mxfp8"]
 _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD = ("bf16", "mxfp8")
 

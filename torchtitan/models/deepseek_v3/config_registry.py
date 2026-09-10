@@ -144,6 +144,37 @@ def deepseek_v3_debugmodel_mxfp8(
     return config
 
 
+def deepseek_v3_debugmodel_mxfp8_fused_grouped_mlp(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    # deepseek_v3_debugmodel_mxfp8 with the routed-expert MLP running as the
+    # fused grouped-GEMM + SwiGLU + quantization kernels. Converters are applied
+    # when the model spec is built, so the stock flavor's converter list is
+    # repeated here with the fusion enabled and the kernels' 256-row padding.
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    config.model_spec = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+            ),
+            MXFP8GroupedExpertsConverter.Config(
+                model_compile_enabled=model_compile_enabled,
+                pad_multiple=256,
+                fuse_grouped_mlp=True,
+            ),
+        ],
+    )
+    # The fused ops record and wait on CUDA events per call, which CUDA-graph
+    # capture rejects.
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:

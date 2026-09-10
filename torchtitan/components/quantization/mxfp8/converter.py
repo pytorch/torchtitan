@@ -11,11 +11,16 @@ import torch
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from ..utils import swap_token_dispatcher
-from ._common import _MXFP8_SCALE_GROUP_ALIGNMENT, InputActivationFormatForBackward
+from ._common import (
+    _MXFP8_FUSED_MLP_ROW_ALIGNMENT,
+    _MXFP8_SCALE_GROUP_ALIGNMENT,
+    InputActivationFormatForBackward,
+)
 
 _mxfp8_linear_import_error: ImportError | None = None
 
@@ -216,11 +221,20 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         rejects anything smaller.
         """
 
+        fuse_grouped_mlp: bool = False
+
         def __post_init__(self) -> None:
             if self.pad_multiple % _MXFP8_SCALE_GROUP_ALIGNMENT:
                 raise ValueError(
                     "MXFP8 grouped experts require pad_multiple to be a multiple "
                     f"of {_MXFP8_SCALE_GROUP_ALIGNMENT}; got {self.pad_multiple}."
+                )
+            if self.fuse_grouped_mlp and (
+                self.pad_multiple % _MXFP8_FUSED_MLP_ROW_ALIGNMENT
+            ):
+                raise ValueError(
+                    "MXFP8 fuse_grouped_mlp requires pad_multiple to be a multiple "
+                    f"of {_MXFP8_FUSED_MLP_ROW_ALIGNMENT}; got {self.pad_multiple}."
                 )
 
     def __init__(self, config: Config):
@@ -235,6 +249,17 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
 
+        if (
+            self.config.fuse_grouped_mlp
+            and torch.cuda.is_available()
+            and torch.cuda.get_device_capability() != (10, 0)
+        ):
+            # The cuDNN grouped-MLP kernels are built for SM 10.0 only.
+            raise ValueError(
+                "MXFP8 fuse_grouped_mlp runs only on SM 10.0 GPUs; got "
+                f"{torch.cuda.get_device_capability()}."
+            )
+
         if not self.config.model_compile_enabled:
             logger.warning(
                 "torch.compile enablement is required for highest performance "
@@ -245,6 +270,27 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         assert get_mxfp8_grouped_experts_cls is not None
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
+            if self.config.fuse_grouped_mlp and not isinstance(
+                parent.token_dispatcher, AllToAllTokenDispatcher.Config
+            ):
+                # The fused kernels' padded-row contract is validated only
+                # against TorchAOTokenDispatcher's permute_and_pad.
+                raise ValueError(
+                    "MXFP8 fuse_grouped_mlp requires the all-to-all token "
+                    f"dispatcher; got {type(parent.token_dispatcher).__qualname__}."
+                )
+            if (
+                self.config.fuse_grouped_mlp
+                and type(config)._owner.forward is not GroupedExperts.forward
+            ):
+                # The fusion overrides the ``_grouped_mlp`` seam of the stock
+                # forward; a variant with its own forward never reaches it and
+                # would silently keep the per-GEMM path.
+                raise ValueError(
+                    "MXFP8 fuse_grouped_mlp applies to the stock GroupedExperts "
+                    f"forward only; {type(config)._owner.__qualname__} bypasses "
+                    "its _grouped_mlp seam."
+                )
             swap_token_dispatcher(parent, self.config.pad_multiple)
             base_module_cls = type(config)._owner
             quantized_cls = get_mxfp8_grouped_experts_cls(base_module_cls)
@@ -254,6 +300,7 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
                 input_activation_format_for_backward=(
                     self.config.input_activation_format_for_backward
                 ),
+                fuse_grouped_mlp=self.config.fuse_grouped_mlp,
             )
             if parent is None:
                 model_config = new_config
@@ -266,5 +313,6 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             "Converted GroupedExperts to MXFP8 grouped GEMMs with FSDP-managed "
             "32x32 weight quantization and saved input activation format "
             f"{self.config.input_activation_format_for_backward}"
+            + (" (fused grouped MLP)" if self.config.fuse_grouped_mlp else "")
         )
         return model_config

@@ -36,6 +36,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
+    deepseek_v3_debugmodel_mxfp8_fused_grouped_mlp,
 )
 from torchtitan.models.deepseek_v4.config_registry import (
     deepseek_v4_debugmodel,
@@ -93,6 +94,7 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
+    deepseek_v3_debugmodel_mxfp8_fused_grouped_mlp,
     deepseek_v4_debugmodel,
     deepseek_v4_mtp_debugmodel,
     gpt_oss_debugmodel,

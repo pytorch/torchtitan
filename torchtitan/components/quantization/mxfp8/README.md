@@ -16,6 +16,7 @@ MXFP8 training can provide substantial training speedups for models where the ma
 - [MXFP8 for Grouped GEMMs (MoE)](#mxfp8-for-grouped-gemms-moe)
   - [Grouped Weight Operands](#grouped-weight-operands)
   - [Usage](#usage-1)
+  - [Fused expert MLP](#fused-expert-mlp)
 - [Example Python Configuration](#example-python-configuration)
 - [Performance](#performance)
   - [Dense Models](#dense-models)
@@ -264,6 +265,8 @@ model_spec = model_registry(
   default because the routed input feeds more than one expert projection, so
   its BF16 form stays alive regardless.
 * `pad_multiple`: token-group padding, 128 by default.
+* `fuse_grouped_mlp`: `False` by default; run the expert MLP as fused grouped
+  GEMM + SwiGLU + quantization kernels, see [Fused expert MLP](#fused-expert-mlp).
 * `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model.
 
 **Important Notes:**
@@ -278,6 +281,68 @@ model_spec = model_registry(
   must be enabled.
 
 * **torch.compile recommendation**: All benchmarks in this document were run with `torch.compile` enabled. We recommend using `torch.compile` for best performance.
+
+#### Fused expert MLP
+
+`MXFP8GroupedExpertsConverter.Config.fuse_grouped_mlp` runs the routed-expert
+MLP `silu(x @ w1.T) * (x @ w3.T) @ w2.T` as TorchAO's `cudnn_grouped_mlp` ops
+([pytorch/ao#4820](https://github.com/pytorch/ao/pull/4820)), each of which
+fuses a ragged grouped GEMM with the SwiGLU (or its derivative) and the MXFP8
+quantization of its output. The forward is two launches (FC1 with the SwiGLU
+and both quantizations of the hidden activation in the epilogue, then FC2) and
+the backward four (FC2 activation gradient with the SwiGLU derivative and
+quantization, FC1 activation gradient, two weight gradients), instead of three
+grouped GEMMs with the SwiGLU in BF16 between them.
+
+The fused ops consume the [grouped weight operands](#grouped-weight-operands)
+FSDP already manages, so the lifecycle above is unchanged and a fused step
+quantizes no weight:
+
+* FC1 reads the gate and up operands interleaved in 32-row bands in the fp8
+  domain (qdata and swizzled scales). A square 32x32 tile never straddles a
+  band, so this equals quantizing an interleaved BF16 `w13`; it costs one
+  `(E, 2F, D)` fp8 copy per forward and one `(E, D, 2F)` copy per backward.
+* FC2 and its gradients read `w2`'s FPROP and DGRAD operands as stored.
+* The autograd function saves the unsharded-tensor wrapper, not the operands,
+  so `reshard_after_forward=True` refills and pipeline microbatch reuse apply
+  exactly as for the per-GEMM path.
+* Routing enters only as the int32 group offsets over the dispatcher-padded
+  token groups; experts that receive no tokens get zero weight gradients.
+
+```python
+MXFP8GroupedExpertsConverter.Config(
+    model_compile_enabled=True,
+    pad_multiple=256,
+    fuse_grouped_mlp=True,
+)
+```
+
+Example flavor: `deepseek_v3_debugmodel_mxfp8_fused_grouped_mlp`.
+
+Requirements (checked at configuration time where possible; there is no
+silent fallback to the per-GEMM path):
+
+* `pad_multiple` a multiple of 256: the kernels hard-code a 256-row group
+  padding, and 128-aligned groups corrupt silently.
+* `dim` and `hidden_dim` multiples of 128, also per rank under tensor
+  parallelism.
+* The all-to-all token dispatcher (`TorchAOTokenDispatcher` after the swap),
+  whose padding the kernels' row contract has been validated against.
+* The stock `GroupedExperts` forward: variants with their own forward
+  (`GptOssGroupedExperts`, `KimiGroupedExperts`, `FusedGroupedExperts`) never
+  reach the `_grouped_mlp` seam, so the converter rejects the flag for them.
+* SM 10.0 exactly, and `training.disable_cuda_graphs=True` (the ops record and
+  wait on CUDA events per call).
+* A TorchAO build with the `cudnn_grouped_mlp` ops and the `cudnn-frontend`
+  python package >= 1.27.
+
+Numerics are close to, but not bitwise equal to, the per-GEMM path: the
+kernels apply the SwiGLU to their FP32 accumulators and requantize the hidden
+activation in-kernel, where the per-GEMM path rounds to BF16 first. At
+`dim=256`, `hidden_dim=512`, 4 experts (one without tokens), the fused output
+and gradients measure 33-37 dB SQNR against the per-GEMM MXFP8 path and
+23-24 dB against BF16, the same 23-24 dB the per-GEMM path itself scores
+against BF16. Performance numbers for this branch are pending.
 
 ### Example Python Configuration
 
@@ -388,6 +453,13 @@ All distributed communication for MXFP8 training is currently done in high preci
 ### Known Limitations
 - Currently in prototype stage - no BC guarantees.
 - Requires torch nightly - important bug fixes have landed since 2.9.1
+- `fuse_grouped_mlp` needs unreleased TorchAO kernels (pytorch/ao#4820) and
+  does not run under CUDA graphs; its example flavor disables them.
+- `fuse_grouped_mlp` fuses the stock `GroupedExperts` MLP only; the converter
+  rejects `GptOssGroupedExperts`, `KimiGroupedExperts` and
+  `FusedGroupedExperts`, whose forwards bypass the `_grouped_mlp` seam.
+- No production-scale performance number for the fused expert MLP on this
+  branch yet.
 
 ### Additional Resources
 

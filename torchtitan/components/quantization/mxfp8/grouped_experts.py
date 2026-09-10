@@ -11,6 +11,9 @@ Tensor shape suffixes:
     E: experts
     N: expert output features
     K: expert input features
+    R: routed-token rows of the expert MLP (moe.py's name for M)
+    D: model dim, the MLP's input and output features
+    F: hidden dim; FC1's N is FC2's K, so the fused MLP keeps moe.py's suffixes
 """
 
 from dataclasses import dataclass
@@ -25,12 +28,15 @@ from torchao.prototype.moe_training.kernels.mxfp8.quant import (
     triton_mx_block_rearrange_2d_M_groups,
 )
 from torchao.prototype.mx_formats.kernels import mxfp8_quantize_cuda
+from torchao.prototype.mx_formats.utils import to_blocked
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 
 from ._common import (
     _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD,
     _MXFP8_BLOCK_SIZE,
+    _MXFP8_FUSED_MLP_DIM_ALIGNMENT,
+    _MXFP8_FUSED_MLP_ROW_ALIGNMENT,
     _MXFP8_SCALING_MODE,
     InputActivationFormatForBackward,
 )
@@ -254,6 +260,499 @@ class _MXFP8GroupedMMFunction(torch.autograd.Function):
 spmd.register_local_autograd_function(_MXFP8GroupedMMFunction)
 
 
+# ---------------------------------------------------------------------------
+# Fused expert MLP over TorchAO's cuDNN grouped-GEMM + SwiGLU + quantization ops
+# ---------------------------------------------------------------------------
+#
+# The four ``torchao::mxfp8_grouped_gemm_*_cudnn`` ops each fuse a ragged
+# grouped GEMM with the SwiGLU (or its derivative) and the MXFP8 quantization
+# of their output, so the expert MLP runs as: FC1 + SwiGLU + quantize (one
+# launch), FC2 (one launch); backward: FC2 dgrad + dSwiGLU + quantize (one
+# launch), FC1 dgrad (one launch), two weight gradients. They consume the same
+# 32x32-tile weight operands FSDP caches for the per-GEMM path: the FC2
+# operands as they are, and FC1's from the gate and up operands interleaved in
+# 32-row bands in the fp8 domain (a square tile never straddles a band), so a
+# fused step quantizes no weight.
+#
+# Contract (TorchAO ``cudnn_grouped_mlp``): every expert's token group and
+# the allocated row count are multiples of 256 (the kernels' fixed group
+# padding; 128-aligned groups corrupt silently), D and F are multiples of 128,
+# SM 10.0. Rows past ``offs[-1]`` of the kernel-allocated outputs are garbage
+# and never read.
+
+# The blocked scale layout tiles a logical ``[rows, cols/32]`` scale matrix in
+# squares of 128 rows by 4 scale columns (128 elements), stored as (32, 4, 4).
+_SCALE_TILE_SIDE = 128
+
+
+def _interleave_rows(a_ENK: torch.Tensor, b_ENK: torch.Tensor) -> torch.Tensor:
+    """``(E, N, K)`` pair -> ``(E, 2N, K)`` alternating 32-row bands, the
+    cuDNN GLU row order ``[a0(32) | b0(32) | a1(32) | b1(32) | ...]``."""
+    e, n, k = a_ENK.shape
+    bands = (e, n // _MXFP8_BLOCK_SIZE, _MXFP8_BLOCK_SIZE, k)
+    return torch.stack([a_ENK.view(bands), b_ENK.view(bands)], dim=2).view(e, 2 * n, k)
+
+
+def _interleave_cols(a_ENK: torch.Tensor, b_ENK: torch.Tensor) -> torch.Tensor:
+    """``(E, N, K)`` pair -> ``(E, N, 2K)`` alternating 32-column bands."""
+    e, n, k = a_ENK.shape
+    bands = (e, n, k // _MXFP8_BLOCK_SIZE, _MXFP8_BLOCK_SIZE)
+    return torch.stack([a_ENK.view(bands), b_ENK.view(bands)], dim=3).view(e, n, 2 * k)
+
+
+def _interleave_row_scales(
+    a: torch.Tensor, b: torch.Tensor, *, rows: int, cols: int
+) -> torch.Tensor:
+    """Blocked scales of two logical ``[rows, cols/32]`` scale matrices -> the
+    blocked scales of their 32-row-band interleave ``[2*rows, cols/32]``.
+
+    The blocked layout stores each 128x4 tile as ``(32, 4, 4)``: row within
+    the band, band within the tile, column. A band is one index of the middle
+    axis, so the interleave is a permute of whole 32x4 slabs.
+    """
+    e = a.shape[0]
+    tiles = (
+        e,
+        rows // _SCALE_TILE_SIDE,
+        cols // _SCALE_TILE_SIDE,
+        _MXFP8_BLOCK_SIZE,
+        4,
+        4,
+    )
+
+    def by_band(scales):  # (E, rows/32, cols/128, 32, 4)
+        return (
+            scales.view(tiles)
+            .permute(0, 1, 4, 2, 3, 5)
+            .reshape(
+                e,
+                rows // _MXFP8_BLOCK_SIZE,
+                cols // _SCALE_TILE_SIDE,
+                _MXFP8_BLOCK_SIZE,
+                4,
+            )
+        )
+
+    interleaved = torch.stack([by_band(a), by_band(b)], dim=2).view(
+        e,
+        2 * rows // _SCALE_TILE_SIDE,
+        4,
+        cols // _SCALE_TILE_SIDE,
+        _MXFP8_BLOCK_SIZE,
+        4,
+    )
+    return interleaved.permute(0, 1, 3, 4, 2, 5).reshape(e, -1)
+
+
+def _interleave_col_scales(
+    a: torch.Tensor, b: torch.Tensor, *, rows: int, cols: int
+) -> torch.Tensor:
+    """Blocked scales of two logical ``[rows, cols/32]`` scale matrices -> the
+    blocked scales of their 32-column-band interleave ``[rows, 2*cols/32]``: a
+    scale column is one index of the tile's last axis."""
+    e = a.shape[0]
+    tiles = (
+        e,
+        rows // _SCALE_TILE_SIDE,
+        cols // _SCALE_TILE_SIDE,
+        _MXFP8_BLOCK_SIZE,
+        4,
+        4,
+    )
+
+    def by_band(scales):  # (E, rows/128, cols/32, 32, 4)
+        return (
+            scales.view(tiles)
+            .permute(0, 1, 2, 5, 3, 4)
+            .reshape(
+                e,
+                rows // _SCALE_TILE_SIDE,
+                cols // _MXFP8_BLOCK_SIZE,
+                _MXFP8_BLOCK_SIZE,
+                4,
+            )
+        )
+
+    interleaved = torch.stack([by_band(a), by_band(b)], dim=3).view(
+        e,
+        rows // _SCALE_TILE_SIDE,
+        2 * cols // _SCALE_TILE_SIDE,
+        4,
+        _MXFP8_BLOCK_SIZE,
+        4,
+    )
+    return interleaved.permute(0, 1, 2, 4, 5, 3).reshape(e, -1)
+
+
+def _w13_fprop_operands(
+    w1_qdata_fprop_EDF, w1_scale_fprop, w3_qdata_fprop_EDF, w3_scale_fprop
+):
+    """The FC1 operand of the fused forward: ``(E, 2F, D)`` gate and up rows
+    interleaved in 32-row bands, quantized along D, plus its blocked scales."""
+    _, d, f = w1_qdata_fprop_EDF.shape
+    qdata_E2FD = _interleave_rows(
+        w1_qdata_fprop_EDF.transpose(-2, -1), w3_qdata_fprop_EDF.transpose(-2, -1)
+    )
+    scales = _interleave_row_scales(w1_scale_fprop, w3_scale_fprop, rows=f, cols=d)
+    return qdata_E2FD, scales
+
+
+def _w13_dgrad_operands(
+    w1_qdata_dgrad_EFD, w1_scale_dgrad, w3_qdata_dgrad_EFD, w3_scale_dgrad
+):
+    """The FC1 operand of the fused activation gradient: ``(E, D, 2F)`` with
+    the gate and up features interleaved in 32-column bands along the
+    contraction axis, plus the blocked scales of the logical ``[D, 2F/32]``."""
+    _, f, d = w1_qdata_dgrad_EFD.shape
+    qdata_ED2F = _interleave_cols(
+        w1_qdata_dgrad_EFD.transpose(-2, -1), w3_qdata_dgrad_EFD.transpose(-2, -1)
+    )
+    scales = _interleave_col_scales(w1_scale_dgrad, w3_scale_dgrad, rows=d, cols=f)
+    return qdata_ED2F, scales
+
+
+def _split_w13_grad(grad_E2FD: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The fused FC1 weight gradient, in the interleaved row order, back to
+    the stock gate and up gradients ``(E, F, D)``."""
+    e, two_f, d = grad_E2FD.shape
+    f = two_f // 2
+    bands = grad_E2FD.view(e, f // _MXFP8_BLOCK_SIZE, 2, _MXFP8_BLOCK_SIZE, d)
+    return bands[:, :, 0].reshape(e, f, d), bands[:, :, 1].reshape(e, f, d)
+
+
+def _pad_offsets_pow2(offs: torch.Tensor) -> torch.Tensor:
+    # The K-groups scale swizzle sizes a tl.arange by the group count, which
+    # Triton requires to be a power of two; repeated end offsets are zero-size
+    # groups the kernel skips.
+    e = offs.shape[0]
+    e_pow2 = 1 << (e - 1).bit_length()
+    if e_pow2 == e:
+        return offs
+    return torch.cat([offs, offs[-1:].expand(e_pow2 - e)])
+
+
+def _blocked_rowwise_scales(scales: torch.Tensor) -> torch.Tensor:
+    """Rowwise 1x32 scales of ``[M, K]`` -> the flat whole-matrix blocked
+    buffer the ops read (equal to the per-group concatenation because every
+    group is a 256-multiple, so 128-row tiles never straddle groups)."""
+    return to_blocked(scales).reshape(-1)
+
+
+def _blocked_colwise_scales(
+    scales: torch.Tensor, offs: torch.Tensor, *, rows: int
+) -> torch.Tensor:
+    """Columnwise 32x1 scales (logical ``[K, M/32]``) of ``[M, K]`` -> the flat
+    per-group blocked buffer of ``K * M/32`` bytes the WGRAD op reads. The
+    swizzle lays the groups out back to back and pads only past them, so the
+    static slice drops that tail without a device sync."""
+    blocked = triton_mx_block_rearrange_2d_K_groups(
+        scales, _pad_offsets_pow2(offs // _MXFP8_BLOCK_SIZE)
+    )
+    return blocked.reshape(-1)[: scales.shape[0] * (rows // _MXFP8_BLOCK_SIZE)]
+
+
+def _validate_fused_mlp_inputs(
+    x_RD: torch.Tensor, w1_EFD: torch.Tensor, offsets_E: torch.Tensor
+) -> None:
+    """Checks at the module's forward: the local expert dims (shards under
+    tensor parallelism) and the routing-dependent token count on the host, the
+    group boundaries on the device."""
+    _, f, d = w1_EFD.shape
+    if f % _MXFP8_FUSED_MLP_DIM_ALIGNMENT or d % _MXFP8_FUSED_MLP_DIM_ALIGNMENT:
+        raise ValueError(
+            "MXFP8 fuse_grouped_mlp requires the local expert dimensions to be "
+            f"multiples of {_MXFP8_FUSED_MLP_DIM_ALIGNMENT}; got hidden_dim={f}, "
+            f"dim={d}. Choose a tensor_parallel_degree that keeps the shards "
+            "aligned, or disable the fusion for this model."
+        )
+    row_alignment = _MXFP8_FUSED_MLP_ROW_ALIGNMENT
+    # R is an unbacked SymInt under compile, so identity tests: literal bools
+    # raise, SymBools become deferred runtime asserts. The >= and % 32 forms
+    # are implied by the row multiple but recorded separately: the kernel
+    # wrappers and GEMM metas check exactly those forms, and the symbolic
+    # engine matches expressions rather than deriving them.
+    r = x_RD.shape[0]
+    for cond, requirement in (
+        (r >= row_alignment, f"at least {row_alignment}"),
+        (
+            r % row_alignment == 0,
+            f"a multiple of {row_alignment} (configure the token dispatcher with "
+            f"pad_multiple={row_alignment})",
+        ),
+        (r % _MXFP8_BLOCK_SIZE == 0, f"a multiple of {_MXFP8_BLOCK_SIZE}"),
+    ):
+        if cond is False:
+            raise ValueError(
+                f"MXFP8 fuse_grouped_mlp: token count {r} must be {requirement}; "
+                "there is no silent fallback."
+            )
+        if cond is not True:
+            torch._check(
+                cond,
+                lambda: f"MXFP8 fuse_grouped_mlp: token count must be {requirement}",
+            )
+    # Group boundaries must be aligned too (the dispatcher's pad_multiple
+    # guarantees it). Their values live on the device, so a host-side check
+    # would sync; a device-side assertion keeps the stream ordered and fails
+    # at the next sync instead of corrupting silently. It runs after the host
+    # checks so a rejected buffer never enqueues a kernel.
+    torch._assert_async(
+        (offsets_E % row_alignment == 0).all(),
+        "MXFP8 fuse_grouped_mlp: every expert's token group must be a multiple "
+        f"of {row_alignment} rows (configure the token dispatcher with "
+        f"pad_multiple={row_alignment})",
+    )
+
+
+# Lives in TorchTitan for the same reason as _MXFP8GroupedMMFunction: it
+# reads the weight operands off FSDP's unsharded tensors in both passes.
+@torch._dynamo.allow_in_graph
+class _MXFP8FusedGroupedMLPFunction(torch.autograd.Function):
+    """``x_RD [R, D] -> y_RD [R, D]``, the SwiGLU expert MLP over the four
+    fused cuDNN ops, on the cached 32x32 weight operands.
+
+    ``w1_EFD``/``w3_EFD``/``w2_EDF`` are the stock parameters (FSDP wrappers
+    or plain tensors) that receive the gradients; the twelve operand tensors
+    are their FPROP and DGRAD qdata and blocked scales for this call.
+    ``offs`` holds int32 exclusive-end row offsets of the 256-row-padded
+    groups, ``offs[-1] <= R``; rows past it in ``y_RD``/``grad_x_RD`` are
+    left unwritten.
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        x_RD: torch.Tensor,
+        w1_EFD: torch.Tensor,
+        w3_EFD: torch.Tensor,
+        w2_EDF: torch.Tensor,
+        w1_qdata_fprop_EDF: torch.Tensor,
+        w1_scale_fprop: torch.Tensor,
+        w1_qdata_dgrad_EFD: torch.Tensor,
+        w1_scale_dgrad: torch.Tensor,
+        w3_qdata_fprop_EDF: torch.Tensor,
+        w3_scale_fprop: torch.Tensor,
+        w3_qdata_dgrad_EFD: torch.Tensor,
+        w3_scale_dgrad: torch.Tensor,
+        w2_qdata_fprop_EFD: torch.Tensor,
+        w2_scale_fprop: torch.Tensor,
+        w2_qdata_dgrad_EDF: torch.Tensor,
+        w2_scale_dgrad: torch.Tensor,
+        offs: torch.Tensor,
+        input_activation_format_for_backward: InputActivationFormatForBackward,
+    ) -> torch.Tensor:
+        # Imported here, not at module scope: the ops ship separately from the
+        # per-GEMM path's kernels, and converter.py imports this module inside
+        # the try that decides whether MXFP8 is available at all.
+        from torchao.prototype.moe_training.kernels.mxfp8.cudnn_grouped_mlp import (
+            mxfp8_grouped_gemm_cudnn,
+            mxfp8_grouped_gemm_swiglu_fwd_cudnn,
+        )
+
+        if x_RD.dtype != torch.bfloat16 or any(
+            weight.dtype != torch.bfloat16 for weight in (w1_EFD, w3_EFD, w2_EDF)
+        ):
+            raise ValueError(
+                "MXFP8 fused grouped experts require BF16 activations and weights; "
+                f"got activation dtype {x_RD.dtype} and weight dtypes "
+                f"{w1_EFD.dtype}, {w3_EFD.dtype}, {w2_EDF.dtype}."
+            )
+        x_RD = x_RD.contiguous()
+        requires_wgrad = any(ctx.needs_input_grad[1:4])
+        quantize_wgrad_input_in_forward = (
+            requires_wgrad and input_activation_format_for_backward == "mxfp8"
+        )
+
+        x_row_RD, _, x_row_scales, _ = mxfp8_quantize_cuda(
+            x_RD, rowwise=True, colwise=False, scaling_mode=_MXFP8_SCALING_MODE
+        )
+        w13_qdata_E2FD, w13_scale = _w13_fprop_operands(
+            w1_qdata_fprop_EDF, w1_scale_fprop, w3_qdata_fprop_EDF, w3_scale_fprop
+        )
+        # FC1 + SwiGLU + quantization: the BF16 pre-activation feeds the
+        # backward op; ``h`` comes out quantized both ways, rowwise for FC2 and
+        # columnwise for the FC2 weight gradient.
+        (
+            z_R2F,
+            h_row_RF,
+            h_row_scales,
+            h_col_RF,
+            h_col_scales,
+        ) = mxfp8_grouped_gemm_swiglu_fwd_cudnn(
+            x_row_RD,
+            _blocked_rowwise_scales(x_row_scales),
+            w13_qdata_E2FD,
+            w13_scale,
+            offs,
+        )
+        # FC2: the right operand is w2 quantized along F, i.e. the FPROP
+        # operand viewed in its stored (E, D, F) orientation.
+        y_RD = mxfp8_grouped_gemm_cudnn(
+            h_row_RF,
+            h_row_scales,
+            w2_qdata_fprop_EFD.transpose(-2, -1),
+            w2_scale_fprop,
+            offs,
+        )
+
+        # Save exactly one input-activation operands for WGRAD, and let FSDP
+        # own the weight operands whenever it manages them: an unsharded
+        # weight carries operands FSDP will refill before backward, so save
+        # the wrapper and read them off it then. Anything else has none, so
+        # its DGRAD operands are saved directly.
+        saved_weight_tensors = []
+        unsharded_weights = []
+        for weight, qdata_dgrad, scale_dgrad in (
+            (w1_EFD, w1_qdata_dgrad_EFD, w1_scale_dgrad),
+            (w3_EFD, w3_qdata_dgrad_EFD, w3_scale_dgrad),
+            (w2_EDF, w2_qdata_dgrad_EDF, w2_scale_dgrad),
+        ):
+            is_unsharded = isinstance(weight, _UnshardedFSDPTensor)
+            unsharded_weights.append(is_unsharded)
+            saved_weight_tensors.extend(
+                (weight,) if is_unsharded else (qdata_dgrad, scale_dgrad)
+            )
+        if quantize_wgrad_input_in_forward:
+            _, x_col_RD, _, x_col_scales = mxfp8_quantize_cuda(
+                x_RD, rowwise=False, colwise=True, scaling_mode=_MXFP8_SCALING_MODE
+            )
+            ctx.save_for_backward(
+                z_R2F,
+                h_col_RF,
+                h_col_scales,
+                offs,
+                x_col_RD,
+                _blocked_colwise_scales(x_col_scales, offs, rows=x_RD.shape[0]),
+                *saved_weight_tensors,
+            )
+        else:
+            ctx.save_for_backward(
+                z_R2F, h_col_RF, h_col_scales, offs, x_RD, *saved_weight_tensors
+            )
+        ctx.requires_dgrad = ctx.needs_input_grad[0]
+        ctx.requires_wgrad = requires_wgrad
+        ctx.saved_quantized_input = quantize_wgrad_input_in_forward
+        ctx.unsharded_weights = tuple(unsharded_weights)
+        return y_RD
+
+    @staticmethod
+    @once_differentiable
+    # pyrefly: ignore [bad-override]
+    def backward(ctx, grad_y_RD: torch.Tensor):
+        # Same import placement as forward.
+        from torchao.prototype.moe_training.kernels.mxfp8.cudnn_grouped_mlp import (
+            mxfp8_grouped_gemm_cudnn,
+            mxfp8_grouped_gemm_dswiglu_bwd_cudnn,
+            mxfp8_grouped_gemm_wgrad_cudnn,
+        )
+
+        saved_tensors = list(ctx.saved_tensors)
+        z_R2F, h_col_RF, h_col_scales, offs = saved_tensors[:4]
+        if ctx.saved_quantized_input:
+            x_col_RD, x_col_scales = saved_tensors[4:6]
+            x_hp_RD = None
+            saved_weight_tensors = saved_tensors[6:]
+        else:
+            x_hp_RD = saved_tensors[4]
+            x_col_RD = x_col_scales = None
+            saved_weight_tensors = saved_tensors[5:]
+
+        dgrad_operands = []
+        for is_unsharded in ctx.unsharded_weights:
+            if is_unsharded:
+                weight = saved_weight_tensors.pop(0)
+                if not isinstance(weight, _UnshardedFSDPTensor):
+                    raise RuntimeError("FSDP restored an incompatible MXFP8 weight")
+                operands = weight.operands
+                if operands is None:
+                    raise RuntimeError(
+                        "FSDP did not build MXFP8 weight state for backward"
+                    )
+                dgrad_operands.append(
+                    (
+                        operands.weight_qdata_dgrad_ENK,
+                        operands.weight_scale_dgrad_swizzled,
+                    )
+                )
+            else:
+                dgrad_operands.append(
+                    (saved_weight_tensors.pop(0), saved_weight_tensors.pop(0))
+                )
+        (
+            (w1_qdata_dgrad_EFD, w1_scale_dgrad),
+            (w3_qdata_dgrad_EFD, w3_scale_dgrad),
+            (w2_qdata_dgrad_EDF, w2_scale_dgrad),
+        ) = dgrad_operands
+
+        grad_y_RD = grad_y_RD.contiguous()
+        rows = grad_y_RD.shape[0]
+        dy_row_RD, dy_col_RD, dy_row_scales, dy_col_scales = mxfp8_quantize_cuda(
+            grad_y_RD,
+            rowwise=True,
+            colwise=ctx.requires_wgrad,
+            scaling_mode=_MXFP8_SCALING_MODE,
+        )
+        # FC2 dgrad + dSwiGLU + quantization: the right operand is w2
+        # quantized along D, i.e. the DGRAD operand as stored. ``dz`` comes
+        # out quantized both ways, rowwise for the FC1 dgrad GEMM and
+        # columnwise for the FC1 weight gradient.
+        (
+            dz_row_R2F,
+            dz_row_scales,
+            dz_col_R2F,
+            dz_col_scales,
+        ) = mxfp8_grouped_gemm_dswiglu_bwd_cudnn(
+            dy_row_RD,
+            _blocked_rowwise_scales(dy_row_scales),
+            w2_qdata_dgrad_EDF,
+            w2_scale_dgrad,
+            z_R2F,
+            offs,
+        )
+
+        grad_x_RD = None
+        if ctx.requires_dgrad:
+            w13_qdata_ED2F, w13_scale = _w13_dgrad_operands(
+                w1_qdata_dgrad_EFD, w1_scale_dgrad, w3_qdata_dgrad_EFD, w3_scale_dgrad
+            )
+            grad_x_RD = mxfp8_grouped_gemm_cudnn(
+                dz_row_R2F, dz_row_scales, w13_qdata_ED2F, w13_scale, offs
+            )
+
+        grad_w1_EFD = grad_w3_EFD = grad_w2_EDF = None
+        if ctx.requires_wgrad:
+            grad_w2_EDF = mxfp8_grouped_gemm_wgrad_cudnn(
+                dy_col_RD,
+                _blocked_colwise_scales(dy_col_scales, offs, rows=rows),
+                h_col_RF,
+                h_col_scales,
+                offs,
+            )
+            if x_col_RD is None:
+                assert x_hp_RD is not None
+                _, x_col_RD, _, x_col_scales_unblocked = mxfp8_quantize_cuda(
+                    x_hp_RD,
+                    rowwise=False,
+                    colwise=True,
+                    scaling_mode=_MXFP8_SCALING_MODE,
+                )
+                x_col_scales = _blocked_colwise_scales(
+                    x_col_scales_unblocked, offs, rows=rows
+                )
+            grad_w1_EFD, grad_w3_EFD = _split_w13_grad(
+                mxfp8_grouped_gemm_wgrad_cudnn(
+                    dz_col_R2F, dz_col_scales, x_col_RD, x_col_scales, offs
+                )
+            )
+
+        return (grad_x_RD, grad_w1_EFD, grad_w3_EFD, grad_w2_EDF, *([None] * 14))
+
+
+# Local-only for SPMD type checking; see the note on _MXFP8GroupedMMFunction.
+spmd.register_local_autograd_function(_MXFP8FusedGroupedMLPFunction)
+
+
 _mxfp8_experts_cache: dict[type, type] = {}
 
 
@@ -295,6 +794,24 @@ def get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
             use MXFP8 while the gate and up projections keep BF16.
             """
 
+            fuse_grouped_mlp: bool = False
+            """Run the expert SwiGLU MLP as fused grouped-GEMM + SwiGLU +
+            MXFP8-quantization kernels (TorchAO's ``cudnn_grouped_mlp`` ops)
+            instead of three grouped GEMMs with the SwiGLU in BF16 between them.
+
+            The fused ops consume the same FSDP-managed 32x32 weight operands
+            as the per-GEMM path (the gate and up operands interleaved in the
+            fp8 domain), so they add no weight quantization. They require the
+            routed token groups padded to multiples of 256, ``dim`` and
+            ``hidden_dim`` multiples of 128 (per rank under tensor
+            parallelism) and SM 10.0; see ``MXFP8GroupedExpertsConverter``.
+            The fusion applies to the stock ``GroupedExperts`` forward; a
+            variant with its own forward (``GptOssGroupedExperts``,
+            ``KimiGroupedExperts``, ``FusedGroupedExperts``) never reaches
+            ``_grouped_mlp`` and keeps the per-GEMM path, so the converter
+            rejects the flag for it.
+            """
+
             def __post_init__(self) -> None:
                 if (
                     self.input_activation_format_for_backward
@@ -311,6 +828,7 @@ def get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
             self.input_activation_format_for_backward = (
                 config.input_activation_format_for_backward
             )
+            self.fuse_grouped_mlp = config.fuse_grouped_mlp
             self._install_unsharded_tensors()
 
         def _install_unsharded_tensors(self) -> None:
@@ -371,6 +889,54 @@ def get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
                 offs,
                 self.input_activation_format_for_backward,
             )
+
+        def _grouped_mlp(self, *, x_RD, w1_EFD, w2_EDF, w3_EFD, offsets_E):
+            if not self.fuse_grouped_mlp:
+                return super()._grouped_mlp(
+                    x_RD=x_RD,
+                    w1_EFD=w1_EFD,
+                    w2_EDF=w2_EDF,
+                    w3_EFD=w3_EFD,
+                    offsets_E=offsets_E,
+                )
+            _validate_fused_mlp_inputs(x_RD, w1_EFD, offsets_E)
+            # Same operand selection as ``_grouped_mm``: an FSDP-unsharded weight
+            # carries this unshard lifetime's cached operands; anything else is
+            # quantized here, from the BF16 storage.
+            with torch.no_grad():
+                w1, w3, w2 = (
+                    w.operands
+                    if isinstance(w, _UnshardedFSDPTensor)
+                    else _quantize_mxfp8_grouped_weight(
+                        w._tensor
+                        if isinstance(w, _GroupedExpertsShardedTensorWithMXFP8Compute)
+                        else w
+                    )
+                    for w in (w1_EFD, w3_EFD, w2_EDF)
+                )
+            # The weights are passed as they are (FSDP wrappers included) so
+            # autograd returns the gradients to the parameters; the output
+            # takes ``x_RD``'s dtype like the stock MLP.
+            return _MXFP8FusedGroupedMLPFunction.apply(
+                x_RD.bfloat16(),
+                w1_EFD,
+                w3_EFD,
+                w2_EDF,
+                w1.weight_qdata_fprop_EKN,
+                w1.weight_scale_fprop_swizzled,
+                w1.weight_qdata_dgrad_ENK,
+                w1.weight_scale_dgrad_swizzled,
+                w3.weight_qdata_fprop_EKN,
+                w3.weight_scale_fprop_swizzled,
+                w3.weight_qdata_dgrad_ENK,
+                w3.weight_scale_dgrad_swizzled,
+                w2.weight_qdata_fprop_EKN,
+                w2.weight_scale_fprop_swizzled,
+                w2.weight_qdata_dgrad_ENK,
+                w2.weight_scale_dgrad_swizzled,
+                offsets_E,
+                self.input_activation_format_for_backward,
+            ).type_as(x_RD)
 
     MXFP8GroupedExperts.__name__ = f"MXFP8{parent_cls.__name__}"
     MXFP8GroupedExperts.__qualname__ = f"MXFP8{parent_cls.__name__}"

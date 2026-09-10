@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib.util
 import os
 
 import pytest
@@ -19,9 +20,13 @@ from torch.distributed.tensor import DTensor, Shard
 pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
+import torchtitan.components.quantization.mxfp8.grouped_experts as mxfp8_grouped_experts  # noqa: E402
 import torchtitan.components.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
 from torchtitan.components.quantization._fsdp_tensor import (  # noqa: E402
     _UnshardedFSDPTensor,
+)
+from torchtitan.components.quantization.mxfp8._common import (  # noqa: E402
+    _MXFP8_FUSED_MLP_ROW_ALIGNMENT,
 )
 from torchtitan.components.quantization.mxfp8.grouped_experts import (  # noqa: E402
     get_mxfp8_grouped_experts_cls,
@@ -467,13 +472,16 @@ def _run_simple_fsdp(
         dist.destroy_process_group()
 
 
-def _make_grouped_experts(num_experts: int, dim: int, hidden_dim: int):
+def _make_grouped_experts(
+    num_experts: int, dim: int, hidden_dim: int, fuse_grouped_mlp: bool = False
+):
     experts_cls = get_mxfp8_grouped_experts_cls(GroupedExperts)
     experts = (
         experts_cls.Config(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
+            fuse_grouped_mlp=fuse_grouped_mlp,
         )
         .build()
         .cuda()
@@ -675,6 +683,225 @@ def _run_grouped_experts_pp_cache_lifecycle(
         dist.destroy_process_group()
 
 
+def _sqnr(reference: torch.Tensor, actual: torch.Tensor) -> float:
+    reference, actual = reference.float(), actual.float()
+    noise = ((reference - actual) ** 2).mean()
+    return (10 * torch.log10((reference**2).mean() / noise)).item()
+
+
+def _run_fused_grouped_experts_reshard_after_forward(
+    rank: int,
+    world_size: int,
+    port: int,
+) -> None:
+    """Test RAF=true release and refill with the fused grouped MLP.
+
+    The fused ops consume the same four FSDP-managed operands per weight as the
+    per-GEMM path (the FC1 pair interleaved in the fp8 domain per call), so
+    each of the three weights is quantized exactly once per unshard: three
+    calls in the forward unshard and three in the backward refill, none from
+    inside the fused Function, which the second patched name would count. The
+    per-GEMM twin sharded alongside bounds the numerics.
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_quantize = mxfp8_tensor._quantize_mxfp8_grouped_weight
+    num_quantize_calls = 0
+
+    def counted_quantize(weight_ENK: torch.Tensor):
+        nonlocal num_quantize_calls
+        num_quantize_calls += 1
+        return original_quantize(weight_ENK)
+
+    mxfp8_tensor._quantize_mxfp8_grouped_weight = counted_quantize
+    mxfp8_grouped_experts._quantize_mxfp8_grouped_weight = counted_quantize
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        num_experts, dim, hidden_dim = 4, 128, 256
+        torch.manual_seed(0)
+        experts = _make_grouped_experts(
+            num_experts, dim, hidden_dim, fuse_grouped_mlp=True
+        )
+        torch.manual_seed(0)
+        reference = _make_grouped_experts(num_experts, dim, hidden_dim)
+        for module in (experts, reference):
+            fully_shard(
+                module,
+                mesh=mesh,
+                mp_policy=MixedPrecisionPolicy(
+                    param_dtype=torch.bfloat16,
+                    reduce_dtype=torch.bfloat16,
+                ),
+                reshard_after_forward=True,
+            )
+        assert isinstance(
+            experts.w1_EFD.to_local(), _GroupedExpertsShardedTensorWithMXFP8Compute
+        )
+
+        tokens_per_expert = _MXFP8_FUSED_MLP_ROW_ALIGNMENT
+        torch.manual_seed(1 + rank)
+        x_RD = torch.randn(
+            num_experts * tokens_per_expert,
+            dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        num_tokens_per_expert_E = torch.full(
+            (num_experts,), tokens_per_expert, device="cuda", dtype=torch.int32
+        )
+
+        out_RD = experts(x_RD, num_tokens_per_expert_E)
+        assert num_quantize_calls == 3
+        weight_param = _get_grouped_weight_param(experts, "w1_EFD")
+        assert len(weight_param._unsharded_inner_tensors) == 4
+        inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+        assert all(
+            tensor.untyped_storage().size() == 0
+            for tensor in weight_param._unsharded_inner_tensors
+        )
+
+        out_RD.sum().backward()
+        assert num_quantize_calls == 6
+        assert tuple(map(id, weight_param._unsharded_inner_tensors)) == inner_tensor_ids
+        assert all(
+            tensor.untyped_storage().size() == 0
+            for tensor in weight_param._unsharded_inner_tensors
+        )
+        assert x_RD.grad is not None
+        for parameter in experts.parameters():
+            assert parameter.grad is not None
+
+        x_reference = x_RD.detach().clone().requires_grad_()
+        out_reference = reference(x_reference, num_tokens_per_expert_E)
+        out_reference.sum().backward()
+        assert _sqnr(out_reference, out_RD) > 25.0
+        assert _sqnr(x_reference.grad, x_RD.grad) > 25.0
+        for name, parameter in experts.named_parameters():
+            reference_grad = reference.get_parameter(name).grad
+            assert (
+                _sqnr(reference_grad.to_local(), parameter.grad.to_local()) > 25.0
+            ), name
+    finally:
+        mxfp8_tensor._quantize_mxfp8_grouped_weight = original_quantize
+        mxfp8_grouped_experts._quantize_mxfp8_grouped_weight = original_quantize
+        dist.destroy_process_group()
+
+
+def _run_fused_grouped_experts_pp_cache_lifecycle(
+    rank: int,
+    world_size: int,
+    port: int,
+) -> None:
+    """Test RAF=false cache reuse across microbatches with the fused grouped MLP.
+
+    Two forwards and two backwards run on one unshard's operands, so the three
+    weights are quantized three times in total; the next generation
+    re-quantizes into the same managed tensor objects.
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_quantize = mxfp8_tensor._quantize_mxfp8_grouped_weight
+    num_quantize_calls = 0
+
+    def counted_quantize(weight_ENK: torch.Tensor):
+        nonlocal num_quantize_calls
+        num_quantize_calls += 1
+        return original_quantize(weight_ENK)
+
+    mxfp8_tensor._quantize_mxfp8_grouped_weight = counted_quantize
+    mxfp8_grouped_experts._quantize_mxfp8_grouped_weight = counted_quantize
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        num_experts, dim, hidden_dim = 4, 128, 256
+        experts = _make_grouped_experts(
+            num_experts, dim, hidden_dim, fuse_grouped_mlp=True
+        )
+        fully_shard(
+            experts,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+            reshard_after_forward=False,
+        )
+        experts.set_is_last_backward(False)
+        experts.set_reshard_after_backward(False)
+        experts.set_requires_gradient_sync(False)
+
+        tokens_per_expert = _MXFP8_FUSED_MLP_ROW_ALIGNMENT
+        num_tokens_per_expert_E = torch.full(
+            (num_experts,), tokens_per_expert, device="cuda", dtype=torch.int32
+        )
+        inputs = [
+            torch.randn(
+                num_experts * tokens_per_expert,
+                dim,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            for _ in range(2)
+        ]
+        outputs = [experts(x_RD, num_tokens_per_expert_E) for x_RD in inputs]
+        assert num_quantize_calls == 3
+        weight_param = _get_grouped_weight_param(experts, "w1_EFD")
+        assert isinstance(experts.w1_EFD, _UnshardedFSDPTensor)
+        assert experts.w1_EFD.operands is not None
+        inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+        assert all(
+            tensor.untyped_storage().size() > 0
+            for tensor in weight_param._unsharded_inner_tensors
+        )
+
+        outputs[0].sum().backward()
+        assert num_quantize_calls == 3
+        assert all(
+            tensor.untyped_storage().size() > 0
+            for tensor in weight_param._unsharded_inner_tensors
+        )
+
+        experts.set_is_last_backward(True)
+        experts.set_reshard_after_backward(True)
+        experts.set_requires_gradient_sync(True)
+        outputs[1].sum().backward()
+        assert num_quantize_calls == 3
+        assert all(
+            tensor.untyped_storage().size() == 0
+            for tensor in weight_param._unsharded_inner_tensors
+        )
+
+        out_RD = experts(inputs[0].detach(), num_tokens_per_expert_E)
+        assert num_quantize_calls == 6
+        assert tuple(map(id, weight_param._unsharded_inner_tensors)) == inner_tensor_ids
+        assert all(
+            tensor.untyped_storage().size() > 0
+            for tensor in weight_param._unsharded_inner_tensors
+        )
+        out_RD.sum().backward()
+    finally:
+        mxfp8_tensor._quantize_mxfp8_grouped_weight = original_quantize
+        mxfp8_grouped_experts._quantize_mxfp8_grouped_weight = original_quantize
+        dist.destroy_process_group()
+
+
+# The fused expert MLP runs on TorchAO's cudnn_grouped_mlp ops, built for
+# SM 10.0.
+_requires_fused_grouped_mlp_kernels = pytest.mark.skipif(
+    importlib.util.find_spec(
+        "torchao.prototype.moe_training.kernels.mxfp8.cudnn_grouped_mlp"
+    )
+    is None
+    or (torch.cuda.is_available() and torch.cuda.get_device_capability() != (10, 0)),
+    reason="the fused grouped MLP needs TorchAO's cudnn_grouped_mlp ops on SM 10.0",
+)
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -684,6 +911,14 @@ def _run_grouped_experts_pp_cache_lifecycle(
         _run_simple_fsdp,
         _run_grouped_experts_reshard_after_forward,
         _run_grouped_experts_pp_cache_lifecycle,
+        pytest.param(
+            _run_fused_grouped_experts_reshard_after_forward,
+            marks=_requires_fused_grouped_mlp_kernels,
+        ),
+        pytest.param(
+            _run_fused_grouped_experts_pp_cache_lifecycle,
+            marks=_requires_fused_grouped_mlp_kernels,
+        ),
     ],
     ids=[
         "reshard-after-forward",
@@ -692,6 +927,8 @@ def _run_grouped_experts_pp_cache_lifecycle(
         "simple-fsdp",
         "grouped-experts-reshard-after-forward",
         "grouped-experts-pp-cache",
+        "fused-grouped-experts-reshard-after-forward",
+        "fused-grouped-experts-pp-cache",
     ],
 )
 def test_mxfp8_fsdp_tensor_lifecycle(target):

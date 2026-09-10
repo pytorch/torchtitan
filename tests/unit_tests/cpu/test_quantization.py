@@ -19,6 +19,10 @@ from torchtitan.components.data import (
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.quantization import Float8Linear, Float8LinearConverter
 from torchtitan.components.quantization.float8 import _get_float8_grouped_experts_cls
+from torchtitan.components.quantization.mxfp8._common import (
+    _MXFP8_FUSED_MLP_DIM_ALIGNMENT,
+    _MXFP8_FUSED_MLP_ROW_ALIGNMENT,
+)
 from torchtitan.components.quantization.mxfp8.converter import (
     get_mxfp8_grouped_experts_cls,
     MXFP8GroupedExpertsConverter,
@@ -32,6 +36,10 @@ from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_co
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.token_dispatcher import (
+    HybridEPTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 
 
@@ -475,6 +483,301 @@ def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent
     assert list(override.parameters) == list(base.parameters)
     for name, parameter in base.parameters.items():
         assert override.parameters[name].kind == parameter.kind
+
+
+def _bypass_mxfp8_experts_converter_gates(monkeypatch):
+    # ``convert()`` is a config-tree transform: the SM100 gates of the
+    # converters' ``__init__`` do not apply. ``get_device_capability`` is what
+    # the fused gate reads when a GPU is present.
+    import torchtitan.components.quantization.mxfp8.converter as converter_mod
+
+    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (10, 0))
+
+
+@pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
+def test_mxfp8_grouped_experts_config_defaults_to_the_per_gemm_mlp(parent_cls):
+    config = get_mxfp8_grouped_experts_cls(parent_cls).Config(
+        dim=96, hidden_dim=96, num_experts=2
+    )
+    assert config.fuse_grouped_mlp is False
+
+
+def test_mxfp8_grouped_experts_converter_config_checks_the_fused_pad_multiple():
+    """The fused kernels pad every expert's token group to 256 rows and corrupt
+    silently on a smaller alignment, so the dispatcher pad must be a multiple of
+    it; the per-GEMM path's 128 is rejected only when fusing."""
+    with pytest.raises(ValueError, match="multiple of 256"):
+        MXFP8GroupedExpertsConverter.Config(fuse_grouped_mlp=True, pad_multiple=128)
+    for pad_multiple in (256, 512):
+        MXFP8GroupedExpertsConverter.Config(
+            fuse_grouped_mlp=True, pad_multiple=pad_multiple
+        )
+
+
+def _assert_mxfp8_experts_wiring(
+    model_config,
+    *,
+    fuse_grouped_mlp,
+    pad_multiple,
+    dispatcher_cls=TorchAOTokenDispatcher.Config,
+):
+    """Every experts config in the tree is the MXFP8 config carrying
+    ``fuse_grouped_mlp``, behind a ``dispatcher_cls`` padding to ``pad_multiple``."""
+    mxfp8_config_cls = get_mxfp8_grouped_experts_cls(GroupedExperts).Config
+    experts = list(model_config.traverse(GroupedExperts.Config))
+    assert experts
+    # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
+    for _fqn, config, parent, _attr in experts:
+        assert type(config) is mxfp8_config_cls
+        assert config.fuse_grouped_mlp is fuse_grouped_mlp
+        assert isinstance(parent.token_dispatcher, dispatcher_cls)
+        assert parent.token_dispatcher.pad_multiple == pad_multiple
+
+
+@pytest.mark.parametrize(
+    "flavor, fuse_grouped_mlp, pad_multiple",
+    [
+        ("deepseek_v3_debugmodel_mxfp8", False, 128),
+        ("deepseek_v3_debugmodel_mxfp8_fused_grouped_mlp", True, 256),
+    ],
+)
+def test_dsv3_mxfp8_flavors_wire_the_grouped_mlp(
+    monkeypatch, flavor, fuse_grouped_mlp, pad_multiple
+):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    _bypass_mxfp8_experts_converter_gates(monkeypatch)
+
+    config = ConfigManager().parse_args(["--module", "deepseek_v3", "--config", flavor])
+
+    _assert_mxfp8_experts_wiring(
+        config.model_spec.model,
+        fuse_grouped_mlp=fuse_grouped_mlp,
+        pad_multiple=pad_multiple,
+    )
+    # The fused ops record and wait on CUDA events per call, which CUDA-graph
+    # capture rejects; the stock flavor keeps the default.
+    assert config.training.disable_cuda_graphs is fuse_grouped_mlp
+
+
+def test_mxfp8_grouped_experts_converter_fused_mlp_needs_the_all_to_all_dispatcher(
+    monkeypatch,
+):
+    """The fused kernels' padded-row contract is validated against torchao's
+    ``permute_and_pad`` only, so the fusion refuses other dispatchers before
+    ``swap_token_dispatcher`` would have padded them. Unfused, the per-GEMM path
+    supports the padded HybridEP dispatcher."""
+    pytest.importorskip("torchao")
+    _bypass_mxfp8_experts_converter_gates(monkeypatch)
+    from torchtitan.models.deepseek_v3 import model_registry
+
+    def convert_hybridep_tree(fuse_grouped_mlp):
+        return model_registry(
+            "debugmodel",
+            moe_comm_backend="hybridep",
+            non_blocking_capacity_factor=1.0,
+            converters=[
+                MXFP8GroupedExpertsConverter.Config(
+                    fuse_grouped_mlp=fuse_grouped_mlp, pad_multiple=256
+                )
+            ],
+        ).model
+
+    with pytest.raises(ValueError, match="all-to-all token dispatcher"):
+        convert_hybridep_tree(True)
+
+    _assert_mxfp8_experts_wiring(
+        convert_hybridep_tree(False),
+        fuse_grouped_mlp=False,
+        pad_multiple=256,
+        dispatcher_cls=HybridEPTokenDispatcher.Config,
+    )
+
+
+def test_mxfp8_grouped_experts_converter_fused_mlp_needs_the_stock_forward(
+    monkeypatch,
+):
+    """``GptOssGroupedExperts.forward`` never reaches the ``_grouped_mlp`` seam
+    the fusion overrides, so the converter refuses the flag for it instead of
+    silently keeping the per-GEMM path; unfused it converts as before."""
+    pytest.importorskip("torchao")
+    _bypass_mxfp8_experts_converter_gates(monkeypatch)
+    from torchtitan.models.gpt_oss import model_registry
+
+    def convert_gpt_oss_tree(fuse_grouped_mlp):
+        return model_registry(
+            "debugmodel",
+            converters=[
+                MXFP8GroupedExpertsConverter.Config(
+                    fuse_grouped_mlp=fuse_grouped_mlp, pad_multiple=256
+                )
+            ],
+        ).model
+
+    with pytest.raises(ValueError, match="GptOssGroupedExperts bypasses"):
+        convert_gpt_oss_tree(True)
+
+    experts = list(convert_gpt_oss_tree(False).traverse(GroupedExperts.Config))
+    assert experts
+    for _fqn, config, _parent, _attr in experts:
+        assert (
+            type(config) is get_mxfp8_grouped_experts_cls(GptOssGroupedExperts).Config
+        )
+        assert config.fuse_grouped_mlp is False
+
+
+def test_mxfp8_fused_grouped_mlp_alignment_matches_the_torchao_ops():
+    """The fusion's row and dim alignment constants are torchao's own; a torchao
+    that changes them must fail here rather than corrupt silently on the GPU
+    (the ops do not validate)."""
+    cudnn_grouped_mlp = pytest.importorskip(
+        "torchao.prototype.moe_training.kernels.mxfp8.cudnn_grouped_mlp"
+    )
+    assert _MXFP8_FUSED_MLP_ROW_ALIGNMENT == cudnn_grouped_mlp.ROW_GROUP_ALIGNMENT
+    assert _MXFP8_FUSED_MLP_DIM_ALIGNMENT == cudnn_grouped_mlp.DIM_ALIGNMENT
+
+
+_EXPERTS_DIMS = {"dim": 128, "hidden_dim": 256, "num_experts": 3}
+# Expert-major token groups on the fused kernels' 256-row padding: two full
+# groups around a zero-token expert.
+_NUM_TOKENS_PER_EXPERT_E = torch.tensor([256, 0, 256])
+_OFFSETS_E = torch.tensor([256, 256, 512], dtype=torch.int32)
+
+
+def test_mxfp8_grouped_mlp_unfused_delegates_to_the_stock_grouped_mlp(monkeypatch):
+    """Fusion off must reach ``GroupedExperts._grouped_mlp`` (hence the stock
+    three-GEMM path through the MXFP8 ``_grouped_mm``) with the seam's own
+    keywords and untouched operands, and ``forward`` returns its result as is."""
+    pytest.importorskip("torchao")
+    module = (
+        get_mxfp8_grouped_experts_cls(GroupedExperts).Config(**_EXPERTS_DIMS).build()
+    )
+    calls = []
+    out_RD = torch.full((512, 128), 7.0, dtype=torch.bfloat16)
+
+    def grouped_mlp(self, **kwargs):
+        calls.append((self, kwargs))
+        return out_RD
+
+    monkeypatch.setattr(GroupedExperts, "_grouped_mlp", grouped_mlp)
+    x_RD = torch.randn(512, 128)
+    y_RD = module(x_RD, _NUM_TOKENS_PER_EXPERT_E)
+
+    ((owner, kwargs),) = calls
+    assert owner is module
+    assert kwargs.keys() == {"x_RD", "w1_EFD", "w2_EDF", "w3_EFD", "offsets_E"}
+    assert kwargs["x_RD"] is x_RD
+    assert kwargs["w1_EFD"] is module.w1_EFD
+    assert kwargs["w2_EDF"] is module.w2_EDF
+    assert kwargs["w3_EFD"] is module.w3_EFD
+    assert kwargs["offsets_E"].dtype == torch.int32
+    assert torch.equal(kwargs["offsets_E"], _OFFSETS_E)
+    assert y_RD is out_RD
+
+
+def test_mxfp8_fused_grouped_mlp_hands_the_composite_the_cached_weight_operands(
+    monkeypatch,
+):
+    """Fusion on, with the composite's ``apply`` replaced by a recorder (the
+    kernels are SM100-only) and the weight quantizer by a stub handing out four
+    tensors per weight; the input validator runs for real. The composite
+    receives the BF16 input, the three parameters themselves (so autograd
+    returns the gradients to them), each weight's operands in the Function's
+    order, and int32 exclusive-end offsets of the padded groups; ``forward``
+    restores the caller's dtype."""
+    grouped_experts = pytest.importorskip(
+        "torchtitan.components.quantization.mxfp8.grouped_experts"
+    )
+    mxfp8_tensor = pytest.importorskip(
+        "torchtitan.components.quantization.mxfp8.tensor"
+    )
+    module = (
+        get_mxfp8_grouped_experts_cls(GroupedExperts)
+        .Config(**_EXPERTS_DIMS, fuse_grouped_mlp=True)
+        .build()
+    )
+
+    quantized, operands = [], []
+
+    def quantize_grouped_weight(weight_ENK):
+        quantized.append(weight_ENK)
+        operands.append(
+            mxfp8_tensor._MXFP8GroupedWeightOperands(
+                *(torch.empty(0) for _ in range(4))
+            )
+        )
+        return operands[-1]
+
+    calls = []
+
+    def apply(*args):
+        calls.append(args)
+        return torch.full((512, 128), 7.0, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(
+        grouped_experts, "_quantize_mxfp8_grouped_weight", quantize_grouped_weight
+    )
+    monkeypatch.setattr(grouped_experts._MXFP8FusedGroupedMLPFunction, "apply", apply)
+
+    x_RD = torch.randn(512, 128)
+    y_RD = module(x_RD, _NUM_TOKENS_PER_EXPERT_E)
+
+    ((x_arg, w1_EFD, w3_EFD, w2_EDF, *rest),) = calls
+    *operand_args, offsets_E, input_activation_format = rest
+    assert x_arg.dtype == torch.bfloat16
+    assert torch.equal(x_arg, x_RD.bfloat16())
+    assert w1_EFD is module.w1_EFD
+    assert w3_EFD is module.w3_EFD
+    assert w2_EDF is module.w2_EDF
+    # Without FSDP the operands are built per call from each wrapper's storage:
+    # gate, up, then down.
+    parameters = (module.w1_EFD, module.w3_EFD, module.w2_EDF)
+    assert all(
+        weight is parameter._tensor
+        for weight, parameter in zip(quantized, parameters, strict=True)
+    )
+    expected_operands = [
+        tensor
+        for weight_operands in operands
+        for tensor in (
+            weight_operands.weight_qdata_fprop_EKN,
+            weight_operands.weight_scale_fprop_swizzled,
+            weight_operands.weight_qdata_dgrad_ENK,
+            weight_operands.weight_scale_dgrad_swizzled,
+        )
+    ]
+    assert len(operand_args) == 12
+    assert all(
+        actual is expected
+        for actual, expected in zip(operand_args, expected_operands, strict=True)
+    )
+    assert offsets_E.dtype == torch.int32
+    assert torch.equal(offsets_E, _OFFSETS_E)
+    assert input_activation_format == module.input_activation_format_for_backward
+    # forward's trailing type_as restores the caller's dtype.
+    assert y_RD.dtype == x_RD.dtype
+    assert torch.equal(y_RD, torch.full_like(x_RD, 7.0))
+
+
+def test_mxfp8_fused_grouped_mlp_keeps_the_stock_parameters():
+    """The fusion reads the stock weights at call time, so the parameter set and
+    checkpoint keys match stock ``GroupedExperts``."""
+    pytest.importorskip("torchao")
+    stock = GroupedExperts.Config(**_EXPERTS_DIMS).build()
+    fused = (
+        get_mxfp8_grouped_experts_cls(GroupedExperts)
+        .Config(**_EXPERTS_DIMS, fuse_grouped_mlp=True)
+        .build()
+    )
+    assert (
+        dict(fused.named_parameters()).keys() == dict(stock.named_parameters()).keys()
+    )
+    stock_state = stock.state_dict()
+    fused_state = fused.state_dict()
+    assert fused_state.keys() == stock_state.keys()
+    for key, value in fused_state.items():
+        assert value.shape == stock_state[key].shape
 
 
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
