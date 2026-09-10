@@ -7,8 +7,10 @@
 import unittest
 
 import pytest
+import spmd_types as spmd
 import torch
 import torch.nn as nn
+from spmd_types.checker import typecheck
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -20,8 +22,14 @@ from torchtitan.components.optimizer import (
     register_moe_quantile_balancing_hook,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common import RouterGateLinear
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    dense_param_placement,
+)
 from torchtitan.models.common.moe import MoE, QuantileBalancedTopKRouter
+from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
 
 @pytest.mark.multi_gpu
@@ -36,14 +44,26 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_optimizer_hook_reduces_stacked_histograms_over_loss_mesh(self) -> None:
+    def test_distributed_quantile_balancing(self) -> None:
         device = torch.device(self.device_type, self.rank)
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=self.world_size,
+            world_size=self.world_size,
+        )
+        parallel_dims.build_mesh()
+        dense_mesh = parallel_dims.spmd_dense_mesh()
+
         model = nn.Module()
         moe_layers = []
         for layer_idx in range(2):
             router = QuantileBalancedTopKRouter.Config(
                 num_experts=4,
-                top_k=1,
+                top_k=2,
                 gate=RouterGateLinear.Config(
                     in_features=4,
                     out_features=4,
@@ -76,12 +96,12 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
         local_bias_LRE = torch.tensor(
             [
                 [
-                    [-0.5, -0.1, 0.1, 0.5],
-                    [0.5, 0.1, -0.5, -0.1],
+                    [-0.55, -0.15, 0.25, 0.45],
+                    [0.45, 0.25, -0.55, -0.15],
                 ],
                 [
-                    [-0.1, -0.5, 0.5, 0.1],
-                    [0.1, 0.5, -0.1, -0.5],
+                    [-0.15, -0.55, 0.45, 0.25],
+                    [0.25, 0.45, -0.15, -0.55],
                 ],
             ],
             device=device,
@@ -97,17 +117,45 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
         for layer_idx, moe in enumerate(moe_layers):
             router = moe.router
             local_scores_TE = score_rows_LRE[layer_idx, self.rank].expand(4, -1)
+            input_TD = torch.logit(local_scores_TE)
             with torch.no_grad():
                 router.gate.weight.copy_(torch.eye(4, device=device))
-            _, _, routing_map_TE = router(
-                torch.logit(local_scores_TE), moe.expert_bias_E
+            with set_current_spmd_mesh(dense_mesh), typecheck(local=False):
+                spmd.assert_type(
+                    input_TD,
+                    dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+                )
+                spmd.assert_type(
+                    router.gate.weight,
+                    dense_param_placement(tp=spmd.R),
+                )
+                spmd.assert_type(
+                    moe.expert_bias_E,
+                    dense_param_placement(tp=spmd.R),
+                )
+                topk_scores_TK, topk_expert_ids_TK, routing_map_TE = router(
+                    input_TD,
+                    moe.expert_bias_E,
+                )
+
+            self.assertTrue(topk_expert_ids_TK.is_contiguous())
+            dispatcher = LocalTokenDispatcher.Config(
+                num_experts=4,
+                top_k=2,
+            ).build()
+            routed_input_RD, _, _ = dispatcher.dispatch(
+                input_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                routing_map_TE.sum(dim=0),
             )
+            self.assertEqual(routed_input_RD.shape, (8, 4))
 
             histogram_EB = router.quantile_balancer.required_bias_histogram_EB
             histograms.append(histogram_EB)
             torch.testing.assert_close(
                 routing_map_TE.sum(dim=-1),
-                torch.ones(4, dtype=torch.int64, device=device),
+                torch.full((4,), 2, dtype=torch.int64, device=device),
             )
             torch.testing.assert_close(
                 histogram_EB.sum(dim=-1),
@@ -137,16 +185,6 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
                 )
             ],
         ).build(model_parts=[model])
-        parallel_dims = ParallelDims(
-            dp_replicate=1,
-            dp_shard=self.world_size,
-            cp=1,
-            tp=1,
-            pp=1,
-            ep=self.world_size,
-            world_size=self.world_size,
-        )
-        parallel_dims.build_mesh()
         register_moe_quantile_balancing_hook(
             optimizers,
             [model],
