@@ -13,9 +13,10 @@ import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
+from typing_extensions import override
 
-from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import CompileConfig, ParallelismConfig
+from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss, LossConfig
+from torchtitan.config import CompileConfig, Configurable, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -420,21 +421,34 @@ def apply_fsdp_to_mtp_decoder(
             del model.layers[key]
 
 
-class MTPLoss(CrossEntropyLoss):
+class MTPLoss(
+    Configurable,
+    Loss[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]],
+):
     """DeepSeek-V3 weighted multi-term cross-entropy objective."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CrossEntropyLoss.Config):
+    class Config(
+        LossConfig[
+            tuple[torch.Tensor, ...],
+            tuple[torch.Tensor, ...],
+        ]
+    ):
         mtp_scale: float = 0.3
+        global_vocab_size: int | None = None
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        super().__init__(config, compile_config=compile_config)
+        self.cross_entropy = CrossEntropyLoss(
+            CrossEntropyLoss.Config(global_vocab_size=config.global_vocab_size),
+            compile_config=compile_config,
+        )
         self.mtp_scale = config.mtp_scale
 
+    @override
     def __call__(
         self,
-        pred: torch.Tensor | tuple[torch.Tensor, ...],
-        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        pred: tuple[torch.Tensor, ...],
+        labels: tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -454,7 +468,7 @@ class MTPLoss(CrossEntropyLoss):
                 "prediction."
             )
         mtp_weight = self.mtp_scale / num_mtp_layers
-        main_loss, _ = super().__call__(pred[0], labels[0])
+        main_loss, _ = self.cross_entropy(pred[0], labels[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
         if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
@@ -463,7 +477,7 @@ class MTPLoss(CrossEntropyLoss):
                 dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
             )
         for mtp_pred, mtp_labels in zip(pred[1:], labels[1:], strict=True):
-            depth_loss, _ = super().__call__(mtp_pred, mtp_labels)
+            depth_loss, _ = self.cross_entropy(mtp_pred, mtp_labels)
             mtp_loss = mtp_loss + depth_loss * mtp_weight
         loss = main_loss + mtp_loss
         if global_valid_tokens is not None:
