@@ -340,20 +340,14 @@ def _validate_disjoint_regions_in_bounds(
         f"{direction} regions must be in bounds",
     )
 
-    positive_regions = [region for region in regions if region.numel]
-    if len(positive_regions) < 2:
-        return
-    # Multiple scalar regions overlap.
-    _require_valid_plan(
-        bool(bounds_shape),
-        "overlapping logical tensor regions are not supported",
+    positive_regions = sorted(
+        (region for region in regions if region.numel),
+        key=lambda region: region.offsets,
     )
-    positive_regions.sort(key=lambda region: region.offsets[0])
     for index, first in enumerate(positive_regions):
-        first_end = first.offsets[0] + first.shape[0]
         for other_index in range(index + 1, len(positive_regions)):
             second = positive_regions[other_index]
-            if second.offsets[0] >= first_end:
+            if bounds_shape and second.offsets[0] >= first.offsets[0] + first.shape[0]:
                 break
             _require_valid_plan(
                 not all(
