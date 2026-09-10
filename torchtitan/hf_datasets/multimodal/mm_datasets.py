@@ -451,11 +451,6 @@ def _packing_output_to_mm_sample(
     max_context_length: int,
 ) -> dict[str, Any]:
     """Restore Torch token fields and flatten per-document media lists."""
-    # Grain numbers each packed document from 1 and leaves 0 on the padding it
-    # appends. The packer also pads positions with a constant 0, which would
-    # read as one document start per padded token; number the padding like the
-    # collator's tail instead, so it forms segments of at most one context
-    # window.
     padding_mask = np.asarray(packing_output["input_ids_segment_ids"]) == 0
     positions = np.asarray(packing_output["positions"]).copy()
     if np.any(padding_mask):
