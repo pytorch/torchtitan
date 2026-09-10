@@ -27,25 +27,19 @@ class _AnchorFirer:
     """Runs the planned encodes after the action they are anchored to.
 
     Anchored on the action BEFORE the idle interval and fired after it returns, so the
-    encode occupies the gap from its start. The first attempt anchored on the action
-    AFTER the interval and hooked ``fwd_recv_ops.pop`` -- the moment the runtime is
-    about to wait for a receive. Correct in principle and useless in practice: the rank
-    owning the tower owns pipeline stage 0, whose forward receives nothing, so no pop
-    ever happens for it. That version planned 8 placements on a real pp8xvp4 cell and
-    fired 0, which the fired-vs-placed warning reported rather than hiding.
+    encode occupies the gap from its start. Anchoring on the action after the
+    interval would hook the receive wait, which the rank owning the tower never
+    enters: its stage 0 forward receives nothing.
     """
 
     def __init__(self, on_anchor) -> None:
         self._on_anchor = on_anchor
         self._by_anchor: dict[tuple[int, int], list[int]] = {}
         self.fired = 0
-        # Wall-clock actually spent inside the planned encodes, and the count of them.
-        # The plan is built from a STATIC cost ratio, and this session paid for the gap
-        # that leaves: a ratio measured at seq 4096 (0.493) was handed to a seq-256 cell
-        # where the true value is about 14, so each encode overran its interval roughly
-        # 28-fold. Every counter still read green, because "ran at the planned point" was
-        # true -- occupancy is not hiding. Measuring the encodes is what makes that
-        # visible as something other than a slower step.
+        # Wall-clock spent inside the planned encodes, and their count. The plan
+        # is built from a static cost ratio; a ratio wrong for the cell lets an
+        # encode overrun its interval while every counter still reads "ran at
+        # the planned point". The time makes that visible.
         self.encode_seconds = 0.0
         self.encode_calls = 0
 

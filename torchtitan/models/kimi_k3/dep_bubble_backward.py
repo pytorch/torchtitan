@@ -54,10 +54,9 @@ def cut_for_deferred_backward(
     The detach makes the tower's graph unreachable from the text's, which is what keeps
     the text's ``.backward()`` from freeing it. An ``autograd.Function`` wrapping the
     tower's output does NOT achieve that even when its backward returns ``None``:
-    measured, the deferred pass then dies with "Trying to backward through the graph a
-    second time", and it only survives if the text backward is given
-    ``retain_graph=True`` -- which would mean holding the whole text graph for the sake
-    of the tower, and the pipeline calls that backward itself.
+    the deferred pass then backwards through a graph the text backward has freed,
+    unless that backward is given ``retain_graph=True``, which would hold the whole
+    text graph for the sake of the tower, and the pipeline calls that backward itself.
 
     The hook, rather than a Function, is what fires at the right moment without putting
     anything back in the graph: ``detached`` is a leaf of the text graph, so autograd
@@ -69,9 +68,7 @@ def cut_for_deferred_backward(
         # case under LoRA when no adapter sits inside it. Cutting anyway would be worse
         # than useless -- it introduces a grad-requiring leaf where the graph had none,
         # so the splicing stage's output starts requiring grad and torch's stage_backward
-        # is dragged down a path it would not have taken. Measured: LoRA + bubble died in
-        # stage_backward with "grad can be implicitly created only for scalar outputs"
-        # while full-parameter passed.
+        # is dragged down a path it would not have taken.
         return features
 
     detached = features.detach().requires_grad_(True)
@@ -94,11 +91,10 @@ class GradQueue:
     immediately, turning the memory window into a configured quantity instead of
     whatever the plan happened to imply.
 
-    Zero means unbounded, and that is the default deliberately. The window has not
-    been measured (it needs a box that can hold the configuration where hiding
-    exists), so a nonzero default would replace a known behaviour with a guessed
-    number. What the bound is for is the run that hits its memory ceiling: there it
-    is a knob rather than a rewrite.
+    Zero means unbounded, the default: the right bound is the memory window of
+    the configuration that hides the encodes, which a run at that scale sets.
+    The bound is for the run that hits its memory ceiling; there it is a knob
+    rather than a rewrite.
     """
 
     def __init__(self, max_pending: int = 0) -> None:

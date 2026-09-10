@@ -132,23 +132,18 @@ def plan_for_rank(
     # fires after it returns -- the start of the idle interval, reachable without any
     # receive to hook.
     #
-    # Anchoring on the action AFTER the bubble was the first attempt and it cannot work
-    # where it matters. The hook available there is fwd_recv_ops.pop, the moment the
-    # runtime is about to wait for a receive; but the rank owning the tower owns
-    # pipeline stage 0, whose forward receives nothing, so no pop ever happens for it.
-    # Measured on a real pp8xvp4 cell: 8 placements planned, 0 fired, which the
-    # fired-vs-placed warning reported instead of hiding.
+    # Anchoring on the action AFTER the bubble cannot work where it matters: the
+    # hook there is the receive wait, and the rank owning the tower owns stage
+    # 0, whose forward receives nothing.
     prev: tuple[str, int, int] | None = None
     for slot, action in enumerate(actions):
         if action is None:
             budget += 1.0
             idle += 1
-            # Keep placing while this bubble's accumulated budget can pay. The previous
-            # version placed at most ONE encode per idle slot, which made `placed` bounded
-            # by the idle-slot count no matter how small the cost ratio got -- and a small
-            # cost ratio is precisely what dynamic CP produces, since it divides the
-            # per-rank encoder cost before DEP sees it. Measured at pp4 x mb64: 14 idle
-            # slots, 4 placed, 56 left synchronous.
+            # Keep placing while this bubble's accumulated budget can pay: one
+            # encode per idle slot would bound the placements by the slot count
+            # however small the cost ratio, and dynamic CP makes it small by
+            # dividing the per-rank encoder cost before DEP sees it.
             if prev is not None:
                 while budget >= cost_ratio:
                     k = next(

@@ -37,10 +37,9 @@ class VisionPrefetcher:
         # done when its forward asked for it, which is the whole claim.
         self._hits = 0
         self._misses = 0
-        # Async bookkeeping. The overlap metric is DEFAULT-STREAM TIME BETWEEN ISSUE AND
-        # JOIN, not "was the encode complete on arrival" -- that first attempt was useless
-        # because the synchronous wrapper also leaves the encode complete by the time
-        # take() runs, so it read the same either way. Time on the current stream between
+        # Async bookkeeping. The overlap metric is the default-stream time between
+        # issue and join, not whether the encode was complete on arrival, which
+        # the synchronous path satisfies as well. Time on the current stream between
         # ensure() and take() is zero when the issue path joins immediately and positive
         # only when real work was interleaved.
         self._pending: dict[int, object] = {}
@@ -49,7 +48,7 @@ class VisionPrefetcher:
         # whether there is anything to hide at all: if it is microseconds, no scheduling
         # change can show up in a step time, and that is a fact about the config rather
         # than about the implementation.
-        self._encode_spans: list[tuple[object, object]] = []
+        self._encode_spans: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 
     def begin_step(self, kwarg_mbs) -> None:
         """Record the step's per-micro-batch kwargs and reset the cache.
