@@ -36,6 +36,7 @@ from torch_checkpointing.distributed_metadata import (
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
 from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
+from torch_checkpointing.hf.quantized_resharder import QuantizedHuggingFaceResharder
 from torch_checkpointing.logging_utils import checkpoint_logging_context, EventLogger
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
@@ -334,11 +335,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        if from_quantized:
-            raise ValueError(
-                "TorchCheckpointingManager does not support loading "
-                "quantized Hugging Face checkpoints."
-            )
         if from_hf and self.sd_adapter is None:
             raise ValueError(
                 "checkpoint.initial_load_in_hf is True, but sd_adapter "
@@ -368,10 +364,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             hf_model_spec = ItemSpec(
                 requires_copy=model_spec.requires_copy,
                 layout=model_spec.layout,
-                # DefaultResharder reads safetensors sources directly, so the
-                # HF load needs no dedicated resharder. Mirrors the HF save
-                # path, which derives its spec the same way.
-                resharder=model_spec.resharder,
+                resharder=(
+                    QuantizedHuggingFaceResharder()
+                    if from_quantized
+                    else model_spec.resharder
+                ),
                 required=model_spec.required,
             )
             hf_config = _default_backend_config(

@@ -4,15 +4,46 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import torch
+from safetensors.torch import save_file
 from torch.nn.attention.flex_attention import BlockMask
 
+from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
+from torchtitan.components.checkpointer.torch_checkpointing import (
+    TorchCheckpointingManager,
+)
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+
+
+_E2M1_VALUES = torch.tensor(
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ]
+)
 
 
 def _small_model_config() -> KimiK3Model.Config:
@@ -228,6 +259,100 @@ class TestKimiK3(unittest.TestCase):
         self.assertEqual(state_dict.keys(), roundtrip_state_dict.keys())
         for key, value in state_dict.items():
             torch.testing.assert_close(value, roundtrip_state_dict[key])
+
+    def test_quantized_hf_checkpoint_loads_through_adapter(self):
+        torch.manual_seed(3)
+        config = _small_model_config()
+        source_model = config.build()
+        source_model.init_states()
+        adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = adapter.to_hf(source_model.state_dict())
+
+        checkpoint_state: dict[str, torch.Tensor] = {}
+        expected_hf_state: dict[str, torch.Tensor] = {}
+        num_quantized_weights = 0
+        for key, value in hf_state_dict.items():
+            value = value.detach().contiguous()
+            if ".block_sparse_moe.experts." not in key:
+                checkpoint_state[key] = value
+                expected_hf_state[key] = value
+                continue
+
+            self.assertTrue(key.endswith(".weight"))
+            self.assertEqual(0, value.shape[-1] % 32)
+            codes = (
+                torch.arange(value.numel(), dtype=torch.uint8).reshape(value.shape) % 16
+            )
+            checkpoint_state[f"{key}_packed"] = codes[..., 0::2] | (
+                codes[..., 1::2] << 4
+            )
+            checkpoint_state[f"{key}_scale"] = torch.full(
+                (*value.shape[:-1], value.shape[-1] // 32),
+                127,
+                dtype=torch.uint8,
+            )
+            expected_hf_state[key] = _E2M1_VALUES[codes.long()].to(value.dtype)
+            num_quantized_weights += 1
+
+        self.assertEqual(6, num_quantized_weights)
+        expected_state_dict = adapter.from_hf(expected_hf_state)
+
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            checkpoint_path = Path(checkpoint_dir)
+            save_file(checkpoint_state, checkpoint_path / "model.safetensors")
+            quantization_config = {
+                "quant_method": "compressed-tensors",
+                "format": "mxfp4-pack-quantized",
+                "config_groups": {
+                    "group_0": {
+                        "format": "mxfp4-pack-quantized",
+                        "targets": ["Linear"],
+                        "weights": {
+                            "group_size": 32,
+                            "num_bits": 4,
+                            "scale_dtype": "torch.uint8",
+                            "strategy": "group",
+                            "symmetric": True,
+                            "type": "float",
+                        },
+                    }
+                },
+            }
+            (checkpoint_path / "config.json").write_text(
+                json.dumps(
+                    {"text_config": {"quantization_config": quantization_config}}
+                )
+            )
+
+            target_model = config.build()
+            target_model.init_states()
+            manager_config = TorchCheckpointingManager.Config(
+                enable=True,
+                keep_latest_k=0,
+                initial_load_path=checkpoint_dir,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+                initial_load_in_hf_quantized=True,
+                load_only=True,
+            )
+            manager = manager_config.build(
+                dataloader=None,
+                model_parts=[target_model],
+                optimizers=mock.Mock(),
+                lr_schedulers=mock.Mock(),
+                states={},
+                sd_adapter=adapter,
+                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
+            )
+            try:
+                self.assertTrue(manager.load())
+            finally:
+                manager.close()
+
+        actual_state_dict = target_model.state_dict()
+        self.assertEqual(expected_state_dict.keys(), actual_state_dict.keys())
+        for key, expected in expected_state_dict.items():
+            torch.testing.assert_close(actual_state_dict[key], expected)
 
 
 if __name__ == "__main__":

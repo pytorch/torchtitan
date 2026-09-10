@@ -33,6 +33,7 @@ from torch_checkpointing.config import (
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.hf.quantized_resharder import QuantizedHuggingFaceResharder
 from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
@@ -960,12 +961,14 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             self.assertEqual([], adapter.from_hf_calls)
             manager.close()
 
-    def test_hf_load_rejects_quantized_checkpoint(self) -> None:
+    def test_hf_load_uses_quantized_resharder(self) -> None:
         with tempfile.TemporaryDirectory() as base_folder:
             checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
             os.makedirs(checkpoint_id)
             with open(os.path.join(checkpoint_id, "model.safetensors"), "wb"):
                 pass
+            model = nn.Linear(2, 2, bias=False)
+            adapter = _StateDictAdapter()
             config = TorchCheckpointingManager.Config(
                 enable=True,
                 keep_latest_k=0,
@@ -975,16 +978,37 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 initial_load_in_hf_quantized=True,
                 load_only=True,
             )
-            manager, backend_manager = self._build_manager(
-                config,
-                base_folder=base_folder,
-                sd_adapter=_StateDictAdapter(),
+            backend_manager = _BackendManager()
+            hf_manager = _BackendManager()
+
+            with mock.patch.object(
+                BackendCheckpointManager.Config,
+                "build",
+                autospec=True,
+                side_effect=[backend_manager, hf_manager],
+            ) as build:
+                manager = config.build(
+                    dataloader=None,
+                    model_parts=[model],
+                    optimizers=_Stateful("optimizer"),
+                    lr_schedulers=_Stateful("scheduler"),
+                    states={"train_state": _Stateful("train")},
+                    sd_adapter=adapter,
+                    base_folder=base_folder,
+                )
+
+                self.assertTrue(manager.load())
+
+            hf_config = build.call_args_list[1].args[0]
+            self.assertIsInstance(
+                hf_config.items[MODEL].resharder,
+                QuantizedHuggingFaceResharder,
             )
-
-            with self.assertRaisesRegex(ValueError, "quantized"):
-                manager.load()
-
             self.assertEqual([], backend_manager.load_calls)
+            self.assertEqual(1, len(hf_manager.load_calls))
+            self.assertEqual(checkpoint_id, hf_manager.load_calls[0][0])
+            self.assertIs(adapter.to_hf_results[0], hf_manager.load_calls[0][1][MODEL])
+            self.assertEqual({"strict": True}, hf_manager.load_calls[0][2])
             manager.close()
 
     def test_native_load_restores_model_and_optimizer(self) -> None:
