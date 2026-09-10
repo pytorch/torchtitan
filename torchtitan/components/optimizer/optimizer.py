@@ -56,8 +56,8 @@ class ParamGroupConfig:
     """Configuration for a parameter group with its own optimizer.
 
     Each entry specifies a regex pattern matching parameter FQNs and a
-    self-contained optimizer setup. ``optimizer_name`` and ``optimizer_kwargs``
-    fully define the optimizer for matched parameters — no implicit inheritance.
+    self-contained optimizer setup. ``optimizer`` fully defines the optimizer
+    for matched parameters -- no implicit inheritance.
 
     Patterns are checked in order; first match wins. Place specific patterns
     before a broad fallback pattern. Example::
