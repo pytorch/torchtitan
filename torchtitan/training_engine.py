@@ -17,7 +17,7 @@ from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedLossWrapper, Loss
 from torchtitan.components.optim import Optim
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
@@ -127,7 +127,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         sdc_replayer: SDCReplayer.Config | None = None
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
-        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+        loss: Loss.Config = field(default_factory=Loss.Config)
         dist_moe_runtime: Configurable.Config | None = None
         """Optional rank-wide Dist-MoE memory and pipeline-slot policy."""
 
@@ -230,7 +230,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     model_parts: list[BaseModel]
     model_config: BaseModel.Config
     output_dir: str
-    loss_fn: BaseLoss
+    loss_fn: Loss[Any]
     optim: Optim
     checkpointer: BaseCheckpointManager
     pp_has_last_stage: bool

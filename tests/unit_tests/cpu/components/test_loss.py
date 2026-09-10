@@ -25,21 +25,21 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    Loss,
 )
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import (
     get_mtp_token_counts,
+    MTPCrossEntropyLoss,
     MTPDecoder,
-    MTPLoss,
     roll_mtp_sequence,
 )
 from torchtitan.models.llama3 import build_model_config
@@ -248,16 +248,16 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
         torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
-    def test_mtp_loss_rejects_plain_tensor(self):
-        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+    def test_mtp_cross_entropy_loss_rejects_plain_tensor(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
         labels = torch.zeros(1, 4, dtype=torch.long)
 
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
             loss_fn(pred, labels)
 
-    def test_mtp_loss_uses_each_depth_target_count(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_uses_each_depth_target_count(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4, requires_grad=True) for _ in range(3))
         labels = (
             torch.zeros(4, dtype=torch.long),
@@ -274,8 +274,8 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(logits[1].grad[0, 0], torch.tensor(-0.15 * 0.75 / 3))
         torch.testing.assert_close(logits[2].grad[0, 0], torch.tensor(-0.15 * 0.75 / 2))
 
-    def test_mtp_loss_without_counts_returns_unnormalized_sum(self):
-        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+    def test_mtp_cross_entropy_loss_without_counts_returns_unnormalized_sum(self):
+        loss_fn = MTPCrossEntropyLoss(MTPCrossEntropyLoss.Config(mtp_scale=0.3))
         logits = tuple(torch.zeros(4, 4) for _ in range(2))
         labels = tuple(torch.zeros(4, dtype=torch.long) for _ in range(2))
 
@@ -763,18 +763,18 @@ class _FakeMTPDecoder(MTPDecoder):
         return {}
 
 
-class _WeightedTwoOutputLoss(BaseLoss):
+class _WeightedTwoOutputLoss(Loss[tuple[torch.Tensor, ...]]):
     """Two-output objective used to exercise generic chunked-loss plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(Loss.Config):
         pass
 
     auxiliary_weight = 0.25
 
     def __init__(self, config: Config):
         del config
-        self.fn = cross_entropy_loss
+        self._loss_fn = cross_entropy_loss
 
     def __call__(
         self,
@@ -786,9 +786,9 @@ class _WeightedTwoOutputLoss(BaseLoss):
         del loss_inputs
         if not isinstance(pred, tuple) or not isinstance(labels, tuple):
             raise ValueError("Expected prediction and labels tuples.")
-        loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
-            pred[1], labels[1]
-        )
+        loss = self._loss_fn(
+            pred[0], labels[0]
+        ) + self.auxiliary_weight * self._loss_fn(pred[1], labels[1])
         if global_loss_token_counts is not None:
             loss = loss / global_loss_token_counts
         return loss, {}
@@ -1150,11 +1150,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
         model_ref, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked, _ = self._make_model_and_loss(dim, vocab_size, num_chunks)
         model_chunked.output.load_state_dict(model_ref.output.state_dict())
-        loss_config = MTPLoss.Config(
+        loss_config = MTPCrossEntropyLoss.Config(
             mtp_scale=0.3,
             global_vocab_size=vocab_size,
         )
-        full_loss = MTPLoss(loss_config)
+        full_loss = MTPCrossEntropyLoss(loss_config)
         chunked_loss = ChunkedLossWrapper(
             ChunkedLossWrapper.Config(
                 num_chunks=num_chunks,

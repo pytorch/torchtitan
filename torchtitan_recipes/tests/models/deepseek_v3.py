@@ -33,7 +33,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 
 from torchtitan.models.deepseek_v3 import build_model_config
-from torchtitan.models.deepseek_v3.mtp import MTPLoss
+from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
@@ -123,7 +123,7 @@ def deepseek_v3_debugmodel_mtp(
     )
     config.dataloader.num_mtp_layers = num_mtp_layers
     config.loss = ChunkedLossWrapper.Config(
-        loss_fn=MTPLoss.Config(
+        loss_fn=MTPCrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),
         ),
     )
