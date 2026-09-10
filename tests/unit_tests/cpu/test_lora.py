@@ -96,7 +96,7 @@ def test_lora_targets_fused_feed_forward_projection():
         LoRAConverter.Config(
             rank=2,
             alpha=4.0,
-            target_modules=["w13"],
+            target_modules=["w1", "w3"],
         )
     ).convert(config)
     feed_forward = config.build()
@@ -157,7 +157,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
         LoRAConverter.Config(
             rank=4,
             alpha=8.0,
-            target_modules=["w13"],
+            target_modules=["w1", "w3"],
         )
     ).convert(config)
     feed_forward = config.build()
@@ -175,17 +175,18 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
 
 @pytest.mark.parametrize("target", ["w1", "w3"])
-def test_lora_rejects_logical_feed_forward_projection(target):
+def test_lora_requires_both_gate_up_configs(target):
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
         w1=Linear.Config(in_features=4, out_features=8, param_init=init),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
         w3=Linear.Config(in_features=4, out_features=8, param_init=init),
     )
-    with pytest.raises(ValueError, match="part of the fused w13 projection"):
-        LoRAConverter(
-            LoRAConverter.Config(rank=2, alpha=4.0, target_modules=[target])
-        ).convert(config)
+    config = LoRAConverter(
+        LoRAConverter.Config(rank=2, alpha=4.0, target_modules=[target])
+    ).convert(config)
+    with pytest.raises(ValueError, match="different implementations"):
+        config.build()
 
 
 def test_validate_converter_order():
