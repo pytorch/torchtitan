@@ -14,19 +14,19 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.distributed import ParallelDims
-from torchtitan.models.common import RouterGateLinear
-from torchtitan.models.common.moe import MoE
-from torchtitan.models.kimi_k3.quantile_balance import (
-    QuantileBalancedTopKRouter,
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    ParamGroupConfig,
     register_moe_quantile_balancing_hook,
 )
+from torchtitan.distributed import ParallelDims
+from torchtitan.models.common import RouterGateLinear
+from torchtitan.models.common.moe import MoE, QuantileBalancedTopKRouter
 
 
 @pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
-class TestKimiK3QuantileBalancingDistributed(DTensorTestBase):
+class TestQuantileBalancingDistributed(DTensorTestBase):
     @property
     def world_size(self) -> int:
         return 2
@@ -68,8 +68,12 @@ class TestKimiK3QuantileBalancingDistributed(DTensorTestBase):
         local_scores_TE = score_rows_RE[self.rank].expand(4, -1)
         with torch.no_grad():
             router.gate.weight.copy_(torch.eye(4, device=device))
-        router(torch.logit(local_scores_TE), moe.expert_bias_E)
+        _, _, routing_map_TE = router(torch.logit(local_scores_TE), moe.expert_bias_E)
 
+        torch.testing.assert_close(
+            routing_map_TE.sum(dim=-1),
+            torch.ones(4, dtype=torch.int64, device=device),
+        )
         torch.testing.assert_close(
             histogram_EB.sum(dim=-1),
             torch.full((4,), 4, dtype=torch.int64, device=device),
