@@ -43,10 +43,16 @@ from .base import (
     purge_thread,
 )
 
+# "EMA" is also the class name (torchtitan.components.ema.EMA), aliased on
+# import below to avoid shadowing this state-dict key constant, which follows
+# the same NAME = "name" convention as MODEL/OPTIMIZER/etc. above.
+EMA = "ema"
+
 if TYPE_CHECKING:
     import torch.nn as nn
 
     from torchtitan.components.data.loader import BaseDataLoader
+    from torchtitan.components.ema import EMA as EMAContainer  # noqa: N811
     from torchtitan.components.optimizer import (
         LRSchedulersContainer,
         OptimizersContainer,
@@ -122,8 +128,10 @@ class CheckpointManager(BaseCheckpointManager):
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
+        ema (Optional[EMA]): Online EMA of model weights, or None when the
+            user hasn't configured one (see torchtitan.components.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
-            previous 4 components.
+            previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
@@ -155,6 +163,7 @@ class CheckpointManager(BaseCheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
+        ema: EMAContainer | None,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
@@ -177,6 +186,8 @@ class CheckpointManager(BaseCheckpointManager):
                 LR_SCHEDULER: lr_schedulers,
             }
         )
+        if ema is not None:
+            self.states[EMA] = ema
 
         # Loading & Saving Policy
         self.load_only = config.load_only
@@ -602,6 +613,13 @@ class CheckpointManager(BaseCheckpointManager):
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
+        # EMA is excluded from loading (e.g. resuming with EMA newly enabled
+        # against a checkpoint that predates it, or was saved with EMA off)
+        # via the same exclude_from_loading a caller uses for any other
+        # optional state -- reseed it from the just-loaded model weights
+        # rather than leaving it at its pre-load (fresh-init) values.
+        if not model_only and EMA in self.exclude_from_loading and EMA in self.states:
+            self.states[EMA].load_state_dict({})
 
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
