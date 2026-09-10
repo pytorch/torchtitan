@@ -134,6 +134,23 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
 
+@torch.library.custom_op(
+    "torchtitan_graph_trainer_test::ordered_identity", mutates_args=()
+)
+def _ordered_identity(x: torch.Tensor) -> torch.Tensor:
+    """Return a distinct tensor while representing an ordered effect."""
+    return x.clone()
+
+
+@_ordered_identity.register_fake
+def _ordered_identity_fake(x: torch.Tensor) -> torch.Tensor:
+    """Describe the ordered identity output during fake execution."""
+    return torch.empty_like(x)
+
+
+_ordered_identity.register_effect(torch.library.EffectType.ORDERED)
+
+
 class TestDefaultTransformerBlockBuckets(TestCase):
     def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
         from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -1425,6 +1442,30 @@ class TestApplySACPass(TestCase):
         self.assertEqual(
             tags[torch.ops.aten.relu.default], CheckpointPolicy.MUST_RECOMPUTE
         )
+
+    def test_effectful_ops_are_saved_and_not_rematerialized(self):
+        """An ordered operation must not be copied into the backward graph."""
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        ordered_identity = (
+            torch.ops.torchtitan_graph_trainer_test.ordered_identity.default
+        )
+        effect = graph.call_function(ordered_identity, args=(x,))
+        backward = graph.call_function(torch.ops.aten.mul.Tensor, args=(effect, 2))
+        backward.meta["autograd_backward"] = True
+        graph.output(backward)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        self.assertEqual(effect.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+        selective_activation_remat_pass(gm)
+        effect_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function" and node.target is ordered_identity
+        ]
+        self.assertEqual(effect_nodes, [effect])
 
     def test_getitem_propagates_parent_tags(self):
         """operator.getitem nodes should inherit the parent's recompute tag."""
