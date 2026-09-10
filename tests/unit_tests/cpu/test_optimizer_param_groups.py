@@ -6,8 +6,10 @@
 
 import tempfile
 import unittest
+from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import Mock, patch
 
 import torch
@@ -16,9 +18,12 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torchtitan.components.optimizer import (
+    Adam,
+    AdamW,
     default_adamw,
     LRSchedulersContainer,
     OptimizersContainer,
+    Optimizer,
     ParamGroupConfig,
     register_moe_load_balancing_hook,
 )
@@ -99,36 +104,81 @@ class FakeParallelDims:
 # Default AdamW param group for catch-all
 _DEFAULT_ADAMW = ParamGroupConfig(
     pattern=r".*",
-    optimizer_name="AdamW",
-    optimizer_kwargs={
-        "lr": 1e-3,
-        "betas": (0.9, 0.95),
-        "eps": 1e-8,
-        "weight_decay": 0.1,
-    },
+    optimizer=AdamW.Config(
+        lr=1e-3, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1
+    ),
 )
 
 
-class TestParamGroupConfigOptimizerName(unittest.TestCase):
-    """Validate optimizer_name at ParamGroupConfig construction, without a model."""
+class TestOptimizerBatching(unittest.TestCase):
+    """Groups of one optimizer class batch into a single instance."""
 
-    def test_accepts_known_optimizer_names(self):
-        for name in ("Adam", "AdamW", "DistMuon"):
-            with self.subTest(name=name):
-                pg = ParamGroupConfig(pattern=r".*", optimizer_name=name)
-                self.assertEqual(pg.optimizer_name, name)
+    def _build(self, param_groups):
+        model = SimpleModel()
+        config = OptimizersContainer.Config(param_groups=param_groups)
+        return config.build(model_parts=[model])
 
-    def test_rejects_unknown_optimizer_names(self):
-        for name in ("Adamw", "foo"):
-            with self.subTest(name=name):
-                with self.assertRaises(ValueError) as ctx:
-                    ParamGroupConfig(pattern=r".*", optimizer_name=name)
-                msg = str(ctx.exception)
-                self.assertIn(name, msg)
-                self.assertIn("Allowed names:", msg)
-                self.assertIn("Adam", msg)
-                self.assertIn("AdamW", msg)
-                self.assertIn("DistMuon", msg)
+    def test_same_class_batches_into_one_instance(self):
+        container = self._build(
+            [
+                ParamGroupConfig(
+                    pattern=r".*norm.*", optimizer=AdamW.Config(lr=1e-4)
+                ),
+                ParamGroupConfig(pattern=r".*", optimizer=AdamW.Config(lr=1e-3)),
+            ]
+        )
+        self.assertEqual(len(container.optimizers), 1)
+        self.assertEqual(len(container.optimizers[0].param_groups), 2)
+        self.assertEqual(
+            [group["lr"] for group in container.optimizers[0].param_groups],
+            [1e-4, 1e-3],
+        )
+
+    def test_different_classes_get_separate_instances(self):
+        container = self._build(
+            [
+                ParamGroupConfig(
+                    pattern=r".*norm.*", optimizer=Adam.Config(lr=1e-4)
+                ),
+                ParamGroupConfig(pattern=r".*", optimizer=AdamW.Config(lr=1e-3)),
+            ]
+        )
+        self.assertEqual(len(container.optimizers), 2)
+        self.assertEqual(
+            sorted(type(opt).__name__ for opt in container.optimizers),
+            ["Adam", "AdamW"],
+        )
+
+
+class TestFactoryKwargAgreement(unittest.TestCase):
+    """Batched groups share one constructor, so factory kwargs must agree."""
+
+    def test_disagreeing_factory_kwargs_raise(self):
+        @dataclass(kw_only=True, slots=True)
+        class _FakeConfig(Optimizer.Config):
+            _FACTORY_FIELDS: ClassVar[frozenset[str]] = frozenset({"widget"})
+
+            lr: float = 1e-3
+            widget: str = "a"
+
+        class _Fake(Optimizer):
+            Config = _FakeConfig
+
+            def __init__(self, config, *, params):
+                torch.optim.Optimizer.__init__(self, params, {"lr": config.lr})
+
+        _FakeConfig._owner = _Fake
+
+        config = OptimizersContainer.Config(
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*norm.*", optimizer=_FakeConfig(widget="a")
+                ),
+                ParamGroupConfig(pattern=r".*", optimizer=_FakeConfig(widget="b")),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "factory arguments"):
+            config.build(model_parts=[SimpleModel()])
 
 
 def _get_param_names_in_group(model, group):
@@ -271,8 +321,7 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 1e-2, "betas": (0.9, 0.95), "eps": 1e-8},
+                    optimizer=Adam.Config(lr=0.01, betas=(0.9, 0.95), eps=1e-08),
                 ),
             ],
         )
@@ -290,8 +339,7 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.0, weight_decay=0.0),
                 ),
             ],
         )
@@ -328,8 +376,7 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.0, weight_decay=0.0),
                 ),
             ],
         )
@@ -350,8 +397,7 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.0, weight_decay=0.0),
                 ),
             ],
         )
@@ -376,13 +422,12 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.0,
-                    },
+                    optimizer=AdamW.Config(
+                        lr=0.001,
+                        betas=(0.9, 0.95),
+                        eps=1e-08,
+                        weight_decay=0.0,
+                    ),
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -410,13 +455,12 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-4,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    optimizer=AdamW.Config(
+                        lr=0.0001,
+                        betas=(0.9, 0.95),
+                        eps=1e-08,
+                        weight_decay=0.1,
+                    ),
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -436,24 +480,22 @@ class TestParamGroupConfig(unittest.TestCase):
                 # First pattern: all norm params get wd=0
                 ParamGroupConfig(
                     pattern=r".*norm.*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.0,
-                    },
+                    optimizer=AdamW.Config(
+                        lr=0.001,
+                        betas=(0.9, 0.95),
+                        eps=1e-08,
+                        weight_decay=0.0,
+                    ),
                 ),
                 # Second pattern: broader match that also covers norm
                 ParamGroupConfig(
                     pattern=r".*layers.*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 5e-4,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    optimizer=AdamW.Config(
+                        lr=0.0005,
+                        betas=(0.9, 0.95),
+                        eps=1e-08,
+                        weight_decay=0.1,
+                    ),
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -473,23 +515,21 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.85, 0.99),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    optimizer=AdamW.Config(
+                        lr=0.001,
+                        betas=(0.85, 0.99),
+                        eps=1e-08,
+                        weight_decay=0.1,
+                    ),
                 ),
                 ParamGroupConfig(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.999),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    optimizer=AdamW.Config(
+                        lr=0.001,
+                        betas=(0.9, 0.999),
+                        eps=1e-08,
+                        weight_decay=0.1,
+                    ),
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -507,8 +547,7 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"nonexistent_layer",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3},
+                    optimizer=AdamW.Config(lr=0.001),
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -527,13 +566,11 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.0),
                 ),
                 ParamGroupConfig(
                     pattern=r".*norm.*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.0),
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -563,8 +600,7 @@ class TestParamGroupConfig(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3},
+                    optimizer=AdamW.Config(lr=0.001),
                 ),
             ],
         )
@@ -581,13 +617,11 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.0),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -616,18 +650,15 @@ class TestDCPWithParamGroups(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.0),
                 ),
                 ParamGroupConfig(
                     pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-4, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.0001, weight_decay=0.1),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -668,13 +699,11 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    optimizer=Adam.Config(lr=0.0005, betas=(0.9, 0.95), eps=1e-08),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -696,13 +725,11 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.0),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -722,13 +749,11 @@ class TestMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    optimizer=Adam.Config(lr=0.0005, betas=(0.9, 0.95), eps=1e-08),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -792,13 +817,11 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 5e-4, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.0005, weight_decay=0.0),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -816,13 +839,11 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    optimizer=Adam.Config(lr=0.0005, betas=(0.9, 0.95), eps=1e-08),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )
@@ -841,13 +862,11 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    optimizer=Adam.Config(lr=0.0005, betas=(0.9, 0.95), eps=1e-08),
                 ),
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
+                    optimizer=AdamW.Config(lr=0.001, weight_decay=0.1),
                 ),
             ],
         )

@@ -9,18 +9,28 @@ import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
+from typing import (
+    Annotated,
+    Any,
+    cast,
+    Generic,
+    Literal,
+    overload,
+    Protocol,
+    TypeVar,
+)
 
 import torch
 import torch.nn as nn
+import tyro
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.optim import Optimizer
+from torch.optim import Optimizer as TorchOptimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.flex_shard import build_dist_muon
 
+from .base import Adam, AdamW, Optimizer
 from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -31,19 +41,14 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "Adam",
+    "AdamW",
+    "Optimizer",
     "OptimizersContainer",
     "ParamGroupConfig",
     "default_adamw",
     "register_moe_load_balancing_hook",
 ]
-
-
-# Single source of truth for supported optimizer names and constructors.
-_OPTIMIZER_FACTORIES: dict[str, Callable[..., Optimizer]] = {
-    "Adam": torch.optim.Adam,
-    "AdamW": torch.optim.AdamW,
-    "DistMuon": build_dist_muon,
-}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -68,23 +73,15 @@ class ParamGroupConfig:
     """Regex pattern matched against parameter fully qualified names (FQNs).
     E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*', '.*' (catch-all)"""
 
-    optimizer_name: str
-    """Optimizer type for this group. Must be one of Adam, AdamW, DistMuon."""
+    optimizer: Annotated[Optimizer.Config, tyro.conf.Suppress]
+    """Optimizer for this group, as a config rather than a name.
 
-    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Keyword arguments passed to the optimizer constructor.
-    Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
-
-    def __post_init__(self) -> None:
-        if self.optimizer_name not in _OPTIMIZER_FACTORIES:
-            allowed = ", ".join(sorted(_OPTIMIZER_FACTORIES))
-            raise ValueError(
-                f"Unknown optimizer_name {self.optimizer_name!r}. "
-                f"Allowed names: {allowed}."
-            )
+    Suppressed from the command line: the frozen CLI expands a component base
+    into one option per field per subclass, the same reason
+    ``Trainer.Config.model_spec`` is suppressed."""
 
 
-T = TypeVar("T", bound=Optimizer)
+T = TypeVar("T", bound=TorchOptimizer)
 
 
 class _MoELike(Protocol):
@@ -93,7 +90,7 @@ class _MoELike(Protocol):
     expert_bias_E: torch.Tensor  # noqa: N815
 
 
-class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
+class OptimizersContainer(TorchOptimizer, Stateful, Configurable, Generic[T]):
     """A container for multiple optimizers, supporting mixed optimizer types.
 
     This class wraps multiple optimizers into a single object to simplify the
@@ -128,8 +125,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         ] = "fused"
         """
         Optimizer implementation mode applied to all optimizer instances.
-        Per-param-group ``optimizer_kwargs`` can override this (e.g.
-        ``"fused": False`` for optimizers that don't support fused).
+        A per-group optimizer config can override this by declaring the same
+        field (e.g. ``DistMuon.Config.foreach``, which is always ``False``).
 
         - 'fused': Use fused implementation (CUDA only) for best performance.
         - 'foreach': Use some horizontal fusion of tensors for better performance.
@@ -141,25 +138,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
-        optimizer_factory_kwargs_by_name: dict[str, dict[str, Any]] = field(
-            default_factory=dict
-        )
-        """Arguments passed once per optimizer factory invocation, keyed by name.
-
-        Use this for instance-wide objects such as per-parameter compute
-        metadata and communication bucket specs. These arguments are not copied
-        into PyTorch parameter groups; group hyperparameters belong in
-        ``ParamGroupConfig.optimizer_kwargs``.
-        """
 
     optimizers: list[T]
     model_parts: list[nn.Module]
-
-    @staticmethod
-    def _resolve_optimizer_factory(name: str) -> Callable[..., Optimizer]:
-        if name not in _OPTIMIZER_FACTORIES:
-            raise NotImplementedError(f"Optimizer {name} not added.")
-        return _OPTIMIZER_FACTORIES[name]
 
     @staticmethod
     def _build_impl_kwargs(config: Config) -> dict[str, Any]:
@@ -186,17 +167,22 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
 
-        Returns two dicts keyed by optimizer name and aligned by index: the param
-        group dicts to pass to the optimizer constructor, and the regex pattern of
-        each group. Patterns are returned separately (not stored on the group) so
-        they stay out of the saved optimizer state dict; they are logging-only.
+        Returns two dicts keyed by optimizer config type and aligned by index:
+        the param group dicts to pass to the optimizer constructor, and the regex
+        pattern of each group. Patterns are returned separately (not stored on the
+        group) so they stay out of the saved optimizer state dict; they are
+        logging-only.
 
         Each param group dict carries a ``param_names`` list (canonical FQNs
         aligned with ``params``) so PyTorch records the names on the group; the
         checkpoint utilities use those names to build FQN-keyed optimizer state.
         """
-        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        patterns: dict[str, list[str]] = defaultdict(list)
+        groups: dict[type, list[dict[str, Any]]] = defaultdict(list)
+        patterns: dict[type, list[str]] = defaultdict(list)
+        # Groups sharing an optimizer class become one instance, so they must
+        # agree on the instance-wide arguments. Local to this helper: build()
+        # re-derives them from the config.
+        factory_kwargs: dict[type, dict[str, Any]] = {}
         claimed: set[str] = set()  # first-match-wins
 
         for pg in param_group_configs:
@@ -215,15 +201,29 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     f"matched no parameters"
                 )
 
-            groups[pg.optimizer_name].append(
+            config_type = type(pg.optimizer)
+            group_factory_kwargs = pg.optimizer.to_factory_kwargs()
+            if config_type in factory_kwargs:
+                if factory_kwargs[config_type] != group_factory_kwargs:
+                    raise ValueError(
+                        f"Param groups sharing optimizer {config_type.__qualname__} "
+                        "disagree on instance-wide factory arguments: "
+                        f"{factory_kwargs[config_type]} vs {group_factory_kwargs}. "
+                        "They are batched into one optimizer instance, so these "
+                        "must match."
+                    )
+            else:
+                factory_kwargs[config_type] = group_factory_kwargs
+
+            groups[config_type].append(
                 {
                     "params": params,
                     "param_names": param_names,
                     **impl_kwargs,
-                    **pg.optimizer_kwargs,
+                    **pg.optimizer.to_param_group_kwargs(),
                 }
             )
-            patterns[pg.optimizer_name].append(pg.pattern)
+            patterns[config_type].append(pg.pattern)
 
         return groups, patterns
 
@@ -234,17 +234,22 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
 
+        # Any group of a given class carries the factory kwargs used to build it:
+        # _build_param_groups has verified that every group sharing a class
+        # agrees on them. Per-group hyperparameters are not read from here; they
+        # are already merged into the group dicts.
+        config_by_type = {
+            type(pg.optimizer): pg.optimizer for pg in param_group_configs
+        }
+
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
+            groups_by_type, patterns_by_type = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
             )
-            for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = self._resolve_optimizer_factory(opt_name)(
-                    opt_param_groups,
-                    **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
-                )
+            for config_type, opt_param_groups in groups_by_type.items():
+                optimizer = config_by_type[config_type].build(params=opt_param_groups)
                 self.optimizers.append(cast(T, optimizer))
-                self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
+                self._log_optimizer(optimizer, part_idx, patterns_by_type[config_type])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
 
@@ -255,7 +260,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self._post_init(all_params)
 
     def _log_optimizer(
-        self, optimizer: Optimizer, part_idx: int, patterns: list[str]
+        self, optimizer: TorchOptimizer, part_idx: int, patterns: list[str]
     ) -> None:
         """Log one optimizer's param-group assignments (patterns are logging-only)."""
         _KEY_KWARGS = {
@@ -339,7 +344,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
         # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
-        Optimizer.__init__(self, all_params, {})
+        TorchOptimizer.__init__(self, all_params, {})
 
     def _register_bf16_optimizer_state_hook(self) -> None:
         """Create and restore Adam optimizer states in bfloat16.
@@ -355,7 +360,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         """
 
         def _bf16_state_init_hook(
-            optimizer: Optimizer, args: tuple, kwargs: dict
+            optimizer: TorchOptimizer, args: tuple, kwargs: dict
         ) -> None:
             for group in optimizer.param_groups:
                 for p in group["params"]:
@@ -381,7 +386,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                                 memory_format=torch.preserve_format,
                             )
 
-        def _bf16_state_load_hook(optimizer: Optimizer) -> None:
+        def _bf16_state_load_hook(optimizer: TorchOptimizer) -> None:
             for group in optimizer.param_groups:
                 for p in group["params"]:
                     state = optimizer.state.get(p, {})
@@ -400,7 +405,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         pass
 
 
-def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config:
+def default_adamw(
+    lr: float = 8e-4,
+    *,
+    betas: tuple[float, float] = (0.9, 0.95),
+    eps: float = 1e-8,
+    weight_decay: float = 0.1,
+) -> OptimizersContainer.Config:
     """Create an OptimizersContainer.Config with a catch-all AdamW param group.
 
     Use as a convenience for the common case::
@@ -411,14 +422,9 @@ def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config
         param_groups=[
             ParamGroupConfig(
                 pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={
-                    "lr": lr,
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "weight_decay": 0.1,
-                    **kwargs,
-                },
+                optimizer=AdamW.Config(
+                    lr=lr, betas=betas, eps=eps, weight_decay=weight_decay
+                ),
             )
         ]
     )
