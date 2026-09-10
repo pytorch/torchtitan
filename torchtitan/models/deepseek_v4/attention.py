@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -366,19 +365,6 @@ class CompressedSparseAttention(DSV4FlexAttention):
             )
 
         head_dim = q.size(-1)
-        # selected_attention has no scale override -- it always divides by
-        # sqrt(head_dim) internally. DeepSeek V4 only ever constructs
-        # softmax_scale as head_dim**-0.5 (see torchtitan/models/deepseek_v4/
-        # __init__.py), so this should never fire; it exists to catch a
-        # silent numerics mismatch if that invariant is ever broken.
-        expected_scale = head_dim**-0.5
-        if not math.isclose(self.softmax_scale, expected_scale, rel_tol=1e-6):
-            raise ValueError(
-                "CompressedSparseAttention requires softmax_scale == "
-                f"head_dim**-0.5 ({expected_scale}), got {self.softmax_scale}; "
-                "selected_attention does not support a custom scale."
-            )
-
         seqlen = q.size(0)
 
         with spmd.no_typecheck():
@@ -424,6 +410,7 @@ class CompressedSparseAttention(DSV4FlexAttention):
                 attention_sink=attn_sink,
                 doc_ids=None,
                 sliding_window_size=self.window_size,
+                scale=self.softmax_scale,
                 backend=backend,
             )
             return out_bhtk.squeeze(0).transpose(0, 1)
