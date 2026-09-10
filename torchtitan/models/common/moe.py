@@ -412,11 +412,21 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             num_bins=config.num_bins,
         ).build()
 
-    def _select_experts_and_cutoff(
+    def _select_experts(
         self,
         scores_TE: torch.Tensor,
-        expert_bias_E: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        if expert_bias_E is None:
+            raise ValueError("Quantile balancing requires an expert bias.")
+        if not self.training:
+            return super()._select_experts(
+                scores_TE,
+                expert_bias_E,
+                **router_kwargs,
+            )
+
         biased_scores_TE = scores_TE + expert_bias_E
         topk_plus_one_scores, topk_plus_one_expert_ids = torch.topk(
             biased_scores_TE,
@@ -424,50 +434,12 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        return (
-            topk_plus_one_expert_ids[:, : self.top_k],
+        self.quantile_balancer.observe(
+            scores_TE,
             topk_plus_one_scores[:, self.top_k :],
+            expert_bias_E,
         )
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        expert_bias_E: torch.Tensor | None = None,
-        **router_kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Route tokens and collect the required-bias histogram in training."""
-        if expert_bias_E is None:
-            raise ValueError("Quantile balancing requires an expert bias.")
-        if not self.training:
-            return super().forward(x_TD, expert_bias_E, **router_kwargs)
-
-        scores_TE = torch.sigmoid(self.gate(x_TD))
-        topk_expert_ids_TK, cutoff_T1 = remat.region(
-            self._select_experts_and_cutoff,
-            "routing_decision",
-            recompute=False,
-        )(scores_TE, expert_bias_E)
-        remat.recompute_needs_tensor(topk_expert_ids_TK, cutoff_T1)
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        if self.route_norm:
-            denominator_T1 = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
-            topk_scores_TK = topk_scores_TK / denominator_T1
-        topk_scores_TK = topk_scores_TK * self.route_scale
-
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1,
-            topk_expert_ids_TK,
-            True,
-        )
-        if self.aux_loss is not None:
-            topk_scores_TK = self.aux_loss(
-                scores_TE,
-                routing_map_TE,
-                carrier=topk_scores_TK,
-            )
-
-        self.quantile_balancer.observe(scores_TE, cutoff_T1, expert_bias_E)
-        return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
+        return topk_plus_one_expert_ids[:, : self.top_k]
 
 
 class QuantileBalancer(Module):
@@ -525,16 +497,14 @@ class QuantileBalancer(Module):
                 (required_bias_TE - lower_bound) / bin_width
             ).to(torch.int64)
             bin_indices_ET = bin_indices_TE.clamp_(0, self.num_bins - 1).transpose(0, 1)
-            microbatch_histogram_EB = torch.zeros_like(self.required_bias_histogram_EB)
-            microbatch_histogram_EB.scatter_add_(
+            self.required_bias_histogram_EB.scatter_add_(
                 1,
                 bin_indices_ET,
                 torch.ones_like(
                     bin_indices_ET,
-                    dtype=microbatch_histogram_EB.dtype,
+                    dtype=self.required_bias_histogram_EB.dtype,
                 ),
             )
-            self.required_bias_histogram_EB.add_(microbatch_histogram_EB)
 
     def estimate_expert_bias(
         self,
