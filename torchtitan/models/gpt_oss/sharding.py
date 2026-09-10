@@ -9,12 +9,12 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
-    set_fused_qkv_linear_sharding,
     set_gqa_inner_attention_local_map,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -112,7 +112,7 @@ def _set_gpt_oss_layer_sharding(
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    set_fused_qkv_linear_sharding(attention.qkv_linear)
+    attention.qkv_linear.wqkv.sharding_config = colwise_config()
     attention.wo.sharding_config = scaled_bias_rowwise_config(output_sp=enable_sp)
 
     set_gqa_inner_attention_local_map(attention.inner_attention)
