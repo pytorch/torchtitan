@@ -36,66 +36,96 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_optimizer_hook_reduces_histograms_over_loss_mesh(self) -> None:
+    def test_optimizer_hook_reduces_stacked_histograms_over_loss_mesh(self) -> None:
         device = torch.device(self.device_type, self.rank)
-        router = QuantileBalancedTopKRouter.Config(
-            num_experts=4,
-            top_k=1,
-            gate=RouterGateLinear.Config(
-                in_features=4,
-                out_features=4,
-                bias=False,
-            ),
-            score_func="sigmoid",
-            num_bins=10,
-        ).build()
-        moe = MoE.__new__(MoE)
-        nn.Module.__init__(moe)
-        moe.router = router
-        moe.register_buffer("expert_bias_E", torch.zeros(4))
         model = nn.Module()
-        model.add_module("moe", moe)
+        moe_layers = []
+        for layer_idx in range(2):
+            router = QuantileBalancedTopKRouter.Config(
+                num_experts=4,
+                top_k=1,
+                gate=RouterGateLinear.Config(
+                    in_features=4,
+                    out_features=4,
+                    bias=False,
+                ),
+                score_func="sigmoid",
+                num_bins=10,
+            ).build()
+            moe = MoE.__new__(MoE)
+            nn.Module.__init__(moe)
+            moe.router = router
+            moe.register_buffer("expert_bias_E", torch.zeros(4))
+            model.add_module(f"moe_{layer_idx}", moe)
+            moe_layers.append(moe)
         model.to(device)
 
-        histogram_EB = router.quantile_balancer.required_bias_histogram_EB
-        score_rows_RE = torch.tensor(
+        score_rows_LRE = torch.tensor(
             [
-                [0.92, 0.68, 0.31, 0.07],
-                [0.07, 0.31, 0.92, 0.68],
+                [
+                    [0.92, 0.68, 0.31, 0.07],
+                    [0.07, 0.31, 0.92, 0.68],
+                ],
+                [
+                    [0.68, 0.92, 0.07, 0.31],
+                    [0.31, 0.07, 0.68, 0.92],
+                ],
             ],
             device=device,
         )
-        local_scores_TE = score_rows_RE[self.rank].expand(4, -1)
-        with torch.no_grad():
-            router.gate.weight.copy_(torch.eye(4, device=device))
-        _, _, routing_map_TE = router(torch.logit(local_scores_TE), moe.expert_bias_E)
+        local_bias_LRE = torch.tensor(
+            [
+                [
+                    [-0.5, -0.1, 0.1, 0.5],
+                    [0.5, 0.1, -0.5, -0.1],
+                ],
+                [
+                    [-0.1, -0.5, 0.5, 0.1],
+                    [0.1, 0.5, -0.1, -0.5],
+                ],
+            ],
+            device=device,
+        )
+        expected_global_bias_LE = torch.tensor(
+            [
+                [-0.2, 0.2, -0.2, 0.2],
+                [0.2, -0.2, 0.2, -0.2],
+            ],
+            device=device,
+        )
+        histograms = []
+        for layer_idx, moe in enumerate(moe_layers):
+            router = moe.router
+            local_scores_TE = score_rows_LRE[layer_idx, self.rank].expand(4, -1)
+            with torch.no_grad():
+                router.gate.weight.copy_(torch.eye(4, device=device))
+            _, _, routing_map_TE = router(
+                torch.logit(local_scores_TE), moe.expert_bias_E
+            )
 
-        torch.testing.assert_close(
-            routing_map_TE.sum(dim=-1),
-            torch.ones(4, dtype=torch.int64, device=device),
-        )
-        torch.testing.assert_close(
-            histogram_EB.sum(dim=-1),
-            torch.full((4,), 4, dtype=torch.int64, device=device),
-        )
-        local_bias_RE = torch.tensor(
-            [
-                [-0.5, -0.1, 0.1, 0.5],
-                [0.5, 0.1, -0.5, -0.1],
-            ],
-            device=device,
-        )
-        torch.testing.assert_close(
-            router.quantile_balancer.estimate_expert_bias(moe.expert_bias_E),
-            local_bias_RE[self.rank],
-        )
-        expected_global_bias_E = torch.tensor(
-            [-0.2, 0.2, -0.2, 0.2],
-            device=device,
-        )
-        self.assertFalse(
-            torch.allclose(local_bias_RE[self.rank], expected_global_bias_E)
-        )
+            histogram_EB = router.quantile_balancer.required_bias_histogram_EB
+            histograms.append(histogram_EB)
+            torch.testing.assert_close(
+                routing_map_TE.sum(dim=-1),
+                torch.ones(4, dtype=torch.int64, device=device),
+            )
+            torch.testing.assert_close(
+                histogram_EB.sum(dim=-1),
+                torch.full((4,), 4, dtype=torch.int64, device=device),
+            )
+            torch.testing.assert_close(
+                router.quantile_balancer.estimate_expert_bias(
+                    histogram_EB,
+                    moe.expert_bias_E,
+                ),
+                local_bias_LRE[layer_idx, self.rank],
+            )
+            self.assertFalse(
+                torch.allclose(
+                    local_bias_LRE[layer_idx, self.rank],
+                    expected_global_bias_LE[layer_idx],
+                )
+            )
 
         optimizers = OptimizersContainer.Config(
             implementation="for-loop",
@@ -125,11 +155,14 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
 
         optimizers.step()
 
-        torch.testing.assert_close(
-            moe.expert_bias_E,
-            expected_global_bias_E,
-        )
-        self.assertEqual(histogram_EB.count_nonzero().item(), 0)
+        for layer_idx, (moe, histogram_EB) in enumerate(
+            zip(moe_layers, histograms, strict=True)
+        ):
+            torch.testing.assert_close(
+                moe.expert_bias_E,
+                expected_global_bias_LE[layer_idx],
+            )
+            self.assertEqual(histogram_EB.count_nonzero().item(), 0)
 
 
 if __name__ == "__main__":
