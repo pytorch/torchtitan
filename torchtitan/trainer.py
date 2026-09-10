@@ -49,7 +49,11 @@ from torchtitan.distributed.activation_checkpoint import (
     MemoryBudgetAC,
     SelectiveAC,
 )
-from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
+from torchtitan.distributed.cudagraph import (
+    cudagraph_teardown,
+    wrap_with_cuda_graph,
+)
+from torchtitan.distributed.pipeline_parallel import PipelineRuntime
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
@@ -324,6 +328,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     num_pp_microbatches: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
+    pipeline_runtime: PipelineRuntime
     sdc_replayer: SDCReplayer | None
 
     # additional training states
@@ -484,6 +489,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             num_tokens_per_dp_rank * dp_degree
         )
         # apply parallelisms and initialization
+        self.pipeline_runtime = PipelineRuntime()
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
                 if not model_spec.pipelining_fn:
@@ -493,12 +499,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     )
 
                 # apply both Pipeline Parallel and SPMD-style scaling techniques
-                (
-                    self.pp_schedule,
-                    self.model_parts,
-                    self.pp_has_first_stage,
-                    self.pp_has_last_stage,
-                ) = model_spec.pipelining_fn(
+                pipeline = model_spec.pipelining_fn(
                     model,
                     parallel_dims=parallel_dims,
                     training=config.training,
@@ -511,6 +512,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     parallelize_fn=model_spec.parallelize_fn,
                     loss_fn=self.loss_fn,
                 )
+                self.pp_schedule = pipeline.schedule
+                self.model_parts = pipeline.model_parts
+                self.pp_has_first_stage = pipeline.has_first_stage
+                self.pp_has_last_stage = pipeline.has_last_stage
+                self.pipeline_runtime = pipeline.runtime
                 # when PP is enabled, `model` obj is no longer used after this point,
                 # model_parts is used instead
                 del model
@@ -551,6 +557,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 model.train()
 
                 self.model_parts = [model]
+
+        self.pipeline_runtime.synchronize_parameters()
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
@@ -974,12 +982,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     accumulated_loss.add_(detached_loss)
 
         with sl.log_trace_span("optim"):
+            self.pipeline_runtime.finalize_gradients()
+            parameters = tuple(
+                parameter
+                for model_part in self.model_parts
+                for parameter in model_part.parameters()
+            )
             grad_norm = dist_utils.clip_grad_norm_(
-                [p for m in self.model_parts for p in m.parameters()],
+                parameters,
                 self.config.training.max_norm,
                 foreach=True,
                 pp_mesh=parallel_dims.get_optional_mesh("pp"),
                 ep_enabled=parallel_dims.ep_enabled,
+                norm_parameters=self.pipeline_runtime.parameters_for_grad_norm(
+                    parameters
+                ),
             )
             # Only the last PP stage owns the loss. First combine its DP/CP
             # replicas, then propagate the result across PP. TP replicas have
@@ -1071,6 +1088,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         sl.log_trace_instant("training_start")
 
         self.checkpointer.load(step=config.checkpoint.load_step)
+        self.pipeline_runtime.synchronize_parameters()
 
         # Capture loaded step for relative_step calculation.
         # After checkpoint load: self.step = restored step (e.g. 100), or 0 if fresh.
