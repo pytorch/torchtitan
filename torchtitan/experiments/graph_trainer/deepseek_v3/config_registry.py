@@ -16,14 +16,27 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
+    deepseek_v3_16b_dist_moe_bf16,
+    deepseek_v3_16b_dist_moe_mxfp8,
     deepseek_v3_16b_minimal_async_ep,
     deepseek_v3_671b,
+    deepseek_v3_671b_dist_moe_bf16,
+    deepseek_v3_671b_dist_moe_mxfp8,
     deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_dist_moe_bf16,
+    deepseek_v3_debugmodel_dist_moe_mxfp8,
     deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_mxfp8_linear_converter_config,
 )
 
 from . import model_registry
+
+
+def _dist_moe_graph_config(base) -> GraphTrainer.Config:
+    """Convert one eager Dist-MoE recipe to the GraphTrainer model wrapper."""
+    config = to_graph_trainer_config(base, model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
 
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
@@ -51,6 +64,16 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
     config = to_graph_trainer_config(base, model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16() -> GraphTrainer.Config:
+    """Build the GraphTrainer debug recipe with BF16 Dist-MoE experts."""
+    return _dist_moe_graph_config(deepseek_v3_debugmodel_dist_moe_bf16(seq_len=2048))
+
+
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8() -> GraphTrainer.Config:
+    """Build the GraphTrainer debug recipe with MXFP8 Dist-MoE experts."""
+    return _dist_moe_graph_config(deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=2048))
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
@@ -101,6 +124,16 @@ def graph_trainer_deepseek_v3_16b_minimal_async_ep() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_deepseek_v3_16b_dist_moe_bf16() -> GraphTrainer.Config:
+    """Build the GraphTrainer DSV3 16B recipe with BF16 Dist-MoE experts."""
+    return _dist_moe_graph_config(deepseek_v3_16b_dist_moe_bf16(seq_len=4096))
+
+
+def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8() -> GraphTrainer.Config:
+    """Build the GraphTrainer DSV3 16B recipe with MXFP8 Dist-MoE experts."""
+    return _dist_moe_graph_config(deepseek_v3_16b_dist_moe_mxfp8(seq_len=4096))
+
+
 def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config = graph_trainer_deepseek_v3_16b()
     config.parallelism.context_parallel_load_balancer = "headtail"
@@ -116,3 +149,13 @@ def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_671b(seq_len=4096), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
+
+
+def graph_trainer_deepseek_v3_671b_dist_moe_bf16() -> GraphTrainer.Config:
+    """Build the GraphTrainer DSV3 671B recipe with BF16 Dist-MoE experts."""
+    return _dist_moe_graph_config(deepseek_v3_671b_dist_moe_bf16(seq_len=4096))
+
+
+def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8() -> GraphTrainer.Config:
+    """Build the GraphTrainer DSV3 671B recipe with MXFP8 Dist-MoE experts."""
+    return _dist_moe_graph_config(deepseek_v3_671b_dist_moe_mxfp8(seq_len=4096))
