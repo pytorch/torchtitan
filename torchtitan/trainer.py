@@ -29,6 +29,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.dist_moe import cleanup_dist_moe, setup_dist_moe
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
@@ -512,6 +513,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # model_parts is used instead
                 del model
 
+                setup_dist_moe(
+                    config=config,
+                    model_parts=self.model_parts,
+                    parallel_dims=parallel_dims,
+                    device=self.device,
+                    pp_schedule=self.pp_schedule,
+                )
+
                 for m in self.model_parts:
                     m.to_empty(device=init_device)
                     with torch.no_grad():
@@ -540,14 +549,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
+                self.model_parts = [model]
+                setup_dist_moe(
+                    config=config,
+                    model_parts=self.model_parts,
+                    parallel_dims=parallel_dims,
+                    device=self.device,
+                    pp_schedule=None,
+                )
                 model.to_empty(device=init_device)
                 with torch.no_grad():
                     # TODO: Change this back to init_weights once
                     # autoparallel contains the wrap_init_states
                     cast(BaseModel, model).init_weights(buffer_device=buffer_device)
                 model.train()
-
-                self.model_parts = [model]
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
@@ -1151,6 +1166,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
             cudagraph_teardown()
+        if hasattr(self, "model_parts"):
+            cleanup_dist_moe(self.model_parts)
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
