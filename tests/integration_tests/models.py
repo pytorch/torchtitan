@@ -33,7 +33,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="llama3_fsdp+tp+cp+region_ac",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/llama3_{gpu_arch}.txt"
             ),
         ),
         OverrideDefinitions(
@@ -138,6 +138,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
             # NOTE: This topology is not bitwise deterministic with Real PG on
             # A10G, so this case provides end-to-end coverage without a golden.
+            # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
