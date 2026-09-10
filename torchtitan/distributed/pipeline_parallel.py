@@ -10,6 +10,7 @@ import os
 from collections.abc import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
@@ -24,10 +25,16 @@ from torch.distributed.pipelining.schedules import (
     ScheduleZBVZeroBubble,
 )
 
-from torchtitan.components.loss import LossFunction
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -36,6 +43,76 @@ from torchtitan.tools.logging import logger
 # pipeline_llm and pipeline_vlm are the public entrypoints for model-specific PP
 # setup. Helpers in this module are implementation details and stay private.
 __all__ = ["pipeline_llm", "pipeline_vlm"]
+
+
+def _can_build_static_pipeline_stage_args(
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+) -> bool:
+    return (
+        parallelism.spmd_backend == "default"
+        and parallelism.tensor_parallel_degree == 1
+        and parallelism.context_parallel_degree == 1
+        and isinstance(model_config, Decoder.Config)
+    )
+
+
+def _build_static_pipeline_stage_args(
+    stage_idx: int,
+    num_stages: int,
+    *,
+    training: TrainingConfig,
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+    output_hidden_states: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build static decoder boundary metadata for pipeline execution."""
+    if (
+        parallelism.spmd_backend != "default"
+        or parallelism.tensor_parallel_degree != 1
+        or parallelism.context_parallel_degree != 1
+    ):
+        raise NotImplementedError(
+            "Static pipeline stage metadata currently requires "
+            "spmd_backend='default', tensor_parallel_degree=1, and "
+            "context_parallel_degree=1. TP, CP, or a typed SPMD backend "
+            "requires distributed forward and gradient metadata at pipeline "
+            "boundaries."
+        )
+
+    if not isinstance(model_config, Decoder.Config):
+        raise NotImplementedError(
+            "Static pipeline stage metadata requires a Decoder model config, got "
+            f"{type(model_config).__qualname__}."
+        )
+
+    microbatch_shape = (
+        parallelism.pipeline_parallel_microbatch_size,
+        training.seq_len,
+    )
+    hidden_shape = (*microbatch_shape, model_config.dim)
+    hidden_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
+
+    if stage_idx == 0:
+        input_args = torch.empty(microbatch_shape, dtype=torch.int64, device="meta")
+    else:
+        input_args = torch.empty(
+            hidden_shape,
+            dtype=hidden_dtype,
+            device="meta",
+            requires_grad=True,
+        )
+
+    output_dim = model_config.dim
+    if stage_idx == num_stages - 1 and not output_hidden_states:
+        output_dim = model_config.vocab_size
+    output_args = torch.empty(
+        (*microbatch_shape, output_dim),
+        dtype=hidden_dtype,
+        device="meta",
+        requires_grad=True,
+    )
+    return input_args, output_args
 
 
 def _build_get_mesh_callback(
@@ -94,6 +171,11 @@ def pipeline_llm(
         logger.debug(f"Stage {i}: {stage_ms}")
 
     get_mesh_cb = _build_get_mesh_callback(parallel_dims)
+    pp_group = pp_mesh.get_group("pp")
+    requires_static_stage_args = dist.get_backend(pp_group) == "fake"
+    use_static_stage_args = requires_static_stage_args or (
+        _can_build_static_pipeline_stage_args(parallelism, model_config)
+    )
     stages, model_parts = _pipeline_module_split(
         model,
         pp_mesh,
@@ -101,6 +183,20 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        static_stage_args_factory=(
+            (
+                lambda stage_idx, num_stages: _build_static_pipeline_stage_args(
+                    stage_idx,
+                    num_stages,
+                    training=training,
+                    parallelism=parallelism,
+                    model_config=model_config,
+                    output_hidden_states=isinstance(loss_fn, ChunkedLossWrapper),
+                )
+            )
+            if use_static_stage_args
+            else None
+        ),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -576,6 +672,9 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    static_stage_args_factory: (
+        Callable[[int, int], tuple[torch.Tensor, torch.Tensor]] | None
+    ) = None,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -599,6 +698,9 @@ def _pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
+        static_stage_args_factory: Optional factory for static stage input and
+                                   output metadata. Without it, PyTorch infers
+                                   metadata dynamically during schedule warmup.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -622,11 +724,18 @@ def _pipeline_module_split(
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
         model_chunk = _split_module(whole_model, module_names)
+        input_args, output_args = (
+            static_stage_args_factory(stage_idx, num_stages)
+            if static_stage_args_factory is not None
+            else (None, None)
+        )
         stage = PipelineStage(
             model_chunk,
             stage_idx,
             num_stages,
             device,
+            input_args=input_args,
+            output_args=output_args,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
         )
