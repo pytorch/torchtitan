@@ -48,7 +48,7 @@ class VisionPrefetcher:
         # whether there is anything to hide at all: if it is microseconds, no scheduling
         # change can show up in a step time, and that is a fact about the config rather
         # than about the implementation.
-        self._encode_spans: list[tuple[object, object]] = []
+        self._encode_spans: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
 
     def begin_step(self, kwarg_mbs) -> None:
         """Record the step's per-micro-batch kwargs and reset the cache.
