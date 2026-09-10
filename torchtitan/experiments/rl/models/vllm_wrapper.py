@@ -588,12 +588,18 @@ class VLLMModelWrapper(Module):
                 for state_name, layout in sharding_config.state_shardings.items():
                     layouts[f"{module_prefix}{state_name}"] = layout
 
-                # FusedSwiGLU exposes split w1/w3 state-dict keys while the
-                # layout is declared on the fused w13 parameter.
+                # Fused modules expose split gate/up state-dict keys while the
+                # layout is declared on the fused w13 parameter. Dense SwiGLU
+                # uses w1.weight/w3.weight; grouped experts use w1_EFD/w3_EFD.
                 w13_layout = sharding_config.state_shardings.get("w13")
                 if w13_layout is not None:
-                    for proj_name in ("w1", "w3"):
-                        layouts[f"{module_prefix}{proj_name}.weight"] = w13_layout
+                    for state_name in (
+                        "w1.weight",
+                        "w3.weight",
+                        "w1_EFD",
+                        "w3_EFD",
+                    ):
+                        layouts[f"{module_prefix}{state_name}"] = w13_layout
 
             if isinstance(module, FusedQKVLinear):
                 # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
