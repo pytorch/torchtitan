@@ -32,6 +32,49 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   builder validates named DTensor parameters and plans their storage-to-compute
   transitions.
 
+For HSDP storage such as `(Replicate(), Shard(0))`, declaring `Owned()` on both
+`dp_replicate` and `dp_shard` assigns each complete matrix parameter to one
+owner in the Cartesian group. Parameters are greedily balanced across owners,
+and the existing packed all-to-all path gathers compute inputs and restores
+updated storage shards. This is opt-in through `compute_sharding_by_fqn`; model
+recipes do not enable it automatically.
+
+A native 3D matrix batch `[M, R, C]` stored as `(Replicate(), Shard(0))`
+can instead split each storage shard's matrices over its replica group:
+
+```python
+compute_sharding_by_fqn = {
+    "experts.weight": ComputeLayout(
+        shardings_by_mesh_axis={
+            "dp_replicate": Shard(0),
+            "dp_shard": Shard(0),
+        },
+        shard_order_by_tensor_dim={0: ("dp_shard", "dp_replicate")},
+    ),
+}
+optimizer = build_dist_muon(
+    [{"params": [weight], "param_names": ["experts.weight"]}],
+    compute_sharding_by_fqn=compute_sharding_by_fqn,
+    bucket_configs=[BucketConfig(patterns=("experts.weight",))],
+)
+```
+
+Here `weight` is the HSDP DTensor parameter. The order is outermost first:
+`dp_shard` keeps its storage-local matrix batch and `dp_replicate` partitions
+that batch into complete matrices. If `dp_shard` already precedes
+`dp_replicate` in the storage mesh, the default order suffices. Uneven and empty
+matrix batches are supported. The packed redistribution is confined to each
+replica group; its inverse sends computed directions to all storage holders.
+Parameters and momentum retain their original storage placements.
+
+Replica compute partitioning trades repeated Newton-Schulz work for replica
+communication and synchronization. It can be useful when expensive matrices
+or matrix batches offer enough work to distribute across replica ranks. It is
+not an unconditional speedup: small batches, idle compute ranks, and slow
+interconnects can favor duplicated compute. Select it per parameter through
+the existing API and measure on the target topology. Buckets requiring
+different transport groups must use separate `BucketConfig` entries.
+
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
 most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
