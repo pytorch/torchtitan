@@ -9,12 +9,12 @@
 import copy
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import torch.nn as nn
 
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
-    compute_ffn_hidden_dim,
     Embedding,
     Linear,
     RMSNorm,
@@ -27,7 +27,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.utils import validate_converter_order
-
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -48,7 +47,6 @@ __all__ = [
     "Gemma4Model",
     "gemma4_configs",
 ]
-
 
 _LINEAR_INIT = {
     "weight": partial(nn.init.trunc_normal_, std=0.02),
@@ -83,15 +81,9 @@ def _make_gemma4_ffn_config(
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> Gemma4FeedForward.Config:
     return Gemma4FeedForward.Config(
-        w1=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w1_param_init
-        ),
-        w2=Linear.Config(
-            in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
-        ),
-        w3=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
-        ),
+        w1=Linear.Config(in_features=dim, out_features=hidden_dim, param_init=w1_param_init),
+        w2=Linear.Config(in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init),
+        w3=Linear.Config(in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init),
     )
 
 
@@ -107,127 +99,69 @@ def _build_gemma4_layers(
     global_head_dim: int = 512,
     global_kv_heads: int | None = None,
     attention_k_eq_v: bool = False,
-    fuse_qkv: bool = False,
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
     sliding_window_size: int = 1024,
     global_attn_interval: int = 6,
 ) -> list[Gemma4TransformerBlock.Config]:
-    """Build a list of per-layer Gemma4TransformerBlock configs with depth-scaled inits.
-
-    Gemma-4 uses hybrid attention: interleaved sliding-window with periodic global layers
-    according to global_attn_interval (default 6 for 5:1 ratio).
-    """
+    """Build per-layer Gemma4TransformerBlock configs with hybrid attention routing."""
     inner_attention = get_attention_config(attn_backend)
+    norm_cfg = RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT)
 
     layers: list[Gemma4TransformerBlock.Config] = []
     for layer_id in range(n_layers):
         use_global_attn = (layer_id + 1) % global_attn_interval == 0
         actual_head_dim = (
-            global_head_dim
-            if use_global_attn and global_head_dim is not None
-            else head_dim
+            global_head_dim if use_global_attn and global_head_dim is not None else head_dim
         )
-        if use_global_attn and global_kv_heads is not None:
-            actual_kv_heads = global_kv_heads
-        else:
-            actual_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
+        actual_kv_heads = (
+            global_kv_heads if use_global_attn and global_kv_heads is not None else (n_kv_heads or n_heads)
+        )
 
-        # Gemma-4 invariant: sliding layers (head_dim=256) use FlexAttention;
-        # global layers (head_dim=512) exceed SRAM/LDS limits for multi-head GQA
-        # across all FlashAttention/FlexAttention backends (see Dao-AILab/flash-attention#2427
-        # and huggingface/transformers#45201) and dispatch to PyTorch's native C++ SDPA.
+        # Sliding layers use FlexAttention; global layers (head_dim=512) dispatch to SDPA
         if use_global_attn and actual_head_dim > 256:
             layer_inner_attn = Gemma4GlobalSDPA.Config()
-        elif use_global_attn:
-            layer_inner_attn = copy.deepcopy(inner_attention)
         else:
             layer_inner_attn = copy.deepcopy(inner_attention)
-            if isinstance(layer_inner_attn, VarlenAttention.Config):
+            if not use_global_attn and isinstance(layer_inner_attn, VarlenAttention.Config):
                 layer_inner_attn.window_size = (sliding_window_size, 0)
 
-        wq = Linear.Config(
-            in_features=dim,
-            out_features=n_heads * actual_head_dim,
-            param_init=_LINEAR_INIT,
-        )
-        wk = Linear.Config(
-            in_features=dim,
-            out_features=actual_kv_heads * actual_head_dim,
-            param_init=_LINEAR_INIT,
-        )
-        wv = (
-            None
-            if use_global_attn and attention_k_eq_v
-            else Linear.Config(
-                in_features=dim,
-                out_features=actual_kv_heads * actual_head_dim,
-                param_init=_LINEAR_INIT,
-            )
-        )
         qkv_linear = Gemma4QKVLinear.Config(
             head_dim=actual_head_dim,
-            wq=wq,
-            wk=wk,
-            wv=wv,
+            wq=Linear.Config(in_features=dim, out_features=n_heads * actual_head_dim, param_init=_LINEAR_INIT),
+            wk=Linear.Config(in_features=dim, out_features=actual_kv_heads * actual_head_dim, param_init=_LINEAR_INIT),
+            wv=None if use_global_attn and attention_k_eq_v else Linear.Config(
+                in_features=dim, out_features=actual_kv_heads * actual_head_dim, param_init=_LINEAR_INIT
+            ),
         )
-        wo = Linear.Config(
-            in_features=n_heads * actual_head_dim,
-            out_features=dim,
-            param_init=_depth_init(layer_id),
+        layer_rope = Gemma4RoPE.Config(
+            dim=actual_head_dim,
+            max_context_length=rope.max_context_length,
+            theta=1000000.0 if use_global_attn else 10000.0,
+            partial_rotary_factor=0.25 if use_global_attn else 1.0,
+            scaling="none",
         )
-        if use_global_attn:
-            layer_rope = Gemma4RoPE.Config(
-                dim=actual_head_dim,
-                max_context_length=rope.max_context_length,
-                theta=1000000.0,
-                partial_rotary_factor=0.25,
-                scaling="none",
-            )
-        else:
-            layer_rope = Gemma4RoPE.Config(
-                dim=actual_head_dim,
-                max_context_length=rope.max_context_length,
-                theta=10000.0,
-                partial_rotary_factor=1.0,
-                scaling="none",
-            )
-
         attention_cfg = Gemma4Attention.Config(
             n_heads=n_heads,
             dim=dim,
             qkv_linear=qkv_linear,
-            wo=wo,
-            qk_norm=RMSNorm.Config(
-                normalized_shape=actual_head_dim, eps=1e-6, param_init=_NORM_INIT
-            ),
+            wo=Linear.Config(in_features=n_heads * actual_head_dim, out_features=dim, param_init=_depth_init(layer_id)),
+            qk_norm=RMSNorm.Config(normalized_shape=actual_head_dim, eps=1e-6, param_init=_NORM_INIT),
             n_kv_heads=actual_kv_heads,
             head_dim=actual_head_dim,
             inner_attention=layer_inner_attn,
             rope=layer_rope,
             attn_scale=1.0,
-            v_norm=RMSNorm.Config(
-                normalized_shape=actual_head_dim,
-                eps=1e-6,
-                elementwise_affine=False,
-            ),
+            v_norm=RMSNorm.Config(normalized_shape=actual_head_dim, eps=1e-6, elementwise_affine=False),
         )
 
         layers.append(
             Gemma4TransformerBlock.Config(
                 use_global_attention=use_global_attn,
-                attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT
-                ),
-                post_attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT
-                ),
-                ffn_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT
-                ),
-                post_ffn_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT
-                ),
+                attention_norm=norm_cfg,
+                post_attention_norm=norm_cfg,
+                ffn_norm=norm_cfg,
+                post_ffn_norm=norm_cfg,
                 attention=attention_cfg,
                 feed_forward=_make_gemma4_ffn_config(
                     dim=dim,
@@ -241,335 +175,108 @@ def _build_gemma4_layers(
     return layers
 
 
-def _debugmodel(
+def _create_gemma4_config(
+    *,
+    dim: int,
+    n_heads: int,
+    n_layers: int,
+    hidden_dim: int,
+    n_kv_heads: int | None = None,
+    head_dim: int = 256,
+    global_head_dim: int | None = 512,
+    global_kv_heads: int | None = None,
+    attention_k_eq_v: bool = False,
+    vocab_size: int = 262144,
+    sliding_window_size: int = 1024,
+    enable_sliding_window: bool = True,
+    global_attn_interval: int = 6,
+    rope_dim: int = 256,
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
-    *,
     seq_len: int,
 ) -> Gemma4Model.Config:
-    dim = 256
-    n_heads = 16
-    n_layers = 6
-    return Gemma4Model.Config(
-        dim=dim,
-        vocab_size=2048,
-        enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=2048, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
-        ),
-        layers=_build_gemma4_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            hidden_dim=compute_ffn_hidden_dim(dim, multiple_of=256),
-            rope=Gemma4RoPE.Config(
-                dim=dim // n_heads,
-                max_context_length=seq_len,
-                theta=10000.0,
-                scaling="none",
-            ),
-            attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
-        ),
-    )
-
-
-def _e2b(
-    attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
-    *,
-    seq_len: int,
-) -> Gemma4Model.Config:
-    """Gemma-4 E2B configuration (Edge 2B)."""
-    dim = 1536
-    intermediate_size = 6144
-    n_heads = 8
-    n_kv_heads = 1
-    n_layers = 35
-    vocab_size = 262144
-    sliding_window = 512
-
     return Gemma4Model.Config(
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        sliding_window_size=sliding_window,
-        enable_sliding_window=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
-        ),
+        sliding_window_size=sliding_window_size,
+        enable_sliding_window=enable_sliding_window,
+        tok_embeddings=Embedding.Config(num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT),
         norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
+        lm_head=Linear.Config(in_features=dim, out_features=vocab_size, param_init=_output_linear_init(dim)),
         layers=_build_gemma4_layers(
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
-            hidden_dim=intermediate_size,
-            head_dim=256,
-            global_head_dim=512,
-            global_kv_heads=1,
-            attention_k_eq_v=False,
-            rope=Gemma4RoPE.Config(
-                dim=256,
-                max_context_length=seq_len,
-                theta=10000.0,
-                scaling="none",
-            ),
+            hidden_dim=hidden_dim,
+            head_dim=head_dim,
+            global_head_dim=global_head_dim,
+            global_kv_heads=global_kv_heads,
+            attention_k_eq_v=attention_k_eq_v,
+            rope=Gemma4RoPE.Config(dim=rope_dim, max_context_length=seq_len, theta=10000.0, scaling="none"),
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
-            sliding_window_size=sliding_window,
-            global_attn_interval=5,
+            sliding_window_size=sliding_window_size,
+            global_attn_interval=global_attn_interval,
         ),
     )
 
 
-def _e4b(
-    attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
-    *,
-    seq_len: int,
-) -> Gemma4Model.Config:
-    """Gemma-4 E4B configuration (Edge 4B)."""
-    dim = 2560
-    intermediate_size = 10240
-    n_heads = 8
-    n_kv_heads = 2
-    n_layers = 42
-    vocab_size = 262144
-    sliding_window = 512
+_FLAVOR_SPECS: dict[str, dict[str, Any]] = {
+    "debugmodel": dict(
+        dim=256, n_heads=16, n_layers=6, hidden_dim=1024,
+        head_dim=16, global_head_dim=None, rope_dim=16,
+        vocab_size=2048, enable_sliding_window=False,
+    ),
+    "e2b": dict(
+        dim=1536, n_heads=8, n_kv_heads=1, n_layers=35, hidden_dim=6144,
+        global_kv_heads=1, sliding_window_size=512, global_attn_interval=5,
+    ),
+    "e4b": dict(
+        dim=2560, n_heads=8, n_kv_heads=2, n_layers=42, hidden_dim=10240,
+        global_kv_heads=2, sliding_window_size=512, global_attn_interval=6,
+    ),
+    "12b": dict(
+        dim=3840, n_heads=16, n_kv_heads=8, n_layers=48, hidden_dim=15360,
+        global_kv_heads=1, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
+    ),
+    "26b_a4b": dict(
+        dim=2816, n_heads=16, n_kv_heads=8, n_layers=30, hidden_dim=2112,
+        global_kv_heads=2, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
+    ),
+    "31b": dict(
+        dim=5376, n_heads=32, n_kv_heads=16, n_layers=60, hidden_dim=21504,
+        global_kv_heads=4, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
+    ),
+}
 
-    return Gemma4Model.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        enable_weight_tying=True,
-        sliding_window_size=sliding_window,
-        enable_sliding_window=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_gemma4_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=intermediate_size,
-            head_dim=256,
-            global_head_dim=512,
-            global_kv_heads=2,
-            attention_k_eq_v=False,
-            rope=Gemma4RoPE.Config(
-                dim=256,
-                max_context_length=seq_len,
-                theta=10000.0,
-                scaling="none",
-            ),
+
+def _get_flavor_builder(flavor: str) -> Callable:
+    params = _FLAVOR_SPECS[flavor.lower()]
+
+    def builder(
+        attn_backend: str,
+        tp_gemm_backend: TpGemmBackend = "default",
+        *,
+        seq_len: int,
+    ) -> Gemma4Model.Config:
+        return _create_gemma4_config(
+            **params,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
-            sliding_window_size=sliding_window,
-            global_attn_interval=6,
-        ),
-    )
+            seq_len=seq_len,
+        )
 
-
-def _12b(
-    attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
-    *,
-    seq_len: int,
-) -> Gemma4Model.Config:
-    """Gemma-4 12B configuration."""
-    dim = 3840
-    intermediate_size = 15360
-    n_heads = 16
-    n_kv_heads = 8
-    n_layers = 48
-    vocab_size = 262144
-    sliding_window = 1024
-
-    return Gemma4Model.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        enable_weight_tying=True,
-        sliding_window_size=sliding_window,
-        enable_sliding_window=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_gemma4_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=intermediate_size,
-            head_dim=256,
-            global_head_dim=512,
-            global_kv_heads=1,
-            attention_k_eq_v=True,
-            rope=Gemma4RoPE.Config(
-                dim=256,
-                max_context_length=seq_len,
-                theta=10000.0,
-                scaling="none",
-            ),
-            attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
-            sliding_window_size=sliding_window,
-            global_attn_interval=6,
-        ),
-    )
-
-
-def _26b_a4b(
-    attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
-    *,
-    seq_len: int,
-) -> Gemma4Model.Config:
-    """Gemma-4 26B A4B configuration."""
-    dim = 2816
-    intermediate_size = 2112
-    n_heads = 16
-    n_kv_heads = 8
-    n_layers = 30
-    vocab_size = 262144
-    sliding_window = 1024
-
-    return Gemma4Model.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        enable_weight_tying=True,
-        sliding_window_size=sliding_window,
-        enable_sliding_window=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_gemma4_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=intermediate_size,
-            head_dim=256,
-            global_head_dim=512,
-            global_kv_heads=2,
-            attention_k_eq_v=True,
-            rope=Gemma4RoPE.Config(
-                dim=256,
-                max_context_length=seq_len,
-                theta=10000.0,
-                scaling="none",
-            ),
-            attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
-            sliding_window_size=sliding_window,
-            global_attn_interval=6,
-        ),
-    )
-
-
-def _31b(
-    attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
-    *,
-    seq_len: int,
-) -> Gemma4Model.Config:
-    """Gemma-4 31B (Dense) configuration."""
-    dim = 5376
-    intermediate_size = 21504
-    n_heads = 32
-    n_kv_heads = 16
-    n_layers = 60
-    vocab_size = 262144
-    sliding_window = 1024
-
-    return Gemma4Model.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        enable_weight_tying=True,
-        sliding_window_size=sliding_window,
-        enable_sliding_window=True,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_gemma4_layers(
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=intermediate_size,
-            head_dim=256,
-            global_head_dim=512,
-            global_kv_heads=4,
-            attention_k_eq_v=True,
-            rope=Gemma4RoPE.Config(
-                dim=256,
-                max_context_length=seq_len,
-                theta=10000.0,
-                scaling="none",
-            ),
-            attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
-            sliding_window_size=sliding_window,
-            global_attn_interval=6,
-        ),
-    )
+    return builder
 
 
 gemma4_configs = {
-    "debugmodel": (_debugmodel, 262144),
-    "e2b": (_e2b, 262144),
-    "E2B": (_e2b, 262144),
-    "e4b": (_e4b, 262144),
-    "E4B": (_e4b, 262144),
-    "12b": (_12b, 262144),
-    "12B": (_12b, 262144),
-    "26b_a4b": (_26b_a4b, 262144),
-    "26B_A4B": (_26b_a4b, 262144),
-    "31b": (_31b, 262144),
-    "31B": (_31b, 262144),
+    key: (_get_flavor_builder(key), 262144)
+    for key in [
+        "debugmodel", "e2b", "E2B", "e4b", "E4B",
+        "12b", "12B", "26b_a4b", "26B_A4B", "31b", "31B",
+    ]
 }
 
 
@@ -581,18 +288,7 @@ def model_registry(
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    """Register Gemma-4 model with TorchTitan.
-
-    Args:
-        flavor: Model size ("e2b", "e4b", "12b", "26b_a4b", "31b", "debugmodel")
-        seq_len: Optional sequence length override
-        attn_backend: Attention backend ("flex", "sdpa")
-        tp_gemm_backend: Tensor parallel GEMM backend
-        converters: Optional config converters for custom experimentation
-
-    Returns:
-        ModelSpec for training with TorchTitan
-    """
+    """Register Gemma-4 model with TorchTitan."""
     get_config, max_context_len = gemma4_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:

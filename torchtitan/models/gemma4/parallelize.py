@@ -7,6 +7,8 @@
 # Gemma-4 Model Parallelization
 # Applies TP, activation checkpointing, torch.compile, and FSDP to the model
 
+import torch.nn as nn
+
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
@@ -18,6 +20,7 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.models.gemma4.model import Gemma4Model
+from torchtitan.tools.logging import logger
 
 
 def parallelize_gemma4(
@@ -37,6 +40,41 @@ def parallelize_gemma4(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+    # Untie tok_embeddings / lm_head weights before FSDP wrapping.
+    #
+    # Gemma-4 uses ``enable_weight_tying=True``, which makes
+    # ``tok_embeddings.weight`` and ``lm_head.weight`` the *same* Parameter
+    # object. When ChunkedLossWrapper is used, lm_head is invoked per-chunk
+    # inside the loss function and its FSDP group is explicitly resharded via
+    # ``lm_head.reshard()`` after the chunked loop — before the decoder
+    # backward propagates back through norm → tok_embeddings.
+    #
+    # If the three modules share one FSDP param group (the tied path in
+    # ``apply_fsdp_to_decoder``), that ``reshard()`` call also reshards
+    # tok_embeddings and norm, so FSDP's backward hooks fire on an already-
+    # resharded group and produce zero gradients for the entire decoder.
+    #
+    # The fix (same approach as the transformers_modeling_backend) is to clone
+    # lm_head.weight into an independent Parameter before FSDP wraps the model.
+    # FSDP then takes the non-tied branch: tok_embeddings in its own group,
+    # [norm, lm_head] in a separate group. ``lm_head.reshard()`` only touches
+    # that second group, leaving tok_embeddings unaffected during backward.
+    #
+    # Note: this causes tok_embeddings and lm_head to diverge during training,
+    # which is expected — the model learns independent embedding and output
+    # projections. Checkpoint loading via Gemma4StateDictAdapter correctly
+    # re-ties the weights at load time; they become independent again here.
+    if model.enable_weight_tying and model.tok_embeddings is not None and model.lm_head is not None:
+        model.lm_head.weight = nn.Parameter(
+            model.lm_head.weight.clone(),
+            requires_grad=model.lm_head.weight.requires_grad,
+        )
+        model.enable_weight_tying = False
+        logger.info(
+            "Untied tok_embeddings/lm_head weights for FSDP + ChunkedLossWrapper "
+            "compatibility. Parameters will train independently."
+        )
+
     if parallelism.spmd_backend == "spmd_types" or parallel_dims.tp_enabled:
         model.parallelize(parallel_dims)
     model_compile_enabled = (

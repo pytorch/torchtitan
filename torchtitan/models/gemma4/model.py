@@ -261,6 +261,10 @@ class Gemma4TransformerBlock(TransformerBlock):
         self.post_ffn_norm = config.post_ffn_norm.build()
         self.register_buffer("layer_scalar", torch.ones(1))
 
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        super()._init_self_buffers(buffer_device=buffer_device)
+        self.layer_scalar.fill_(1.0)
+
     def forward(
         self,
         x: torch.Tensor,
