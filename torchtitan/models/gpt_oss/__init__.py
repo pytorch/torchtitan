@@ -21,7 +21,7 @@ from torchtitan.models.common import (
     RouterGateLinear,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import FusedQKVLinear, VarlenAttention
+from torchtitan.models.common.attention import QKVLinear, VarlenAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
@@ -94,7 +94,7 @@ def _make_gptoss_attn_config(
         "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
     }
 
-    qkv = FusedQKVLinear.Config(
+    qkv = QKVLinear.Config(
         head_dim=head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,

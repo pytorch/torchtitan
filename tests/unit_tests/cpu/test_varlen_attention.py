@@ -18,8 +18,8 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
-    FusedQKVLinear,
     GQAttention,
+    QKVLinear,
     VarlenAttention,
 )
 from torchtitan.models.common.linear import Linear
@@ -47,7 +47,7 @@ class TestPackedVarlenAttention(unittest.TestCase):
             n_kv_heads=num_heads,
             head_dim=head_dim,
             dim=dim,
-            qkv_linear=FusedQKVLinear.Config(
+            qkv_linear=QKVLinear.Config(
                 head_dim=head_dim,
                 n_heads=num_heads,
                 n_kv_heads=num_heads,

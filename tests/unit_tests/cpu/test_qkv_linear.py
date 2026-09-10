@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checkpoint and forward tests for FusedQKVLinear.
+"""Checkpoint and forward tests for QKVLinear.
 
-FusedQKVLinear stores a single fused ``wqkv`` parameter but checkpoints in the
+QKVLinear stores a single fused ``wqkv`` parameter but checkpoints in the
 logical ``wq.weight`` / ``wk.weight`` / ``wv.weight`` layout via state_dict
 hooks.
 
@@ -16,7 +16,7 @@ All tests run on CPU.
 import unittest
 
 import torch
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import Linear
 
 _DIM = 16
@@ -30,8 +30,8 @@ _WQ_OUT = _N_HEADS * _HEAD_DIM  # 32
 _WK_OUT = _N_KV_HEADS * _HEAD_DIM  # 16
 
 
-def _build_fused(with_bias: bool = False) -> FusedQKVLinear:
-    fused = FusedQKVLinear.Config(
+def _build_qkv_linear(with_bias: bool = False) -> QKVLinear:
+    fused = QKVLinear.Config(
         head_dim=_HEAD_DIM,
         n_heads=_N_HEADS,
         n_kv_heads=_N_KV_HEADS,
@@ -61,10 +61,10 @@ def _logical_state_dict(with_bias: bool = False) -> dict[str, torch.Tensor]:
     return state_dict
 
 
-class TestFusedQKVCheckpointInterop(unittest.TestCase):
+class TestQKVLinearCheckpointInterop(unittest.TestCase):
     def test_state_dict_exposes_logical_qkv(self):
         """The fused parameter is exposed as logical Q/K/V tensors."""
-        fused = _build_fused(with_bias=True)
+        fused = _build_qkv_linear(with_bias=True)
         state_dict = fused.state_dict()
 
         n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
@@ -86,10 +86,10 @@ class TestFusedQKVCheckpointInterop(unittest.TestCase):
             torch.equal(state_dict["wv.bias"], b_3d[:, _HPK + 1].reshape(-1))
         )
 
-    def test_logical_checkpoint_loads_into_fused(self):
+    def test_logical_checkpoint_loads_into_qkv_linear(self):
         """Logical Q/K/V checkpoint tensors are packed into wqkv."""
         state_dict = _logical_state_dict(with_bias=True)
-        fused = _build_fused(with_bias=True)
+        fused = _build_qkv_linear(with_bias=True)
         fused.load_state_dict(state_dict)
 
         n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
@@ -114,7 +114,7 @@ class TestFusedQKVCheckpointInterop(unittest.TestCase):
         )
 
     def test_hf_adapter_roundtrip(self):
-        """HF adapter works with FusedQKVLinear's hook-produced wq/wk/wv keys."""
+        """HF adapter works with QKVLinear's hook-produced wq/wk/wv keys."""
         from torchtitan.models.llama3 import llama3_configs
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
         from torchtitan.models.muse_glimmer import muse_glimmer_configs
@@ -164,7 +164,7 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
 
     def test_forward_outputs_are_contiguous_and_correct(self):
         """q/k/v are contiguous and match an independent per-projection matmul."""
-        fused = _build_fused()
+        fused = _build_qkv_linear()
         num_tokens = 6
         x_TD = torch.randn(num_tokens, _DIM)
         xq_THK, xk_THK, xv_THV = fused(x_TD)
@@ -189,7 +189,7 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
         (what vLLM's kernels do) gets the wrong bytes from the strided split, and
         the correct bytes only after the forward's ``.contiguous()``.
         """
-        fused = _build_fused()
+        fused = _build_qkv_linear()
         num_tokens = 6
         x_TD = torch.randn(num_tokens, _DIM)
 

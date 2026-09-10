@@ -20,8 +20,8 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
     FlexAttention,
-    FusedQKVLinear,
     GQAttention,
+    QKVLinear,
     VarlenAttention,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -213,7 +213,7 @@ def make_gqa_config(
 
     # The backend picks the classes; everything below builds the same shapes into
     # whichever was chosen.
-    qkv_cls, wo_cls = FusedQKVLinear, Linear
+    qkv_cls, wo_cls = QKVLinear, Linear
     if tp_gemm_backend == "dist_gemm":
         qkv_cls = AllGatherFusedQKVLinear
         wo_cls = RowParallelLinear
