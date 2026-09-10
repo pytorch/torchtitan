@@ -439,7 +439,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             topk_plus_one_scores[:, self.top_k :],
             expert_bias_E,
         )
-        return topk_plus_one_expert_ids[:, : self.top_k]
+        return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
 
 class QuantileBalancer(Module):
@@ -483,7 +483,7 @@ class QuantileBalancer(Module):
         if not self.training:
             return
 
-        with torch.no_grad():
+        with spmd.no_typecheck(), torch.no_grad():
             local_scores_TE = self._local_tensor(scores_TE)
             local_cutoff_T1 = self._local_tensor(cutoff_T1)
             local_expert_bias_E = self._local_tensor(expert_bias_E)

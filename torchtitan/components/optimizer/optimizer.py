@@ -558,30 +558,28 @@ def register_moe_quantile_balancing_hook(
         if loss_mesh is not None:
             reduction_groups.append(loss_mesh.get_group())
 
-        reduced_histograms_LEB = None
+        histograms = [
+            router.quantile_balancer.required_bias_histogram_EB
+            for _moe, router in moe_layers
+        ]
         if reduction_groups:
-            reduced_histograms_LEB = torch.stack(
-                [
-                    router.quantile_balancer.required_bias_histogram_EB
-                    for _moe, router in moe_layers
-                ]
-            )
+            reduced_histograms_LEB = torch.stack(histograms)
             for group in reduction_groups:
                 torch.distributed.all_reduce(
                     reduced_histograms_LEB,
                     group=group,
                     op=torch.distributed.ReduceOp.SUM,
                 )
+            histograms = list(reduced_histograms_LEB.unbind())
 
-        for layer_idx, (moe, router) in enumerate(moe_layers):
+        for histogram_EB, (moe, router) in zip(
+            histograms,
+            moe_layers,
+            strict=True,
+        ):
             expert_bias_E = moe.expert_bias_E
             assert expert_bias_E is not None
             quantile_balancer = router.quantile_balancer
-            histogram_EB = (
-                quantile_balancer.required_bias_histogram_EB
-                if reduced_histograms_LEB is None
-                else reduced_histograms_LEB[layer_idx]
-            )
             next_expert_bias_E = quantile_balancer.estimate_expert_bias(
                 histogram_EB,
                 expert_bias_E,
