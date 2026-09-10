@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 
-from torchtitan.models.common.linear import _build_interleaved_linear, Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
@@ -48,6 +49,56 @@ def _merge_gate_up_param_init(
     }
 
 
+def _validate_fused_gate_up_configs(
+    w1: Linear.Config,
+    w3: Linear.Config,
+) -> None:
+    """Validate that w1 and w3 can build one physical projection."""
+    config_type = type(w1)
+    if type(w3) is not config_type:
+        raise ValueError(
+            "Cannot fuse w1 and w3 with different implementations: "
+            f"w1 uses {type(w1).__qualname__}, but w3 uses "
+            f"{type(w3).__qualname__}."
+        )
+    if w1.out_features != w3.out_features:
+        raise ValueError("Fused w1 and w3 must have matching out_features")
+
+    comparable_fields = {
+        field.name
+        for field in fields(config_type)
+        if field.init and field.name not in ("out_features", "param_init")
+    }
+    for field_name in comparable_fields:
+        if getattr(w3, field_name) != getattr(w1, field_name):
+            raise ValueError(f"Fused w1 and w3 have different {field_name} values")
+
+
+def _build_fused_gate_up_linear(
+    w1: Linear.Config,
+    w3: Linear.Config,
+    *,
+    param_init: dict[str, Callable] | None,
+) -> Any:
+    """Build logical w1 and w3 configs as one interleaved w13 Linear."""
+    _validate_fused_gate_up_configs(w1, w3)
+
+    config_type = type(w1)
+    config_kwargs = {
+        field.name: getattr(w1, field.name)
+        for field in fields(config_type)
+        if field.init
+    }
+    config_kwargs["out_features"] = w1.out_features + w3.out_features
+    config_kwargs["param_init"] = param_init
+    w13 = config_type(**config_kwargs).build()
+    w13._logical_output_slices = (
+        ("w1", w1.out_features),
+        ("w3", w3.out_features),
+    )
+    return w13
+
+
 def compute_ffn_hidden_dim(
     dim: int,
     *,
@@ -81,10 +132,9 @@ class FeedForward(Module):
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w13 = _build_interleaved_linear(
+        self.w13 = _build_fused_gate_up_linear(
             config.w1,
             config.w3,
-            logical_names=("w1", "w3"),
             param_init=_merge_gate_up_param_init(config.w1, config.w3),
         )
         self.w2 = config.w2.build()
