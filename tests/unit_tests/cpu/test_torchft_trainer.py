@@ -5,12 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from importlib import import_module
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.lora import LoRAConverter
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import override
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
@@ -57,3 +59,16 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ft.FaultTolerantTrainer(config)
 
     assert hasattr(built_ffns[0].w1, "lora_a"), "FT ignored the FFN LoRA override"
+
+
+def test_ft_chunked_loss_without_pp_binds_lm_head_and_skips_model_projection():
+    model = SimpleNamespace(lm_head=torch.nn.Linear(4, 8), _skip_lm_head=False)
+    trainer = object.__new__(ft.FaultTolerantTrainer)
+    trainer.parallel_dims = SimpleNamespace(pp_enabled=False)
+    trainer.model_parts = [model]
+    trainer.loss_fn = ChunkedLossWrapper.Config(num_chunks=2).build()
+
+    trainer._configure_chunked_loss()
+
+    assert trainer.loss_fn.lm_head is model.lm_head
+    assert model._skip_lm_head is True

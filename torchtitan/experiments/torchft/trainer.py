@@ -256,6 +256,9 @@ class FaultTolerantTrainer(Trainer):
 
             self.model_parts = [model]
 
+        # Set lm_head reference for ChunkedLossWrapper after model construction.
+        self._configure_chunked_loss()
+
         # FT addition: set all reduce hook
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
