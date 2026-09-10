@@ -19,7 +19,6 @@ grouped-expert implementation still stores separate ``w1`` and ``w3``
 parameters.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import spmd_types as spmd
@@ -33,7 +32,7 @@ from torch.distributed.tensor.experimental import local_map
 from torchtitan.config import derive, override
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import _make_fused_gate_up_init, FeedForward
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -331,33 +330,6 @@ def silu_and_mul_setup_context(ctx, inputs, output):
 silu_and_mul_op.register_autograd(
     silu_and_mul_autograd_backward, setup_context=silu_and_mul_setup_context
 )
-
-
-def _make_fused_gate_up_init(
-    gate_init: Callable,
-    up_init: Callable,
-    *,
-    gate_up_axis: int,
-) -> Callable:
-    """Build an initializer for a fused gate/up weight from per-half initializers.
-
-    The fused weight has a size-2 ``gate_up_axis`` (index 0 = gate / stock w1,
-    index 1 = up / stock w3). Each half is initialized with its own initializer
-    because the gate and up projections differ (e.g. up shares w2's depth-scaled
-    init), so initializing the whole tensor at once would mis-init the up half.
-    Used by the grouped FusedGroupedExperts ``(E, F, 2, D)`` override and by
-    the logical 3D view of the dense fused linear weight.
-    """
-
-    def _init(t: torch.Tensor) -> None:
-        gate_idx: list[int | slice] = [slice(None)] * t.ndim
-        up_idx: list[int | slice] = [slice(None)] * t.ndim
-        gate_idx[gate_up_axis] = 0
-        up_idx[gate_up_axis] = 1
-        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
-        up_init(t[tuple(up_idx)])  # up (stock w3)
-
-    return _init
 
 
 def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
