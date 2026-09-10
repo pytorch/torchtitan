@@ -364,8 +364,7 @@ class KimiK3Model(Decoder):
                 )
             }
         )
-        if parallelism.spmd_backend == "spmd_types":
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

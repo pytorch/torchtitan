@@ -287,8 +287,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     TODO(pianpwk): this is transitional code while ShardingConfig-based
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
-    or we should write collective-based (not placement-based) redistributions
-    once the partial_dtensor backend is removed.
+    or we should write collective-based (not placement-based) redistributions.
     """
 
     def _normalize_partition_spec(
