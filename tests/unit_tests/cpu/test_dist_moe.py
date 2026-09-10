@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any, cast
+from unittest.mock import Mock, patch
+
 import pytest
 import torch
 
@@ -12,6 +15,7 @@ from torchtitan.components.dist_moe import (
     DistMoeConverter,
     DistMoeRoutedExperts,
 )
+from torchtitan.components.dist_moe.backend import _DistMoeRuntime
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
@@ -20,6 +24,42 @@ from torchtitan.experiments.graph_trainer.deepseek_v3 import (
 from torchtitan.models.common.attention import VarlenAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.deepseek_v3 import config_registry as eager_configs
+
+
+def _runtime(prefetch: Any) -> _DistMoeRuntime:
+    return _DistMoeRuntime(
+        config=cast(Any, object()),
+        group=cast(Any, object()),
+        prefetch=prefetch,
+    )
+
+
+def test_dist_moe_runtime_closes_prefetch_after_initialization_failure():
+    prefetch = Mock()
+    runtime = _runtime(prefetch)
+
+    with (
+        patch(
+            "torchtitan.components.dist_moe.backend.create_context",
+            side_effect=RuntimeError("context creation failed"),
+        ),
+        pytest.raises(RuntimeError, match="context creation failed"),
+    ):
+        runtime.initialize(torch.device("cuda"))
+
+    prefetch.close.assert_called_once_with()
+    assert runtime.prefetch is None
+
+
+def test_dist_moe_runtime_close_releases_pending_prefetch():
+    prefetch = Mock()
+    runtime = _runtime(prefetch)
+
+    runtime.close()
+    runtime.close()
+
+    prefetch.close.assert_called_once_with()
+    assert runtime.prefetch is None
 
 
 def _routed_experts_config() -> DistMoeRoutedExperts.Config:
