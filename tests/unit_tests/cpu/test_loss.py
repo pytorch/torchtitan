@@ -524,6 +524,7 @@ class _AddMTPBlock(nn.Module):
 class _FakeMTPDecoder(MTPDecoder):
     def __init__(self, *, skip_lm_head: bool, num_mtp_layers: int = 1):
         nn.Module.__init__(self)
+        self.num_mtp_layers = 1
         self._skip_lm_head = skip_lm_head
         self.tok_embeddings = nn.Embedding(16, 4)
         self.layers = nn.ModuleDict({"0": _IdentityDecoderBlock()})
@@ -742,9 +743,12 @@ class TestChunkedLossWrapper(unittest.TestCase):
             mtp_input_valid_masks=(valid_mask,),
         )
         self.assertIsInstance(hidden_outputs, tuple)
-        self.assertEqual(len(hidden_outputs), 2)
+        self.assertEqual(len(hidden_outputs), 3)
         self.assertEqual(hidden_outputs[0].shape, (4, 4))
         self.assertEqual(hidden_outputs[1].shape, (4, 4))
+        torch.testing.assert_close(
+            hidden_outputs[2], torch.tensor([True, False, True, False])
+        )
 
         full_outputs = _FakeMTPDecoder(skip_lm_head=False)(
             model_inputs,
@@ -753,6 +757,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         )
         self.assertEqual(full_outputs[0].shape, (4, 16))
         self.assertEqual(full_outputs[1].shape, (4, 16))
+        torch.testing.assert_close(full_outputs[2], hidden_outputs[2])
 
     def test_chunked_mtp_matches_full_objective(self):
         torch.manual_seed(42)
