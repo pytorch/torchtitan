@@ -951,35 +951,15 @@ class _ResolvedStorageToComputeTransition:
     redistribution_storage_mesh_axis: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _MuonPlanSpec:
-    """Immutable geometry for one parameter's storage-to-compute plan.
-
-    ``logical_shape`` is local to the transport group; storage and compute
-    shapes describe the global parameter layout.
-    """
-
-    storage_regions: tuple[_StorageRegionMapping, ...]
-    participants: tuple[int, ...]
-    shard_participants: tuple[int, ...]
-    storage_shape: tuple[int, ...]
-    logical_shape: tuple[int, ...]
-    compute_shape: tuple[int, ...]
-    owner_rank: int | None
-
-
 def _resolve_muon_redistribution_plans(
     contexts: tuple[_BucketPlanningContext[_ParameterComputeLayout], ...],
     *,
     ns_steps_by_group: Sequence[int],
 ) -> tuple[tuple[_RedistributionPlan | None, ...], ...]:
-    """Build one redistribution plan per unique spec across all buckets.
-
-    Buckets split by parameter name, so the same geometry recurs across them.
-    Resolve ownership in bucket order before deduplicating plan specs.
-    """
+    """Resolve Muon compute shardings directly into transport plans."""
     cumulative_loads_by_participants: dict[tuple[int, ...], tuple[int, ...]] = {}
     specs_by_bucket = []
+    unique_specs = {}
     for context in contexts:
         participants = context.group.participants
         initial_loads = cumulative_loads_by_participants.setdefault(
@@ -993,18 +973,29 @@ def _resolve_muon_redistribution_plans(
             ns_steps_by_group=ns_steps_by_group,
         )
         cumulative_loads_by_participants[participants] = cumulative_loads
-        specs_by_bucket.append(
-            tuple(
-                _make_muon_plan_spec(layout, context.group, owner_rank)
-                for layout, owner_rank in zip(context.items, owner_ranks, strict=True)
+        bucket_specs = []
+        for layout, owner_rank in zip(context.items, owner_ranks, strict=True):
+            if layout.storage_is_compute_ready:
+                bucket_specs.append(None)
+                continue
+            spec = (
+                layout.storage_layout_signature,
+                tuple(layout.param.device_mesh.shape),
+                layout.storage_mesh_ranks,
+                layout.redistribution_storage_mesh_axis,
+                context.group.participants,
+                context.group.mesh_axis_participants,
+                tuple(layout.global_compute_shape),
+                layout.compute_sharding,
+                owner_rank,
             )
-        )
+            bucket_specs.append(spec)
+            unique_specs.setdefault(spec, (layout, context.group, owner_rank))
+        specs_by_bucket.append(bucket_specs)
 
-    unique_specs = dict.fromkeys(
-        spec for bucket in specs_by_bucket for spec in bucket if spec is not None
-    )
     plans_by_spec = {
-        spec: _build_parameter_redistribution_plan(spec) for spec in unique_specs
+        spec: _build_parameter_redistribution_plan(*args)
+        for spec, args in unique_specs.items()
     }
     return tuple(
         tuple(None if spec is None else plans_by_spec[spec] for spec in bucket)
@@ -1110,11 +1101,11 @@ def _balance_loads_across_partitions(
     return tuple(assignments), tuple(updated_cumulative_primary_loads)
 
 
-def _make_muon_plan_spec(
+def _build_parameter_redistribution_plan(
     compute_layout: _ParameterComputeLayout,
     group: _RedistributionGroup,
     owner_rank: int | None,
-) -> _MuonPlanSpec | None:
+) -> _RedistributionPlan | None:
     transition = compute_layout.storage_to_compute_transition
     if isinstance(transition, _NoRedistributionTransition):
         return None
@@ -1129,43 +1120,28 @@ def _make_muon_plan_spec(
     if type(compute_sharding) is Owned:
         assert owner_rank is not None
         assert owner_rank in group.participants
-    else:
-        assert owner_rank is None
-        assert type(compute_sharding) is Shard
-
-    return _MuonPlanSpec(
-        storage_regions=storage_regions,
-        participants=group.participants,
-        shard_participants=group.mesh_axis_participants,
-        storage_shape=tuple(compute_layout.param.shape),
-        logical_shape=group_local_storage_shape,
-        compute_shape=tuple(compute_layout.global_compute_shape),
-        owner_rank=owner_rank,
-    )
-
-
-def _build_parameter_redistribution_plan(spec: _MuonPlanSpec) -> _RedistributionPlan:
-    if spec.owner_rank is not None:
         return _build_owned_redistribution_plan(
-            spec.storage_regions,
-            participants=spec.participants,
-            owner_rank=spec.owner_rank,
-            logical_shape=spec.storage_shape,
+            storage_regions,
+            participants=group.participants,
+            owner_rank=owner_rank,
+            logical_shape=tuple(compute_layout.param.shape),
         )
 
-    if spec.compute_shape == spec.storage_shape:
+    assert owner_rank is None
+    assert type(compute_sharding) is Shard
+    if tuple(compute_layout.global_compute_shape) == tuple(compute_layout.param.shape):
         return _build_dim0_shard_redistribution_plan(
-            spec.storage_regions,
-            participants=spec.participants,
-            shard_participants=spec.shard_participants,
-            logical_shape=spec.logical_shape,
+            storage_regions,
+            participants=group.participants,
+            shard_participants=group.mesh_axis_participants,
+            logical_shape=group_local_storage_shape,
         )
 
     return _build_batched_matrix_redistribution_plan(
-        spec.storage_regions,
-        participants=spec.participants,
-        storage_shape=spec.storage_shape,
-        compute_shape=spec.compute_shape,
+        storage_regions,
+        participants=group.participants,
+        storage_shape=tuple(compute_layout.param.shape),
+        compute_shape=tuple(compute_layout.global_compute_shape),
     )
 
 
