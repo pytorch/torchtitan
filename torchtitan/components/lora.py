@@ -468,7 +468,7 @@ def _get_lora_cls(parent_cls: type) -> type:
 
 
 _EXPERT_WEIGHT_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
-_mxfp4_experts_cls_cache: dict[type, type] = {}
+_mxfp4_experts_cls_cache: dict[type[GroupedExperts], type[GroupedExperts]] = {}
 
 
 class MXFP4ExpertsBase:
@@ -480,8 +480,13 @@ class MXFP4ExpertsBase:
     _mx_scale_dtype: torch.dtype
     _mx_ctx: Any
 
+    def register_parameter(self, name: str, param: nn.Parameter | None) -> None:
+        raise NotImplementedError
 
-def _get_mxfp4_experts_cls(parent_cls: type) -> type:
+
+def _get_mxfp4_experts_cls(
+    parent_cls: type[GroupedExperts],
+) -> type[GroupedExperts]:
     """Get or create an MXFP4 split-storage subclass of a grouped-experts class.
 
     Same build-time pack-then-shard order as the LoRA linear's mxfp4 path: the
@@ -532,9 +537,9 @@ def _get_mxfp4_experts_cls(parent_cls: type) -> type:
 
         return fget
 
-    class MXFP4Experts(parent_cls, MXFP4ExpertsBase):  # type: ignore[valid-type, misc]
+    class MXFP4Experts(parent_cls, MXFP4ExpertsBase):
         @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls):  # type: ignore[misc]
+        class Config(parent_config_cls):
             pass
 
         def __init__(self, config) -> None:
@@ -623,6 +628,7 @@ def _get_mxfp4_experts_cls(parent_cls: type) -> type:
                 )
                 qdata = self._parameters[name + "_qdata"]
                 scale = self._parameters[name + "_scale"]
+                assert qdata is not None and scale is not None
                 q_local = qdata.to_local() if isinstance(qdata, DTensor) else qdata
                 s_local = scale.to_local() if isinstance(scale, DTensor) else scale
                 w_rows = torch.empty(
@@ -777,8 +783,9 @@ class LoRAConverter(ModelConfigConverter):
             ):
                 # The packed subclass creates its params frozen; no frozen
                 # wrap needed on top.
-                assert cfg._owner is not None
-                experts_cls = _get_mxfp4_experts_cls(cfg._owner)
+                owner = cfg._owner
+                assert owner is not None and issubclass(owner, GroupedExperts)
+                experts_cls = _get_mxfp4_experts_cls(owner)
                 new_cfg = experts_cls.Config(
                     **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init}
                 )
