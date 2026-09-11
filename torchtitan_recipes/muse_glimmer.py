@@ -10,6 +10,7 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.config import ContextParallelLoadBalancerConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
@@ -42,7 +43,11 @@ def _muse_glimmer_30b_cp(
     config.parallelism.context_parallel_load_balancer = load_balancer
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=inner_attention)],
+        [
+            ContextParallelTransform(
+                inner_attention={FlexInnerAttention.Config: inner_attention}
+            )
+        ],
     )
 
 
@@ -81,5 +86,11 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    VarlenInnerAttention.Config: UlyssesCPVarlenInnerAttention
+                }
+            )
+        ],
     )

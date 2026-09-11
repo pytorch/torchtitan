@@ -6,7 +6,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
@@ -359,13 +359,18 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         from torchtitan.models.common.cp_attention import CPInnerAttention
 
-        inner_attention = self.config.first_full_attention_backend
-        owner = cast(
-            "type[CPInnerAttention] | None",
-            inner_attention._owner if inner_attention is not None else None,
-        )
-        assert owner is not None and issubclass(owner, CPInnerAttention)
-        return owner.cp_shard_metadata(batch, load_balancer)
+        # Let each distinct CP attention backend config prepare shared metadata once.
+        sharded_backend_types: set[type[CPInnerAttention.Config]] = set()
+        for _, backend_config, _, _ in self.config.traverse(
+            CPInnerAttention.Config, recurse=True
+        ):
+            assert isinstance(backend_config, CPInnerAttention.Config)
+            backend_type = type(backend_config)
+            if backend_type in sharded_backend_types:
+                continue
+            batch = backend_config.cp_shard_metadata(batch, load_balancer)
+            sharded_backend_types.add(backend_type)
+        return batch
 
     def get_attention_masks(
         self,

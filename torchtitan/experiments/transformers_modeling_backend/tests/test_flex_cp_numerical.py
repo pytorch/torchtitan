@@ -167,7 +167,9 @@ def main():
         cp_mesh=cp_mesh,
     )
     batch = load_balancer.shard_inputs(batch)
-    batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, load_balancer)
+    batch = KVAllGatherCPFlexInnerAttention.Config().cp_shard_metadata(
+        batch, load_balancer
+    )
     loc_input = batch["input"]
     loc_pos = batch["positions"]
     loc_gidx = batch["global_indices"]

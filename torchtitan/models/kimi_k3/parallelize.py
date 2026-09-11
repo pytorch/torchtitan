@@ -42,14 +42,12 @@ def parallelize_kimi_k3(
         for name, enabled in (
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
-            ("context parallel", parallel_dims.cp_enabled),
         )
         if enabled
     ]
     if unsupported_parallelisms:
         raise NotImplementedError(
-            "Kimi K3 currently supports FSDP2 data parallelism "
-            f"only; disable {', '.join(unsupported_parallelisms)}."
+            f"Kimi K3 does not support {', '.join(unsupported_parallelisms)}."
         )
     if compile_config.enable and "model" in compile_config.components:
         raise NotImplementedError("Kimi K3 does not support model compilation yet.")
