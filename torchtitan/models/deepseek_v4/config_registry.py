@@ -207,6 +207,41 @@ _GB300_FLEX_KERNEL_OPTIONS = {
 }
 
 
+def _pin_gb300_flex_tiles(config: Trainer.Config) -> None:
+    """Pin the FlexAttention Triton tiles on every flex layer of `config`.
+
+    Both `pro` and `flash` have head_dim=512, and on GB300 (232448 B of shared
+    memory per block) Inductor finds no valid Triton config for the default
+    autotune sweep -- the first forward dies with "No valid triton configs.
+    OutOfMemoryError: out of resource: triton_flex_attention Required: 294912
+    Hardware limit: 232448".
+
+    Measured on one GB300 at D=512 with a block mask: every larger forward tile
+    fails (64x64, 64x32 and 128x32 all raise NoValidChoicesError or a launch
+    failure, with or without num_stages=1), and 32x32 fails unless num_stages
+    and num_warps are pinned too.
+
+    The backward needs its own tiles. Measured at `pro`'s real shape (H=128,
+    D=512, Q=4096, KV=5121 -- KV is longer than Q because of index_topk=1024
+    and the compressed paths), the forward compiles fine with the tile above
+    while the backward dies with "CUDA error: unspecified launch failure";
+    pinning BLOCK_M1/N1/M2/N2 fixes it. torchtitan's FlexAttention docstring
+    names this the intended workflow: autotune once, then set kernel_options
+    explicitly.
+
+    This is a correctness requirement, not a tuning choice -- without it the
+    model cannot execute a forward pass on this hardware. It is also small
+    enough to cost attention throughput, so revisit if a future PyTorch lowers
+    the shared-memory demand at head_dim=512.
+    """
+    for layer in config.model_spec.model.layers:
+        attention = getattr(layer, "attention", None)
+        inner = getattr(attention, "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.kernel_options = dict(_GB300_FLEX_KERNEL_OPTIONS)
+
+
+
 def deepseek_v4_pro_64xgb300(seq_len: int | None = None) -> Trainer.Config:
     """`deepseek_v4_pro` made to fit on 64x GB300 (16 nodes x 4 GPUs).
 
@@ -252,32 +287,62 @@ def deepseek_v4_pro_64xgb300(seq_len: int | None = None) -> Trainer.Config:
     config.parallelism = ParallelismConfig(expert_parallel_degree=64)
     config.activation_checkpoint = FullAC.Config()
 
-    # Pin the FlexAttention Triton tile. `pro` has head_dim=512, and on GB300
-    # (232448 B of shared memory per block) Inductor finds no valid Triton
-    # config for the default autotune sweep -- the first forward dies with
-    # "No valid triton configs. OutOfMemoryError: out of resource:
-    # triton_flex_attention Required: 294912 Hardware limit: 232448".
-    #
-    # Measured on one GB300 at D=512 with a block mask: every larger forward
-    # tile fails (64x64, 64x32 and 128x32 all raise NoValidChoicesError or a
-    # launch failure, with or without num_stages=1), and 32x32 fails unless
-    # num_stages and num_warps are pinned too.
-    #
-    # The backward needs its own tiles. Measured at this model's real shape
-    # (H=128, D=512, Q=4096, KV=5121 -- KV is longer than Q because of
-    # index_topk=1024 and the compressed paths), the forward compiles fine
-    # with the tile above while the backward dies with "CUDA error:
-    # unspecified launch failure"; pinning BLOCK_M1/N1/M2/N2 fixes it.
-    # torchtitan's FlexAttention docstring names this the intended workflow:
-    # autotune once, then set kernel_options explicitly.
-    #
-    # This is a correctness requirement, not a tuning choice -- without it the
-    # model cannot execute a forward pass on this hardware. It is also small
-    # enough to cost attention throughput, so revisit if a future PyTorch
-    # lowers the shared-memory demand at head_dim=512.
-    for layer in config.model_spec.model.layers:
-        attention = getattr(layer, "attention", None)
-        inner = getattr(attention, "inner_attention", None)
-        if isinstance(inner, FlexAttention.Config):
-            inner.kernel_options = dict(_GB300_FLEX_KERNEL_OPTIONS)
+    _pin_gb300_flex_tiles(config)
+    return config
+
+
+def deepseek_v4_flash_64xgb300(seq_len: int | None = None) -> Trainer.Config:
+    """`deepseek_v4_flash` (284.3 B) on 64x GB300, same recipe as the Pro baseline.
+
+    Companion to `deepseek_v4_pro_64xgb300`: same four deltas off stock, so the
+    two flavors differ only in the model and a TFLOP/s comparison between them
+    is honest. The numbers behind each delta are different, though, and only
+    one of the four is actually forced at this size:
+
+    1. ``training.dtype = "bfloat16"``. For `pro` this was the change that made
+       the model fit at all. Here it is NOT forced: 284.3 B params at
+       torchtitan's default 16 B/param (fp32 shard + fp32 grad + two fp32 AdamW
+       moments) is 4.55 TB = 71.1 GB/GPU over 64 GPUs, which sits inside 298 GB
+       of HBM with room to spare -- where `pro` needed 393 GB/GPU and did not.
+       It is kept anyway so the comparison against the 31.48 TFLOP/s Pro
+       baseline measures the model and not the optimizer dtype. Full bf16 is
+       8 B/param = 2.27 TB = 35.5 GB/GPU. To spend the headroom on convergence
+       instead of comparability, pass ``--training.dtype float32``.
+
+    2. ``expert_parallel_degree = 64``. Stock is 1, which leaves all 256 routed
+       experts of a layer to FSDP: one all-gather materializes
+       256 x 3 x 4096 x 2048 x 2 B = 12.9 GB for a single layer, more with
+       prefetch. At EP=64 each rank owns 256/64 = 4 whole experts, 0.20 GB, and
+       only token dispatch crosses the wire. EP must divide
+       ``dp_shard * cp * tp`` (= 64 here), and 64 | 256, so the mesh is legal.
+       Less load-bearing than at `pro`'s 50.7 GB/layer, but the same argument.
+
+    3. ``activation_checkpoint = FullAC``. Stock is ``None``. `pro` measured
+       ~56.9 GiB of activations WITH FullAC; `flash` has 43 blocks instead of
+       61 at dim 4096 instead of 7168, so expect roughly 0.4x that. That is far
+       inside the ~260 GB/GPU this flavor leaves free, so unlike `pro` this is a
+       safety choice rather than a necessity -- dropping AC is the first thing
+       to try for throughput, and the batch shape (stock: 1 x 4096 tokens per
+       rank) is the second, via
+       ``--training.num_tokens_per_microbatch_per_dp_rank``.
+
+    4. The pinned FlexAttention tiles, via ``_pin_gb300_flex_tiles``. This one
+       IS forced: `flash` has ``head_dim=512`` exactly like `pro`, and on GB300
+       Inductor finds no valid Triton config at that head_dim for the default
+       autotune sweep, so the first forward dies before it can OOM. See
+       ``_GB300_FLEX_KERNEL_OPTIONS`` for the measured sweep behind the tiles.
+
+    ``disable_cuda_graphs`` follows upstream's own ``deepseek_v3_671b`` recipe.
+    Everything else -- optimizer, LR schedule, loss, dataloader, compile
+    settings, batch shape -- is inherited from stock ``deepseek_v4_flash``.
+
+    Note: bf16 AdamW moments are fine for a throughput baseline but are not a
+    convergence-grade choice for a real 284 B pretrain.
+    """
+    config = deepseek_v4_flash(seq_len=seq_len)
+    config.training.dtype = "bfloat16"
+    config.training.disable_cuda_graphs = True
+    config.parallelism = ParallelismConfig(expert_parallel_degree=64)
+    config.activation_checkpoint = FullAC.Config()
+    _pin_gb300_flex_tiles(config)
     return config
