@@ -130,6 +130,8 @@ class TrainingMicrobatch:
     generator_logprobs: torch.Tensor  # [T]
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
+    padding_mask: torch.Tensor  # [T]
+    """True for padding tokens."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +139,7 @@ class TrainingBatch:
     """Packed microbatches for one optimizer step.
 
     Example:
-        # 5 training samples, effective length 5 each; seq_len=10, local_batch_size=2, dp_degree=1
+        # 5 training samples, effective length 5 each; 2 rows/rank, dp_degree=1
         # next-fit rows -> [[s5, s5], [s5, s5], [s5]] = 3 rows; rows_per_microbatch = 2 * 1 = 2
         # -> 2 microbatches (3 rows padded to 4 with one pad-only row):
         #    microbatches = [[TrainingMicrobatch(token_ids=[20])],
