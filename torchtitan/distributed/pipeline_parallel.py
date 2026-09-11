@@ -326,6 +326,7 @@ def _build_pipeline_schedule(
             "defer_pp_recv": parallelism.pipeline_parallel_defer_recv,
             "reuse_recv_buffers": parallelism.pipeline_parallel_reuse_recv_buffers,
             "max_active_stages": parallelism.pipeline_parallel_max_active_stages,
+            "unshard_lookahead": parallelism.pipeline_parallel_unshard_lookahead,
         }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
@@ -336,6 +337,11 @@ def _build_pipeline_schedule(
             **schedule_kwargs,
         )
     else:
+        if parallelism.pipeline_parallel_unshard_lookahead is not None:
+            raise ValueError(
+                "pipeline_parallel_unshard_lookahead is supported only by "
+                "multi-stage pipeline schedules"
+            )
         schedule = schedule_class(
             stages[0],
             n_microbatches=num_microbatches,
