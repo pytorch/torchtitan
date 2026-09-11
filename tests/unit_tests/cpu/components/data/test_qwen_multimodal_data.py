@@ -23,6 +23,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
 from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
+from torchtitan.models.qwen3_6 import config_registry as qwen36_configs
 from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
 
 
@@ -164,6 +165,10 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
         (qwen35_configs, "qwen35_35b_a3b"),
         (qwen35_configs, "qwen35_122b_a10b"),
         (qwen35_configs, "qwen35_397b_a17b"),
+        (qwen36_configs, "qwen36_debugmodel"),
+        (qwen36_configs, "qwen36_debugmodel_moe"),
+        (qwen36_configs, "qwen36_27b"),
+        (qwen36_configs, "qwen36_35b_a3b"),
         (qwen38_configs, "qwen38_debugmodel"),
         (qwen38_configs, "qwen38_debugmodel_moe"),
         (qwen38_configs, "qwen38_27b"),
@@ -226,7 +231,10 @@ def test_packing_preserves_ordered_media_when_merging_rows():
         row["labels"],
         torch.tensor([1, 2, 3, 4] + [IGNORE_INDEX] * (CONTEXT.max_context_length - 4)),
     )
-    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 0, 0, 0, 0]
+    # Padding is numbered like the collator's tail padding, so it forms one
+    # segment instead of one document start per padded token.
+    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 1, 2, 3, 4]
+    assert row["padding_mask"].tolist() == [False] * 4 + [True] * 5
     assert len(row["pixel_values"]) == 2
     assert torch.equal(row["pixel_values"][0], first_image)
     assert torch.equal(row["pixel_values"][1], second_image)
@@ -315,7 +323,8 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    inputs, labels = collator([packed])
+    inputs = collator([packed])
+    labels = inputs["labels"]
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
     assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4

@@ -1,0 +1,3 @@
+# Verifiers provides the rollout runtime; math-verify scores DAPO responses.
+verifiers==0.3.1
+math-verify==0.9.0

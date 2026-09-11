@@ -50,8 +50,8 @@ class TestDatasetCheckpointing(unittest.TestCase):
                     resumed_iterator = iter(resumed)
 
                     for _ in range(8):
-                        expected_inputs, expected_labels = next(iterator)
-                        actual_inputs, actual_labels = next(resumed_iterator)
+                        expected_inputs = next(iterator)
+                        actual_inputs = next(resumed_iterator)
                         self.assertTrue(
                             torch.equal(
                                 actual_inputs["input"], expected_inputs["input"]
@@ -63,7 +63,11 @@ class TestDatasetCheckpointing(unittest.TestCase):
                                 expected_inputs["positions"],
                             )
                         )
-                        self.assertTrue(torch.equal(actual_labels, expected_labels))
+                        self.assertTrue(
+                            torch.equal(
+                                actual_inputs["labels"], expected_inputs["labels"]
+                            )
+                        )
 
     def _build_dataloader(self, source_type, rank):
         config = GrainDataLoader.Config(
