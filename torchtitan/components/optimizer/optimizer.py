@@ -223,6 +223,19 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.model_parts = model_parts
 
         for part_idx, model in enumerate(self.model_parts):
+            if not any(p.requires_grad for p in model.parameters()):
+                # A fully frozen model part gets no optimizer. This is the
+                # normal shape of adapter training under pipeline parallelism:
+                # a vision-tower stage carries no LoRA targets (MLLM practice
+                # keeps the tower frozen), and raising on it would make every
+                # frozen stage a hard error. Pattern-level raises below still
+                # catch config typos on parts that DO train.
+                logger.info(
+                    "Optimizer: model part %d has no trainable parameters; "
+                    "skipping optimizer construction for it.",
+                    part_idx,
+                )
+                continue
             groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
             )

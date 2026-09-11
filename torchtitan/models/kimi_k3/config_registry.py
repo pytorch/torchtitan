@@ -94,3 +94,61 @@ def kimi_k3_debugmodel(
         ),
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def kimi_k3_debugmodel_lora() -> Trainer.Config:
+    """The multimodal debug model with LoRA adapters, through core's LoRAConverter.
+
+    Targets match on the last FQN segment: the MLA projections, the dense FFN
+    and the latent-MoE projections, so every decoder layer carries an adapter.
+    The MLA output gate is left out: it is named ``gate``, as is every MoE
+    router's gate, and last-segment matching cannot tell them apart.
+    """
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel", converters=[_kimi_k3_lora_converter()]
+    )
+    return config
+
+
+def _kimi_k3_lora_converter(
+    *, quantize_base: str | None = None, quantize_experts: str | None = None
+):
+    from torchtitan.components.lora import LoRAConverter
+
+    return LoRAConverter.Config(
+        rank=8,
+        alpha=16.0,
+        target_modules=[
+            # MLA
+            "wq_a",
+            "wq_b",
+            "wkv_a",
+            "wkv_b",
+            "wo",
+            # dense FFN and shared experts
+            "w1",
+            "w2",
+            "w3",
+            # latent MoE down/up projections
+            "routed_down",
+            "routed_up",
+        ],
+        quantize_base=quantize_base,
+        quantize_experts=quantize_experts,
+    )
+
+
+def kimi_k3_debugmodel_qlora_mxfp4() -> Trainer.Config:
+    """The LoRA debug model with MXFP4-packed frozen bases (QLoRA).
+
+    The bases pack at build, before parallelize, so FSDP2 shards packed bytes.
+    """
+    config = kimi_k3_debugmodel()
+    config.model_spec = model_registry(
+        "debugmodel",
+        converters=[
+            _kimi_k3_lora_converter(quantize_base="mxfp4", quantize_experts="mxfp4")
+        ],
+    )
+    return config
