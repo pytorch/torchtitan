@@ -15,7 +15,10 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    spmd_local_context,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -35,7 +38,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     build_vision_bank_indices,
     gather_vision_embeds,
-    multimodal_context,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -361,6 +363,8 @@ class MuseGlimmerModel(Decoder):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
         from .sharding import vision_bank_indices_placement
@@ -401,12 +405,18 @@ class MuseGlimmerModel(Decoder):
         batch.pop("special_tokens", None)
 
         positions = batch.get("positions", None)
+        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
 
         input_sharding = {
             **decoder_input_sharding(),
@@ -500,7 +510,7 @@ class MuseGlimmerModel(Decoder):
         # is already hidden states, so injection is skipped there.
         if self.tok_embeddings is not None:
             h_TD = self.tok_embeddings(tokens)
-            with multimodal_context():
+            with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
                     h_TD,
                     pixel_values=pixel_values,
@@ -524,6 +534,10 @@ class MuseGlimmerModel(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> AttentionMasksType:
         attn_config = self.config.first_attention
         assert attn_config is not None
@@ -532,7 +546,12 @@ class MuseGlimmerModel(Decoder):
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
         if isinstance(inner_attn, VarlenInnerAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
         if not isinstance(inner_attn, FlexInnerAttention.Config):
             raise TypeError(
                 "Muse Glimmer requires FlexInnerAttention or VarlenInnerAttention for "

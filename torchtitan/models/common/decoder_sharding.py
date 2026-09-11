@@ -73,6 +73,22 @@ def token_id_placement() -> SpmdType:
     )
 
 
+def token_id_sequence_parallel_placement() -> SpmdType:
+    """Sequence-parallel token IDs with shape ``(tokens,)``.
+
+    Same token-axis mesh as ``dense_sequence_parallel_placement()``, but the
+    tensor is 1D so there is no trailing replicated feature dim.
+    """
+    return SpmdType(
+        {
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.V,
+        },
+        partition_spec=spmd.PartitionSpec((DP, CP, TP)),
+    )
+
+
 def attention_activation_placement(
     *, cp: spmd.PerMeshAxisSpmdType = spmd.S(0)
 ) -> SpmdType:

@@ -1172,14 +1172,18 @@ class HFTransformerModel(BaseModel):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
+        del max_num_documents, max_context_length
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        batch.pop("padding_mask", None)
         if "attention_masks" not in batch:
             positions = batch.get("positions")
             if positions is not None:
