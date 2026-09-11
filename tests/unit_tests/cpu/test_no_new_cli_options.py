@@ -184,6 +184,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "training.enable_cpu_offload",
         "training.gc_debug",
         "training.gc_freq",
+        "training.grad_dtype",
         "training.max_context_length",
         "training.max_norm",
         "training.mixed_precision_param",

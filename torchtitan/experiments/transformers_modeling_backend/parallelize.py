@@ -32,6 +32,7 @@ from torchtitan.distributed.fsdp import (
     get_fsdp_reshard_after_forward_policy,
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
+    set_model_grad_dtype,
 )
 from torchtitan.tools.logging import logger
 
@@ -204,6 +205,7 @@ def parallelize_hf_transformers(
         dp_mesh,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        grad_dtype=TORCH_DTYPE_MAP[training.grad_dtype],
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
@@ -234,6 +236,7 @@ def apply_fsdp(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    grad_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
@@ -252,6 +255,7 @@ def apply_fsdp(
     per transformer block — matching Titan's approach and avoiding
     nested FSDP hooks that cause SAC op-count mismatches during recompute.
     """
+    set_model_grad_dtype(model, grad_dtype)
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,

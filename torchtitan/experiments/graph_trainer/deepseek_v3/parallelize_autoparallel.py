@@ -27,7 +27,10 @@ from torch.distributed.tensor.placement_types import Shard
 from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.fsdp import (
+    get_fsdp_reshard_after_forward_policy,
+    set_model_grad_dtype,
+)
 from torchtitan.experiments.graph_trainer.autoparallel_api import AutoParallelGraph
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.configs import (
@@ -159,6 +162,7 @@ def parallelize_autoparallel_deepseekv3(
             mesh=sparse_mesh,
             compute_dtype=param_dtype,
         )
+    set_model_grad_dtype(ap_model, TORCH_DTYPE_MAP[training.grad_dtype])
 
     def input_fn():
         dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard

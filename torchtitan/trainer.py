@@ -50,6 +50,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
+from torchtitan.distributed.fsdp import set_model_grad_dtype
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
@@ -416,6 +417,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
         ):
             model = model_config.build()
+        set_model_grad_dtype(model, TORCH_DTYPE_MAP[config.training.grad_dtype])
 
         # Verify all submodules satisfy the Module protocol
         # TODO: move this to module validate().

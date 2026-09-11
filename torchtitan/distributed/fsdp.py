@@ -136,11 +136,19 @@ def get_fsdp_reshard_after_forward_policy(
             )
 
 
+def set_model_grad_dtype(model: nn.Module, grad_dtype: torch.dtype) -> None:
+    """Set the gradient dtype on every trainable model parameter."""
+    for param in model.parameters():
+        if param.requires_grad:
+            param.grad_dtype = grad_dtype
+
+
 def apply_fsdp_to_vision_encoder(
     vision_encoder: nn.Module,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    grad_dtype: torch.dtype,
     reshard_after_forward_policy: str = "default",
     pp_enabled: bool = False,
     cpu_offload: bool = False,
@@ -160,6 +168,7 @@ def apply_fsdp_to_vision_encoder(
     "attempting to assign a gradient with device type 'cuda' to a tensor with
     device type 'cpu'".
     """
+    set_model_grad_dtype(vision_encoder, grad_dtype)
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled=pp_enabled
@@ -180,6 +189,7 @@ def apply_fsdp_to_decoder(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    grad_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
@@ -203,6 +213,7 @@ def apply_fsdp_to_decoder(
         dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
         param_dtype (torch.dtype): The data type to use for model parameters.
         reduce_dtype (torch.dtype): The data type to use for reductions.
+        grad_dtype (torch.dtype): The data type for parameter gradients.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool, optional): Whether to offload model parameters to
             CPU. Defaults to False.
@@ -230,6 +241,7 @@ def apply_fsdp_to_decoder(
         enable_symm_mem (bool): Whether to enable symmetric-memory FSDP
             communication.
     """
+    set_model_grad_dtype(model, grad_dtype)
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,

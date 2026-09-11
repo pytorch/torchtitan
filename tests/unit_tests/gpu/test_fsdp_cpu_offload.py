@@ -98,6 +98,7 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
             mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
+            grad_dtype=torch.float32,
             cpu_offload=cpu_offload,
         )
         apply_fsdp_to_decoder(
@@ -105,6 +106,7 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
             mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
+            grad_dtype=torch.float32,
             pp_enabled=False,
             cpu_offload=cpu_offload,
         )

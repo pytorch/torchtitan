@@ -67,6 +67,10 @@ HSDP gradient accumulation uses `set_requires_all_reduce` (not `set_requires_gra
 - FSDP2 maps `mixed_precision` to `mp_policy` and `cpu_offload` to `offload_policy`.
   - For `mp_policy`, we remove `buffer_dtype`, simplify `cast_forward_inputs` and `cast_root_forward_inputs` into just `cast_forward_inputs`, and add an `output_dtype`.
   - For `offload_policy`, we add a `pin_memory` option to avoid pinning CPU memory. (This feature may not have landed yet.)
+- TorchTitan configures the three training dtypes independently:
+  - `training.dtype` controls persistent model parameter and optimizer-state storage.
+  - `training.grad_dtype` controls sharded and unsharded parameter gradients. TorchTitan sets `Tensor.grad_dtype` before `fully_shard`, and FSDP preserves it on the parameters it creates.
+  - `training.mixed_precision_reduce` controls the dtype used by gradient collectives.
 - FSDP2 removes `auto_wrap_policy`, `backward_prefetch`, `param_init_fn`, `device_id`, `sync_module_states`, `limit_all_gathers`, and `use_orig_params`.
   - `auto_wrap_policy` provides a syntactic sugar for calling `FullyShardedDataParallel` on modules based on a predicate given by the policy and assigning the wrapped module to its parent. FSDP2 is no longer an `nn.Module` wrapper, so there is need to assign the module back to its parent. We prefer for this functionality to exist above `fully_shard`, and we may provide a utility like `auto_wrap_policy` in the future.
   - FSDP2 always follows `backward_prefetch=BACKWARD_PRE` without option since that is the only way to overlap collectives in backward correctly. `BACKWARD_POST` can prefetch [incorrectly](https://github.com/pytorch/pytorch/issues/108190) in nested-module cases.

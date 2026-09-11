@@ -127,12 +127,18 @@ class TestConfigManager(unittest.TestCase):
                 "8192",
                 "--training.max_context_length",
                 "1024",
+                "--training.grad_dtype",
+                "bfloat16",
+                "--training.mixed_precision_reduce",
+                "bfloat16",
             ]
         )
         assert config.training.steps == 5
         assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
         assert config.training.num_tokens_per_train_step == 8192
         assert config.training.max_context_length == 1024
+        assert config.training.grad_dtype == "bfloat16"
+        assert config.training.mixed_precision_reduce == "bfloat16"
 
     def test_num_tokens_per_microbatch_must_be_positive(self):
         config_manager = ConfigManager()
@@ -151,6 +157,17 @@ class TestConfigManager(unittest.TestCase):
     def test_num_tokens_per_train_step_must_be_positive_or_unset(self):
         with pytest.raises(ValueError, match="must be -1 or greater than 0"):
             TrainingConfig(num_tokens_per_train_step=0)
+
+    def test_grad_dtype_defaults_to_float32(self):
+        assert TrainingConfig().grad_dtype == "float32"
+
+    def test_gradient_and_reduce_dtypes_are_independent(self):
+        config = TrainingConfig(
+            grad_dtype="float32",
+            mixed_precision_reduce="bfloat16",
+        )
+        assert config.grad_dtype == "float32"
+        assert config.mixed_precision_reduce == "bfloat16"
 
     def test_max_context_length_must_be_positive(self):
         for max_context_length in (0, -1):

@@ -86,6 +86,7 @@ def kimi_k3_debugmodel(
             max_context_length=model_spec.max_context_length,
             steps=10,
             dtype="bfloat16",
+            grad_dtype="bfloat16",
             disable_cuda_graphs=True,
         ),
         checkpoint=CheckpointManager.Config(

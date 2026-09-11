@@ -94,6 +94,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
+            grad_dtype=torch.float32,
             pp_enabled=False,
             ep_degree=1,
         )
@@ -111,6 +112,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
+            grad_dtype=torch.float32,
             pp_enabled=False,
             ep_degree=1,
         )
@@ -132,6 +134,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
+            grad_dtype=torch.float32,
             pp_enabled=False,
             ep_degree=2,
             edp_mesh=edp_mesh,
