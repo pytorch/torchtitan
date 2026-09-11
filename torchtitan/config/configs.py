@@ -256,10 +256,9 @@ class ParallelismConfig:
     ] = None
     """FSDP prefetch distance for a looped pipeline schedule.
 
-    ``None`` selects PyTorch's rank-aware schedule default. An integer applies a
-    uniform distance in upcoming distinct stages; setting it to
-    ``pipeline_parallel_max_active_stages`` restores eager prefetch of the full
-    residency window.
+    ``None`` preserves PyTorch's default of prefetching the full residency
+    window. An integer applies a smaller or equal distance in upcoming distinct
+    stages.
     """
 
     context_parallel_degree: int = 1
