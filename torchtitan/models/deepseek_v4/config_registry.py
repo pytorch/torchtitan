@@ -639,3 +639,39 @@ def deepseek_v4_flash_8k_ep16_sac_bs2(seq_len: int | None = 8192) -> Trainer.Con
     config.activation_checkpoint = SelectiveAC.Config()
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return config
+
+
+# --- the two proven winners, composed --------------------------------------
+#
+#   8k reference          18.19 TFLOP/s   95.14 GiB
+#   EP=16                 21.37 (+17.5 %) 65.70 GiB
+#   block_size 32         21.17 (+16.4 %) 75.89 GiB
+#
+# They attack different costs -- EP is MoE dispatch scope, block_size is
+# attention score area -- so they should compose. Both also *free* memory
+# (-29.4 and -19.3 GiB), which is what makes the batch variant reachable.
+
+
+def deepseek_v4_flash_8k_ep16_blk32(seq_len: int | None = 8192) -> Trainer.Config:
+    """F17. EP=16 + block_size 32 -- the two measured winners together."""
+    config = _flash_8k_ep(16, seq_len)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 32
+    return config
+
+
+def deepseek_v4_flash_8k_ep16_blk32_batch4(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """F18. Both winners plus 4x microbatch (32768 tokens/rank).
+
+    If the two savings are additive the base lands near 50 GiB, leaving well
+    over 200 GiB for the batch to grow into. Batch has been the most reliable
+    lever on every model measured on this cluster, and flash is still running
+    one microbatch.
+    """
+    config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 32768
+    return config
