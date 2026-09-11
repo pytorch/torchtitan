@@ -235,14 +235,23 @@ def compute_annotated_loss(
 def accumulate_param_grads_(
     params: Iterable[torch.Tensor],
     grads: Iterable[torch.Tensor | None],
+    *,
+    clone_grads_to_initialize_param_grad: bool = False,
 ) -> None:
-    """Accumulate explicit graph-produced gradients into live parameters."""
+    """Accumulate explicit graph-produced gradients into live parameters.
+
+    Args:
+        params: Parameters that receive the explicit gradients.
+        grads: Gradients returned by the traced forward-backward graph.
+        clone_grads_to_initialize_param_grad: Whether to initialize empty
+            ``param.grad`` fields with clones instead of input aliases.
+    """
     for param, grad in zip(params, grads, strict=True):
         if grad is None:
             continue
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
         if param.grad is None:
-            param.grad = grad
+            param.grad = grad.clone() if clone_grads_to_initialize_param_grad else grad
         else:
             param.grad += grad
 

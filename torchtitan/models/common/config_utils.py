@@ -34,6 +34,7 @@ from torchtitan.models.common.feed_forward import _make_fused_linear_init, FeedF
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
+    MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
@@ -49,6 +50,9 @@ from torchtitan.models.common.token_dispatcher import (
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+
+
+DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
 
 
 def decoder_vocab_size(model_spec: ModelSpec) -> int:
@@ -302,8 +306,14 @@ def make_moe_config(
     routed_experts: RoutedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    if aux_loss_coeff is not None:
+        router = dataclasses.replace(
+            router,
+            aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=aux_loss_coeff),
+        )
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,

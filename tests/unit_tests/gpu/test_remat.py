@@ -412,8 +412,8 @@ class TestRematRegions(unittest.TestCase):
         ).build()
 
         def forward(x_TD: torch.Tensor) -> torch.Tensor:
-            topk_scores_TK, _, scores_TE = router(x_TD)
-            return topk_scores_TK.sum() + scores_TE.sum()
+            topk_scores_TK, _, routing_map_TE = router(x_TD)
+            return topk_scores_TK.sum() + routing_map_TE.sum()
 
         with patch.object(
             router,

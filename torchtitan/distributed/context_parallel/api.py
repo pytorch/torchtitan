@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -20,21 +20,6 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import AttentionMasksType
-
-if TYPE_CHECKING:
-    from torchtitan.config import ParallelismConfig
-
-
-def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
-    """Validate CP backend compatibility for ShardingConfig-based models."""
-    if (
-        parallelism.context_parallel_degree > 1
-        and parallelism.spmd_backend != "spmd_types"
-    ):
-        raise ValueError(
-            "Context Parallel requires parallelism.spmd_backend='spmd_types', "
-            f"got '{parallelism.spmd_backend}'."
-        )
 
 
 def _cp_shard_dims(input_sharding: dict[str, SpmdType]) -> dict[str, int]:
