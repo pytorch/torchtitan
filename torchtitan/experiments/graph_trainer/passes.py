@@ -142,6 +142,11 @@ def _tensor_parallel_degree(config, parallel_dims=None) -> int:
     return int(getattr(config.parallelism, "tensor_parallel_degree", 1))
 
 
+def construct_mandatory_graph_passes() -> list[Callable]:
+    """Return correctness passes that run even when optional passes are disabled."""
+    return [remove_parameter_gradient_markers_pass]
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -203,7 +208,7 @@ def compile_time_passes(
         split_moe_expert_buckets=efsdp_degree > 1,
     )
 
-    passes: list[Callable] = [remove_parameter_gradient_markers_pass]
+    passes = construct_mandatory_graph_passes()
     if include_mandatory_normalization:
         passes.extend(
             [
