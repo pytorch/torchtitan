@@ -11,26 +11,30 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
 
 - `ComputeLayout` describes temporary optimizer-compute sharding on named
   `DeviceMesh` axes using PyTorch DTensor placements plus `BlockShard` or
-  `Owned`, and optionally the order in which several axes shard one tensor
-  dimension.
+  `Owned`, and optionally a `MatrixBatchLayout` applied before Muon compute.
 - `BlockShard` shards complete fixed-size blocks along one tensor dimension. It
   preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
-  values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
-  only a 2D parameter `[M * R, C]` with contiguous local DTensor storage. The
-  placement must target tensor dimension 0 with `block_size=R`; the leading
-  dimension must be nonzero and divisible by `R`. Each consecutive `R` rows
-  forms one independent `[R, C]` matrix. FlexShard routes the flat 2D compute
-  tensor, and DistMuon applies a zero-copy local `[M_local, R, C]` view
-  immediately before Muon compute. A native batch-first 3D `[M, R, C]`
-  parameter uses `Shard(0)` to distribute complete matrices. A single 2D
-  matrix without `BlockShard` uses whole-matrix compute such as `Owned`. The
-  builder validates named DTensor parameters and plans their storage-to-compute
-  transitions.
+- `MatrixBatchLayout` describes matrices packed within each compute block.
+  Setting `num_interleaved_matrices=F` interprets each storage group as
+  `[R, F, C]` and applies Muon independently to its `F` matrices. With
+  `BlockShard`, `R` is inferred from `block_size / F`; with `Owned`,
+  `matrix_rows=R` is required because there is no block size to infer it from.
+- `build_dist_muon` consumes per-parameter `ComputeLayout` values in
+  `compute_sharding_by_fqn`. Without an explicit `MatrixBatchLayout`, its
+  `BlockShard` path keeps the existing behavior where each block is one Muon
+  matrix. A native batch-first 3D `[M, R, C]` parameter uses `Shard(0)`, and a
+  single 2D matrix can use `Owned`.
+
+For an interleaved fused gate/up weight, use
+`num_interleaved_matrices=2` with a `BlockShard` whose block size is
+`2 * hidden_dim`. An `Owned` layout additionally requires
+`matrix_rows=hidden_dim`. Contiguous fused gate/up and per-head fused QKV use
+only `BlockShard(dim=0, block_size=matrix_rows)`. A 2D parameter using `Owned`
+without `MatrixBatchLayout` keeps whole-matrix Muon behavior.
 
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
