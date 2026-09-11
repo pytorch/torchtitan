@@ -30,6 +30,10 @@ def _batch() -> dict[str, Any]:
     }
 
 
+class _TrainerStub(SimpleNamespace):
+    _run_microbatch_groups = Trainer._run_microbatch_groups
+
+
 def _bind_pp_forward_backward_body(trainer: Trainer) -> None:
     trainer.fwd_bwd_fn = lambda *args: Trainer._pp_forward_backward_body(trainer, *args)
 
@@ -365,7 +369,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     )
     trainer = cast(
         Trainer,
-        SimpleNamespace(
+        _TrainerStub(
             config=SimpleNamespace(
                 training=SimpleNamespace(
                     disable_cuda_graphs=False,
@@ -433,7 +437,7 @@ def test_train_step_replay_checks_only_first_forward_backward():
     )
     trainer = cast(
         Trainer,
-        SimpleNamespace(
+        _TrainerStub(
             config=SimpleNamespace(
                 training=SimpleNamespace(disable_cuda_graphs=True, max_norm=1.0),
             ),
@@ -484,7 +488,7 @@ def test_replay_failure_happens_before_optimizer():
     optimizers = MagicMock()
     trainer = cast(
         Trainer,
-        SimpleNamespace(
+        _TrainerStub(
             config=SimpleNamespace(
                 training=SimpleNamespace(disable_cuda_graphs=True, max_norm=1.0),
             ),
@@ -588,7 +592,7 @@ def _run_train_step_recording_all_reduce(
     part = _RecordingFSDPPart()
     trainer = cast(
         Trainer,
-        SimpleNamespace(
+        _TrainerStub(
             config=SimpleNamespace(
                 training=SimpleNamespace(
                     disable_cuda_graphs=disable_cuda_graphs,
