@@ -76,7 +76,16 @@ def pipeline_llm(
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
     stage_class: type[PipelineStage] = PipelineStage,
+    last_stage_modules: Sequence[str] = (),
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    """Split ``model`` into pipeline stages and build the schedule.
+
+    ``last_stage_modules`` names modules the generated split pins to the last
+    stage, next to the head, for a model whose output is aggregated there;
+    ``pipeline_with_first_stage_modules`` is the same thing for the first
+    stage. Both are ignored when ``parallelism.module_fqns_per_model_part``
+    spells the split out.
+    """
     pp_mesh = parallel_dims.get_mesh("pp")
 
     (
@@ -89,7 +98,11 @@ def pipeline_llm(
     module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = _generate_llm_fqn_per_model_part(
-            num_virtual_stages, num_layers, input_weight, output_weight
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+            last_stage_modules=last_stage_modules,
         )
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
@@ -150,6 +163,7 @@ def pipeline_with_first_stage_modules(
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
+    last_stage_modules: Sequence[str] = (),
     **kwargs,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     """Co-locate additional model modules with the first pipeline stage.
@@ -159,6 +173,11 @@ def pipeline_with_first_stage_modules(
     prepends each present module from ``first_stage_module_fqns`` to the first
     stage's FQN list before delegating to ``pipeline_llm``. On other stages, the
     modules are pruned to ``None``; the model's ``forward`` must tolerate that.
+
+    ``last_stage_modules`` does the same at the other end, for a model whose
+    output is aggregated next to the head; it reaches the generated split
+    here because this function hands ``pipeline_llm`` a split that is already
+    spelled out.
 
     NOTE: This adds load to stage 0 that the auto split does not model
     (``input_weight`` only accounts for ``tok_embeddings``). Use
@@ -172,7 +191,11 @@ def pipeline_with_first_stage_modules(
             output_weight,
         ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
         fqn_per_part = _generate_llm_fqn_per_model_part(
-            num_virtual_stages, num_layers, input_weight, output_weight
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+            last_stage_modules=last_stage_modules,
         )
         present_module_fqns = [
             module_fqn
@@ -180,8 +203,15 @@ def pipeline_with_first_stage_modules(
             if getattr(model, module_fqn, None) is not None
         ]
         fqn_per_part[0][:0] = present_module_fqns
+        # This function spells the split out, which makes
+        # pipeline_parallel_layers_per_stage dead from here on: it has been
+        # read above, and pipeline_llm takes the explicit split in preference
+        # to it. Clearing it says so, and keeps the config's invariant that
+        # the two never describe the split at the same time.
         parallelism = dataclasses.replace(
-            parallelism, module_fqns_per_model_part=fqn_per_part
+            parallelism,
+            module_fqns_per_model_part=fqn_per_part,
+            pipeline_parallel_layers_per_stage=None,
         )
 
     return pipeline_llm(
@@ -217,8 +247,37 @@ def _get_pipeline_metadata(
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
 
+    virtual_stages_per_rank = parallelism.pipeline_parallel_virtual_stages_per_rank
+
     # Calculate number of virtual stages
-    if layers_per_stage is not None:
+    if virtual_stages_per_rank is not None:
+        # The stage count stated directly, for a shape the layer arithmetic
+        # below cannot reach. A multiple of the degree by construction.
+        num_virtual_stages = parallel_dims.pp * virtual_stages_per_rank
+        stages_per_rank = virtual_stages_per_rank
+        num_units = num_layers + input_weight + output_weight
+        if num_virtual_stages > num_units:
+            raise ValueError(
+                f"pipeline_parallel_virtual_stages_per_rank="
+                f"{virtual_stages_per_rank} over {parallel_dims.pp} ranks asks "
+                f"for {num_virtual_stages} stages, more than the "
+                f"{num_units} units this model splits into ({num_layers} "
+                f"layers, plus the weighted input and output modules). Stages "
+                f"would be left with nothing to run."
+            )
+        if is_single_stage_schedule and stages_per_rank != 1:
+            raise ValueError(
+                f"Single stage schedule requires exactly 1 stage per rank, but "
+                f"pipeline_parallel_virtual_stages_per_rank="
+                f"{stages_per_rank} was given."
+            )
+        if not is_single_stage_schedule and stages_per_rank < 2:
+            raise ValueError(
+                f"Multi-stage schedule requires at least 2 stages per rank, but "
+                f"pipeline_parallel_virtual_stages_per_rank="
+                f"{stages_per_rank} was given."
+            )
+    elif layers_per_stage is not None:
 
         # Calculate number of virtual stages needed (using ceiling division)
         # This allows for unequal distribution where stages can differ by at most 1 layer
@@ -361,6 +420,8 @@ def _generate_llm_fqn_per_model_part(
     num_layers: int,
     input_weight: int = 1,
     output_weight: int = 1,
+    *,
+    last_stage_modules: Sequence[str] = (),
 ) -> list[list[str]]:
     """Programmatically generates module names per model part, focused on LLM models.
 
@@ -372,6 +433,9 @@ def _generate_llm_fqn_per_model_part(
         num_layers: Total number of transformer layers in the model
         input_weight: Weight for input modules (tok_embeddings) in layer calculation
         output_weight: Weight for output modules (norm + output) in layer calculation
+        last_stage_modules: Extra module names pinned to the last stage, after
+            ``norm`` and ``lm_head`` (e.g. modules that aggregate the whole
+            model's output). They do not count as layers.
 
     Returns:
         List of lists containing module names for each model part
@@ -383,10 +447,12 @@ def _generate_llm_fqn_per_model_part(
     if num_stages < 1:
         raise ValueError("Number of stages must be at least 1")
 
+    last_extra = list(last_stage_modules)
+
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "lm_head"]]
+        return [["tok_embeddings"] + layer_names + ["norm", "lm_head"] + last_extra]
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -456,6 +522,7 @@ def _generate_llm_fqn_per_model_part(
 
             # Add output modules
             stage_modules.extend(["norm", "lm_head"])
+            stage_modules.extend(last_extra)
 
         # Middle stages: only transformer layers
         else:

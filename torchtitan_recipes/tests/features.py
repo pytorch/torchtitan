@@ -518,12 +518,16 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
 
 def kimi_k3_debugmodel_pp8_vp4() -> Trainer.Config:
     # 35 units (33 layers, the embedding and the head) over 32 stages, so the
-    # split is uneven and the last stage holds the head alone.
+    # split is uneven and the last stage holds the head alone. The stage count
+    # is asked for per rank: ceil(units / layers_per_stage) cannot reach 32 for
+    # 35 units. The split itself is core's, so the vision tower rides with the
+    # embedding on the first stage and the AttnRes aggregation with the head on
+    # the last.
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 8
-    config.parallelism.pipeline_parallel_layers_per_stage = 1
+    config.parallelism.pipeline_parallel_virtual_stages_per_rank = 4
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 8
     return config

@@ -29,11 +29,7 @@ from torchtitan.distributed.fsdp import (
     resolve_sparse_fsdp_mesh,
 )
 
-from torchtitan.distributed.pipeline_parallel import (
-    _generate_llm_fqn_per_model_part,
-    get_schedule_class,
-    pipeline_llm,
-)
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.kimi_k3.layout import (
     gather_layer_to_stage,
@@ -151,62 +147,14 @@ def parallelize_kimi_k3(
 
 
 _KIMI_ATTN_RES_LAST_STAGE_FQNS = ("output_res_proj", "output_res_norm")
+# The vision tower rides with the embedding; core prunes it on the stages
+# that do not hold it, and a text-only model does not have it at all.
+_KIMI_K3_FIRST_STAGE_FQNS = ("vision_encoder",)
 
 
-def kimi_k3_module_fqns_per_model_part(
-    model: nn.Module,
-    *,
-    model_config,
-    parallelism,
-    pp: int,
-) -> list[list[str]] | None:
-    """The pipeline split of a Kimi K3 model, built from its config.
-
-    Core's layer distribution (``_generate_llm_fqn_per_model_part``) places the
-    embedding, the layers and the head; on top of it this model needs the
-    AttnRes aggregation modules (``output_res_proj``, ``output_res_norm``) on
-    the stage that holds ``lm_head``, since the final block attention runs
-    there, and the vision tower on the stage that holds the embedding, since
-    vision features are spliced into the embeddings and nothing vision-side
-    crosses a stage boundary. Returns None when the split does not apply (no
-    pipeline parallelism, or a config without layers); the caller keeps
-    whatever split the user configured.
-    """
-    if pp <= 1 or model_config is None:
-        return None
-    layers = getattr(model_config, "layers", None)
-    if layers is None:
-        return None
-    num_layers = len(layers)
-    input_weight = parallelism.pipeline_parallel_first_stage_less_layers
-    output_weight = parallelism.pipeline_parallel_last_stage_less_layers
-    layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
-    if issubclass(schedule_class, PipelineScheduleSingle):
-        stages_per_rank = 1
-    elif layers_per_stage is None:
-        stages_per_rank = 2
-    else:
-        # The multiple of pp nearest to units / layers_per_stage: a layer count
-        # no shape divides (the 93-layer model's) still splits, with stages
-        # differing by a layer, where core's ceiling would refuse it.
-        units = num_layers + input_weight + output_weight
-        stages_per_rank = max(2, round(units / layers_per_stage / pp))
-    num_virtual_stages = pp * stages_per_rank
-    fqns = _generate_llm_fqn_per_model_part(
-        num_virtual_stages, num_layers, input_weight, output_weight
-    )
-    # Core spells the head ``output``; this model calls it ``lm_head``. Any
-    # FQN matching no child makes core set that child to None on every stage.
-    fqns = [["lm_head" if n == "output" else n for n in stage] for stage in fqns]
-    tail = [n for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS if hasattr(model, n)]
-    fqns[-1].extend(tail)
-    if getattr(model, "vision_encoder", None) is not None:
-        embed_stage = next(
-            (stage for stage in fqns if "tok_embeddings" in stage), fqns[0]
-        )
-        embed_stage.append("vision_encoder")
-    return fqns
+def _kimi_k3_last_stage_modules(model: nn.Module) -> tuple[str, ...]:
+    """Modules the split pins next to the head: the AttnRes aggregation."""
+    return tuple(n for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS if hasattr(model, n))
 
 
 def _schedule_stages(schedule: _PipelineSchedule) -> list[AttnResPipelineStage]:
@@ -226,8 +174,8 @@ def _schedule_stages(schedule: _PipelineSchedule) -> list[AttnResPipelineStage]:
 def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
     """``pipelining_fn`` for Kimi K3.
 
-    Splits the model with this model's names, builds the schedule on
-    :class:`AttnResPipelineStage`, then gives every stage the routing tables
+    Builds the schedule on :class:`AttnResPipelineStage` over core's split with
+    this model's pinned modules, then gives every stage the routing tables
     computed from the split the trainer applied: the layer-to-stage map is one
     all-gather over the pipeline group, and the stage-to-rank map is the
     schedule's own.
@@ -242,27 +190,23 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
     must resolve it identically: a rank routing differently from its peers
     hangs the first hop with nothing pointing at the cause.
     """
-    import dataclasses
-
-    parallelism = kwargs["parallelism"]
-    if parallelism.module_fqns_per_model_part is None:
-        fqns = kimi_k3_module_fqns_per_model_part(
-            model,
-            model_config=kwargs.get("model_config"),
-            parallelism=parallelism,
-            pp=kwargs["parallel_dims"].pp,
-        )
-        if fqns is not None:
-            # Core validates layers_per_stage with a ceiling the unit count has
-            # to divide; the split above already honoured it, so core gets the
-            # split alone.
-            kwargs["parallelism"] = dataclasses.replace(
-                parallelism,
-                module_fqns_per_model_part=fqns,
-                pipeline_parallel_layers_per_stage=None,
-            )
-    pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
-        model, stage_class=AttnResPipelineStage, **kwargs
+    # Core's split places the embedding, the layers and the head. On top of
+    # it the vision tower goes to the stage that holds the embedding (vision
+    # features are spliced into the embeddings; nothing vision-side crosses a
+    # stage boundary), which is core's first-stage entry, and the AttnRes
+    # aggregation modules to the stage that holds the head, since the final
+    # block attention runs there.
+    (
+        pp_schedule,
+        model_parts,
+        has_first_stage,
+        has_last_stage,
+    ) = pipeline_with_first_stage_modules(
+        model,
+        stage_class=AttnResPipelineStage,
+        first_stage_module_fqns=_KIMI_K3_FIRST_STAGE_FQNS,
+        last_stage_modules=_kimi_k3_last_stage_modules(model),
+        **kwargs,
     )
 
     stages = _schedule_stages(pp_schedule)
