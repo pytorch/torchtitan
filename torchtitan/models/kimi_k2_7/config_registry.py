@@ -28,6 +28,7 @@ from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
     ComputeLayout,
+    MatrixBatchLayout,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -350,21 +351,31 @@ def _dist_muon_optimizer(
     }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
 
+    def fused_gate_up_layout(matrix_rows: int) -> ComputeLayout:
+        return replace(
+            owned,
+            matrix_batch=MatrixBatchLayout(
+                matrix_rows=matrix_rows,
+                num_interleaved_matrices=2,
+            ),
+        )
+
     def compute_shardings_for_layer(
         layer_id: int,
     ) -> dict[str, ComputeLayout]:
         prefix = f"layers.{layer_id}"
+        layer_config = model_config.layers[layer_id]
         shardings = {
             f"{prefix}.attention.{projection}.weight": compute_sharding
             for projection, compute_sharding in attention_shardings.items()
         }
         if not layer_id:
-            shardings.update(
-                {
-                    f"{prefix}.feed_forward.{projection}.weight": owned
-                    for projection in ("w13", "w2")
-                }
+            feed_forward = layer_config.feed_forward
+            assert feed_forward is not None
+            shardings[f"{prefix}.feed_forward.w13.weight"] = fused_gate_up_layout(
+                feed_forward.w2.in_features
             )
+            shardings[f"{prefix}.feed_forward.w2.weight"] = owned
         else:
             shardings.update(
                 {
@@ -373,12 +384,13 @@ def _dist_muon_optimizer(
                 }
             )
             shardings[f"{prefix}.moe.router.gate.weight"] = owned
-            shardings.update(
-                {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": owned
-                    for projection in ("w13", "w2")
-                }
+            moe = layer_config.moe
+            assert moe is not None and moe.shared_experts is not None
+            shared_experts = moe.shared_experts
+            shardings[f"{prefix}.moe.shared_experts.w13.weight"] = (
+                fused_gate_up_layout(shared_experts.w2.in_features)
             )
+            shardings[f"{prefix}.moe.shared_experts.w2.weight"] = owned
         return shardings
 
     compute_sharding_by_fqn_per_layer = tuple(
@@ -434,11 +446,11 @@ def _dist_muon_optimizer(
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
         rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
-        r"feed_forward\.w[123]\.weight|"
+        r"feed_forward\.w(?:13|2)\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
         # SVD-entropy gain over AdamW is larger than for other matrix groups.
         r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.w[123]\.weight"
+        r"moe\.shared_experts\.w(?:13|2)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
@@ -473,39 +485,37 @@ def _align_dist_muon_expert_compute_layouts(
 ) -> OptimizersContainer.Config:
     """Align routed-expert layouts with the final parallelism config.
 
-    The registry builds compute layouts from the recipe's declared parallelism,
-    but the CLI can still override ``expert_parallel_degree`` afterwards. That
-    override decides whether routed experts use the 1D ``dp_shard`` layout or
-    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
+    The final config can differ from the registry after CLI parallelism changes,
+    so routed experts are aligned here.
     """
-    # TODO: Remove this function once parallelism can no longer be overridden
-    # from the CLI; the registry layouts are then already final.
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
+    original_dist_muon_kwargs = (
+        optimizer_config.optimizer_factory_kwargs_by_name.get("DistMuon")
+    )
+    if original_dist_muon_kwargs is None:
         return optimizer_config
-    compute_sharding_by_fqn = cast(
-        dict[str, ComputeLayout],
-        dist_muon_kwargs["compute_sharding_by_fqn"],
+    dist_muon_kwargs = dict(original_dist_muon_kwargs)
+    factory_kwargs_by_name = {
+        **optimizer_config.optimizer_factory_kwargs_by_name,
+        "DistMuon": dist_muon_kwargs,
+    }
+
+    compute_layouts = dict(
+        cast(
+            dict[str, ComputeLayout],
+            dist_muon_kwargs["compute_sharding_by_fqn"],
+        )
     )
     per_expert = _per_expert_compute_layout(parallelism)
-    aligned_shardings = {}
     changed = False
-    for fqn, compute_layout in compute_sharding_by_fqn.items():
+    for fqn, compute_layout in compute_layouts.items():
         if ".moe.routed_experts.inner_experts." in fqn and compute_layout != per_expert:
-            aligned_shardings[fqn] = per_expert
+            compute_layouts[fqn] = per_expert
             changed = True
-        else:
-            aligned_shardings[fqn] = compute_layout
+
     if not changed:
         return optimizer_config
 
-    dist_muon_kwargs["compute_sharding_by_fqn"] = aligned_shardings
+    dist_muon_kwargs["compute_sharding_by_fqn"] = compute_layouts
     return replace(
         optimizer_config,
         optimizer_factory_kwargs_by_name=factory_kwargs_by_name,

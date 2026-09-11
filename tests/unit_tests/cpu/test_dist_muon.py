@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
+
 import pytest
 import torch
 
@@ -19,10 +21,10 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _MatrixBatchView,
     _zeropower_via_newtonschulz,
 )
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.overrides.fused_swiglu import fused_swiglu
+from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
 
 
 _NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
@@ -119,24 +121,21 @@ def test_concatenated_matrix_batch_applies_ns_to_gate_and_up_independently() -> 
     torch.testing.assert_close(storage, matrix_batch.view_as(storage))
 
 
-def test_fused_swiglu_applies_ns_to_gate_and_up_independently() -> None:
+def test_feed_forward_w13_applies_ns_to_gate_and_up_independently() -> None:
     input_dim = 2
     hidden_dim = 3
-    fused = fused_swiglu(
-        FeedForward.Config(
-            w1=Linear.Config(in_features=input_dim, out_features=hidden_dim),
-            w2=Linear.Config(in_features=hidden_dim, out_features=input_dim),
-            w3=Linear.Config(in_features=input_dim, out_features=hidden_dim),
-        )
+    feed_forward = FeedForward.Config(
+        w13=Linear.Config(in_features=input_dim, out_features=2 * hidden_dim),
+        w2=Linear.Config(in_features=hidden_dim, out_features=input_dim),
     ).build()
     with torch.no_grad():
-        fused.w13.weight.copy_(
+        feed_forward.w13.weight.copy_(
             torch.arange(
-                fused.w13.weight.numel(),
-                dtype=fused.w13.weight.dtype,
-            ).reshape_as(fused.w13.weight)
+                feed_forward.w13.weight.numel(),
+                dtype=feed_forward.w13.weight.dtype,
+            ).reshape_as(feed_forward.w13.weight)
         )
-    storage = fused.w13.weight.detach()
+    storage = feed_forward.w13.weight.detach()
     layout = ComputeLayout(
         shardings_by_mesh_axis={
             "dp_shard": BlockShard(dim=0, block_size=2 * hidden_dim),
@@ -167,7 +166,7 @@ def test_fused_qkv_matrix_batch_applies_ns_per_head(num_kv_heads: int) -> None:
     head_dim = 3
     num_heads = 4
     num_fused_heads = num_heads + 2 * num_kv_heads
-    fused_qkv = FusedQKVLinear.Config(
+    fused_qkv = QKVLinear.Config(
         head_dim=head_dim,
         n_heads=num_heads,
         n_kv_heads=num_kv_heads,
@@ -325,3 +324,55 @@ def test_compute_layout_rejects_invalid_matrix_batch() -> None:
             shardings_by_mesh_axis={"dp_shard": Owned()},
             matrix_batch="invalid",  # pyrefly: ignore[bad-argument-type]
         )
+
+
+def test_kimi_dist_muon_configures_fused_gate_up_layouts() -> None:
+    config = kimi_k2_5_debugmodel()
+    assert config.model_spec is not None
+    dense_feed_forward = config.model_spec.model.layers[0].feed_forward
+    moe = config.model_spec.model.layers[1].moe
+    assert dense_feed_forward is not None
+    assert moe is not None
+    shared_experts = moe.shared_experts
+    assert shared_experts is not None
+    matrix_rows_by_fqn = {
+        "layers.0.feed_forward.w13.weight": dense_feed_forward.w2.in_features,
+        "layers.1.moe.shared_experts.w13.weight": shared_experts.w2.in_features,
+    }
+    factory_kwargs = config.optimizer.optimizer_factory_kwargs_by_name["DistMuon"]
+    compute_layouts = factory_kwargs["compute_sharding_by_fqn"]
+    assert all(fqn in compute_layouts for fqn in matrix_rows_by_fqn)
+
+    config.parallelism.expert_parallel_degree = 2
+    config.__post_init__()
+    config.__post_init__()
+
+    factory_kwargs = config.optimizer.optimizer_factory_kwargs_by_name["DistMuon"]
+    compute_layouts = factory_kwargs["compute_sharding_by_fqn"]
+
+    for fqn, matrix_rows in matrix_rows_by_fqn.items():
+        layout = compute_layouts[fqn]
+        assert type(layout.shardings_by_mesh_axis["dp_shard"]) is Owned
+        assert layout.matrix_batch is not None
+        assert layout.matrix_batch.matrix_rows == matrix_rows
+        assert layout.matrix_batch.num_interleaved_matrices == 2
+
+    assert "layers.0.feed_forward.w1.weight" not in compute_layouts
+    assert "layers.0.feed_forward.w3.weight" not in compute_layouts
+    assert "layers.1.moe.shared_experts.w1.weight" not in compute_layouts
+    assert "layers.1.moe.shared_experts.w3.weight" not in compute_layouts
+    muon_pattern = config.optimizer.param_groups[0].pattern
+    assert all(re.search(muon_pattern, fqn) for fqn in matrix_rows_by_fqn)
+    bucket_configs = factory_kwargs["bucket_configs"]
+    for fqn in matrix_rows_by_fqn:
+        assert sum(fqn in bucket.patterns for bucket in bucket_configs) == 1
+
+    routed_layouts = tuple(
+        layout
+        for fqn, layout in compute_layouts.items()
+        if ".moe.routed_experts.inner_experts." in fqn
+    )
+    assert routed_layouts
+    for layout in routed_layouts:
+        assert set(layout.shardings_by_mesh_axis) == {"ep", "efsdp"}
+        assert layout.shard_order_by_tensor_dim[0] == ("ep", "efsdp")
