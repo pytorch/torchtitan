@@ -52,13 +52,14 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
-    "FlexAttention",
     "BaseQKVLinear",
+    "FlexInnerAttention",
     "FusedQKVLinear",
     "GQAttention",
+    "InnerAttention",
     "QKVLinear",
-    "ScaledDotProductAttention",
-    "VarlenAttention",
+    "ScaledDotProductInnerAttention",
+    "VarlenInnerAttention",
     "VarlenMetadata",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
@@ -124,9 +125,17 @@ def local_head_split(
     return out
 
 
-class VarlenAttention(Module):
+class InnerAttention(Module):
+    """Base class for attention kernels used by outer attention modules."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        pass
+
+
+class VarlenInnerAttention(InnerAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
         window_size: tuple[int, int] = (-1, 0)
         """ window_size=(left, right) controls the attention window relative to each
             query position. 'left' is how many tokens before the query to attend to,
@@ -220,11 +229,11 @@ class VarlenAttention(Module):
         return out_transform(out_THV, lse_TH)
 
 
-class FlexAttention(Module):
+class FlexInnerAttention(InnerAttention):
     """Inner attention using ``flex_attention`` with torch.compile.
 
     Query/key inputs use ``[T, H, K]`` and value inputs use ``[T, H, V]``.
-    The FlexAttention kernel requires a batch dimension, so inputs are adapted
+    The FlexInnerAttention kernel requires a batch dimension, so inputs are adapted
     to ``[1, H, T, K]`` and ``[1, H, T, V]`` only at the kernel boundary.
 
     Note:
@@ -233,7 +242,7 @@ class FlexAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
@@ -289,7 +298,7 @@ class FlexAttention(Module):
         return_aux: AuxRequest,
         kernel_options: dict,
     ):
-        """Run compiled FlexAttention outside SPMD typechecking.
+        """Run compiled FlexInnerAttention outside SPMD typechecking.
 
         Compiled regions are not currently compatible with SPMD typechecking, so
         the opaque kernel output is re-typed at the boundary instead of
@@ -301,7 +310,7 @@ class FlexAttention(Module):
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
-            out, aux = FlexAttention._compiled_flex_attn(
+            out, aux = FlexInnerAttention._compiled_flex_attn(
                 q,
                 k,
                 v,
@@ -353,13 +362,13 @@ class FlexAttention(Module):
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
-        #    `FlexAttention._compiled_flex_attn` is correct.
+        #    `FlexInnerAttention._compiled_flex_attn` is correct.
         # Mark the flex region so that, when the enclosing model is compiled with
         # a non-inductor backend, regional_inductor scoops just this region into
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
-        with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out_1HTV, aux = FlexAttention.compiled_flex_attn(
+        with maybe_regional_inductor(FlexInnerAttention.inductor_configs):
+            out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
                 q_1HTK,
                 k_1HTK,
                 v_1HTV,
@@ -380,7 +389,7 @@ class FlexAttention(Module):
 
 # TODO: Verify whether SDPA support can be removed without losing performance
 # after folding: https://github.com/pytorch/torchtitan/pull/4218#pullrequestreview-4977638012
-class ScaledDotProductAttention(Module):
+class ScaledDotProductInnerAttention(InnerAttention):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
     ``forward()`` adapts Q/K from ``(B, L, H, K)`` to ``(B, H, L, K)`` and V
@@ -393,14 +402,14 @@ class ScaledDotProductAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         pass
 
     sdpa_backends: list[SDPBackend] = []
 
     def __init__(self, config: Config) -> None:
         if config is None:
-            config = ScaledDotProductAttention.Config()
+            config = ScaledDotProductInnerAttention.Config()
         super().__init__()
         if not self.sdpa_backends:
             self.sdpa_backends = [
@@ -423,7 +432,7 @@ class ScaledDotProductAttention(Module):
     ) -> torch.Tensor:
         if attention_masks is not None:
             raise ValueError(
-                "ScaledDotProductAttention does not support attention_masks; it "
+                "ScaledDotProductInnerAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
         q_BHLK, k_BHLK, v_BHLV = (

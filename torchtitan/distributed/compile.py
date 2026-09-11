@@ -30,7 +30,7 @@ FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
 
 # Toggled on by ``_maybe_regional_inductor_backend`` when the model is compiled
 # with a non-inductor backend that needs inductor-only regions (e.g.
-# FlexAttention) scooped into an inductor sub-compile. Read by
+# FlexInnerAttention) scooped into an inductor sub-compile. Read by
 # ``maybe_regional_inductor`` at trace time; left False on the default inductor
 # / eager paths so no annotation metadata is emitted.
 _regional_inductor_enabled: bool = False
@@ -100,26 +100,26 @@ def _maybe_regional_inductor_backend(model: nn.Module, backend: str) -> str | Ca
     """Wrap the ``aot_eager`` backend so inductor-only flex regions are scooped out.
 
     ``regional_inductor`` lowers just the regions annotated with ``compile_with_inductor`` (see
-    ``FlexAttention.forward``) to inductor while the rest stays in aot_eager.
+    ``FlexInnerAttention.forward``) to inductor while the rest stays in aot_eager.
 
-    Only applied for ``aot_eager`` on models that actually use FlexAttention, so
+    Only applied for ``aot_eager`` on models that actually use FlexInnerAttention, so
     dense/non-flex aot_eager paths are left untouched. Other non-inductor backends
     can't be scooped here and raise rather than silently degrading.
     """
-    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
 
-    uses_flex = any(isinstance(m, FlexAttention) for m in model.modules())
+    uses_flex = any(isinstance(m, FlexInnerAttention) for m in model.modules())
     # Non-flex models never need the scoop; the default inductor backend already
     # lowers the flex region directly. Both are left on the unmodified backend.
     if not uses_flex or backend == "inductor":
         return backend
 
-    # FlexAttention only has an inductor lowering. Under a non-inductor backend
+    # FlexInnerAttention only has an inductor lowering. Under a non-inductor backend
     # other than aot_eager it would decompose to eager aten ops (no Triton
     # kernel), which we can't transparently scoop here -- fail loudly.
     if backend != "aot_eager":
         raise ValueError(
-            f"Model uses FlexAttention but compile backend {backend!r} is neither "
+            f"Model uses FlexInnerAttention but compile backend {backend!r} is neither "
             f"'inductor' nor 'aot_eager'; the flex region would decompose to eager "
             f"aten ops (no Triton kernel). Use 'inductor' or 'aot_eager'."
         )
