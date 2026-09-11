@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
+
 import pytest
 import torch
 
@@ -22,6 +24,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
 from torchtitan.overrides.fused_swiglu import fused_swiglu
 
 
@@ -325,3 +328,63 @@ def test_compute_layout_rejects_invalid_matrix_batch() -> None:
             shardings_by_mesh_axis={"dp_shard": Owned()},
             matrix_batch="invalid",  # pyrefly: ignore[bad-argument-type]
         )
+
+
+def test_kimi_dist_muon_aligns_final_compute_layouts() -> None:
+    config = kimi_k2_5_debugmodel()
+    assert config.model_spec is not None
+    dense_feed_forward = config.model_spec.model.layers[0].feed_forward
+    moe = config.model_spec.model.layers[1].moe
+    assert dense_feed_forward is not None
+    assert moe is not None
+    shared_experts = moe.shared_experts
+    assert shared_experts is not None
+    matrix_rows_by_fqn = {
+        "layers.0.feed_forward.w13.weight": dense_feed_forward.w1.out_features,
+        "layers.1.moe.shared_experts.w13.weight": shared_experts.w1.out_features,
+    }
+    factory_kwargs = config.optimizer.optimizer_factory_kwargs_by_name["DistMuon"]
+    stock_compute_layouts = factory_kwargs["compute_sharding_by_fqn"]
+    assert all(
+        fqn not in stock_compute_layouts for fqn in matrix_rows_by_fqn
+    )
+
+    config.model_spec.model.layers[0].feed_forward = fused_swiglu(
+        dense_feed_forward
+    )  # pyrefly: ignore[bad-assignment]
+    moe.shared_experts = fused_swiglu(
+        shared_experts
+    )  # pyrefly: ignore[bad-assignment]
+    config.parallelism.expert_parallel_degree = 2
+    config.__post_init__()
+    config.__post_init__()
+
+    factory_kwargs = config.optimizer.optimizer_factory_kwargs_by_name["DistMuon"]
+    compute_layouts = factory_kwargs["compute_sharding_by_fqn"]
+
+    for fqn, matrix_rows in matrix_rows_by_fqn.items():
+        layout = compute_layouts[fqn]
+        assert type(layout.shardings_by_mesh_axis["dp_shard"]) is Owned
+        assert layout.matrix_batch is not None
+        assert layout.matrix_batch.matrix_rows == matrix_rows
+        assert layout.matrix_batch.num_interleaved_matrices == 2
+
+    assert "layers.0.feed_forward.w1.weight" in compute_layouts
+    assert "layers.0.feed_forward.w3.weight" in compute_layouts
+    assert "layers.1.moe.shared_experts.w1.weight" in compute_layouts
+    assert "layers.1.moe.shared_experts.w3.weight" in compute_layouts
+    muon_pattern = config.optimizer.param_groups[0].pattern
+    assert all(re.search(muon_pattern, fqn) for fqn in matrix_rows_by_fqn)
+    bucket_configs = factory_kwargs["bucket_configs"]
+    for fqn in matrix_rows_by_fqn:
+        assert sum(fqn in bucket.patterns for bucket in bucket_configs) == 1
+
+    routed_layouts = tuple(
+        layout
+        for fqn, layout in compute_layouts.items()
+        if ".moe.routed_experts.inner_experts." in fqn
+    )
+    assert routed_layouts
+    for layout in routed_layouts:
+        assert set(layout.shardings_by_mesh_axis) == {"ep", "efsdp"}
+        assert layout.shard_order_by_tensor_dim[0] == ("ep", "efsdp")

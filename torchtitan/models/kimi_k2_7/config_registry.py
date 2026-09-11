@@ -29,6 +29,7 @@ from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
     ComputeLayout,
+    MatrixBatchLayout,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -432,11 +433,11 @@ def _dist_muon_optimizer(
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
         rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
-        r"feed_forward\.w[123]\.weight|"
+        r"feed_forward\.w(?:13|[123])\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
         # SVD-entropy gain over AdamW is larger than for other matrix groups.
         r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.w[123]\.weight"
+        r"moe\.shared_experts\.w(?:13|[123])\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
@@ -464,46 +465,83 @@ def _dist_muon_optimizer(
     )
 
 
-def _align_dist_muon_expert_compute_layouts(
+def _align_dist_muon_compute_layouts(
     optimizer_config: OptimizersContainer.Config,
     *,
     parallelism: ParallelismConfig,
+    model_config: KimiK25Model.Config,
 ) -> OptimizersContainer.Config:
-    """Align routed-expert layouts with the final parallelism config.
+    """Align DistMuon layouts with the final trainer config.
 
-    The registry builds compute layouts from the recipe's declared parallelism,
-    but the CLI can still override ``expert_parallel_degree`` afterwards. That
-    override decides whether routed experts use the 1D ``dp_shard`` layout or
-    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
+    The final config can differ from the registry after CLI parallelism changes
+    and module overrides, so routed experts and fused SwiGLU are aligned here.
     """
-    # TODO: Remove this function once parallelism can no longer be overridden
-    # from the CLI; the registry layouts are then already final.
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
+    original_dist_muon_kwargs = (
+        optimizer_config.optimizer_factory_kwargs_by_name.get("DistMuon")
+    )
+    if original_dist_muon_kwargs is None:
         return optimizer_config
-    compute_sharding_by_fqn = cast(
-        dict[str, ComputeLayout],
-        dist_muon_kwargs["compute_sharding_by_fqn"],
+    dist_muon_kwargs = dict(original_dist_muon_kwargs)
+    factory_kwargs_by_name = {
+        **optimizer_config.optimizer_factory_kwargs_by_name,
+        "DistMuon": dist_muon_kwargs,
+    }
+
+    compute_layouts = dict(
+        cast(
+            dict[str, ComputeLayout],
+            dist_muon_kwargs["compute_sharding_by_fqn"],
+        )
     )
     per_expert = _per_expert_compute_layout(parallelism)
-    aligned_shardings = {}
     changed = False
-    for fqn, compute_layout in compute_sharding_by_fqn.items():
+    for fqn, compute_layout in compute_layouts.items():
         if ".moe.routed_experts.inner_experts." in fqn and compute_layout != per_expert:
-            aligned_shardings[fqn] = per_expert
+            compute_layouts[fqn] = per_expert
             changed = True
+
+    fused_fqns = []
+    for layer_id, layer_config in enumerate(model_config.layers):
+        if layer_config.feed_forward is not None:
+            feed_forward = layer_config.feed_forward
+            prefix = f"layers.{layer_id}.feed_forward"
         else:
-            aligned_shardings[fqn] = compute_layout
+            feed_forward = layer_config.moe.shared_experts
+            prefix = f"layers.{layer_id}.moe.shared_experts"
+
+        w13 = getattr(feed_forward, "w13", None)
+        if w13 is None:
+            continue
+        w1_fqn = f"{prefix}.w1.weight"
+        w3_fqn = f"{prefix}.w3.weight"
+        w13_fqn = f"{prefix}.w13.weight"
+        w1_layout = compute_layouts[w1_fqn]
+        assert w1_layout == compute_layouts[w3_fqn]
+        compute_layouts[w13_fqn] = replace(
+            w1_layout,
+            matrix_batch=MatrixBatchLayout(
+                matrix_rows=w13.out_features // 2,
+                num_interleaved_matrices=2,
+            ),
+        )
+        fused_fqns.append((w1_fqn, w13_fqn))
+        changed = True
+
     if not changed:
         return optimizer_config
 
-    dist_muon_kwargs["compute_sharding_by_fqn"] = aligned_shardings
+    dist_muon_kwargs["compute_sharding_by_fqn"] = compute_layouts
+    if fused_fqns:
+        dist_muon_kwargs["bucket_configs"] = tuple(
+            replace(
+                bucket,
+                patterns=(
+                    *bucket.patterns,
+                    *(w13 for w1, w13 in fused_fqns if w1 in bucket.patterns),
+                ),
+            )
+            for bucket in dist_muon_kwargs["bucket_configs"]
+        )
     return replace(
         optimizer_config,
         optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
@@ -514,9 +552,11 @@ def _align_dist_muon_expert_compute_layouts(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimizer = _align_dist_muon_expert_compute_layouts(
+        assert self.model_spec is not None
+        self.optimizer = _align_dist_muon_compute_layouts(
             self.optimizer,
             parallelism=self.parallelism,
+            model_config=cast(KimiK25Model.Config, self.model_spec.model),
         )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
         if self.parallelism.tensor_parallel_degree > 1:
