@@ -152,6 +152,7 @@ def generate() -> None:
                 if isinstance(attention_backend, FlexAttention.Config)
                 else AttentionBackendEnum.CUSTOM
             ),
+            flex_attn_kv_block_size=gen_config.flex_attention_kv_block_size,
         ),
         disable_log_stats=False,
     )
