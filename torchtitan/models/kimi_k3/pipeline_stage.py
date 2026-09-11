@@ -268,9 +268,11 @@ class AttnResPipelineStage(PipelineStage):
             payload_TND = self._commit_and_route(fwd_chunk_id, stack_out_TND, order_in)
             output_tuple = (hidden_out_TD, payload_TND)
 
-        flatten_input_tensors = flatten_args(composite_args) + flatten_args(
-            composite_kwargs
-        )
+        # flatten_args returns a list here (detach=False); spelled as lists so
+        # the checker does not see its detach=True tuple overload.
+        flatten_input_tensors: list[torch.Tensor] = list(
+            flatten_args(composite_args)
+        ) + list(flatten_args(composite_kwargs))
         self.fwd_cache[fwd_chunk_id] = (output_tuple, flatten_input_tensors)
 
         if self._is_last_on_rank():

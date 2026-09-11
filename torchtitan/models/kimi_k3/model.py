@@ -458,7 +458,7 @@ class KimiK3Model(Decoder):
             vision_positions=vision_positions,
         )
 
-    def forward(  # pyrefly: ignore [bad-override]
+    def forward(  # pyrefly: ignore [bad-param-name-override]
         self,
         tokens: torch.Tensor,
         block_residual_TND: torch.Tensor | None = None,
