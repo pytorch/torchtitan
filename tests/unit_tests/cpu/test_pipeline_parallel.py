@@ -7,6 +7,7 @@
 import pytest
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.distributed import pipeline_parallel as pp
 from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
@@ -156,3 +157,58 @@ def test_pp_rank_to_stage_mapping_requires_even_division():
 def test_get_pipeline_metadata_requires_layers_attribute():
     with pytest.raises(ValueError, match="Model does not have layers attribute."):
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
+
+
+@pytest.mark.parametrize("lookahead", [True, False, 0, -1, 4, "auto"])
+def test_unshard_lookahead_rejects_invalid_values(lookahead):
+    with pytest.raises(ValueError, match="pipeline_parallel_unshard_lookahead"):
+        ParallelismConfig(
+            pipeline_parallel_max_active_stages=3,
+            pipeline_parallel_unshard_lookahead=lookahead,
+        )
+
+
+def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch):
+    class CapturingSchedule(pp.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(pp, "get_schedule_class", lambda _: CapturingSchedule)
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="CapturingSchedule",
+        pipeline_parallel_max_active_stages=3,
+        pipeline_parallel_unshard_lookahead=2,
+    )
+
+    schedule = pp._build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda: None,
+    )
+
+    assert schedule.kwargs["max_active_stages"] == 3
+    assert schedule.kwargs["unshard_lookahead"] == 2
+
+
+def test_unshard_lookahead_rejects_single_stage_schedule(monkeypatch):
+    class CapturingSchedule(pp.PipelineScheduleSingle):
+        pass
+
+    monkeypatch.setattr(pp, "get_schedule_class", lambda _: CapturingSchedule)
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="CapturingSchedule",
+        pipeline_parallel_unshard_lookahead=2,
+    )
+
+    with pytest.raises(ValueError, match="only by multi-stage"):
+        pp._build_pipeline_schedule(
+            parallelism=parallelism,
+            num_microbatches=2,
+            stages=[object()],
+            loss_fn=lambda: None,
+        )
