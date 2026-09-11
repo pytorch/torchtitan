@@ -159,16 +159,21 @@ def test_get_pipeline_metadata_requires_layers_attribute():
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
 
 
-@pytest.mark.parametrize("lookahead", [True, False, 0, -1, 4, "auto"])
+@pytest.mark.parametrize(
+    "lookahead",
+    [None, True, 2, "adaptive", [1, 2], (1,), (1, 4), (1, False)],
+)
 def test_unshard_lookahead_rejects_invalid_values(lookahead):
     with pytest.raises(ValueError, match="pipeline_parallel_unshard_lookahead"):
         ParallelismConfig(
+            pipeline_parallel_degree=2,
             pipeline_parallel_max_active_stages=3,
             pipeline_parallel_unshard_lookahead=lookahead,
         )
 
 
-def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch):
+@pytest.mark.parametrize("lookahead", ["default", "auto", (1, 3)])
+def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch, lookahead):
     class CapturingSchedule(pp.PipelineScheduleMulti):
         __slots__ = ("kwargs",)
 
@@ -180,7 +185,7 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch):
         pipeline_parallel_degree=2,
         pipeline_parallel_schedule="CapturingSchedule",
         pipeline_parallel_max_active_stages=3,
-        pipeline_parallel_unshard_lookahead=2,
+        pipeline_parallel_unshard_lookahead=lookahead,
     )
 
     schedule = pp._build_pipeline_schedule(
@@ -191,10 +196,11 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch):
     )
 
     assert schedule.kwargs["max_active_stages"] == 3
-    assert schedule.kwargs["unshard_lookahead"] == 2
+    assert schedule.kwargs["unshard_lookahead"] == lookahead
 
 
-def test_unshard_lookahead_rejects_single_stage_schedule(monkeypatch):
+@pytest.mark.parametrize("lookahead", ["auto", (1, 3)])
+def test_unshard_lookahead_rejects_single_stage_schedule(monkeypatch, lookahead):
     class CapturingSchedule(pp.PipelineScheduleSingle):
         pass
 
@@ -202,7 +208,7 @@ def test_unshard_lookahead_rejects_single_stage_schedule(monkeypatch):
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
         pipeline_parallel_schedule="CapturingSchedule",
-        pipeline_parallel_unshard_lookahead=2,
+        pipeline_parallel_unshard_lookahead=lookahead,
     )
 
     with pytest.raises(ValueError, match="only by multi-stage"):
