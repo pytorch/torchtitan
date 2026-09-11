@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib.util
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -17,10 +17,6 @@ if TYPE_CHECKING:
     from torchtitan.experiments.torchft.manager import TorchFTManager
 
 __all__ = ["TorchFTOptimizersContainer"]
-
-has_torchft = importlib.util.find_spec("torchft") is not None
-if has_torchft:
-    import torchft
 
 
 class TorchFTOptimizersContainer(OptimizersContainer):
@@ -42,10 +38,10 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         for optim in self.optimizers:
             init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
-        self._ft_optimizer = torchft.Optimizer(ft_manager.manager, self)
-        # Whether to determine quorum using FT.optimizer,
-        # in semi-sync training we use the synchronization step to start quorum
-        self._use_ft_optimizer: bool = ft_manager.use_async_quorum
+        # Semi-sync algorithms manage quorum in their own synchronization hooks.
+        self._quorum_manager = (
+            ft_manager.manager if ft_manager.use_async_quorum else None
+        )
 
     def init_cache_state_dict(self) -> None:
         self.cache_state_dict = super().state_dict()
@@ -61,28 +57,19 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         super().load_state_dict(state_dict)
         self.init_cache_state_dict()
 
-    def step(self, *args, **kwargs) -> None:
-        """Calling the correct step() depending on the caller.
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        assert closure is None, "OptimizersContainer does not support closures"
+        if (
+            self._quorum_manager is not None
+            and not self._quorum_manager.should_commit()
+        ):
+            return None
+        # Call inner optimizers directly to avoid re-entering container hooks.
+        for optimizer in self.optimizers:
+            optimizer.step()
+        return None
 
-        TorchFT's OptimizerWrapper.step() is designed to be called only once
-        per train step per torchft.Manager regardless how many optimizers are used.
-        Hence we will need to appropriately dispatch the call.
-        """
-        if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.step(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().step(*args, **kwargs)
-
-    def zero_grad(self, *args, **kwargs) -> None:
-        """Calling the correct zero_grad() depending on the caller.
-
-        Check the comment in ``step()``.
-        """
-        if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.zero_grad(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().zero_grad(*args, **kwargs)
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        if self._quorum_manager is not None:
+            self._quorum_manager.start_quorum()
+        super().zero_grad(set_to_none=set_to_none)
