@@ -216,6 +216,7 @@ def _kda_config(
         output_gate=_linear(dim, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=head_dim,
+            conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),
         ),
         output_norm=KimiRMSNormGated.Config(

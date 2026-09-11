@@ -99,7 +99,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         }
         return load_balancer
 
-    def shard_metadata(batch, received_load_balancer):
+    def shard_metadata(_config, batch, received_load_balancer):
         assert received_load_balancer is load_balancer
         calls.append("cp_metadata")
         return batch
@@ -116,7 +116,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     monkeypatch.setattr(ContextParallelLoadBalancerConfig, "build", build)
     monkeypatch.setattr(
         "torchtitan.models.common.cp_attention."
-        "KVAllGatherCPFlexInnerAttention.cp_shard_metadata",
+        "KVAllGatherCPFlexInnerAttention.Config.cp_shard_metadata",
         shard_metadata,
     )
     monkeypatch.setattr(

@@ -358,18 +358,17 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         from torchtitan.models.common.cp_attention import CPInnerAttention
 
-        # Let each distinct CP backend prepare its shared attention metadata once.
-        sharded_backends: set[type[CPInnerAttention]] = set()
-        for _, module_config, _, _ in self.config.traverse(Module.Config, recurse=True):
-            owner = module_config._owner
-            if (
-                owner is None
-                or not issubclass(owner, CPInnerAttention)
-                or owner in sharded_backends
-            ):
+        # Let each distinct CP backend config prepare shared metadata once.
+        sharded_backend_types: set[type[CPInnerAttention.Config]] = set()
+        for _, backend_config, _, _ in self.config.traverse(
+            CPInnerAttention.Config, recurse=True
+        ):
+            assert isinstance(backend_config, CPInnerAttention.Config)
+            backend_type = type(backend_config)
+            if backend_type in sharded_backend_types:
                 continue
-            batch = owner.cp_shard_metadata(batch, load_balancer)
-            sharded_backends.add(owner)
+            batch = backend_config.cp_shard_metadata(batch, load_balancer)
+            sharded_backend_types.add(backend_type)
         return batch
 
     def get_attention_masks(

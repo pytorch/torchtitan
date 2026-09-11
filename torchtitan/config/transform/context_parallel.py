@@ -9,7 +9,6 @@
 from dataclasses import dataclass
 from typing import cast
 
-from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.cp_attention import CPInnerAttention
 from torchtitan.protocols.module import Module
 
@@ -20,29 +19,39 @@ __all__ = ["ContextParallelTransform"]
 
 @dataclass(kw_only=True, slots=True)
 class ContextParallelTransform(ModelConfigTransform):
-    """Run attention under context parallelism.
+    """Replace inner-attention configs with context-parallel implementations.
 
-    Replace every inner attention with ``inner_attention`` while preserving its
-    config.
-
-    TODO(fegin): support one kernel per attention type, for models that mix
-    them.
+    TODO: Replace config-type keys with an instance-aware selection
+    mechanism. Selective gather may require different CP behavior for attention
+    instances that share an inner-attention config type but use different masks.
     """
 
-    inner_attention: type[Module]
-    """Replacement inner attention; must inherit ``CPInnerAttention``."""
+    inner_attention: dict[type[Module.Config], type[Module]]
+    """Map each local config type to its CP backend implementation."""
 
     def __post_init__(self) -> None:
-        if not issubclass(self.inner_attention, CPInnerAttention):
-            raise ValueError(
-                f"{self.inner_attention.__qualname__} must inherit CPInnerAttention."
-            )
+        for config_type, replacement in self.inner_attention.items():
+            if not issubclass(config_type, Module.Config):
+                raise ValueError(
+                    f"{config_type.__qualname__} must inherit Module.Config."
+                )
+            if not issubclass(replacement, CPInnerAttention):
+                raise ValueError(
+                    f"{replacement.__qualname__} must inherit CPInnerAttention."
+                )
 
     def transform(self, model: Module.Config) -> Module.Config:
-        for _, traversed, _, _ in model.traverse(BaseAttention.Config):
-            # traverse returns the base config type.
-            attention = cast(BaseAttention.Config, traversed)
-            attention.inner_attention = convert_config_type(
-                attention.inner_attention, self.inner_attention
-            )
+        for config_type, replacement in self.inner_attention.items():
+            for _, traversed, parent, field_name in model.traverse(config_type):
+                converted = convert_config_type(
+                    cast(Module.Config, traversed), replacement
+                )
+                if parent is None:
+                    model = converted
+                elif isinstance(parent, list):
+                    assert isinstance(field_name, int)
+                    parent[field_name] = converted
+                else:
+                    assert isinstance(field_name, str)
+                    setattr(parent, field_name, converted)
         return model

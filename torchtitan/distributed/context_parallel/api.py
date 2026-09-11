@@ -89,6 +89,7 @@ class ContextParallelLoadBalancer(Configurable):
         ptrr_mask_key: str | None = None,
     ) -> None:
         self._cp_mesh = cp_mesh
+        self._load_balancer_type = config.load_balancer_type
         self._shard_dims = (
             _cp_shard_dims(input_shardings)
             if input_shardings is not None
@@ -107,11 +108,21 @@ class ContextParallelLoadBalancer(Configurable):
             self._shard_dims[first_name]
         )
         self._load_balancer_impl = self._build_load_balancer_impl(
-            config.load_balancer_type,
+            self._load_balancer_type,
             seq_len,
             input_dict.get("attention_masks"),
             ptrr_mask_key,
         )
+
+    @property
+    def cp_mesh(self) -> DeviceMesh:
+        """Device mesh whose CP axis owns this partition."""
+        return self._cp_mesh
+
+    @property
+    def load_balancer_type(self) -> str | None:
+        """Configured token-partition strategy."""
+        return self._load_balancer_type
 
     def _build_load_balancer_impl(
         self,

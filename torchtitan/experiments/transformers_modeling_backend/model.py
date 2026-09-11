@@ -1205,7 +1205,7 @@ class HFTransformerModel(BaseModel):
             )
             assert isinstance(load_balancer, ContextParallelLoadBalancer)
             batch = load_balancer.shard_inputs(batch)
-            batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
+            batch = KVAllGatherCPFlexInnerAttention.Config().cp_shard_metadata(
                 batch, load_balancer
             )
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types

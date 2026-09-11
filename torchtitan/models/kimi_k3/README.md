@@ -41,6 +41,7 @@ describe the released model.
 | Feature | Notes |
 |---------|-------|
 | FSDP2 / HSDP | Decoder sharded per layer; vision encoder sharded as a separate unit |
+| Context parallel | Attention Gym native CP for KDA; MLA supports all-gather K/V with contiguous or headtail partitions and Ulysses with contiguous partitions |
 
 ## Numerical Parity
 
