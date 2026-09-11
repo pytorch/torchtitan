@@ -13,6 +13,7 @@ from unittest import mock
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.protocols.module import Module
 
 
@@ -33,7 +34,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         if cp_kernel:
             # Apply the transform without its final validation.
             ContextParallelTransform(
-                inner_attention=KVAllGatherCPFlexInnerAttention
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
             ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
         config.training.max_context_length = 512
@@ -96,9 +99,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
             attention.n_heads = n_heads
         if n_kv_heads is not None:
             attention.n_kv_heads = n_kv_heads
-        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
-            config.model
-        )
+        ContextParallelTransform(
+            inner_attention={FlexInnerAttention.Config: UlyssesCPFlexInnerAttention}
+        ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = load_balancer
@@ -213,9 +216,9 @@ class TestHeadDivisibility(unittest.TestCase):
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
         if inner_attention is not None:
-            ContextParallelTransform(inner_attention=inner_attention).transform(
-                config.model
-            )
+            ContextParallelTransform(
+                inner_attention={FlexInnerAttention.Config: inner_attention}
+            ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = None

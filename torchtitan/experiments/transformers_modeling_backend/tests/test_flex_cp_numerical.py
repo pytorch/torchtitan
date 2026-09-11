@@ -172,6 +172,7 @@ def main():
         batch = KVAllGatherCPFlexInnerAttention.prepare_cp_batch_metadata(
             batch,
             permutation=permutation,
+            config=KVAllGatherCPFlexInnerAttention.Config(),
         )
         batch = context_parallel.shard_inputs(
             batch,

@@ -44,6 +44,7 @@ __all__ = [
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
     "get_cp_input_seq_len",
+    "get_token_fragments",
     "shard_inputs",
 ]
 
@@ -192,6 +193,49 @@ def get_cp_input_seq_len(
             f"but got {seq_lens}."
         )
     return next(iter(seq_lens.values()))
+
+
+def get_token_fragments(
+    num_tokens: int,
+    *,
+    cp_size: int,
+    permutation: torch.Tensor | None,
+) -> list[list[tuple[int, int]]]:
+    """Return each CP rank's global token ranges in local tensor order."""
+    if num_tokens % cp_size:
+        raise ValueError(
+            f"The token count ({num_tokens}) must be divisible by the CP degree "
+            f"({cp_size})."
+        )
+
+    local_num_tokens = num_tokens // cp_size
+    if permutation is None:
+        return [
+            [(rank * local_num_tokens, (rank + 1) * local_num_tokens)]
+            for rank in range(cp_size)
+        ]
+    if permutation.ndim != 2 or permutation.shape != (1, num_tokens):
+        raise ValueError(
+            "CP routing requires a permutation with shape [1, num_tokens], "
+            f"but got {tuple(permutation.shape)}."
+        )
+
+    fragments: list[list[tuple[int, int]]] = []
+    for rank_indices in permutation[0].split(local_num_tokens):
+        token_indices = rank_indices.tolist()
+        rank_fragments: list[tuple[int, int]] = []
+        start = token_indices[0]
+        stop = start + 1
+        for token_idx in token_indices[1:]:
+            if token_idx == stop:
+                stop += 1
+            else:
+                rank_fragments.append((start, stop))
+                start = token_idx
+                stop = token_idx + 1
+        rank_fragments.append((start, stop))
+        fragments.append(rank_fragments)
+    return fragments
 
 
 def _permute_tensor(

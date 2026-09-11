@@ -406,11 +406,10 @@ class Decoder(BaseModel):
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
-        if permutation is not None:
-            batch = self._prepare_cp_metadata(
-                batch,
-                permutation=permutation,
-            )
+        batch = self._prepare_cp_metadata(
+            batch,
+            permutation=permutation,
+        )
         return context_parallel.shard_inputs(
             batch,
             input_shardings=input_shardings,
@@ -434,11 +433,12 @@ class Decoder(BaseModel):
                 "type[CPInnerAttention[Any, Any]] | None", backend_config._owner
             )
             assert owner is not None and issubclass(owner, CPInnerAttention)
-            if owner in prepared_backends:
+            if owner in prepared_backends or not owner.prepares_cp_metadata:
                 continue
             batch = owner.prepare_cp_batch_metadata(
                 batch,
                 permutation=permutation,
+                config=backend_config,
             )
             prepared_backends.add(owner)
         return batch
