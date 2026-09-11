@@ -246,7 +246,7 @@ class ParallelismConfig:
     """Reuse schedule-planned receive buffers across non-overlapping actions."""
 
     pipeline_parallel_per_direction_p2p: Annotated[bool, tyro.conf.Suppress] = False
-    """Use independent process groups for forward and backward PP traffic."""
+    """Use one process group per directed physical-rank PP edge."""
 
     pipeline_parallel_max_active_stages: Annotated[int, tyro.conf.Suppress] = 3
     """Maximum FSDP stages kept unsharded by a looped pipeline schedule."""

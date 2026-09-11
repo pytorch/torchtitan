@@ -188,27 +188,29 @@ class TestConfigManager(unittest.TestCase):
 
         assert config.parallelism.pipeline_parallel_schedule == "1F1B"
 
-    def test_looped_pipeline_cuda_graphs_require_isolated_p2p(self):
-        config = ConfigManager().parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--training.disable-cuda-graphs",
-                "--parallelism.pipeline_parallel_degree",
-                "2",
-                "--parallelism.pipeline_parallel_schedule",
-                "Interleaved1F1B",
-            ]
-        )
-        config.training.disable_cuda_graphs = False
+    def test_cuda_graphs_reject_looped_pipeline_schedule(self):
+        config_manager = ConfigManager()
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with pytest.raises((ValueError, SystemExit)) as exc_info:
+                config_manager.parse_args(
+                    [
+                        "--module",
+                        "llama3",
+                        "--config",
+                        "llama3_debugmodel",
+                        "--parallelism.pipeline_parallel_degree",
+                        "2",
+                        "--parallelism.pipeline_parallel_schedule",
+                        "Interleaved1F1B",
+                    ]
+                )
 
-        with pytest.raises(ValueError, match="independent forward and backward"):
-            config._validate_cuda_graphs()
-
-        config.parallelism.pipeline_parallel_per_direction_p2p = True
-        config._validate_cuda_graphs()
+        if isinstance(exc_info.value, SystemExit):
+            assert exc_info.value.code == 2
+            error = stderr.getvalue()
+        else:
+            error = str(exc_info.value)
+        assert "do not support looped pipeline schedules" in error
 
     def test_cuda_graphs_reject_pipeline_validation(self):
         config = ConfigManager().parse_args(
