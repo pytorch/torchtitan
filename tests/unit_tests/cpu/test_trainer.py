@@ -7,7 +7,7 @@
 import weakref
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,19 +17,45 @@ from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
 
-def _batch() -> tuple[dict[str, object], torch.Tensor]:
-    """One dataloader batch.
+def _batch() -> dict[str, Any]:
+    """One batch produced by ``Trainer.batch_generator``.
 
     Built fresh per call because ``train_step`` pops ``num_valid_tokens`` out of
     the dict it is handed.
     """
-    return {"input": torch.ones(1), "num_valid_tokens": 1}, torch.ones(
-        1, dtype=torch.long
-    )
+    return {
+        "input": torch.ones(1),
+        "labels": torch.ones(1, dtype=torch.long),
+        "num_valid_tokens": 1,
+    }
 
 
 def _bind_pp_forward_backward_body(trainer: Trainer) -> None:
     trainer.fwd_bwd_fn = lambda *args: Trainer._pp_forward_backward_body(trainer, *args)
+
+
+def test_batch_generator_preserves_labels_in_input_dict() -> None:
+    labels = torch.ones(1, dtype=torch.long)
+    input_dict = {
+        "input": torch.ones(1),
+        "labels": labels,
+        "num_valid_tokens": torch.tensor(1),
+    }
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            metrics_processor=SimpleNamespace(
+                ntokens_since_last_log=0,
+                data_loading_times=[],
+            )
+        ),
+    )
+
+    output = next(Trainer.batch_generator(trainer, [input_dict]))
+
+    assert output is input_dict
+    assert output["labels"] is labels
+    assert trainer.metrics_processor.ntokens_since_last_log == 1
 
 
 def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
@@ -51,7 +77,12 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
                 )
             ],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=None),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                dataloader=SimpleNamespace(max_num_documents=None),
+                training=SimpleNamespace(max_context_length=2048),
+            ),
             ntokens_seen=0,
             device=torch.device("cpu"),
             _pp_loss_sentinel_on_non_last_stage=sentinel,
@@ -61,8 +92,7 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
 
     loss = Trainer.forward_backward_step(
         trainer,
-        input_dict=[{"input": torch.ones(1)}],
-        labels=[torch.ones(1)],
+        input_dict=[{"input": torch.ones(1), "labels": torch.ones(1)}],
         global_valid_tokens=torch.tensor(1),
     )
 
@@ -104,7 +134,11 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
                 )
             ],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=None),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                training=SimpleNamespace(max_context_length=2048),
+            ),
             ntokens_seen=0,
             device=torch.device("cpu"),
         ),
@@ -113,8 +147,10 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
 
     reporting_loss = Trainer.forward_backward_step(
         trainer,
-        input_dict=[{"input": torch.ones(1)}] * 2,
-        labels=[torch.ones(1)] * 2,
+        input_dict=[
+            {"input": torch.ones(1), "labels": torch.ones(1)},
+            {"input": torch.ones(1), "labels": torch.ones(1)},
+        ],
         global_valid_tokens=torch.tensor(2),
     )
 
@@ -145,7 +181,11 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
             pp_has_last_stage=True,
             model_parts=[_FakeModel()],
             parallel_dims=SimpleNamespace(pp_enabled=True),
-            config=SimpleNamespace(parallelism="PARA"),
+            dataloader=SimpleNamespace(max_num_documents=4),
+            config=SimpleNamespace(
+                parallelism="PARA",
+                training=SimpleNamespace(max_context_length=2048),
+            ),
             ntokens_seen=0,
             fwd_bwd_fn=fwd_bwd_fn,
         ),
@@ -155,10 +195,17 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     result = Trainer.forward_backward_step(
         trainer,
         input_dict=[
-            {"input": torch.tensor(1), "positions": torch.tensor(10)},
-            {"input": torch.tensor(2), "positions": torch.tensor(20)},
+            {
+                "input": torch.tensor(1),
+                "positions": torch.tensor(10),
+                "labels": torch.tensor([3]),
+            },
+            {
+                "input": torch.tensor(2),
+                "positions": torch.tensor(20),
+                "labels": torch.tensor([4]),
+            },
         ],
-        labels=[torch.tensor([3]), torch.tensor([4])],
         global_valid_tokens=global_valid_tokens,
     )
 
@@ -175,7 +222,7 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
 
 
 def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
-    captured = {}
+    captured: dict[str, Any] = {}
 
     class _FakeModel:
         def preprocess_inputs(self, input_dict, **kw):
@@ -188,16 +235,23 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
 
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
+        dataloader=SimpleNamespace(max_num_documents=4),
         parallel_dims=SimpleNamespace(pp_enabled=False),
-        config=SimpleNamespace(parallelism="PARA"),
+        config=SimpleNamespace(
+            parallelism="PARA",
+            dataloader=SimpleNamespace(max_num_documents=4),
+            training=SimpleNamespace(
+                disable_cuda_graphs=True,
+                max_context_length=2048,
+            ),
+        ),
         ntokens_seen=100,
         fwd_bwd_fn=fwd_bwd_fn,
     )
 
     Trainer.forward_backward_step(
-        fake,
-        input_dict={"input": 0},
-        labels=torch.zeros(1),
+        fake,  # pyrefly: ignore[bad-argument-type]
+        input_dict={"input": 0, "labels": torch.zeros(1)},
         global_valid_tokens=torch.tensor(1),
     )
 
@@ -209,6 +263,8 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     assert captured["preprocess_kwargs"] == {
         "parallel_dims": fake.parallel_dims,
         "parallelism": "PARA",
+        "max_num_documents": 4,
+        "max_context_length": 2048,
     }
 
 

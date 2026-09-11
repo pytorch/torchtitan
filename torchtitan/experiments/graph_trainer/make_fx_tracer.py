@@ -18,6 +18,7 @@ from torch._guards import tracing, TracingContext
 from torch._subclasses import FakeTensorMode
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
@@ -285,6 +286,43 @@ def _reparametrize_train_state(
         yield
 
 
+@dataclass(frozen=True, slots=True)
+class GraphStateMapping:
+    """Trace-time locations associated with one trainer-owned tensor.
+
+    ``input_indices`` identifies the flattened FX placeholders that hold the
+    tensor. It is a tuple because a tensor subclass can unwrap into multiple
+    plain tensor inputs.
+
+    For example, suppose a traced linear layer has these inputs and outputs::
+
+        inputs  = [weight, bias, weight_grad_buffer, bias_grad_buffer, batch]
+    Its state mappings are::
+
+        GraphStateMapping("weight", input_indices=(2,))
+        GraphStateMapping("bias", input_indices=(3,))
+    """
+
+    fqn: str
+    input_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphStateSpec:
+    """Locations of trainer-owned tensors passed to the traced function."""
+
+    mappings: tuple[GraphStateMapping, ...] = ()
+
+    def __post_init__(self) -> None:
+        fqns = tuple(mapping.fqn for mapping in self.mappings)
+        if len(set(fqns)) != len(fqns):
+            raise ValueError("Graph-state FQNs must be unique")
+
+    @property
+    def fqns(self) -> tuple[str, ...]:
+        return tuple(mapping.fqn for mapping in self.mappings)
+
+
 @dataclass
 class TracedResult:
     """Execution metadata returned by :func:`minimal_fx_tracer`.
@@ -299,6 +337,11 @@ class TracedResult:
         output_subclass_layouts: Subclass unwrap/rewrap metadata for outputs.
         output_spec: Original output pytree spec used during reconstruction.
         state_fqns: Trace-time module parameter/buffer FQNs.
+        graph_state: Per-tensor mappings for trainer-owned state flattened after
+            module state.
+        num_optimizer_state_inputs: Number of logical optimizer-state inputs.
+        num_runtime_mesh_inputs: Number of DeviceMesh inputs between state and
+            user inputs.
     """
 
     gm: torch.fx.GraphModule
@@ -317,6 +360,9 @@ class TracedResult:
 
     # state related
     state_fqns: list[str]
+    graph_state: GraphStateSpec = GraphStateSpec()
+    num_optimizer_state_inputs: int = 0
+    num_runtime_mesh_inputs: int = 0
 
     @property
     def num_static_inputs(self) -> int:
@@ -331,7 +377,7 @@ class TracedResult:
         should be included since their addresses are also stable across steps,
         avoiding cudagraph re-copying them every step.
         """
-        num_state = len(self.state_fqns)
+        num_state = len(self.state_fqns) + len(self.graph_state.mappings)
         return sum(
             self.input_subclass_layouts[i].num_tensors
             if i in self.input_subclass_layouts
@@ -340,12 +386,28 @@ class TracedResult:
         )
 
 
+def _flat_tensor_ranges(
+    num_values: int,
+    layouts: dict[int, SubclassLayout],
+) -> tuple[tuple[int, ...], ...]:
+    ranges = []
+    flat_index = 0
+    for logical_index in range(num_values):
+        num_tensors = (
+            layouts[logical_index].num_tensors if logical_index in layouts else 1
+        )
+        ranges.append(tuple(range(flat_index, flat_index + num_tensors)))
+        flat_index += num_tensors
+    return tuple(ranges)
+
+
 def minimal_fx_tracer(
     fn: Callable,
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     *,
     precompile_meshes: list[DeviceMesh] | None = None,
+    graph_state: dict[str, torch.Tensor] | None = None,
     prepare_inputs: Callable[[tuple[Any, ...], dict[str, Any]], None] | None = None,
     prepare_call_inputs: Callable[
         [tuple[Any, ...], dict[str, Any]],
@@ -374,6 +436,10 @@ def minimal_fx_tracer(
     ``fn`` should reference ``module`` and ``optimizer`` from its enclosing
     closure — passing them explicitly through ``args``/``kwargs`` is invalid
     because ``nn.Module`` and ``Optimizer`` instances are not pytree-able.
+    ``graph_state`` supplies additional named tensors as explicit, stable graph
+    inputs immediately after module state. The reconstructed mapping is passed
+    as the traced function's first positional argument so the function can
+    mutate that state directly.
 
     The trace-time ``args`` and ``kwargs`` must satisfy these constraints:
 
@@ -403,12 +469,22 @@ def minimal_fx_tracer(
 
         model_state, optim_state = extract_train_state(module, optimizer)
         state_fqns = list(model_state.keys())
+        graph_state_t = graph_state or {}
+        graph_state_fqns = tuple(graph_state_t)
         trace_meshes = precompile_meshes or []
 
-        state_tree = {"model": model_state, "optim": optim_state}
+        state_tree = {
+            "model": model_state,
+            "graph": graph_state_t,
+            "optim": optim_state,
+        }
         state_flat, state_spec = pytree.tree_flatten(state_tree)
         num_state_inputs = len(state_flat)
+        num_optimizer_state_inputs = len(pytree.tree_flatten(optim_state)[0])
         num_mesh_inputs = len(trace_meshes)
+
+        if any(not isinstance(value, torch.Tensor) for value in graph_state_t.values()):
+            raise ValueError("minimal_fx_tracer graph_state values must be tensors")
 
         user_inputs_flat, user_inputs_spec = pytree.tree_flatten((args, kwargs))
 
@@ -446,13 +522,33 @@ def minimal_fx_tracer(
         unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
         fake_mode = FakeTensorMode(
             allow_non_fake_inputs=True,
-            shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+            shape_env=ShapeEnv(),
         )
         fake_args = tuple(
             _fakeify_input(fake_mode, a, input_name=f"input_{i}")
             if isinstance(a, torch.Tensor)
             else a
             for i, a in enumerate(unwrapped_args)
+        )
+
+        input_ranges = _flat_tensor_ranges(num_full_args, input_layouts)
+        graph_state_start = len(model_state)
+        graph_state_input_indices = tuple(
+            input_ranges[graph_state_start + state_index]
+            for state_index in range(len(graph_state_fqns))
+        )
+        graph_state_spec = GraphStateSpec(
+            mappings=tuple(
+                GraphStateMapping(
+                    fqn=fqn,
+                    input_indices=input_indices,
+                )
+                for fqn, input_indices in zip(
+                    graph_state_fqns,
+                    graph_state_input_indices,
+                    strict=True,
+                )
+            )
         )
 
         output_layouts: dict[int, SubclassLayout] = {}
@@ -481,7 +577,10 @@ def minimal_fx_tracer(
             with _reparametrize_train_state(
                 module, optimizer, model_state_t, optim_state_t
             ), torch.compiler._patch_engine_backward():
-                result = fn(*user_args, **user_kwargs)
+                if graph_state is not None:
+                    result = fn(state_t["graph"], *user_args, **user_kwargs)
+                else:
+                    result = fn(*user_args, **user_kwargs)
 
             flat_outs, output_spec = pytree.tree_flatten(result)
             num_flat_outputs = len(flat_outs)
@@ -538,6 +637,9 @@ def minimal_fx_tracer(
             output_subclass_layouts=output_layouts,
             output_spec=output_spec,
             state_fqns=state_fqns,
+            graph_state=graph_state_spec,
+            num_optimizer_state_inputs=num_optimizer_state_inputs,
+            num_runtime_mesh_inputs=num_mesh_inputs,
         )
 
     return _trace_with_args
@@ -549,6 +651,7 @@ def run_traced(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     precompile_meshes: list[DeviceMesh] | None = None,
+    graph_state: dict[str, torch.Tensor] | None = None,
     _validate_runtime: bool = False,
     interpreter_cls: type | None = None,
 ) -> Callable[..., Any]:
@@ -560,12 +663,12 @@ def run_traced(
         outputs = run_traced(traced, module=model, optimizer=opt)(*args, **kwargs)
 
     Mirrors :func:`minimal_fx_tracer`'s state extraction: parameters/buffers
-    are sampled from ``module`` and the optimizer state is sampled from
-    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the
-    graph already contains explicit backward ops (from ``torch.autograd.grad``
-    traced by make_fx). Without this, PyTorch would build a redundant autograd
-    graph on top, keeping all forward intermediates alive via ``grad_fn``
-    references.
+    are sampled from ``module``, ``graph_state`` supplies separately owned
+    persistent tensors, and optimizer state is sampled from
+    ``optimizer.state_dict()``. Runs under ``torch.no_grad()`` because the graph
+    already contains explicit backward ops (from ``torch.autograd.grad`` traced
+    by make_fx). Without this, PyTorch would build a redundant autograd graph on
+    top, keeping all forward intermediates alive via ``grad_fn`` references.
 
     With ``_validate_runtime=True``, runtime module parameter/buffer FQNs must match
     trace time and runtime ``(args, kwargs)`` must flatten to the same pytree
@@ -587,7 +690,18 @@ def run_traced(
                 f"  Got:    {list(model_state.keys())}"
             )
         runtime_meshes = precompile_meshes or []
-        state_tree = {"model": model_state, "optim": optim_state}
+        graph_state_t = graph_state or {}
+        if tuple(graph_state_t) != traced_result.graph_state.fqns:
+            raise ValueError(
+                "graph state has different names than during tracing.\n"
+                f"  Traced: {traced_result.graph_state.fqns}\n"
+                f"  Got:    {tuple(graph_state_t)}"
+            )
+        state_tree = {
+            "model": model_state,
+            "graph": graph_state_t,
+            "optim": optim_state,
+        }
         state_flat, _ = pytree.tree_flatten(state_tree)
 
         user_inputs_flat, runtime_spec = pytree.tree_flatten((args, kwargs))

@@ -1185,12 +1185,11 @@ class MinimalAsyncEPTokenDispatcher(BaseEPTokenDispatcher):
 
 def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     """Validate and fill EP token dispatcher configs from runtime config."""
+    from torchtitan.models.common.moe import MoE
+
     parallelism = config.parallelism
     dispatcher_cfgs = []
-    for layer_cfg in model_config.layers:
-        moe_cfg = getattr(layer_cfg, "moe", None)
-        if moe_cfg is None:
-            continue
+    for _, moe_cfg, _, _ in model_config.traverse(MoE.Config):
         token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
         if not isinstance(
             token_dispatcher_cfg,
