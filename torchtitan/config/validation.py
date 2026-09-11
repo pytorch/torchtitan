@@ -23,7 +23,7 @@ def validate_context_parallel(
     """Validate the CP backend and each inner attention."""
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
-        UlyssesCPFlexInnerAttention,
+        UlyssesCPInnerAttention,
     )
 
     cp = parallelism.context_parallel_degree
@@ -33,13 +33,13 @@ def validate_context_parallel(
             f"got {parallelism.spmd_backend!r}."
         )
 
-    first_cp_attention: tuple[str, type[CPInnerAttention]] | None = None
+    first_cp_config: tuple[str, type] | None = None
 
     for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
         # traverse returns the base config type.
         attention = cast(BaseAttention.Config, traversed)
-        owner = attention.inner_attention._owner
-        is_cp_attention = owner is not None and issubclass(owner, CPInnerAttention)
+        inner_attention = attention.inner_attention
+        is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
         if cp > 1 and not is_cp_attention:
             raise ValueError(
                 f"{fqn}.inner_attention must use CPInnerAttention, such as "
@@ -55,22 +55,22 @@ def validate_context_parallel(
         if not is_cp_attention:
             continue
 
-        cp_attention = cast("type[CPInnerAttention]", owner)
-        if first_cp_attention is None:
-            first_cp_attention = (fqn, cp_attention)
-        elif first_cp_attention[1] is not cp_attention:
+        cp_config_type = type(inner_attention)
+        if first_cp_config is None:
+            first_cp_config = (fqn, cp_config_type)
+        elif first_cp_config[1] is not cp_config_type:
             raise ValueError(
                 f"{fqn}.inner_attention and "
-                f"{first_cp_attention[0]}.inner_attention use different CP "
+                f"{first_cp_config[0]}.inner_attention use different CP "
                 "backends, but model inputs are sharded once."
             )
         # TODO(fegin): it seems to be cleaner if we move this logic to each
         # backend class definition. We need to revisit a good strategy to
         # define "where" should a validation implementation lives.
-        if issubclass(cp_attention, UlyssesCPFlexInnerAttention):
+        if isinstance(inner_attention, UlyssesCPInnerAttention.Config):
             if parallelism.context_parallel_load_balancer is not None:
                 raise ValueError(
-                    f"{fqn}.inner_attention uses {cp_attention.__qualname__}, so "
+                    f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
                     "context_parallel_load_balancer must be None."
                 )
             head_shard_degree = (

@@ -17,11 +17,11 @@ import spmd_types as spmd
 
 import torch
 
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 
 if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
@@ -29,7 +29,9 @@ if TYPE_CHECKING:
 __all__ = [
     "CPInnerAttention",
     "KVAllGatherCPFlexInnerAttention",
+    "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
+    "UlyssesCPVarlenInnerAttention",
 ]
 
 _TOKEN_DIM = 0
@@ -38,6 +40,10 @@ _HEAD_DIM = 1
 
 class CPInnerAttention(ABC):
     """Inner attention that owns its context-parallel behavior."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
 
     @classmethod
     @abstractmethod
@@ -56,7 +62,7 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
+    class Config(CPInnerAttention.Config, FlexInnerAttention.Config):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
         """Dtype of the backward reduce-scatter."""
 
@@ -110,11 +116,11 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
-    """Run FlexInnerAttention with sequence-to-head all-to-all redistribution."""
+class UlyssesCPInnerAttention(CPInnerAttention):
+    """Move CP sharding between the token and head dimensions."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
+    class Config(CPInnerAttention.Config):
         pass
 
     @classmethod
@@ -164,6 +170,8 @@ class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
             )
             for x in (q_THK, k_THK, v_THV)
         )
+        # super() follows the concrete class MRO to its inner attention.
+        # pyrefly: ignore [missing-attribute]
         out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
         return spmd.redistribute(
@@ -172,3 +180,19 @@ class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
             src=spmd.S(_HEAD_DIM),
             dst=spmd.S(_TOKEN_DIM),
         )
+
+
+class UlyssesCPFlexInnerAttention(UlyssesCPInnerAttention, FlexInnerAttention):
+    """FlexInnerAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UlyssesCPInnerAttention.Config, FlexInnerAttention.Config):
+        pass
+
+
+class UlyssesCPVarlenInnerAttention(UlyssesCPInnerAttention, VarlenInnerAttention):
+    """VarlenInnerAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UlyssesCPInnerAttention.Config, VarlenInnerAttention.Config):
+        pass
