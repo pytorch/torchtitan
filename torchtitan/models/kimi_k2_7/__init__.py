@@ -14,7 +14,7 @@ from torchtitan.components.optimizer import (
     register_moe_load_balancing_hook,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import pipeline_vlm
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -535,7 +535,10 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k2_5,
-        pipelining_fn=pipeline_vlm,
+        pipelining_fn=partial(
+            pipeline_with_first_stage_modules,
+            first_stage_module_fqns=("vision_encoder",),
+        ),
         post_optimizer_build_fn=_register_optimizer_hooks,
         state_dict_adapter=KimiK25StateDictAdapter,
     )

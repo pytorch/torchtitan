@@ -31,4 +31,4 @@ So all you need to do is make sure that `metrics.enable_wandb` is enabled
 
 For an example you can inspect the Llama 3 [config_registry.py](../torchtitan/models/llama3/config_registry.py)
 
-Note that if both W&B and Tensorboard are enabled then we will prioritize W&B.
+If both W&B and TensorBoard are enabled, both loggers run.

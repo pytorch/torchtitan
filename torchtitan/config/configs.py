@@ -287,6 +287,16 @@ class ParallelismConfig:
                 "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
                 "for compute capability 9.0 or newer."
             )
+        # Import lazily so loading configs.py does not pull in pipelining.
+        from torch.distributed.pipelining.schedules import get_schedule_class
+
+        try:
+            get_schedule_class(self.pipeline_parallel_schedule)
+        except ValueError as e:
+            raise ValueError(
+                "Invalid parallelism.pipeline_parallel_schedule "
+                f"{self.pipeline_parallel_schedule!r}: {e}"
+            ) from e
 
     expert_parallel_degree: int = 1
     """

@@ -8,7 +8,7 @@
 
 Groups the pieces that make the vLLM generator match the trainer op-for-op under
 batch-invariant mode: a model-config converter that pins FlexInnerAttention kernel
-options, plus two runtime patches (bmm and the v2 logprob kernel).
+options, plus a runtime patch for the v2 logprob kernel.
 """
 
 import logging
@@ -52,32 +52,6 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
                 inner.kernel_options["BLOCK_M"] = self._BLOCK_M
                 inner.kernel_options["BLOCK_N"] = self._BLOCK_N
         return model_config
-
-
-_batch_invariant_bmm_lib: torch.library.Library | None = None
-
-
-def patch_bmm_for_batch_invariance() -> None:
-    """Override ``aten::bmm`` with vLLM's batch-invariant bmm kernel.
-
-    torchtitan's batch-invariant mode (``batch_invariant_ops``, applied by
-    ``set_batch_invariance``) overrides ``mm``/``addmm``/``_log_softmax``/
-    ``mean.dim`` but not ``bmm``. The MoE router gate (3-D activation @ 2-D
-    weight) lowers to ``aten::bmm`` in the generator but ``aten::mm`` in the
-    trainer, so without this the generator's gate scores drift from the
-    trainer's and flip top-k expert routing, breaking on-policy logprob parity.
-
-    TODO: Investigate how to drop bmm batch invariant patch in generator.
-    """
-    global _batch_invariant_bmm_lib
-    if _batch_invariant_bmm_lib is not None:
-        return
-    from vllm.model_executor.determinism.batch_invariant import bmm_batch_invariant
-
-    _batch_invariant_bmm_lib = torch.library.Library("aten", "IMPL")
-    _batch_invariant_bmm_lib.impl("bmm", bmm_batch_invariant, "CUDA")
-    # pyrefly: ignore[bad-assignment]
-    torch.bmm = bmm_batch_invariant
 
 
 def force_logprobs_fn_for_batch_invariance() -> None:
