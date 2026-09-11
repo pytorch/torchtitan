@@ -7,7 +7,7 @@
 """Configurations for the ``h100`` integration test suite."""
 
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -102,6 +102,14 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     config = qwen3_moe_deepep(seq_len=512)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
+    return config
+
+
+def qwen3_moe_deepep_region_ac_fsdp4_ep4() -> Trainer.Config:
+    config = qwen3_moe_deepep_fsdp4_ep4()
+    config.activation_checkpoint = RegionAC.Config(
+        save_regions=["moe.routed_experts.ep_communication"]
+    )
     return config
 
 
