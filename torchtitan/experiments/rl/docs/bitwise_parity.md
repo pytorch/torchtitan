@@ -79,11 +79,6 @@ back to the trainer's ops:
     (`apply_attention_sink_rescale`, `sigmoid(lse - sinks)`); the vLLM wrapper's
     `_inject_attention_sinks` installs that same rescale as the generator
     attention's `out_transform`, so the sink math matches the trainer.
-- **`patch_bmm_for_batch_invariance`:** `batch_invariant_ops` overrides
-  `mm`/`addmm` but not `bmm`. The MoE router gate (3-D activation @ 2-D weight)
-  lowers to `aten::bmm` in the generator but `aten::mm` in the trainer, so the
-  gate scores drift and flip top-k expert routing. Installs vLLM's
-  batch-invariant `bmm`.
 - **`force_logprobs_fn_for_batch_invariance`:** vLLM's v2 GPU sampler computes
   per-token logprobs with a fused Triton kernel that inlines
   `log(softmax(logits))` and never calls PyTorch ops. Replaced with the trainer's
@@ -147,10 +142,10 @@ FSDP mixed precision (fp32 master weights, bf16-cast forward) on the trainer:
 ## Performance: cost of batch-invariant mode
 
 Batch-invariant mode swaps in deterministic kernels (the `batch_invariant_ops`
-Triton mm/addmm/log_softmax, flash attention forced to `num_splits=1`, the `bmm`
-router override) and disables TF32 + reduced-precision reductions, so the raw
-compute is slower. Whether that slowdown shows up end-to-end depends on how
-compute-bound the workload is.
+Triton mm/addmm/log_softmax and flash attention forced to `num_splits=1`) and
+disables TF32 + reduced-precision reductions, so the raw compute is slower.
+Whether that slowdown shows up end-to-end depends on how compute-bound the
+workload is.
 
 **Experiment setup.** Dense Qwen3-8B on the Search-R1 recipe
 (`rl_grpo_qwen3_8b_search_r1` with and without the `_batch_invariant` variant),
