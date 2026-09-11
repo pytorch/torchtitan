@@ -346,3 +346,130 @@ def deepseek_v4_flash_64xgb300(seq_len: int | None = None) -> Trainer.Config:
     config.activation_checkpoint = FullAC.Config()
     _pin_gb300_flex_tiles(config)
     return config
+
+
+# ===========================================================================
+# deepseek_v4_flash (284.3 B) at seq_len 8192 on 64x GB300 -- optimization round 1.
+#
+# The 4096 baseline measured **23.74 TFLOP/s** at **56.14 GiB (20.3 %)** peak
+# with 0 allocator retries (job 305). That memory figure is the headline: this
+# flavor uses a fifth of the GPU, where `pro` sat at 84 %. So the levers that
+# were unaffordable on `pro` are free here, and the ones that mattered there
+# are worth re-testing at a completely different operating point.
+#
+# Each config below changes exactly one thing off the 8k baseline so the deltas
+# are attributable, plus one combined run.
+#
+# Carried over as priors, not assumptions:
+#   * EP=16 was the optimum for BOTH `deepseek_v4_pro` and Kimi K2.7 1T on this
+#     cluster (+13.7 % and +8.8 %). 4 GPUs/node, no NVSwitch, 4 IB HCAs -- EP
+#     width sets how far each MoE dispatch travels. 256 experts / 16 = 16 per
+#     rank, and EP must divide dp_shard*cp*tp = 64, so it is legal.
+#   * `block_size` 128 -> 32 was worth **+19 %** on `pro` (37.95 -> 45.30),
+#     by making the DSA sparse mask fine enough to skip score area.
+#   * Dropping FullAC removes a whole extra forward pass. On `pro` this OOMed
+#     by >91 GiB; here there is ~220 GiB free, so it should simply work. On
+#     Kimi the equivalent move (freeing memory, then spending it) was the
+#     difference between 179 and 305 TFLOP/s.
+#   * bf16 gradient reduction: +0.6 % on `pro`, +2.9-4.7 % on Kimi. It pays in
+#     proportion to how much of the step is comms.
+#
+# Autotune is deliberately left ON, matching the baseline. Flash does not pin
+# its flex tiles and its autotuner picks BLOCK_M=128/BLOCK_N=64 -- far larger
+# than the 32x32 `pro` is limited to at n_heads=128 -- so pinning `pro`'s tiles
+# here would likely be a regression. The cost is a ~17 % run-to-run spread and
+# several minutes of startup; pinning flash-appropriate tiles is its own
+# experiment, not a freebie.
+# ===========================================================================
+
+
+def _flash_8k(seq_len: int | None = 8192) -> Trainer.Config:
+    """The flash 64xGB300 recipe at seq_len 8192."""
+    return deepseek_v4_flash_64xgb300(seq_len=seq_len)
+
+
+def deepseek_v4_flash_8k(seq_len: int | None = 8192) -> Trainer.Config:
+    """F0. The 8k REFERENCE: baseline recipe, seq_len 8192.
+
+    Everything else in this round is measured against this, not against the
+    4096 baseline's 23.74 TFLOP/s -- doubling the context changes the attention
+    work per token, so a cross-length comparison would not be clean.
+
+    Note `index_topk=512` against `seq_len // 4` = 2048, so DSA's top-k is a
+    genuine selection at 8192 just as it was at 4096 (512 of 1024). Unlike
+    `pro`, which had `index_topk=1024` and therefore an inert top-k at 4096,
+    flash does not change sparsity regime between the two lengths.
+    """
+    return _flash_8k(seq_len)
+
+
+def deepseek_v4_flash_8k_no_ac(seq_len: int | None = 8192) -> Trainer.Config:
+    """F1. Drop FullAC. The largest lever available, given 20 % memory use.
+
+    FullAC recomputes the whole forward: on `pro`'s profile that showed up as
+    244 attention forward calls against 122 backward. Removing it should cut
+    close to a forward pass of work. It was impossible on `pro` (OOM by
+    >91 GiB) and unaffordable on Kimi until bf16 masters freed 92 GiB.
+    """
+    config = _flash_8k(seq_len)
+    config.activation_checkpoint = None
+    return config
+
+
+def deepseek_v4_flash_8k_ep16(seq_len: int | None = 8192) -> Trainer.Config:
+    """F2. EP 64 -> 16, the optimum found for both other MoE models here."""
+    config = _flash_8k(seq_len)
+    config.parallelism = ParallelismConfig(expert_parallel_degree=16)
+    return config
+
+
+def deepseek_v4_flash_8k_blocksize32(seq_len: int | None = 8192) -> Trainer.Config:
+    """F3. FlexAttention `block_size` 128 -> 32, worth +19 % on `pro`.
+
+    Finer sparse-mask granularity means the kernel visits less score area. On
+    `pro` the visited/selected ratio went 1.72x -> 1.20x. Flash shares
+    `head_dim=512` and the same DSA structure, so the mechanism should carry --
+    but flash autotunes larger tiles, and a BlockMask block cannot be smaller
+    than the compute tile, so this may force smaller tiles as a side effect.
+    That interaction is exactly what the run measures.
+    """
+    config = _flash_8k(seq_len)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 32
+    return config
+
+
+def deepseek_v4_flash_8k_bf16reduce(seq_len: int | None = 8192) -> Trainer.Config:
+    """F4. `mixed_precision_reduce="bfloat16"`, halving gradient all-reduce bytes.
+
+    Upstream types the field `Literal["float32"]`; widening it in
+    `torchtitan/config/configs.py` is the whole change. **Changes training
+    numerics** -- gradients reduce-scattered across 64 shards in bf16 accumulate
+    rounding error that fp32 reduction exists to avoid. Fine for a throughput
+    measurement; needs a fixed-seed fp32 control before a real run.
+    """
+    config = _flash_8k(seq_len)
+    config.training.mixed_precision_reduce = "bfloat16"
+    return config
+
+
+def deepseek_v4_flash_8k_all(seq_len: int | None = 8192) -> Trainer.Config:
+    """F5. Everything at once: no AC + EP=16 + block_size 32 + bf16 reduce.
+
+    Run alongside the single-variable configs rather than instead of them: if
+    this beats them all the components compose, and if it does not the
+    single-variable runs say which one is fighting the others. On Kimi the two
+    comms levers turned out to overlap (bf16 reduce was +4.7 % alone but only
+    +2.9 % on top of a larger batch), so composition is not a given.
+    """
+    config = _flash_8k(seq_len)
+    config.activation_checkpoint = None
+    config.parallelism = ParallelismConfig(expert_parallel_degree=16)
+    config.training.mixed_precision_reduce = "bfloat16"
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 32
+    return config
