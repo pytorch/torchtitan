@@ -337,7 +337,7 @@ def _build_pipeline_schedule(
             **schedule_kwargs,
         )
     else:
-        if parallelism.pipeline_parallel_unshard_lookahead is not None:
+        if parallelism.pipeline_parallel_unshard_lookahead != "default":
             raise ValueError(
                 "pipeline_parallel_unshard_lookahead is supported only by "
                 "multi-stage pipeline schedules"
