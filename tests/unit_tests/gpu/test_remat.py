@@ -21,6 +21,11 @@ from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.vision_encoder import (
+    VisionAttention,
+    VisionMLP,
+    VisionTransformerBlock,
+)
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.overrides.fused_swiglu import (
     dist_gemm_fused_swiglu,
@@ -129,6 +134,66 @@ class _CountingGroupedExperts(GroupedExperts):
         else:
             self.num_w13_forwards += 1
         return A.float() @ weight_EOI[0].float().transpose(0, 1)
+
+
+def _vision_inner_attention(
+    q_THDh: torch.Tensor,
+    k_THDh: torch.Tensor,
+    v_THDh: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor:
+    return q_THDh + k_THDh + v_THDh
+
+
+def _vision_identity_rope(
+    q_THDh: torch.Tensor,
+    k_THDh: torch.Tensor,
+    rope_cache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return q_THDh, k_THDh
+
+
+class _CountingVisionAttention(VisionAttention):
+    """Use VisionAttention.forward unchanged with counted region bodies."""
+
+    def __init__(self):
+        Module.__init__(self)
+        self.head_dim = 4
+        self.wq = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
+        self.wk = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
+        self.wv = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
+        self.proj = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
+        self.flex_attention = _CountingOp(_vision_inner_attention)
+
+
+class _CountingVisionBlock(VisionTransformerBlock):
+    """Use the common vision block with counted attention and MLP projections."""
+
+    def __init__(self):
+        Module.__init__(self)
+        self.norm1 = torch.nn.Identity()
+        self.norm2 = torch.nn.Identity()
+        self.attn = _CountingVisionAttention()
+        self.mlp = VisionMLP.Config(
+            fc1=_linear_config(4, 8),
+            fc2=_linear_config(8, 4),
+        ).build()
+        self.mlp.linear_fc1 = _CountingOp(self.mlp.linear_fc1)
+        self.mlp.linear_fc2 = _CountingOp(self.mlp.linear_fc2)
+
+
+class _VisionRematModel(Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = ModuleDict({"0": _CountingVisionBlock()})
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.layers["0"](
+            x_TD,
+            rope_cache=x_TD.new_empty(0),
+            rope_apply=_vision_identity_rope,
+            attention_mask=None,  # pyrefly: ignore [bad-argument-type]
+        ).sum()
 
 
 class _RematModel(Module):
@@ -401,6 +466,48 @@ class TestRematRegions(unittest.TestCase):
                     ["grouped_experts.w13", "grouped_experts.w2"],
                 )
                 self.assertIsNotNone(x_RD.grad)
+
+    def test_vision_save_regions_control_recomputation(self):
+        for save_regions, expected_counts in (
+            ([], (2, 2, 2, 2, 2, 2, 2)),
+            (["attn.qkv"], (1, 1, 1, 2, 2, 2, 2)),
+            (["attn.inner_attention"], (2, 2, 2, 1, 2, 2, 2)),
+            (["attn.proj"], (2, 2, 2, 2, 1, 2, 2)),
+            (["mlp.fc1"], (2, 2, 2, 2, 2, 1, 2)),
+            (["mlp.fc2"], (2, 2, 2, 2, 2, 2, 1)),
+            (["attn.*", "mlp.*"], (1, 1, 1, 1, 1, 1, 1)),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                baseline = _VisionRematModel()
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                actual = _run_forward_backward(remat_model, x_TD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
+                block = remat_model.layers["0"]
+                assert isinstance(block, _CountingVisionBlock)
+                self.assertEqual(
+                    (
+                        block.attn.wq.num_forwards,
+                        block.attn.wk.num_forwards,
+                        block.attn.wv.num_forwards,
+                        block.attn.flex_attention.num_forwards,
+                        block.attn.proj.num_forwards,
+                        block.mlp.linear_fc1.num_forwards,
+                        block.mlp.linear_fc2.num_forwards,
+                    ),
+                    expected_counts,
+                )
 
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
