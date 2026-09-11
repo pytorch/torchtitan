@@ -17,6 +17,7 @@ from torchtitan.models.common import (
     Embedding,
     Linear,
     RoPE,
+    Softmax,
     TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
@@ -172,7 +173,7 @@ def _build_qwen3_moe_layers(
                         num_experts=num_experts,
                         gate_param_init=_LINEAR_INIT,
                         top_k=top_k,
-                        score_func="softmax",
+                        score_func=Softmax.Config(),
                         route_norm=True,
                     ),
                     routed_experts=make_routed_experts_config(

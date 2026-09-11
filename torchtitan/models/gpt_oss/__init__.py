@@ -19,6 +19,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    Softmax,
     TransformerBlock,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
@@ -202,7 +203,7 @@ def _build_gptoss_layers(
             routed_experts=routed_experts_cfg,
             router=TokenChoiceTopKRouter.Config(
                 num_experts=num_experts,
-                score_func="softmax",
+                score_func=Softmax.Config(),
                 route_norm=True,
                 gate=RouterGateLinear.Config(
                     in_features=dim,

@@ -18,6 +18,7 @@ from torchtitan.models.common import (  # noqa: F401
     Linear,
     PartialBiasRowwiseLinear,
     SigmoidGatedFeedForward,
+    Softmax,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -440,7 +441,7 @@ def _build_qwen35_moe_layers(
                         num_experts=num_experts,
                         gate_param_init=_depth_init(layer_id),
                         top_k=top_k,
-                        score_func="softmax",
+                        score_func=Softmax.Config(),
                         route_norm=True,
                     ),
                     routed_experts=make_routed_experts_config(

@@ -32,6 +32,79 @@ class ActivationFn(Function[torch.Tensor], ABC):
         pass
 
 
+class UnaryActivationFn(Function[torch.Tensor], ABC):
+    """Base class for configurable one-input activation functions."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+        pass
+
+    @abstractmethod
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        pass
+
+
+class Sigmoid(UnaryActivationFn):
+    """Sigmoid activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return torch.sigmoid(x)
+
+
+class Softmax(UnaryActivationFn):
+    """Softmax activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        dim: int = -1
+
+    def __init__(self, config: Config) -> None:
+        self.dim = config.dim
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return F.softmax(x, dim=self.dim)
+
+
+class SqrtSoftplus(UnaryActivationFn):
+    """Square root of softplus activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return F.softplus(x).sqrt()
+
+
 class SwiGLU(ActivationFn):
     """SwiGLU activation."""
 

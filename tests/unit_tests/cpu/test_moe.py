@@ -8,8 +8,9 @@ import unittest
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from torchtitan.models.common.activation import SiTUGLU
+from torchtitan.models.common.activation import SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
@@ -62,6 +63,101 @@ class TestMoE(unittest.TestCase):
         expected_RF = activation_fn.build()(gate_RF, up_RF)
         actual_RF = experts.activation_fn(gate_RF, up_RF)
         torch.testing.assert_close(actual_RF, expected_RF)
+
+    def test_token_choice_router_uses_normalization_epsilon(self):
+        x_TD = torch.zeros(1, 4)
+        expert_bias_E = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        route_norm_epsilon = 1.0
+        route_scale = 4.0
+
+        for route_norm in (False, True):
+            with self.subTest(route_norm=route_norm):
+                config = make_router_config(
+                    dim=4,
+                    num_experts=4,
+                    gate_param_init={"weight": nn.init.zeros_},
+                    top_k=2,
+                    route_norm=route_norm,
+                    route_norm_epsilon=route_norm_epsilon,
+                    route_scale=route_scale,
+                )
+                router = config.build()
+                with torch.no_grad():
+                    router.gate.weight.zero_()
+
+                (
+                    actual_topk_scores_TK,
+                    actual_topk_expert_ids_TK,
+                    _,
+                ) = router(x_TD, expert_bias_E=expert_bias_E)
+                actual_scores_TE = torch.zeros_like(x_TD).scatter(
+                    dim=-1,
+                    index=actual_topk_expert_ids_TK,
+                    src=actual_topk_scores_TK,
+                )
+                expected_scores_TE = torch.tensor(
+                    [[1.0, 1.0, 0.0, 0.0]] if route_norm else [[2.0, 2.0, 0.0, 0.0]]
+                )
+
+                torch.testing.assert_close(
+                    actual_scores_TE,
+                    expected_scores_TE,
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_token_choice_router_uses_configured_score_functions(self):
+        x_TD = torch.tensor([[-2.0, 0.0, 1.0, 3.0]], dtype=torch.bfloat16)
+        x_fp32_TD = x_TD.float()
+        cases = (
+            ("default", None, torch.sigmoid(x_fp32_TD)),
+            ("softmax", Softmax.Config(), F.softmax(x_fp32_TD, dim=-1)),
+            (
+                "sqrtsoftplus",
+                SqrtSoftplus.Config(),
+                F.softplus(x_fp32_TD).sqrt(),
+            ),
+        )
+
+        for name, score_func, expected_scores_TE in cases:
+            with self.subTest(score_func=name):
+                if score_func is None:
+                    config = make_router_config(
+                        dim=4,
+                        num_experts=4,
+                        gate_param_init={"weight": nn.init.zeros_},
+                        top_k=4,
+                    )
+                else:
+                    config = make_router_config(
+                        dim=4,
+                        num_experts=4,
+                        gate_param_init={"weight": nn.init.zeros_},
+                        top_k=4,
+                        score_func=score_func,
+                    )
+                router = config.build()
+                with torch.no_grad():
+                    router.gate.weight.copy_(torch.eye(4))
+
+                (
+                    actual_topk_scores_TK,
+                    actual_topk_expert_ids_TK,
+                    _,
+                ) = router(x_TD)
+                actual_scores_TE = torch.zeros_like(expected_scores_TE).scatter(
+                    dim=-1,
+                    index=actual_topk_expert_ids_TK,
+                    src=actual_topk_scores_TK,
+                )
+
+                self.assertIs(actual_topk_scores_TK.dtype, torch.float32)
+                torch.testing.assert_close(
+                    actual_scores_TE,
+                    expected_scores_TE,
+                    rtol=0,
+                    atol=0,
+                )
 
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
