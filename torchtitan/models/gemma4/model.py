@@ -76,10 +76,22 @@ class Gemma4RoPE(CosSinRoPE):
         base = cfg.theta
         partial_rotary_factor = getattr(cfg, "partial_rotary_factor", 1.0)
 
-        rotary_dim = int(dim * partial_rotary_factor)
-        inv_freq = 1.0 / (
-            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+        rope_angles = int(partial_rotary_factor * dim // 2)
+        inv_freq_rotated = 1.0 / (
+            base ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32) / dim)
         )
+        nope_angles = dim // 2 - rope_angles
+        if nope_angles > 0:
+            inv_freq = torch.cat(
+                [
+                    inv_freq_rotated,
+                    torch.zeros(nope_angles, dtype=torch.float32, device=inv_freq_rotated.device),
+                ],
+                dim=0,
+            )
+        else:
+            inv_freq = inv_freq_rotated
+
         t = torch.arange(
             max_context_length, dtype=inv_freq.dtype, device=inv_freq.device
         )
@@ -98,32 +110,7 @@ class Gemma4RoPE(CosSinRoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        rotary_dim = rope_cache.shape[-1] // 2
-        cos = rope_cache[..., :rotary_dim]
-        sin = rope_cache[..., rotary_dim:]
-
-        if rotary_dim < query.shape[-1]:
-            q_rot = query[..., :rotary_dim].float()
-            q_pass = query[..., rotary_dim:]
-            xq_out = (q_rot * cos) + (CosSinRoPE._rotate_half(q_rot) * sin)
-            query_out = torch.cat([xq_out.type_as(query), q_pass], dim=-1)
-        else:
-            query_f = query.float()
-            query_out = ((query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)).type_as(query)
-
-        if key is None:
-            return query_out
-
-        if rotary_dim < key.shape[-1]:
-            k_rot = key[..., :rotary_dim].float()
-            k_pass = key[..., rotary_dim:]
-            xk_out = (k_rot * cos) + (CosSinRoPE._rotate_half(k_rot) * sin)
-            key_out = torch.cat([xk_out.type_as(key), k_pass], dim=-1)
-        else:
-            key_f = key.float()
-            key_out = ((key_f * cos) + (CosSinRoPE._rotate_half(key_f) * sin)).type_as(key)
-
-        return query_out, key_out
+        return CosSinRoPE.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
 
 
 class Gemma4GlobalSDPA(Module):
@@ -443,11 +430,12 @@ class Gemma4Model(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
     ):
-        base_embed = (
-            self.tok_embeddings(tokens) * self.embed_scale
-            if self.tok_embeddings is not None
-            else tokens
-        )
+        if self.tok_embeddings is not None:
+            toks_out = self.tok_embeddings(tokens)
+            scale = torch.tensor(self.embed_scale, dtype=toks_out.dtype, device=toks_out.device)
+            base_embed = toks_out * scale
+        else:
+            base_embed = tokens
         per_layer_inputs = (
             self.ple(tokens, base_embed)
             if self.ple is not None and self.tok_embeddings is not None

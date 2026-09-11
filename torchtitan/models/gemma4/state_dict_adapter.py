@@ -121,6 +121,8 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                 self.to_hf_map[f"layers.{i}.moe.routed_experts.inner_experts.w3_EFD"] = f"model.language_model.layers.{i}.experts.gate_up_proj"
                 self.to_hf_map[f"layers.{i}.moe.routed_experts.inner_experts.w2_EDF"] = f"model.language_model.layers.{i}.experts.down_proj"
                 self.to_hf_map[f"layers.{i}.moe.router.gate.weight"] = f"model.language_model.layers.{i}.router.proj.weight"
+                self.to_hf_map[f"layers.{i}.moe.router.scale"] = f"model.language_model.layers.{i}.router.scale"
+                self.to_hf_map[f"layers.{i}.moe.router.per_expert_scale"] = f"model.language_model.layers.{i}.router.per_expert_scale"
                 
                 # We handle splitting/concatenating gate_up_proj in from_hf/to_hf custom logic.
                 self.from_hf_map[f"model.language_model.layers.{i}.experts.down_proj"] = f"layers.{i}.moe.routed_experts.inner_experts.w2_EDF"
@@ -185,6 +187,10 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                     hf_state_dict[new_key] = torch.cat([w1_val, value], dim=1)
                 elif "w2_EDF" in key:
                     hf_state_dict[new_key] = value
+                elif "moe_ffn_norm.weight" in key:
+                    hf_state_dict[new_key] = value
+                else:
+                    raise ValueError(f"Unexpected inner_experts parameter: {key}")
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
