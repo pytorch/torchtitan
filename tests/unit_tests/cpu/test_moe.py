@@ -14,6 +14,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -45,7 +46,86 @@ class _FixedRouter(nn.Module):
         return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 
 
+class _CustomNumericsRouter(TokenChoiceTopKRouter):
+    def _compute_scores(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return x_TD
+
+    def _normalize_topk_scores(
+        self,
+        topk_scores_TK: torch.Tensor,
+    ) -> torch.Tensor:
+        return topk_scores_TK / topk_scores_TK.amax(dim=-1, keepdim=True)
+
+
 class TestMoE(unittest.TestCase):
+    def test_token_choice_router_uses_custom_numerics(self):
+        x_TD = torch.tensor(
+            [
+                [0.1, 0.9, 0.4, 0.8],
+                [0.7, 0.2, 0.6, 0.3],
+            ]
+        )
+        route_scale = 2.5
+
+        for route_norm in (False, True):
+            with self.subTest(route_norm=route_norm):
+                config = make_router_config(
+                    dim=4,
+                    num_experts=4,
+                    gate_param_init={"weight": nn.init.zeros_},
+                    top_k=2,
+                    route_norm=route_norm,
+                    route_scale=route_scale,
+                )
+                router = _CustomNumericsRouter(config)
+                with torch.no_grad():
+                    router.gate.weight.copy_(-torch.eye(4))
+
+                (
+                    actual_topk_scores_TK,
+                    actual_topk_expert_ids_TK,
+                    actual_routing_map_TE,
+                ) = router(x_TD)
+
+                (expected_topk_scores_TK, expected_topk_expert_ids_TK,) = torch.topk(
+                    x_TD,
+                    k=2,
+                    dim=-1,
+                    sorted=False,
+                )
+                if route_norm:
+                    expected_topk_scores_TK = (
+                        expected_topk_scores_TK
+                        / expected_topk_scores_TK.amax(dim=-1, keepdim=True)
+                    )
+                expected_topk_scores_TK = expected_topk_scores_TK * route_scale
+                expected_routing_map_TE = torch.zeros(
+                    x_TD.shape[0],
+                    router.num_experts,
+                    dtype=torch.bool,
+                    device=x_TD.device,
+                ).scatter_(
+                    dim=-1,
+                    index=expected_topk_expert_ids_TK,
+                    value=True,
+                )
+
+                torch.testing.assert_close(
+                    actual_topk_scores_TK,
+                    expected_topk_scores_TK,
+                    rtol=0,
+                    atol=0,
+                )
+                self.assertTrue(
+                    torch.equal(
+                        actual_topk_expert_ids_TK,
+                        expected_topk_expert_ids_TK,
+                    )
+                )
+                self.assertTrue(
+                    torch.equal(actual_routing_map_TE, expected_routing_map_TE)
+                )
+
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
         dim = 4
