@@ -100,6 +100,18 @@ def compute_config_fingerprint(
         f"{compile_config.full_recompute_save_ops}\n".encode()
     )
     h.update(
+        "compile:coda_passes_enabled:"
+        f"{compile_config.coda_passes_enabled}\n".encode()
+    )
+    h.update(
+        "compile:coda_compile_time_benchmark:"
+        f"{compile_config.coda_compile_time_benchmark}\n".encode()
+    )
+    h.update(
+        "compile:coda_compile_time_autotune:"
+        f"{compile_config.coda_compile_time_autotune}\n".encode()
+    )
+    h.update(
         f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
     )
     h.update(

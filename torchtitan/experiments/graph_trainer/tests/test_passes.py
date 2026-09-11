@@ -3746,6 +3746,58 @@ class TestChunkPasses(TestCase):
             names.index("full_inductor_compilation_pass"),
         )
 
+    def test_coda_pass_pipeline_gating_and_order(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.coda_passes_enabled = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "--compile.coda_passes_enabled requires "
+            "--compile.numerics_changing_optim",
+        ):
+            self._compile_pass_names(traced_result, config)
+
+        config.compile.numerics_changing_optim = True
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("full_inductor_compilation_pass"),
+        )
+
+        config.compile.inductor_compilation = "regional"
+        names = self._compile_pass_names(traced_result, config)
+        self.assertLess(
+            names.index("concretize_ep_chunk_symbolic_shapes_pass"),
+            names.index("B_linear_dw_bf16_to_fp32"),
+        )
+        self.assertLess(
+            names.index("B_linear_dw_bf16_to_fp32"),
+            names.index("regional_inductor_pass"),
+        )
+
+    def test_coda_benchmark_uses_terminal_inductor_passes(self):
+        traced_result, config = self._compile_config_for_ep_overlap_test()
+        config.compile.coda_passes_enabled = True
+        config.compile.numerics_changing_optim = True
+
+        with patch(
+            "torchtitan.experiments.graph_trainer.coda_passes.get_coda_pattern_passes",
+            return_value=[],
+        ) as get_coda_pattern_passes:
+            passes = compile_time_passes(
+                traced_result,
+                config,
+                use_cudagraph=False,
+            )
+
+        processor = get_coda_pattern_passes.call_args.kwargs[
+            "benchmark_graph_processor"
+        ]
+        terminal_passes = processor.keywords["passes"]
+        self.assertEqual(processor.func.__name__, "apply_graph_passes")
+        self.assertIs(processor.keywords["compile_config"], config.compile)
+        self.assertEqual(passes[-len(terminal_passes) :], terminal_passes)
+
     def test_graph_ep_chunking_rejects_tensor_parallel(self):
         cases = (
             ("seq", "layers.*.moe"),
