@@ -43,6 +43,7 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
+from torchtitan.config.validation import validate_context_parallel
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -174,6 +175,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "compiled: set --compile.enable and include 'model' in "
                     "--compile.components."
                 )
+
+            if self.model_spec is not None:
+                validate_context_parallel(self.model_spec.model, self.parallelism)
 
         def _validate_cuda_graphs(self) -> None:
             if self.training.disable_cuda_graphs:

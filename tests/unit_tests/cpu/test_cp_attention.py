@@ -1,0 +1,118 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Context-parallel attention kernel selection and mesh lookup."""
+
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+import torch
+
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.config_utils import get_attention_config
+from torchtitan.models.common.cp_attention import (
+    CPInnerAttention,
+    KVAllGatherCPFlexInnerAttention,
+)
+
+
+class TestKernelSelection(unittest.TestCase):
+    def test_cp_kernel_is_a_flex_kernel(self):
+        self.assertIsInstance(
+            KVAllGatherCPFlexInnerAttention.Config(), FlexAttention.Config
+        )
+
+    def test_cp_kernel_inherits_flex_fields(self):
+        config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
+        self.assertEqual(config.block_size, 256)
+
+    def test_cp_kernel_is_not_an_attention_backend(self):
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            get_attention_config("allgather_cp_flex")
+
+    def test_plain_flex_is_not_a_cp_kernel(self):
+        kernel = get_attention_config("flex")._owner
+        assert kernel is not None
+        self.assertFalse(issubclass(kernel, CPInnerAttention))
+
+    def test_cp_inner_attention_owns_input_sharding(self):
+        batch = {"input": torch.arange(8)}
+        sharded = {"input": torch.arange(4)}
+        mesh = object()
+        with mock.patch(
+            "torchtitan.distributed.context_parallel.api."
+            "prepare_context_parallel_input",
+            return_value=sharded,
+        ) as prepare:
+            result = KVAllGatherCPFlexInnerAttention.cp_shard(
+                batch, None, mesh, "headtail", None
+            )
+
+        self.assertIs(result, sharded)
+        prepare.assert_called_once_with(batch, None, mesh, "headtail", None)
+
+
+class _FakeMesh:
+    def __init__(self, cp_size: int | None):
+        self.mesh_dim_names = ("dp", "tp") if cp_size is None else ("dp", "cp", "tp")
+        self._cp_size = cp_size
+
+    def get_group(self, axis):
+        assert axis == "cp"
+        return SimpleNamespace(size=lambda: self._cp_size)
+
+
+def _in_mesh(cp_size):
+    return mock.patch(
+        "torchtitan.distributed.spmd_types.current_spmd_mesh",
+        return_value=_FakeMesh(cp_size),
+    )
+
+
+class TestCpGroup(unittest.TestCase):
+    """CP inner attention requires a multi-rank CP group."""
+
+    @staticmethod
+    def _kernel():
+        return KVAllGatherCPFlexInnerAttention(KVAllGatherCPFlexInnerAttention.Config())
+
+    def test_cp_axis_above_one_yields_its_group(self):
+        with _in_mesh(8):
+            group = spmd_mesh_group(MeshAxisName.CP)
+            assert group is not None
+            self.assertEqual(group.size(), 8)
+
+    def test_no_mesh_context_returns_none(self):
+        with mock.patch(
+            "torchtitan.distributed.spmd_types.current_spmd_mesh", return_value=None
+        ):
+            self.assertIsNone(spmd_mesh_group(MeshAxisName.CP))
+
+    def test_degree_one_returns_none(self):
+        with _in_mesh(1):
+            self.assertIsNone(spmd_mesh_group(MeshAxisName.CP))
+
+    def test_mesh_without_a_cp_axis_returns_none(self):
+        with _in_mesh(None):
+            self.assertIsNone(spmd_mesh_group(MeshAxisName.CP))
+
+    def test_forward_without_a_cp_group_is_an_error(self):
+        num_tokens, heads, head_dim = 8, 2, 16
+        q, k, v = (torch.randn(num_tokens, heads, head_dim) for _ in range(3))
+        with _in_mesh(1), self.assertRaisesRegex(
+            RuntimeError, "active multi-rank CP mesh axis"
+        ):
+            self._kernel().forward(q, k, v)
+
+    def test_cp_inner_attention_holds_no_mesh_state(self):
+        self.assertNotIn("cp_group", CPInnerAttention.__dict__)
+
+
+if __name__ == "__main__":
+    unittest.main()
