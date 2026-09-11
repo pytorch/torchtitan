@@ -21,6 +21,7 @@ class DatasetBuildContext:
     max_context_length: int
     num_tokens_per_batch: int
     read_options: grain.ReadOptions
+    max_num_documents: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
