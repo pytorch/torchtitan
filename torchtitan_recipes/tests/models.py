@@ -24,7 +24,6 @@ from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan.models.qwen3.config_registry import (
     qwen3_debugmodel,
     qwen3_debugmodel_moe_param_groups,
-    qwen3_debugmodel_non_fused_qkv,
 )
 from torchtitan.trainer import Trainer
 

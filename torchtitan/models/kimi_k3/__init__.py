@@ -11,12 +11,25 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Conv1d, Embedding, Linear, RouterGateLinear
+from torchtitan.models.common import (
+    ActivationFn,
+    Conv1d,
+    Embedding,
+    FeedForward,
+    Linear,
+    RouterGateLinear,
+    SiTUGLU,
+)
 from torchtitan.models.common.config_utils import (
+    fused_grouped_experts_param_init,
     get_attention_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -30,7 +43,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
-from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
+from .moe import KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -120,13 +133,14 @@ def _feed_forward_config(
     *,
     dim: int,
     hidden_dim: int,
-) -> KimiFeedForward.Config:
-    return KimiFeedForward.Config(
+) -> FeedForward.Config:
+    return FeedForward.Config(
         w1=_linear(dim, hidden_dim),
         w2=_linear(hidden_dim, dim),
         w3=_linear(dim, hidden_dim),
-        beta=4.0,
-        linear_beta=25.0,
+        activation_fn=ActivationFn.Config(
+            fn=SiTUGLU(beta=4.0, linear_beta=25.0)  # pyrefly: ignore[bad-argument-type]
+        ),
     )
 
 
@@ -243,17 +257,22 @@ def _latent_moe_config(
         ),
         routed_down=_linear(dim, latent_dim),
         routed_experts=RoutedExperts.Config(
-            inner_experts=KimiGroupedExperts.Config(
+            inner_experts=GroupedExperts.Config(
                 dim=latent_dim,
                 hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
-                beta=4.0,
-                linear_beta=25.0,
-                param_init={
-                    "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                    "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
-                    "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                },
+                activation_fn=ActivationFn.Config(
+                    fn=SiTUGLU(  # pyrefly: ignore[bad-argument-type]
+                        beta=4.0, linear_beta=25.0
+                    )
+                ),
+                param_init=fused_grouped_experts_param_init(
+                    {
+                        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                        "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
+                        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                    }
+                ),
             ),
             # core's dispatcher factory: standard / deepep / hybridep /
             # minimal_async_ep per spec, as deepseek_v3; falls back to local

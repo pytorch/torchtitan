@@ -8,7 +8,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
     DistGEMMFeedForward,
     RowParallelLinear,
@@ -207,24 +207,6 @@ def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
-    """Colwise-shard each Q/K/V projection of a ``BaseQKVLinear``.
-
-    Handles both ``QKVLinear`` (separate ``wq`` + ``wkv``) and
-    ``FusedQKVLinear`` (single ``wqkv``).
-    """
-    if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
-        qkv_linear_cfg.wqkv.sharding_config = colwise_config()
-    elif isinstance(qkv_linear_cfg, QKVLinear.Config):
-        qkv_linear_cfg.wq.sharding_config = colwise_config()
-        qkv_linear_cfg.wkv.sharding_config = colwise_config()
-    else:
-        raise TypeError(
-            f"set_qkv_linear_sharding requires QKVLinear.Config or "
-            f"FusedQKVLinear.Config, got {type(qkv_linear_cfg).__name__}"
-        )
-
-
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
@@ -270,7 +252,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    set_qkv_linear_sharding(attention_cfg.qkv_linear)
+    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
 
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
@@ -326,13 +308,13 @@ def set_dense_ffn_sharding(
     attn_x_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
-    """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
+    """Standard dense FFN (physical ``w13``/``w2``) TP sharding.
 
     Shared by llama3, qwen3, and deepseek_v3. ``attn_x_layout`` should match
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    # Same two differences as the dist-GEMM attention block: the fused w1/w3
+    # Same two differences as the dist-GEMM attention block: the fused w13
     # consume the sequence shard directly, so there is no boundary all-gather to
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute

@@ -398,7 +398,7 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     model_config = config.model_spec.model
     model = model_config.build()
     model.init_states()
-    assert isinstance(model.get_submodule("layers.0.feed_forward.w1"), NVFP4Linear)
+    assert isinstance(model.get_submodule("layers.0.feed_forward.w13"), NVFP4Linear)
 
     sd = model.state_dict()
     # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector
@@ -490,7 +490,9 @@ def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
     try:
         torch.serialization.clear_safe_globals()
         dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
-        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        target_state = target.state_dict()
+        dcp.load(target_state, checkpoint_id=tmp_path, no_dist=True)
+        target.load_state_dict(target_state)
     finally:
         torch.serialization.clear_safe_globals()
         torch.serialization.add_safe_globals(saved_safe_globals)
