@@ -527,3 +527,115 @@ def deepseek_v4_flash_8k_bs3(seq_len: int | None = 8192) -> Trainer.Config:
     config = _flash_8k(seq_len)
     config.training.num_tokens_per_microbatch_per_dp_rank = 24576
     return config
+
+
+# ===========================================================================
+# Round 2: lower parallelism, less AC, bigger batch -- all composed on EP=16.
+#
+# EP 64 -> 16 measured **21.37 TFLOP/s against the 8k reference's 18.19
+# (+17.5 %)** and *freed* 29.4 GiB (95.14 -> 65.70 GiB). Both directions matter:
+#
+#   * Throughput: EP=16 is now the optimum on a THIRD model on this cluster --
+#     `pro` +13.7 % (from 64), Kimi K2.7 +8.8 % (from 8), flash +17.5 % (from
+#     64). 4 GPUs/node, no NVSwitch, 4 IB HCAs.
+#   * Memory: the AllToAll dispatch workspace scales with `ep_size`, so EP=64's
+#     buffers are ~4x EP=16's, and that term dominates the extra expert weight
+#     each rank holds (16 experts at EP=16 against 4 at EP=64). Note this is the
+#     OPPOSITE direction to Kimi, where higher EP meant lower memory -- same
+#     lever, different binding constraint.
+#
+# Since memory falls as EP falls, the sweep is worth continuing down. The
+# counter-pressure is FSDP: at EP=1 all 256 routed experts of a layer are left
+# to FSDP, and one all-gather materialises 256 x 3 x 4096 x 2048 x 2 B =
+# 12.9 GB for a single layer, more with prefetch. Somewhere between 16 and 1
+# that overtakes the dispatch saving, and only a measurement says where.
+# ===========================================================================
+
+
+def _flash_8k_ep(ep: int, seq_len: int | None = 8192) -> Trainer.Config:
+    config = _flash_8k(seq_len)
+    config.parallelism = ParallelismConfig(expert_parallel_degree=ep)
+    return config
+
+
+def deepseek_v4_flash_8k_ep8(seq_len: int | None = 8192) -> Trainer.Config:
+    """F9. EP=8 -- 32 experts/rank, dispatch confined to 2 nodes."""
+    return _flash_8k_ep(8, seq_len)
+
+
+def deepseek_v4_flash_8k_ep4(seq_len: int | None = 8192) -> Trainer.Config:
+    """F10. EP=4 -- 64 experts/rank, dispatch stays inside one node (no IB hop).
+
+    The first point where MoE dispatch never leaves the node. On Kimi EP=4 was
+    the worst of the sweep (150.95, and 87 % memory), but Kimi's expert weights
+    are far larger; flash's 12.9 GB/layer may make this affordable.
+    """
+    return _flash_8k_ep(4, seq_len)
+
+
+def deepseek_v4_flash_8k_ep2(seq_len: int | None = 8192) -> Trainer.Config:
+    """F11. EP=2 -- 128 experts/rank."""
+    return _flash_8k_ep(2, seq_len)
+
+
+def deepseek_v4_flash_8k_ep1(seq_len: int | None = 8192) -> Trainer.Config:
+    """F12. EP=1 -- no expert parallelism at all, the STOCK setting.
+
+    All 256 experts per layer go to FSDP. The flash baseline docstring flags
+    the cost: one all-gather materialises 12.9 GB for a single layer, more with
+    prefetch. Included because "much lower parallelism" deserves its endpoint
+    measured rather than assumed -- and because the config-validation path that
+    rejects CUDA graphs returns early at EP=1, so this is also the only EP where
+    CUDA graphs would be legal.
+    """
+    return _flash_8k_ep(1, seq_len)
+
+
+# --- less AC and more batch, on the EP=16 base -----------------------------
+
+
+def deepseek_v4_flash_8k_ep16_sac(seq_len: int | None = 8192) -> Trainer.Config:
+    """F13. EP=16 + SelectiveAC -- "less AC", made affordable.
+
+    No AC needs ~265 GiB of activations at 8k (F1 OOMed with the GPU at 275.26
+    of 276.50), so removing checkpointing entirely is out of reach at this
+    context length whatever EP does. SAC is the reachable middle: it recomputes
+    less than FullAC while storing far less than nothing, and EP=16's 65.70 GiB
+    base leaves ~210 GiB for it to grow into.
+    """
+    config = _flash_8k_ep(16, seq_len)
+    config.activation_checkpoint = SelectiveAC.Config()
+    return config
+
+
+def deepseek_v4_flash_8k_ep16_bs2(seq_len: int | None = 8192) -> Trainer.Config:
+    """F14. EP=16 + 2x microbatch (16384 tokens/rank), projected ~105 GiB."""
+    config = _flash_8k_ep(16, seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    return config
+
+
+def deepseek_v4_flash_8k_ep16_bs4(seq_len: int | None = 8192) -> Trainer.Config:
+    """F15. EP=16 + 4x microbatch (32768 tokens/rank), projected ~183 GiB.
+
+    Batch is the most reliable lever found across all three models here. On
+    Kimi it went 195 -> 305 TFLOP/s and did not flatten until bs=8, so jumping
+    straight to 4x rather than walking 2x/3x is the better use of a slot -- the
+    2x run brackets it from below.
+    """
+    config = _flash_8k_ep(16, seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 32768
+    return config
+
+
+def deepseek_v4_flash_8k_ep16_sac_bs2(seq_len: int | None = 8192) -> Trainer.Config:
+    """F16. All three at once: EP=16 + SelectiveAC + 2x microbatch.
+
+    The combination asked for -- lower parallelism, less AC, bigger batch. Run
+    alongside the single-variable configs: if it beats them the changes compose,
+    and if not those runs say which is fighting which.
+    """
+    config = _flash_8k_ep(16, seq_len)
+    config.activation_checkpoint = SelectiveAC.Config()
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    return config
