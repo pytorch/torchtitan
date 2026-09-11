@@ -65,6 +65,14 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     )
 
 
+def test_llama3_debug_config_defaults_to_short_context() -> None:
+    config = llama3_debugmodel()
+
+    assert config.model_spec is not None
+    assert config.model_spec.max_context_length == 2048
+    assert config.training.max_context_length == 2048
+
+
 def test_parse_multiple_integration_test_suites() -> None:
     assert _parse_test_suites("features,models,h100,b200") == (
         "features",
@@ -130,7 +138,10 @@ def test_models_select_fake_and_real_pg_cases() -> None:
         "muse_glimmer_text_fsdp",
         "muse_glimmer_mm_fsdp+tp+sp",
     } <= fake_pg_model_tests
-    assert {"deepseek_v3_fsdp+cp+pp+ep"} <= real_pg_model_tests
+    assert {
+        "deepseek_v3_fsdp+cp+pp+ep",
+        "deepseek_v4_fsdp+tp+ep",
+    } <= real_pg_model_tests
 
 
 def test_flux_fake_pg_filters_real_collective_cases() -> None:

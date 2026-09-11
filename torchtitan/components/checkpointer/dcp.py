@@ -248,7 +248,6 @@ class CheckpointManager(BaseCheckpointManager):
         if self.stager is not None:
             self.stager.close()
 
-    @torch.no_grad()
     def dcp_save(
         self,
         state_dict: dict[str, Any],
@@ -351,31 +350,33 @@ class CheckpointManager(BaseCheckpointManager):
 
         return ret
 
-    def dcp_load(
+    def _load_checkpoint(
         self,
-        state_dict: dict[str, Any],
+        states: dict[str, Any],
         checkpoint_id: str,
+        *,
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        """Load a DCP into the provided state dictionary.
+        """Restore selected states through DCP or its Hugging Face reader.
 
         This method handles both standard DCP sharded checkpoints and HuggingFace
         safetensors. If loading from HF, it utilizes an adapter to map FQNs and
         handle format-specific sharding logic.
 
         Args:
-            state_dict (dict): The target dictionary to populate with checkpoint data.
-            checkpoint_id (str): Path or identifier for the source checkpoint.
-            from_hf (bool): If True, adapts the load process for HuggingFace model
+            states: Live state objects selected for restoration.
+            checkpoint_id: Path or identifier for the source checkpoint.
+            from_hf: If True, adapts the load process for HuggingFace model
                 definitions and safetensors format.
-            from_quantized (bool): Indicates if the source is in a quantized format
+            from_quantized: Indicates if the source is in a quantized format
                 (e.g., 4-bit/8-bit), requiring the storage reader to handle
                 specialized data types and sharding structures.
 
         Raises:
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
+        state_dict = self._flattened_model_states_sd(states)
 
         if from_hf:
             assert self.sd_adapter is not None, (
@@ -391,17 +392,15 @@ class CheckpointManager(BaseCheckpointManager):
             dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
+            states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
-                self.states[MODEL].load_state_dict(state_dict)
+            if MODEL in states:
+                states[MODEL].load_state_dict(state_dict)
 
-    @sl.log_trace_span("checkpoint_save")
-    @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
@@ -444,6 +443,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_checkpoint_id(curr_step)
         states = self._flattened_model_states_sd()
+        async_save_started_at: float | None = None
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
@@ -457,6 +457,7 @@ class CheckpointManager(BaseCheckpointManager):
                     )
                 )
 
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -470,6 +471,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         elif self.async_mode == AsyncMode.ASYNC:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+            async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
@@ -488,127 +490,22 @@ class CheckpointManager(BaseCheckpointManager):
                 enable_garbage_collection=True,
             )
 
+        if async_save_started_at is not None:
+            assert self.save_future is not None
+            self.save_future.add_done_callback(
+                lambda _: sl.log_trace_scalar(
+                    {
+                        "train.checkpoint_write.native_dcp.execute.async_total.latency_ms": (
+                            time.monotonic() - async_save_started_at
+                        )
+                        * 1000
+                    }
+                )
+            )
         logger.info(
             f"Finished {checkpoint_phase} the checkpoint in "
             f"{time.monotonic() - begin:.2f} seconds."
         )
-        return True
-
-    @sl.log_trace_span("checkpoint_load")
-    @torch.no_grad()
-    def _load(self, step: int = -1) -> bool:
-        """Load the checkpoint for the given step.
-
-        This function orchestrates the states loading process.
-        If the local checkpoint folder contains a valid checkpoint, it retrieves the
-        checkpoint corresponding to the specified step, defaulting to the latest
-        available if the `step` is -1. Otherwise, it attempts an initial load from a
-        specified path (in either native or HF format) or performs loading using
-        provided HF assets path from the state dict adapter.
-
-        Args:
-            step (int, optional): The training step to restore.
-                Defaults to -1 (latest available).
-
-        Returns:
-            bool: Whether the checkpoint was successfully located and loaded.
-        """
-
-        model_only = False
-        from_hf = False
-        from_quantized = False
-
-        has_checkpoint_folder = self._storage.isdir(self.folder)
-        load_step = -1
-        if has_checkpoint_folder:
-            load_step = self._find_load_step() if step == -1 else step
-
-        if step != -1 and not has_checkpoint_folder:
-            raise FileNotFoundError(
-                f"--checkpoint.load_step={step} not found because "
-                f"checkpoint.folder {self.folder} does not exist"
-            )
-
-        if load_step == -1:
-            model_only = self.initial_load_model_only
-            from_hf = self.initial_load_in_hf
-            from_quantized = self.initial_load_in_hf_quantized
-
-            if from_hf:
-                assert model_only, (
-                    "Only model can be loaded when loading from "
-                    "HF's safetensors checkpoint."
-                )
-            if from_quantized:
-                assert from_hf, "Quantized checkpoint can only be loaded from HF format"
-
-            if self.initial_load_path:
-                checkpoint_id = self.initial_load_path
-                if not self._storage.isdir(checkpoint_id):
-                    raise ValueError(
-                        f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
-                    )
-                if from_hf:
-                    logger.info(
-                        "Loading from HF safetensors from "
-                        f"--checkpoint.initial_load_path: {checkpoint_id}"
-                    )
-
-            elif from_hf:
-                assert (
-                    self.sd_adapter and self.sd_adapter.hf_assets_path
-                ), "from_hf=True requires sd_adapter and hf_assets_path."
-                checkpoint_id = self.sd_adapter.hf_assets_path
-                if not self._storage.isdir(checkpoint_id):
-                    raise ValueError(
-                        "model.hf_assets_path is being used to load HF weights "
-                        "but the path is not valid. Either make sure hf_assets_path is "
-                        "correct or provide a valid checkpoint.initial_load_path"
-                    )
-                logger.info(
-                    "Loading HF safetensors from "
-                    f"--model.hf_assets_path: {checkpoint_id}"
-                )
-
-            else:
-                logger.info("No checkpoint was provided, this is a fresh start.")
-                return False
-
-        else:
-            # This is the fault-tolerance branch: checkpoint.folder already
-            # contains valid checkpoints from a previous run, so we resume from
-            # it and all initial_* options are ignored by design. This allows a
-            # job to keep the same arguments across automatic restarts after
-            # failures.
-            step = load_step
-            model_only = step == 0
-            checkpoint_id = self._create_checkpoint_id(step)
-
-            if not self._storage.isdir(checkpoint_id):
-                raise FileNotFoundError(
-                    f"--checkpoint.load_step={step} not found at {checkpoint_id}"
-                )
-
-        logger.info(f"Loading the checkpoint from {checkpoint_id}.")
-        begin = time.monotonic()
-
-        # TODO(checkpoint-rng): Save rank-local training RNG state so same-topology
-        # resumes continue exactly. If world size changes, omit it during load and
-        # keep each rank's newly initialized RNG stream.
-        states = self._states_to_load(model_only)
-        self.dcp_load(
-            states,
-            checkpoint_id=checkpoint_id,
-            from_hf=from_hf,
-            from_quantized=from_quantized,
-        )
-
-        GarbageCollection.collect("GC collection for checkpoint loading.")
-        logger.info(
-            "Finished loading the checkpoint in "
-            f"{time.monotonic() - begin:.2f} seconds."
-        )
-
         return True
 
     def _maybe_wait_for_staging(self) -> None:
@@ -657,14 +554,18 @@ class CheckpointManager(BaseCheckpointManager):
                 "self.save_future is not None, but self.async_mode is DISABLED."
             )
 
-        # Narrowing for the type checker: maybe_wait_for_saving only dispatches
-        # here when save_future is set.
-        assert self.save_future is not None
-        self.save_future.result()
+        # Clear before awaiting so a failed save is not retried by a later
+        # close() or __del__ call.
+        save_future = self.save_future
+        assert save_future is not None
         self.save_future = None
+        save_future.result()
+
+    def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
+        return self._storage.isfile(filesystem.join(checkpoint_dir, ".metadata"))
 
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
-        return self._storage.isfile(filesystem.join(checkpoint_dir, ".metadata")) or (
+        return self._is_resumable_checkpoint(checkpoint_dir) or (
             self._storage.isfile(
                 filesystem.join(checkpoint_dir, "model.safetensors.index.json")
             )
@@ -692,36 +593,6 @@ class CheckpointManager(BaseCheckpointManager):
         if MODEL in states:
             sd.update(states[MODEL].state_dict())
         return sd
-
-    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
-        """Determine which state objects should be restored during loading.
-
-        This method filters the checkpointer's state dictionary based on the
-        loading context. It supports partial restoration for specific steps
-        (e.g., loading only model weights for step 0) and respects explicit
-        exclusion rules for auxiliary states.
-
-        Args:
-            model_only (bool): If True, returns only the model's parameters,
-                bypassing optimizers and other training metadata.
-
-        Returns:
-            dict[str, Any]: A prepared dictionary of states to be passed to
-                the loader.
-        """
-        # For the first step, we will only load the model.
-        if model_only:
-            return self.states[MODEL].state_dict()
-
-        for exclude_key in self.exclude_from_loading:
-            if exclude_key not in self.states:
-                raise ValueError(f"{exclude_key} not found in state_dict.")
-
-        states_to_load = {
-            k: v for k, v in self.states.items() if k not in self.exclude_from_loading
-        }
-
-        return self._flattened_model_states_sd(states_to_load)
 
     def _save_last_step(self, curr_step: int) -> None:
         """Execute the final checkpoint save at the completion of training.

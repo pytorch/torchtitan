@@ -11,6 +11,7 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -42,7 +43,7 @@ from .model import (
     RMSGainCenterNorm,
     SoftCappedLinear,
 )
-from .parallelize import parallelize_muse_glimmer, pipeline_muse_glimmer
+from .parallelize import parallelize_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 from .vision_encoder import (
@@ -53,7 +54,6 @@ from .vision_encoder import (
 
 __all__ = [
     "parallelize_muse_glimmer",
-    "pipeline_muse_glimmer",
     "set_muse_glimmer_vision_sharding_config",
     "MuseGlimmerModel",
     "muse_glimmer_configs",
@@ -554,7 +554,15 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_muse_glimmer,
-        pipelining_fn=pipeline_muse_glimmer,
+        pipelining_fn=partial(
+            pipeline_with_first_stage_modules,
+            first_stage_module_fqns=(
+                "vision_encoder",
+                "vision_adapter",
+                "vision_projection",
+                "perception_emb_norm",
+            ),
+        ),
         post_optimizer_build_fn=None,
         state_dict_adapter=MuseGlimmerStateDictAdapter,
     )
