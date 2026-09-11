@@ -31,7 +31,7 @@ from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import DeepEPTokenDispatcher, LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -245,6 +245,15 @@ class RoutedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
+        if isinstance(self.token_dispatcher, DeepEPTokenDispatcher):
+            return self._forward_deepep(
+                self.token_dispatcher,
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
+
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -259,11 +268,43 @@ class RoutedExperts(Module):
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
-        out_TD = self.token_dispatcher.combine(
-            routed_output_RD,
-            metadata,
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return out_TD
+
+    def _forward_deepep(
+        self,
+        dispatcher: DeepEPTokenDispatcher,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run DeepEP with one policy controlling dispatch and combine."""
+        recompute_ep_communication = self.remat_should_recompute("ep_communication")
+        dispatch_output = remat.region(
+            dispatcher._dispatch_with_tensor_state,
+            self.remat_region_name("ep_communication.dispatch"),
+            recompute=recompute_ep_communication,
+        )(
             x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
         )
+        routed_input_RD = dispatch_output.routed_input_RD
+        num_tokens_per_local_expert_e = dispatch_output.num_tokens_per_local_expert_e
+        # GroupedExperts immediately reads both tensors with bare tensor ops.
+        remat.recompute_needs_tensor(routed_input_RD, num_tokens_per_local_expert_e)
+        with maybe_set_sparse_mesh():
+            routed_output_RD = self.inner_experts(
+                routed_input_RD, num_tokens_per_local_expert_e
+            )
+        out_TD = remat.region(
+            dispatcher._combine_with_tensor_state,
+            self.remat_region_name("ep_communication.combine"),
+            recompute=recompute_ep_communication,
+        )(routed_output_RD, dispatch_output)
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def parallelize(self, parallel_dims) -> None:
