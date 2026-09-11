@@ -45,7 +45,7 @@ A step pre-hook is registered on each optimizer instance. Before Adam's lazy sta
 ### Interaction with other features
 
 - **`training.dtype`**: Primary use case is `float32` training with `fused_opt_states_bf16` for optimizer-state memory savings. With `bfloat16` training, default `implementation="fused"` is usually enough; see the introduction above.
-- **Checkpointing**: Optimizer states are saved in bfloat16 when this option is enabled. On resume, use the same `implementation="fused_opt_states_bf16"` so checkpoint state matches. The pre-hook only creates bf16 tensors for parameters with empty state; if a checkpoint already populated state, those dtypes are preserved. Mixing checkpoint dtype with a different implementation across save/load is unsupported and can result in dtype-mismatch.
+- **Checkpointing**: Optimizer states are saved in bfloat16 when this option is enabled. On resume, use the same `implementation="fused_opt_states_bf16"`. A load post-hook restores `exp_avg`, `exp_avg_sq`, and optional AMSGrad `max_exp_avg_sq` to bfloat16 after PyTorch's native loader casts them to the parameter dtype. The `step` counter retains PyTorch's dtype and device policy. This preserves bf16 states for subsequent updates, but the native loader can still temporarily allocate fp32 states during loading. Mixing implementations across save/load remains unsupported.
 - **FSDP**: Compatible with FSDP2. The optimizer sees DTensor parameters; the bf16 state hook operates on the local shards.
 
 ### Limitations
