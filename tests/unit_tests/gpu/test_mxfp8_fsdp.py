@@ -31,6 +31,7 @@ from torchtitan.distributed.cudagraph import (  # noqa: E402
     cudagraph_teardown,
     CUDAGraphWrapper,
 )
+from torchtitan.distributed.fsdp import set_model_grad_dtype  # noqa: E402
 from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
     data_parallel,
     disable_active_parametrization,
@@ -486,6 +487,75 @@ def test_mxfp8_fsdp_tensor_lifecycle(target):
     )
 
 
+class _NormThenMXFP8Linear(torch.nn.Module):
+    """A norm and an MXFP8 linear in one FSDP group, as a real block has."""
+
+    def __init__(self):
+        super().__init__()
+        self.norm = torch.nn.RMSNorm(128)
+        self.linear = MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            bias=False,
+        ).build()
+
+    def forward(self, x):
+        return self.linear(self.norm(x))
+
+
+def _run_fused_wgrad_accum_grad_dtype(
+    rank: int,
+    world_size: int,
+    port: int,
+    training_dtype: torch.dtype,
+    grad_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+) -> None:
+    """Test independent gradient and reduce dtypes with fused accumulation."""
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+
+        x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+        block = _NormThenMXFP8Linear().cuda().to(training_dtype)
+        set_model_grad_dtype(block, grad_dtype)
+        fully_shard(
+            block,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=reduce_dtype,
+            ),
+            reshard_after_forward=False,
+        )
+        block.set_is_last_backward(False)
+        block.set_reshard_after_backward(False)
+        block.set_requires_gradient_sync(False)
+        block(x).sum().backward()
+        assert block.linear.weight.grad is not None, (
+            "FSDP must keep the running unsharded gradient on the parameter "
+            "while gradient synchronization is disabled"
+        )
+        first = block.linear.weight.grad.clone()
+        assert first.dtype == grad_dtype
+        block(x).sum().backward()
+        torch.cuda.synchronize()
+        assert block.linear.weight.grad.dtype == grad_dtype
+        # Same input twice, so the running gradient must have doubled.
+        torch.testing.assert_close(
+            block.linear.weight.grad,
+            first * 2,
+            rtol=2e-2,
+            atol=2e-2,
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 def _run_simple_fsdp_disabled_parametrization(
     rank: int,
     world_size: int,
@@ -539,6 +609,42 @@ def test_simple_fsdp_disable_active_parametrization():
     mp.spawn(
         _run_simple_fsdp_disabled_parametrization,
         args=(2, get_free_port()),
+        nprocs=2,
+        join=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("training_dtype", "grad_dtype", "reduce_dtype"),
+    [
+        pytest.param(
+            torch.float32,
+            torch.float32,
+            torch.float32,
+            id="titan-default",
+        ),
+        pytest.param(
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            id="scaling",
+        ),
+        pytest.param(
+            torch.bfloat16,
+            torch.bfloat16,
+            torch.float32,
+            id="bf16-grad-fp32-reduce",
+        ),
+    ],
+)
+def test_mxfp8_fused_wgrad_accum_grad_dtype(
+    training_dtype: torch.dtype,
+    grad_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+):
+    mp.spawn(
+        _run_fused_wgrad_accum_grad_dtype,
+        args=(2, get_free_port(), training_dtype, grad_dtype, reduce_dtype),
         nprocs=2,
         join=True,
     )
