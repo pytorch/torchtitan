@@ -56,9 +56,8 @@ def parallelize_kimi_k3(
 
     assert isinstance(model, KimiK3Model)
     if parallelism.spmd_backend == "spmd_types":
-        # Kimi K3 only declares layouts for its MoE modules. Seed replicated
-        # layouts for the remaining decoder and vision parameters before the
-        # MoE declarations replace the expert parameters with sparse shards.
+        # Seed replicated layouts for parameters outside the explicit expert
+        # declarations. Vision buffers declare their DP layouts separately.
         annotate_replicated_parameters(model, parallel_dims)
 
     if parallelism.spmd_backend == "spmd_types" or parallel_dims.ep_enabled:

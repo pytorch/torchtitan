@@ -46,7 +46,8 @@ class TestFluxDataLoader(unittest.TestCase):
             num_tokens_per_batch=2,
             max_context_length=1,
         )
-        model_inputs, labels = self._collator.build(context=context)(rows)
+        model_inputs = self._collator.build(context=context)(rows)
+        labels = model_inputs["labels"]
 
         self.assertNotIn("image", model_inputs)
         self.assertEqual(model_inputs["prompt"], ["first", "second"])
@@ -142,11 +143,12 @@ class TestFluxDataLoader(unittest.TestCase):
                 it = iter(dl)
 
                 for i in range(0, num_steps):
-                    input_data, labels = next(it)
+                    input_data = next(it)
+                    labels = input_data["labels"]
 
                     assert (
-                        len(input_data) == 3
-                    )  # (clip_encodings, t5_encodings, prompt)
+                        len(input_data) == 4
+                    )  # (clip_encodings, t5_encodings, prompt, labels)
                     assert labels.shape == (batch_size, 3, 256, 256)
                     assert input_data["clip"].shape == (
                         batch_size,
@@ -173,9 +175,11 @@ class TestFluxDataLoader(unittest.TestCase):
                 it_resumed = iter(dl_resumed)
 
                 for i in range(num_steps):
-                    expected_input_ids, expected_labels = next(it)
-                    input_ids, labels = next(it_resumed)
+                    expected_input_ids = next(it)
+                    input_ids = next(it_resumed)
 
                     assert torch.equal(input_ids["clip"], expected_input_ids["clip"])
                     assert torch.equal(input_ids["t5"], expected_input_ids["t5"])
-                    assert torch.equal(labels, expected_labels)
+                    assert torch.equal(
+                        input_ids["labels"], expected_input_ids["labels"]
+                    )

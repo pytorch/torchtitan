@@ -19,6 +19,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
+from torch.distributed.checkpoint.stateful import Stateful
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch_checkpointing.checkpoint_layout import LayoutInfo, SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
@@ -322,14 +323,44 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         if hasattr(self, "_manager"):
             self.close()
 
-    # Load routing lands in a later change.
-    def _load(self, step: int = -1) -> bool:
-        raise NotImplementedError(
-            "TorchCheckpointingManager does not implement load() yet."
+    def _load_checkpoint(
+        self,
+        states: dict[str, Any],
+        checkpoint_id: str,
+        *,
+        from_hf: bool,
+        from_quantized: bool,
+    ) -> None:
+        if from_hf:
+            raise ValueError(
+                "TorchCheckpointingManager does not yet support loading "
+                "Hugging Face checkpoints."
+            )
+        if not self._is_valid_checkpoint(checkpoint_id):
+            raise ValueError(
+                f"Checkpoint {checkpoint_id!r} is not a native "
+                "torch_checkpointing checkpoint."
+            )
+        # strict: the backend defaults to skipping anything the checkpoint does
+        # not carry, which would silently leave parameters at their initialized
+        # values and resume from a model that is not the one that was saved.
+        # exclude_from_loading is applied by _states_to_load, so anything still
+        # in `states` here is genuinely required.
+        state_dict = _stateful_to_state_dict(states)
+        loaded = self._manager.load(
+            checkpoint_id,
+            into=state_dict,
+            strict=True,
         )
+        for key, target in states.items():
+            if isinstance(target, Stateful):
+                target.load_state_dict(state_dict[key])
+            elif loaded[key] is not target:
+                raise TypeError(
+                    f"Cannot restore non-Stateful checkpoint state {key!r} of type "
+                    f"{type(target).__name__}"
+                )
 
-    @sl.log_trace_span("checkpoint_save")
-    @torch.no_grad()
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         should_save = self._should_save(curr_step, last_step)
         # Prewarm on a step we are not saving, so the first real save does not
@@ -365,6 +396,17 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         return True
 
+    def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
+        """Whether automatic loading may select ``checkpoint_dir``.
+
+        Unlike ``_is_valid_checkpoint``, this excludes final Hugging Face exports.
+        Hugging Face checkpoint loading has not landed in torch_checkpointing yet,
+        so automatic loading cannot select those exports.
+        """
+        return self._storage.isfile(
+            filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
+        )
+
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         # Either published layout counts as valid:
         #
@@ -379,9 +421,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         #
         # Without the HF shape, a finished export looks abandoned and
         # retention deletes it on the next run.
-        return self._storage.isfile(
-            filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
-        ) or self._storage.isfile(filesystem.join(checkpoint_dir, _HF_INDEX_FILE_NAME))
+        return self._is_resumable_checkpoint(checkpoint_dir) or self._storage.isfile(
+            filesystem.join(checkpoint_dir, _HF_INDEX_FILE_NAME)
+        )
 
     def _maybe_wait_for_staging(self) -> None:
         # BaseCheckpointManager.close() calls this to wait for in-flight staging.
