@@ -175,6 +175,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
         from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
             build_minimal_trainer,
+            single_device_parallel_dims,
         )
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
@@ -182,6 +183,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         model_default = nn.Linear(3, 2, device="cuda")
         model_inplace = deepcopy(model_default)
         model_config = SimpleNamespace(layers=[])
+        parallel_dims = self.enterContext(single_device_parallel_dims())
 
         def make_trainer(model, *, inplace):
             trainer = build_minimal_trainer(
@@ -190,6 +192,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 GraphTrainer,
                 compile_enable_inplace_graph_gradient_accumulation=inplace,
                 compile_inductor_compilation="full",
+                parallel_dims=parallel_dims,
             )
             trainer.optimizers = OptimizersContainer(
                 OptimizersContainer.Config(
@@ -2282,7 +2285,7 @@ class TestTraceFSDP(FSDPTest):
 
         torch.manual_seed(42)
         self._setup()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         model_ref = nn.Linear(8, 4, device="cuda")
         model_test = nn.Linear(8, 4, device="cuda")
         model_test.load_state_dict(model_ref.state_dict())

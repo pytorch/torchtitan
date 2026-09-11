@@ -15,6 +15,7 @@ packed-bank row for every placeholder token.
 import spmd_types as spmd
 import torch
 
+
 def get_vision_positions(
     tokens: torch.Tensor,
     num_vision_tokens_per_item: torch.Tensor,

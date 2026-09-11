@@ -18,9 +18,9 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
+    set_gqa_inner_attention_local_spmd,
     token_id_placement,
     token_id_sequence_parallel_placement,
-    set_gqa_inner_attention_local_spmd,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
