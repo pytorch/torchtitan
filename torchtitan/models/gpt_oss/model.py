@@ -18,11 +18,11 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     BaseQKVLinear,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -57,7 +57,7 @@ class Attention(BaseAttention):
         qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config  # output projection
         inner_attention: Module.Config = dataclasses.field(
-            default_factory=VarlenAttention.Config
+            default_factory=VarlenInnerAttention.Config
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
@@ -171,7 +171,7 @@ class GptOssTransformerBlock(TransformerBlock):
                 ``BlockMask``s from which this layer picks its mask; with varlen,
                 a single ``VarlenMetadata`` shared by all layers (the per-layer
                 causal window is baked into each layer's
-                ``VarlenAttention.window_size``).
+                ``VarlenInnerAttention.window_size``).
             positions: Optional position indices.
 
         Returns:
@@ -244,14 +244,14 @@ class GptOssModel(Decoder):
         assert isinstance(attn_cfg, Attention.Config)
         inner_attn = attn_cfg.inner_attention
 
-        if isinstance(inner_attn, VarlenAttention.Config):
+        if isinstance(inner_attn, VarlenInnerAttention.Config):
             return create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-        elif isinstance(inner_attn, FlexAttention.Config):
+        elif isinstance(inner_attn, FlexInnerAttention.Config):
             base_mask_mods = [
                 get_causal_mask_mod(),
                 get_efficient_causal_mask_mod_for_packed_document(positions),
@@ -283,6 +283,6 @@ class GptOssModel(Decoder):
             return masks
         else:
             raise TypeError(
-                f"GPT-OSS supports FlexAttention and VarlenAttention inner attention, "
+                f"GPT-OSS supports FlexInnerAttention and VarlenInnerAttention inner attention, "
                 f"got {type(inner_attn).__name__}"
             )

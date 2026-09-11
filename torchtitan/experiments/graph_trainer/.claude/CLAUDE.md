@@ -29,7 +29,7 @@ Graph passes are structured into two tiers:
 
 1. **Default passes** (`passes.py`, `remove_noop_passes.py`, etc.) — always
    applied. These are numerics-preserving: cleanup, memory policy, bucketing,
-   async TP, FlexAttention regional Inductor (required for bitwise match with
+   async TP, FlexInnerAttention regional Inductor (required for bitwise match with
    eager).
 
 2. **Performance passes** (`performance_passes.py`) — opt-in via
