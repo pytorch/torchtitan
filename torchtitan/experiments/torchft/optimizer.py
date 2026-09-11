@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
@@ -56,13 +57,17 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         super().load_state_dict(state_dict)
         self.init_cache_state_dict()
 
-    def _step_optimizers(self) -> None:
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:
+        assert closure is None, "OptimizersContainer does not support closures"
         if (
             self._quorum_manager is not None
             and not self._quorum_manager.should_commit()
         ):
-            return
-        super()._step_optimizers()
+            return None
+        # Call inner optimizers directly to avoid re-entering container hooks.
+        for optimizer in self.optimizers:
+            optimizer.step()
+        return None
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         if self._quorum_manager is not None:
