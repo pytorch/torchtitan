@@ -387,7 +387,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims,
             self.device,
             config.debug,
-            distinct_seed_mesh_dims=["pp"],
+            distinct_seed_mesh_dims=config.debug.distinct_seed_mesh_dims,
         )
 
         # build model (using meta init)

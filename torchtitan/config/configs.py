@@ -374,6 +374,9 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
+    distinct_seed_mesh_dims: list[str] = field(default_factory=lambda: ["pp"])
+    """Mesh axes whose ranks each get a distinct RNG seed."""
+
     spmd_typechecking: bool = False
     """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
 
