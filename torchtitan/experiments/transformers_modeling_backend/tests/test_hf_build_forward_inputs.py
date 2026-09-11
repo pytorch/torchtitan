@@ -86,7 +86,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
 
     create_partitioner = Mock(return_value=partitioner)
 
-    def shard_metadata(batch, received_partitioner):
+    def shard_metadata(batch, received_partitioner, _config):
         assert received_partitioner is partitioner
         calls.append("cp_metadata")
         return batch

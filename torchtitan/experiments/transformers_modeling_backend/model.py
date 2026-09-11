@@ -1246,7 +1246,7 @@ class HFTransformerModel(BaseModel):
             )
             batch = partitioner.shard_inputs(batch)
             batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
-                batch, partitioner
+                batch, partitioner, KVAllGatherCPFlexInnerAttention.Config()
             )
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding

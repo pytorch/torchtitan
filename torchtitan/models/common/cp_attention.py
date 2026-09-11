@@ -61,6 +61,7 @@ class LoadBalancedCPInnerAttention(CPInnerAttention):
         cls,
         input_dict: dict[str, Any],
         partitioner: ContextParallelPartitioner,
+        config: CPInnerAttention.Config,
     ) -> dict[str, Any]:
         """Shard metadata to match the model-input token partition.
 
@@ -68,6 +69,7 @@ class LoadBalancedCPInnerAttention(CPInnerAttention):
             input_dict: Model-forward inputs containing any attention metadata.
             partitioner: The current batch's CP partition, shared with model
                 input sharding.
+            config: The attention instance's configuration.
 
         Returns:
             ``input_dict`` with backend-owned metadata updated as required by
@@ -92,6 +94,7 @@ class KVAllGatherCPFlexInnerAttention(LoadBalancedCPInnerAttention, FlexInnerAtt
         cls,
         input_dict: dict[str, Any],
         partitioner: ContextParallelPartitioner,
+        config: CPInnerAttention.Config,
     ) -> dict[str, Any]:
         """Shard BlockMask metadata for K/V all-gather context parallelism.
 
@@ -112,6 +115,7 @@ class KVAllGatherCPFlexInnerAttention(LoadBalancedCPInnerAttention, FlexInnerAtt
             masks or ``BlockMask`` values are present, it is returned
             unchanged.
         """
+        del config
         attention_masks = input_dict.get("attention_masks")
         if attention_masks is None:
             return input_dict

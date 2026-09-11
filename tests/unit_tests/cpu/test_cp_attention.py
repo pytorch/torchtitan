@@ -7,6 +7,7 @@
 """Context-parallel attention kernel selection and mesh lookup."""
 
 import unittest
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
@@ -36,6 +37,23 @@ from torchtitan.models.common.cp_attention import (
     UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.protocols.module import Module
+
+
+class _MetadataCpBackend(LoadBalancedCPInnerAttention, Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(CPInnerAttention.Config, Module.Config):
+        pass
+
+    @classmethod
+    def cp_shard_metadata(cls, input_dict, partitioner, config):
+        return input_dict
+
+
+class _MixedCpModel(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        backends: list[Module.Config]
 
 
 class TestKernelSelection(unittest.TestCase):
@@ -72,7 +90,9 @@ class TestKernelSelection(unittest.TestCase):
             sharded_block_mask,
             sharded_sliding_block_mask,
         )
-        result = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, partitioner)
+        result = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
+            batch, partitioner, KVAllGatherCPFlexInnerAttention.Config()
+        )
 
         self.assertIs(result, batch)
         self.assertIs(result["input"], batch["input"])
@@ -97,7 +117,9 @@ class TestKernelSelection(unittest.TestCase):
         batch = {"attention_masks": block_mask}
         partitioner = mock.Mock(spec=ContextParallelPartitioner)
         partitioner.shard_buffers.return_value = (sharded_block_mask,)
-        result = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, partitioner)
+        result = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
+            batch, partitioner, KVAllGatherCPFlexInnerAttention.Config()
+        )
 
         self.assertIs(result["attention_masks"], sharded_block_mask)
         partitioner.shard_buffers.assert_called_once_with([block_mask], (2,))
@@ -316,11 +338,15 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         create_load_balancer.assert_called_once_with(selected_mask, 2)
 
-    def test_shards_inputs_once_and_first_backend_metadata_once(self):
+    def test_shards_inputs_once_and_metadata_once_per_backend(self):
         from torchtitan.models.common.decoder import Decoder
 
-        model_config = SimpleNamespace(
-            first_full_attention_backend=KVAllGatherCPFlexInnerAttention.Config()
+        model_config = _MixedCpModel.Config(
+            backends=[
+                KVAllGatherCPFlexInnerAttention.Config(),
+                KVAllGatherCPFlexInnerAttention.Config(),
+                _MetadataCpBackend.Config(),
+            ]
         )
 
         model = object.__new__(Decoder)
@@ -333,6 +359,10 @@ class TestDecoderCpSharding(unittest.TestCase):
             KVAllGatherCPFlexInnerAttention,
             "cp_shard_metadata",
             side_effect=lambda inputs, *_args: inputs,
+        ) as shard_all_gather, mock.patch.object(
+            _MetadataCpBackend,
+            "cp_shard_metadata",
+            side_effect=lambda inputs, *_args: inputs,
         ) as shard_metadata:
             result = partitioner.shard_inputs(batch)
             result = Decoder._prepare_context_parallel_metadata(
@@ -341,7 +371,8 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         self.assertIs(result, batch)
         partitioner.shard_inputs.assert_called_once_with(batch)
-        shard_metadata.assert_called_once_with(batch, partitioner)
+        shard_all_gather.assert_called_once_with(batch, partitioner, mock.ANY)
+        shard_metadata.assert_called_once_with(batch, partitioner, mock.ANY)
 
 
 class _FakeMesh:
@@ -525,8 +556,8 @@ class TestUlysses(unittest.TestCase):
         object.__setattr__(
             model,
             "config",
-            SimpleNamespace(
-                first_full_attention_backend=UlyssesCPFlexInnerAttention.Config()
+            _MixedCpModel.Config(
+                backends=[UlyssesCPFlexInnerAttention.Config()]
             ),
         )
         partitioner = mock.Mock(spec=ContextParallelPartitioner)

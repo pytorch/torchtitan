@@ -6,6 +6,7 @@
 
 """Context-parallel partitioning and load-balancing APIs."""
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -48,10 +49,14 @@ def _cp_shard_dims(input_sharding: dict[str, SpmdType]) -> dict[str, int]:
     return dims
 
 
-class ContextParallelLoadBalancer(Configurable):
+class ContextParallelLoadBalancer(Configurable, ABC):
     """Build a PyTorch context-parallel load-balancing policy."""
 
     _load_balancer_impl: _LoadBalancer
+
+    @abstractmethod
+    def token_partition(self, num_tokens: int) -> list[list[tuple[int, int]]]:
+        """Return each CP rank's global token ranges in local tensor order."""
 
 
 class HeadTailLoadBalancer(ContextParallelLoadBalancer):
@@ -89,10 +94,31 @@ class HeadTailLoadBalancer(ContextParallelLoadBalancer):
                 f"the same sequence length, but got {seq_lens}."
             )
         seq_len = next(iter(seq_lens.values()))
+        self._world_size = cp_mesh.size(0)
         self._load_balancer_impl = _HeadTailLoadBalancer(
-            seq_len, cp_mesh.size(0), cp_mesh.device_type
+            seq_len, self._world_size, cp_mesh.device_type
         )
 
+    def token_partition(self, num_tokens: int) -> list[list[tuple[int, int]]]:
+        """Return the head-tail token partition."""
+        world_size = self._world_size
+        num_blocks = 2 * world_size
+        if num_tokens % num_blocks:
+            raise ValueError(
+                "Head-tail context parallelism requires the token count "
+                f"({num_tokens}) to be divisible by {num_blocks}."
+            )
+        block_size = num_tokens // num_blocks
+        return [
+            [
+                (rank * block_size, (rank + 1) * block_size),
+                (
+                    (num_blocks - rank - 1) * block_size,
+                    (num_blocks - rank) * block_size,
+                ),
+            ]
+            for rank in range(world_size)
+        ]
 
 class PTRRLoadBalancer(ContextParallelLoadBalancer):
     """Balance context-parallel tokens with PTRR.
@@ -154,6 +180,11 @@ class PTRRLoadBalancer(ContextParallelLoadBalancer):
             )
         self._load_balancer_impl = _PTRRLoadBalancer(ptrr_mask, cp_world_size)
 
+    def token_partition(self, num_tokens: int) -> list[list[tuple[int, int]]]:
+        del num_tokens
+        raise ValueError(
+            f"{type(self).__name__} does not expose contiguous token fragments."
+        )
 
 class ContextParallelPartitioner:
     """Shard one batch across CP ranks using an optional load balancer.
@@ -190,15 +221,16 @@ class ContextParallelPartitioner:
             if input_shardings is not None
             else {"input": 0, "labels": 0, "positions": 0}
         )
+        self._load_balancer: ContextParallelLoadBalancer | None = None
         self._load_balancer_impl: _LoadBalancer | None = None
         if load_balancer_config is not None:
-            load_balancer = load_balancer_config.build(
+            self._load_balancer = load_balancer_config.build(
                 input_dict=input_dict,
                 input_shardings=input_shardings,
                 cp_mesh=cp_mesh,
             )
-            assert isinstance(load_balancer, ContextParallelLoadBalancer)
-            self._load_balancer_impl = load_balancer._load_balancer_impl
+            assert isinstance(self._load_balancer, ContextParallelLoadBalancer)
+            self._load_balancer_impl = self._load_balancer._load_balancer_impl
 
     def shard_buffers(
         self,
@@ -227,6 +259,28 @@ class ContextParallelPartitioner:
                 load_balancer=self._load_balancer_impl,
             )
         )
+
+    @property
+    def cp_mesh(self) -> DeviceMesh:
+        """Device mesh whose CP axis owns this partition."""
+        return self._cp_mesh
+
+    def token_partition(self, num_tokens: int) -> list[list[tuple[int, int]]]:
+        """Return each CP rank's global token ranges in local tensor order."""
+        if self._load_balancer is not None:
+            return self._load_balancer.token_partition(num_tokens)
+
+        world_size = self._cp_mesh.size(0)
+        if num_tokens % world_size:
+            raise ValueError(
+                f"Context parallelism requires the token count ({num_tokens}) "
+                f"to be divisible by the CP degree ({world_size})."
+            )
+        block_size = num_tokens // world_size
+        return [
+            [(rank * block_size, (rank + 1) * block_size)]
+            for rank in range(world_size)
+        ]
 
     def shard_inputs(self, input_dict: dict[str, Any]) -> dict[str, Any]:
         """Shard named tensors for context parallelism.

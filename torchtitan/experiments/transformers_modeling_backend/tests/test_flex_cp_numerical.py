@@ -169,7 +169,9 @@ def main():
         load_balancer_config=load_balancer_configs[args.balancer],
     )
     batch = partitioner.shard_inputs(batch)
-    batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, partitioner)
+    batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
+        batch, partitioner, KVAllGatherCPFlexInnerAttention.Config()
+    )
     loc_input = batch["input"]
     loc_pos = batch["positions"]
     loc_gidx = batch["global_indices"]

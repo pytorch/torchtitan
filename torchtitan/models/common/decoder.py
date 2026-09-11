@@ -399,15 +399,20 @@ class Decoder(BaseModel):
             LoadBalancedCPInnerAttention,
         )
 
-        inner_attention = self.config.first_full_attention_backend
-        owner = cast(
-            "type[CPInnerAttention] | None",
-            inner_attention._owner if inner_attention is not None else None,
-        )
-        assert owner is not None and issubclass(owner, CPInnerAttention)
-        if not issubclass(owner, LoadBalancedCPInnerAttention):
-            return batch
-        return owner.cp_shard_metadata(batch, partitioner)
+        sharded_backends: set[type[CPInnerAttention]] = set()
+        for _, backend_config, _, _ in self.config.traverse(
+            CPInnerAttention.Config, recurse=True
+        ):
+            owner = cast("type[CPInnerAttention] | None", backend_config._owner)
+            assert owner is not None and issubclass(owner, CPInnerAttention)
+            if (
+                owner in sharded_backends
+                or not issubclass(owner, LoadBalancedCPInnerAttention)
+            ):
+                continue
+            batch = owner.cp_shard_metadata(batch, partitioner, backend_config)
+            sharded_backends.add(owner)
+        return batch
 
     def get_attention_masks(
         self,

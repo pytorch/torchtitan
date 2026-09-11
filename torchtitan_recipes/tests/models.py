@@ -14,6 +14,7 @@ from torchtitan.config.transform import apply_transforms, ContextParallelTransfo
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
 from torchtitan.distributed.context_parallel import PTRRLoadBalancer
 
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
@@ -61,7 +62,13 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -115,7 +122,13 @@ def deepseek_v3_debugmodel_mtp_cp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -145,7 +158,13 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -162,7 +181,13 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -228,7 +253,13 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -246,7 +277,13 @@ def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -266,7 +303,13 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
     config.override.imports = ["torchtitan.overrides.helion_rope.helion_cos_sin_rope"]
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -356,7 +399,13 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config.training.steps = 10
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -436,7 +485,13 @@ def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -470,5 +525,11 @@ def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
