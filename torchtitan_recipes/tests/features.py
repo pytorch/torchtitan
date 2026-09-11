@@ -310,6 +310,15 @@ def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_pp4_interleaved_1f1b_cudagraph() -> Trainer.Config:
+    config = llama3_debugmodel_pp4_interleaved_1f1b()
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.disable_cuda_graphs = False
+    config.parallelism.pipeline_parallel_per_direction_p2p = True
+    return config
+
+
 def llama3_debugmodel_pp4_interleaved_1f1b_layers_per_stage() -> Trainer.Config:
     config = llama3_debugmodel_pp4_interleaved_1f1b()
     config.parallelism.pipeline_parallel_layers_per_stage = 1
