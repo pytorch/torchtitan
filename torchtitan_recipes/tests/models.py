@@ -6,6 +6,7 @@
 
 """Configurations for the ``models`` integration test suite."""
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -96,6 +97,24 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_mtp_cp2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_mtp(seq_len=2048)
+    _use_spmd_types(config, typechecking=True)
+    config.parallelism.context_parallel_degree = 2
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v3_debugmodel_mtp_tp2_cp2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_mtp_cp2()
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    return config
+
+
 def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
     return _configure_fsdp_numerics(
         deepseek_v3_debugmodel(seq_len=2048), expert_parallel_degree=8
@@ -122,6 +141,23 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+    from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(seq_len=512)
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 1
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
     config.training.disable_cuda_graphs = True
     return config
 
@@ -252,6 +288,8 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4_compile() -> Trainer.Config:
 
 def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     config = gpt_oss_debugmodel(seq_len=2048)
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = None
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
