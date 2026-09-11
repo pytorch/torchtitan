@@ -11,7 +11,10 @@ from typing import Any, TYPE_CHECKING
 import torch.nn as nn
 
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.optimizer.utils import init_optim_state
+from torchtitan.components.optimizer.utils import (
+    get_flat_optim_state_dict,
+    init_optim_state,
+)
 
 if TYPE_CHECKING:
     from torchtitan.experiments.torchft.manager import TorchFTManager
@@ -48,6 +51,14 @@ class TorchFTOptimizersContainer(OptimizersContainer):
 
     def state_dict(self) -> dict[str, Any]:
         return self.cache_state_dict
+
+    def _refresh_cached_state_dict(self) -> None:
+        if not self.cache_state_dict:
+            return
+
+        # Refresh scalar metadata while preserving the cache and tensor references.
+        for optimizer in self.optimizers:
+            self.cache_state_dict.update(get_flat_optim_state_dict(optimizer))
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         # We have to invalidate the `cache_state_dict` because optimizer uses
