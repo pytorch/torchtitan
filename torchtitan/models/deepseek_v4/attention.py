@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
@@ -261,7 +262,7 @@ class DSV4FlexAttention(FlexAttention):
         kv = torch.cat([kv, sink_kv], dim=0)
         kv = kv.expand(-1, q.size(1), -1)
 
-        block_mask = attention_masks
+        block_mask = cast(BlockMask, attention_masks)
 
         def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
             return torch.where(kv_idx == sink_idx, attn_sink[h], score)

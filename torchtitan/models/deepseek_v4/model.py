@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import cast, TYPE_CHECKING
 
 import torch
-from torch.nn.attention.flex_attention import BlockMask
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -231,7 +231,7 @@ class DeepSeekV4Model(Decoder):
         seqlen = positions.shape[0]
         device = positions.device
         masks: dict[str, BlockMask] = {}
-        blocks = [  # pyrefly: ignore [bad-assignment]
+        blocks = [
             *self.layers.values(),
             *self.mtp_layers,
         ]
