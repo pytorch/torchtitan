@@ -8,6 +8,6 @@ safetensors
 einops
 pillow
 spmd_types==0.2.5
-attn-gym[linear]==0.0.8
 # Keep this commit pin in sync with pyproject.toml.
 torch_remat @ git+https://github.com/meta-pytorch/remat.git@d302699b1c58f83fa2c7b03bc2593967e9530335
+attn-gym[linear] @ git+https://github.com/meta-pytorch/attention-gym.git@main

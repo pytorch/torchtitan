@@ -15,7 +15,7 @@ from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform
 
-__all__ = ["ContextParallelTransform"]
+__all__ = ["ContextParallelTransform", "KDAContextParallelTransform"]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -45,4 +45,18 @@ class ContextParallelTransform(ModelConfigTransform):
             attention.inner_attention = convert_config_type(
                 attention.inner_attention, self.inner_attention
             )
+        return model
+
+
+@dataclass(kw_only=True, slots=True)
+class KDAContextParallelTransform(ModelConfigTransform):
+    """Install the context-parallel inner KDA implementation."""
+
+    def transform(self, model: Module.Config) -> Module.Config:
+        from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
+        from torchtitan.models.kimi_k3.kda import KDA
+
+        for _, traversed, _, _ in model.traverse(KDA.Config):
+            kda = cast(KDA.Config, traversed)
+            kda.inner_kda = convert_config_type(kda.inner_kda, ContextParallelInnerKDA)
         return model

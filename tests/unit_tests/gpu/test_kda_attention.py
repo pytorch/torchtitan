@@ -8,17 +8,25 @@
 
 import importlib.util
 import unittest
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
 
 import torch
+from attn_gym.linear.context_parallel import ContextParallelRouting
 
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
+from torchtitan.models.kimi_k3.cp_kda import (
+    ContextParallelInnerKDA,
+    partition_fragments,
+)
 from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 
-_HAS_BLACKWELL = (
+_HAS_KDA_GPU = (
     importlib.util.find_spec("attn_gym") is not None
     and torch.cuda.is_available()
-    and torch.cuda.get_device_capability() in {(10, 0), (10, 3)}
+    and torch.cuda.get_device_capability() in {(9, 0), (10, 0), (10, 3)}
 )
 
 
@@ -64,9 +72,124 @@ def _kda_config() -> KDA.Config:
     )
 
 
-@unittest.skipUnless(
-    _HAS_BLACKWELL, "KDA requires Attention Gym on CUDA capability 10.0 or 10.3"
-)
+class TestKDAContextParallelPartition(unittest.TestCase):
+    def test_contiguous_fragments(self):
+        self.assertEqual(
+            partition_fragments(16, 2, None),
+            [[(0, 8)], [(8, 16)]],
+        )
+
+    def test_headtail_fragments(self):
+        self.assertEqual(
+            partition_fragments(16, 2, "headtail"),
+            [[(0, 4), (12, 16)], [(4, 8), (8, 12)]],
+        )
+
+    def test_rejects_an_uneven_partition(self):
+        with self.assertRaisesRegex(ValueError, "divisible by 4"):
+            partition_fragments(15, 2, "headtail")
+
+    def test_rejects_an_unsupported_partition(self):
+        with self.assertRaisesRegex(ValueError, "contiguous or headtail"):
+            partition_fragments(16, 2, "ptrr")
+
+    def test_routing_preserves_packed_document_boundaries(self):
+        with (
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda.dist.get_world_size",
+                return_value=2,
+            ),
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda.dist.get_rank",
+                return_value=0,
+            ),
+        ):
+            routing = ContextParallelInnerKDA.build_kda_context_parallel_routing(
+                cu_seqlens_global=[0, 3, 7, 12],
+                conv_kernel_size=4,
+                load_balancer=None,
+                device=torch.device("cpu"),
+                group=cast(torch.distributed.ProcessGroup, object()),
+            )
+
+        # Rank 0 owns [0, 6): one complete document and part of the next.
+        torch.testing.assert_close(
+            routing.cu_seqlens,
+            torch.tensor([0, 3, 6], dtype=torch.int32),
+        )
+
+    def test_inner_kda_uses_cp_convolution_history_and_offsets(self):
+        num_tokens = 4
+        head_dim = 128
+        num_heads = 2
+        channels = num_heads * head_dim
+        local_offsets = torch.tensor([0, 2, 4], dtype=torch.int32)
+        routing = cast(
+            ContextParallelRouting,
+            SimpleNamespace(
+                cu_seqlens=local_offsets,
+                tail_sources=torch.zeros(1, 2, dtype=torch.int64),
+            ),
+        )
+        initial_state = torch.randn(2, 2, 3 * channels)
+        q_1THK = torch.randn(1, num_tokens, num_heads, head_dim)
+        k_1THK = torch.randn_like(q_1THK)
+        gate_1THK = torch.randn_like(q_1THK)
+        beta_1TH = torch.randn(1, num_tokens, num_heads)
+        output_1THV = torch.randn(1, num_tokens, num_heads, head_dim)
+        cp_group = object()
+        inner_kda = ContextParallelInnerKDA.Config(
+            head_dim=head_dim,
+            kernel=KDAKernel.Config(),
+        ).build()
+
+        def fake_conv(x_1TC, _weight_CW, **kwargs):
+            self.assertIs(kwargs["cu_seqlens"], local_offsets)
+            self.assertIs(kwargs["initial_state"], initial_state)
+            return x_1TC
+
+        with (
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda.context_parallel_conv_history",
+                return_value=initial_state,
+            ) as conv_history,
+            patch("torchtitan.models.kimi_k3.kda.causal_conv1d", fake_conv),
+            patch.object(
+                inner_kda.kernel,
+                "prepare_inputs",
+                return_value=(q_1THK, k_1THK, gate_1THK, beta_1TH),
+            ),
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda.context_parallel_kda",
+                return_value=(output_1THV, None),
+            ) as cp_kda,
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda.spmd_mesh_group",
+                return_value=cp_group,
+            ),
+        ):
+            output_THV = inner_kda(
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, num_heads, head_dim),
+                torch.randn(num_tokens, num_heads),
+                torch.randn(channels, 1, 3),
+                torch.randn(channels, 1, 3),
+                torch.randn(channels, 1, 3),
+                torch.randn(num_heads),
+                torch.randn(num_heads, head_dim),
+                cu_seqlens=None,
+                routing=routing,
+            )
+
+        self.assertEqual(output_THV.shape, (num_tokens, num_heads, head_dim))
+        conv_history.assert_called_once()
+        self.assertIs(cp_kda.call_args.kwargs["routing"], routing)
+        self.assertIs(cp_kda.call_args.kwargs["group"], cp_group)
+
+
+@unittest.skipUnless(_HAS_KDA_GPU, "KDA requires Attention Gym on Hopper or Blackwell")
 class TestKDA(unittest.TestCase):
     def _make_kda(self):
         model = _kda_config().build()

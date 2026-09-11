@@ -9,12 +9,12 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
-from spmd_types import SpmdType
+from attn_gym.linear.context_parallel import ContextParallelRouting
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
@@ -29,12 +29,19 @@ from torchtitan.models.common.attention import (
     VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    dense_activation_placement,
+    token_id_placement,
+)
 from torchtitan.models.common.multimodal import (
+    build_vision_bank_indices,
+    gather_vision_embeds,
     get_vision_positions,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -43,6 +50,7 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
+from .cp_kda import ContextParallelInnerKDA
 from .kda import KDA
 from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
@@ -237,6 +245,7 @@ class KimiK3TransformerBlock(Module):
         block_residual_TND: torch.Tensor,
         attention_masks: KimiK3AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
+        kda_cp_routing: ContextParallelRouting | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum_TD = x_TD
 
@@ -268,7 +277,12 @@ class KimiK3TransformerBlock(Module):
             h_TD = self.attention(h_TD, layer_mask, positions)
         else:
             assert self.delta_attention is not None
-            h_TD = self.delta_attention(h_TD, layer_mask, positions)
+            h_TD = self.delta_attention(
+                h_TD,
+                layer_mask,
+                positions,
+                routing=kda_cp_routing,
+            )
         prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
 
         h_TD = _apply_attention_residual(
@@ -295,8 +309,29 @@ class KimiK3Model(Decoder):
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
         def update_from_config(self, *, config, **kwargs) -> None:
+            parallelism = config.parallelism
+            if parallelism.context_parallel_degree > 1:
+                if parallelism.context_parallel_load_balancer not in (
+                    None,
+                    "headtail",
+                ):
+                    raise ValueError(
+                        "Kimi K3 KDA context parallelism supports only contiguous "
+                        "or headtail token partitions."
+                    )
+                conv_kernel_sizes = {
+                    layer.delta_attention.conv_kernel_size
+                    for layer in self.layers
+                    if layer.delta_attention is not None
+                }
+                if len(conv_kernel_sizes) != 1:
+                    raise ValueError(
+                        "Kimi K3 context parallelism requires every KDA layer "
+                        "to use the same convolution kernel size."
+                    )
             set_kimi_k3_sharding_config(
-                self, enable_ep=config.parallelism.expert_parallel_degree > 1
+                self,
+                enable_ep=parallelism.expert_parallel_degree > 1,
             )
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
@@ -336,6 +371,11 @@ class KimiK3Model(Decoder):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+        self.kda_conv_kernel_sizes = {
+            layer.delta_attention.conv_kernel_size
+            for layer in config.layers
+            if layer.delta_attention is not None
+        }
 
     def preprocess_inputs(
         self,
@@ -346,7 +386,7 @@ class KimiK3Model(Decoder):
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Build masks and annotate K3 multimodal inputs."""
+        """Build masks and CP metadata, shard inputs, and annotate layouts."""
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions")
         padding_mask = batch.pop("padding_mask", None)
@@ -362,25 +402,97 @@ class KimiK3Model(Decoder):
                     max_context_length=max_context_length,
                 )
 
-        multimodal_layout = SpmdType({MeshAxisName.DP: spmd.V})
-        input_sharding = decoder_input_sharding()
-        input_sharding.update(
-            {
-                name: multimodal_layout
-                for name in (
-                    "pixel_values",
-                    "pixel_values_videos",
-                    "grid_thw",
-                    "grid_thw_videos",
+        pixel_values = batch.get("pixel_values")
+        grid_thw = batch.get("grid_thw")
+        special_tokens = batch.get("special_tokens")
+        if parallel_dims.cp_enabled and pixel_values is not None:
+            if grid_thw is None:
+                raise ValueError(
+                    "pixel_values were provided but grid_thw was not provided."
                 )
-            }
-        )
+            if self.vision_encoder is None:
+                raise ValueError("pixel_values were provided without a vision encoder.")
+            if special_tokens is None or "image_id" not in special_tokens:
+                raise ValueError(
+                    "pixel_values require special_tokens with an 'image_id' entry."
+                )
+            if self.tok_embeddings is not None:
+                batch["vision_bank_indices_T"] = build_vision_bank_indices(
+                    batch["input"],
+                    placeholder_id=special_tokens["image_id"],
+                )
+            batch.pop("special_tokens")
+
+        input_sharding = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(include_cp_axis=True),
+        }
+        input_sharding["vision_bank_indices_T"] = token_id_placement()
+        if parallel_dims.cp_enabled:
+            batch = self._cp_shard_inputs(
+                batch,
+                input_sharding,
+                parallel_dims,
+                parallelism,
+            )
+
         if parallelism.spmd_backend == "spmd_types":
             batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch
+
+    def _cp_shard_inputs(
+        self,
+        batch: dict[str, Any],
+        input_shardings: dict[str, Any],
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> dict[str, Any]:
+        """Prepare KDA routing before delegating physical sharding to MLA.
+
+        KDA consumes routing metadata but does not shard tensors. The MLA
+        backend remains the sole owner of token and attention-mask sharding.
+        """
+        attention_masks = cast(
+            "KimiK3AttentionMaskDict | None", batch.get("attention_masks")
+        )
+        kda_metadata = attention_masks["kda"] if attention_masks is not None else None
+        tokens_T = batch["input"]
+        assert isinstance(tokens_T, torch.Tensor)
+        if kda_metadata is None:
+            cu_seqlens_global = [0, tokens_T.shape[0]]
+        else:
+            assert isinstance(kda_metadata, VarlenMetadata)
+            cu_seqlens_global = kda_metadata.cu_seq_q.tolist()
+        batch[
+            "kda_cp_routing"
+        ] = ContextParallelInnerKDA.build_kda_context_parallel_routing(
+            cu_seqlens_global=cu_seqlens_global,
+            conv_kernel_size=next(iter(self.kda_conv_kernel_sizes)),
+            load_balancer=parallelism.context_parallel_load_balancer,
+            device=tokens_T.device,
+            group=parallel_dims.get_mesh("cp").get_group(),
+        )
+
+        quadratic_attention = (
+            attention_masks["quadratic_attention"]
+            if attention_masks is not None
+            else None
+        )
+        batch["attention_masks"] = quadratic_attention
+        batch = super()._cp_shard_inputs(
+            batch,
+            input_shardings,
+            parallel_dims,
+            parallelism,
+        )
+        batch["attention_masks"] = {
+            "quadratic_attention": batch.get("attention_masks"),
+            "kda": kda_metadata,
+        }
+        return batch
 
     def get_attention_masks(
         self,
@@ -411,7 +523,6 @@ class KimiK3Model(Decoder):
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-        # pyrefly: ignore [bad-return]
         return {
             "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
             "kda": kda_metadata,
@@ -424,6 +535,7 @@ class KimiK3Model(Decoder):
         pixel_values: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
+        vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
         if (pixel_values is None) != (grid_thw is None):
@@ -436,8 +548,6 @@ class KimiK3Model(Decoder):
         assert grid_thw is not None
         if self.vision_encoder is None:
             raise ValueError("pixel_values were provided without a vision encoder.")
-        if special_tokens is None:
-            raise ValueError("special_tokens are required for multimodal inputs.")
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
@@ -447,6 +557,14 @@ class KimiK3Model(Decoder):
         num_tokens_per_item = (grid_thw[:, 1] // kernel_h) * (
             grid_thw[:, 2] // kernel_w
         )
+        if vision_bank_indices_T is not None:
+            return gather_vision_embeds(
+                embeddings_TD,
+                vision_bank_VD=vision_embeds,
+                vision_bank_indices_T=vision_bank_indices_T,
+            )
+        if special_tokens is None:
+            raise ValueError("special_tokens are required for multimodal inputs.")
         vision_positions = get_vision_positions(
             tokens,
             num_tokens_per_item,
@@ -469,6 +587,8 @@ class KimiK3Model(Decoder):
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
         attention_masks: KimiK3AttentionMaskDict | None = None,
+        kda_cp_routing: ContextParallelRouting | None = None,
+        vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -479,12 +599,18 @@ class KimiK3Model(Decoder):
                     pixel_values=pixel_values,
                     grid_thw=grid_thw,
                     special_tokens=special_tokens,
+                    vision_bank_indices_T=vision_bank_indices_T,
                 )
         else:
             h_TD = tokens
 
         if spmd.is_type_checking():
-            spmd.assert_type(h_TD, {MeshAxisName.DP: spmd.S(0)})
+            # Vision fusion runs on a DP-local mesh. Restore the token layout
+            # before constructing and propagating the attention residual state.
+            spmd.assert_type(
+                h_TD,
+                dense_activation_placement(tp=spmd.I, cp=spmd.S(0)),
+            )
 
         block_residual_TND = h_TD.unsqueeze(1)[:, :0]
         for layer in self.layers.values():
@@ -493,6 +619,7 @@ class KimiK3Model(Decoder):
                 block_residual_TND,
                 attention_masks,
                 positions,
+                kda_cp_routing,
             )
 
         h_TD = _apply_attention_residual(
