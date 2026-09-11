@@ -226,6 +226,8 @@ class Qwen35TransformerBlock(Module):
         x_TD: torch.Tensor,
         attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         layer_mask = (
             attention_masks[self.attn_mask_key] if attention_masks is not None else None
@@ -239,7 +241,7 @@ class Qwen35TransformerBlock(Module):
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            x_TD = x_TD + self.moe(h_TD)
+            x_TD = x_TD + self.moe(h_TD, padding_mask=padding_mask)
         else:
             x_TD = x_TD + self.feed_forward(h_TD)
         return x_TD
@@ -389,7 +391,7 @@ class Qwen35Model(Decoder):
         )
 
         batch: dict[str, Any] = dict(input_dict)
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
         positions = batch.get("positions")
@@ -604,6 +606,7 @@ class Qwen35Model(Decoder):
         grid_thw_videos: torch.Tensor | None = None,
         attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
+        padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
     ):
         with spmd_local_context("dp"):
@@ -630,7 +633,7 @@ class Qwen35Model(Decoder):
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
         # forward. The per-layer MRoPE dispatches on rank.
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions)
+            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:
