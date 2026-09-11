@@ -27,21 +27,29 @@ This directory contains tests for the torchtitan project, including unit tests a
 Use Fake PG as much as possible on pull requests for fast, broad functional
 coverage. Every enabled test runs before landing: tests compatible with Fake PG
 use one physical GPU, while tests marked `use_real_pg=True` use eight physical
-GPUs. Scheduled and post-merge runs execute the complete suite with Real PG.
+GPUs. The same complete set of tests runs with Real PG after the PR is merged
+into `main`. Scheduled runs also execute the complete suite with Real PG.
 
 #### Cadence
 
-- 1 GPU Fake PG cadence: pull requests on open, update, reopen, or
-  ready-for-review. Reusable workflow callers run Fake PG by default.
-- 8 GPU Real PG cadence: every pull request event above runs tests marked
-  `use_real_pg=True` in separate `required subset - features` and
-  `required subset - models` jobs. Adding the `ciflow/8gpu` pull request label
-  creates a `ciflow/8gpu/*` tag and runs separate `full suite - features` and
-  `full suite - models` jobs with Real PG. Pushes and merges to `main`,
-  six-hour schedules, and manual dispatches also run both full-suite jobs with
-  Real PG. Reusable workflow callers can explicitly request
-  `execution_mode: real_pg`, as the ROCm workflow does.
-- 8 GPU H100 cadence: opt-in pull requests carrying the `ciflow/h100.8` label.
+- 1 GPU Fake PG cadence: ready, non-draft pull requests, whether they target
+  `main` directly or belong to a ghstack stack.
+  - The `.github/labeler.yml` file automatically applies the
+    `ciflow/fake-pg` label, and PyTorch Probot manages a
+    `ciflow/fake-pg/*` tag that points to the PR head SHA. This allows stacked
+    PRs to run Fake PG independently of their base branch. Reusable workflow
+    callers run Fake PG by default.
+  - Tests that cannot run with Fake PG (`use_real_pg=True`) instead fall back
+    to Real PG in the separate `required subset - features` and
+    `required subset - models` jobs.
+- 8 GPU Real PG cadence:
+  - Pushes and merges to `main` run both full-suite jobs with Real PG.
+  - Six-hour schedules and manual dispatches also run both full-suite jobs with
+    Real PG.
+  - Opt-in trigger during the PR stage: adding the `ciflow/real-pg` pull request
+    label creates a `ciflow/real-pg/*` tag and runs separate
+    `full suite - features` and `full suite - models` jobs with Real PG.
+- H100 cadence: opt-in pull requests carrying the `ciflow/h100.8` label.
   The lane always uses Real PG; updates and reopened events rerun it while the
   label remains attached.
 - B200 cadence: opt-in pull requests carrying the `ciflow/b200` label and
@@ -65,7 +73,7 @@ and uses its fixed initialization path.
 
 - A10G cases run on one physical GPU with Fake PG for pull requests and eight
   physical A10Gs with Real PG after merge, on schedule, or when triggered by
-  the `ciflow/8gpu` label. Their golden paths can use `{execution_mode}` to
+  the `ciflow/real-pg` label. Their golden paths can use `{execution_mode}` to
   select the `fake_pg/` or `real_pg/` directory.
   Shared numerical cases use the same configuration in both modes.
 - Fake-PG goldens guard PyTorch FakeProcessGroup's deterministic synthetic
