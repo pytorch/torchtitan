@@ -51,6 +51,17 @@ def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
 MODULE=my_company_configs.experiments CONFIG=llama3_ablation_7 ./run_train.sh
 ```
 
+### Transforming model configs
+
+[Model config transforms](transform/README.md) are one supported way to modify
+a completed model config. They are optional, and users may use their own tools.
+
+### Validation
+
+Keep simple invariants that use one config's fields in its `__post_init__`.
+Keep checks that span config sections in [validation.py](validation.py).
+`Trainer.Config.__post_init__` calls these checks after its local validation.
+
 ### The command-line options are frozen
 
 The set of `--section.option` CLI flags will not grow. New features express their knobs in the config tree instead, so the way to introduce a new feature is by adding a new configuration, not a new CLI flag.

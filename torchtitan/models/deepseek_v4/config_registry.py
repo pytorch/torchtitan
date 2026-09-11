@@ -11,7 +11,10 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
@@ -19,7 +22,9 @@ from . import model_registry
 from .mtp import MTPLoss
 
 
-def deepseek_v4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v4_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -62,7 +67,9 @@ def deepseek_v4_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def deepseek_v4_mtp_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v4_mtp_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len, n_mtp_layers=1)
     return Trainer.Config(
         loss=MTPLoss.Config(

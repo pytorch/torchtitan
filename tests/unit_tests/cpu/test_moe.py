@@ -41,8 +41,10 @@ class _FixedRouter(nn.Module):
         topk_expert_ids_TK = torch.zeros(
             num_tokens, self.top_k, dtype=torch.int64, device=x_TD.device
         )
-        scores_TE = x_TD.new_zeros(num_tokens, self.num_experts)
-        return topk_scores_TK, topk_expert_ids_TK, scores_TE
+        routing_map_TE = torch.zeros(
+            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+        ).scatter_(-1, topk_expert_ids_TK, True)
+        return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 
 
 class TestMoE(unittest.TestCase):
