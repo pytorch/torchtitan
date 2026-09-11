@@ -17,20 +17,22 @@ import torch.distributed as dist
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     CPInnerAttention,
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 
 
 class TestKernelSelection(unittest.TestCase):
     def test_cp_kernel_is_a_flex_kernel(self):
-        self.assertIsInstance(
-            KVAllGatherCPFlexInnerAttention.Config(), FlexInnerAttention.Config
-        )
+        config = KVAllGatherCPFlexInnerAttention.Config()
+        self.assertIsInstance(config, CPInnerAttention.Config)
+        self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_cp_kernel_inherits_flex_fields(self):
         config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
@@ -41,9 +43,7 @@ class TestKernelSelection(unittest.TestCase):
             get_attention_config("allgather_cp_flex")
 
     def test_plain_flex_is_not_a_cp_kernel(self):
-        kernel = get_attention_config("flex")._owner
-        assert kernel is not None
-        self.assertFalse(issubclass(kernel, CPInnerAttention))
+        self.assertNotIsInstance(get_attention_config("flex"), CPInnerAttention.Config)
 
     def test_cp_inner_attention_owns_input_sharding(self):
         batch = {"input": torch.arange(8)}
@@ -226,9 +226,9 @@ class TestAllGatherCollective(unittest.TestCase):
 
 class TestUlysses(unittest.TestCase):
     def test_is_still_a_flex_kernel(self):
-        self.assertIsInstance(
-            UlyssesCPFlexInnerAttention.Config(), FlexInnerAttention.Config
-        )
+        config = UlyssesCPFlexInnerAttention.Config()
+        self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
+        self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_is_not_an_attention_backend(self):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
@@ -280,6 +280,39 @@ class TestUlysses(unittest.TestCase):
         self.assertEqual(2, group.size())
         self.assertEqual(spmd.S(1), src)
         self.assertEqual(spmd.S(0), dst)
+
+
+class TestUlyssesVarlen(unittest.TestCase):
+    def test_is_still_a_varlen_kernel(self):
+        config = UlyssesCPVarlenInnerAttention.Config()
+        self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
+        self.assertIsInstance(config, VarlenInnerAttention.Config)
+
+    def test_uses_shared_input_sharding(self):
+        self.assertIs(
+            UlyssesCPVarlenInnerAttention.cp_shard.__func__,
+            UlyssesCPFlexInnerAttention.cp_shard.__func__,
+        )
+
+    def test_dispatches_to_varlen_inner_attention(self):
+        q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
+        mask = object()
+        kernel = UlyssesCPVarlenInnerAttention(UlyssesCPVarlenInnerAttention.Config())
+
+        with _in_mesh(2), mock.patch.object(
+            spmd,
+            "redistribute",
+            side_effect=lambda x, *_args, **_kwargs: x,
+        ), mock.patch.object(
+            VarlenInnerAttention,
+            "forward",
+            autospec=True,
+            return_value=q,
+        ) as inner_forward:
+            result = kernel.forward(q, k, v, attention_masks=mask)
+
+        inner_forward.assert_called_once_with(kernel, q, k, v, attention_masks=mask)
+        self.assertIs(result, q)
 
 
 if __name__ == "__main__":
