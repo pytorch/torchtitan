@@ -15,7 +15,7 @@ from torch.fx._lazy_graph_module import _make_graph_module
 
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
-    find_fsdp_unshard_outputs,
+    find_fsdp_unshard_outputs_by_param,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     allow_fx_graph_extraction_of_side_effectful_ops,
@@ -46,8 +46,8 @@ class GraphPPFSDPForwardSplit:
         fw_no_fsdp_flat_input_indices (tuple[int, ...]): Flat traced input
             indices for non-parameter inputs still consumed by
             ``fw_no_fsdp_module``.
-        num_fw_unsharded_param_inputs (int): Number of leading
-            ``fw_no_fsdp_module`` inputs supplied by ``unshard_module``.
+        num_fw_param_inputs (int): Number of leading ``fw_no_fsdp_module``
+            inputs supplied by ``unshard_module``.
         fw_no_fsdp_output_names (tuple[str, ...]): ``fw_no_fsdp_module`` output
             names.
     """
@@ -58,7 +58,7 @@ class GraphPPFSDPForwardSplit:
     unshard_output_names: tuple[str, ...]
     fw_no_fsdp_input_names: tuple[str, ...]
     fw_no_fsdp_flat_input_indices: tuple[int, ...]
-    num_fw_unsharded_param_inputs: int
+    num_fw_param_inputs: int
     fw_no_fsdp_output_names: tuple[str, ...]
 
 
@@ -166,9 +166,10 @@ def split_forward_fsdp_collectives(
 
     unshard_outputs: list[object] = []
     found_collective = False
+    outputs_by_param = find_fsdp_unshard_outputs_by_param(param_inputs)
 
     for param_input in param_inputs:
-        param_unshard_outputs = find_fsdp_unshard_outputs(param_input)
+        param_unshard_outputs = outputs_by_param[param_input]
         if not param_unshard_outputs:
             unshard_outputs.append(param_input)
             continue
@@ -192,11 +193,17 @@ def split_forward_fsdp_collectives(
             unshard_output_names=(),
             fw_no_fsdp_input_names=fwd_input_names,
             fw_no_fsdp_flat_input_indices=fwd_flat_input_indices,
-            num_fw_unsharded_param_inputs=0,
+            num_fw_param_inputs=0,
             fw_no_fsdp_output_names=output_names(fw_module),
         )
 
     all_outputs = graph_outputs(graph)
+    passthrough_param_inputs = [
+        param_input
+        for param_input in param_inputs
+        if param_input in all_outputs and param_input not in unshard_outputs
+    ]
+    fw_param_inputs = [*unshard_outputs, *passthrough_param_inputs]
     output_node = graph.find_nodes(op="output")[0]
     graph_output_descs = pytree.arg_tree_leaves(
         output_node.meta.get("desc", [None] * len(all_outputs))
@@ -212,14 +219,14 @@ def split_forward_fsdp_collectives(
         unshard_graph = _extract_graph_with_inputs_outputs(
             graph,
             param_inputs,
-            unshard_outputs,
-            unshard_output_descs,
+            fw_param_inputs,
+            [*unshard_output_descs, *([None] * len(passthrough_param_inputs))],
             "unshard",
             ignore_must_be_in_fw_bw=True,
         )
         fw_no_fsdp_graph = _extract_graph_with_inputs_outputs(
             graph,
-            unshard_outputs + remaining_inputs,
+            fw_param_inputs + remaining_inputs,
             list(all_outputs),
             graph_output_descs,
             "fw_no_fsdp",
@@ -238,7 +245,7 @@ def split_forward_fsdp_collectives(
         unshard_output_names=unshard_output_names,
         fw_no_fsdp_input_names=placeholder_names(fw_no_fsdp_module),
         fw_no_fsdp_flat_input_indices=tuple(remaining_flat_input_indices),
-        num_fw_unsharded_param_inputs=len(unshard_output_names),
+        num_fw_param_inputs=len(unshard_output_names),
         fw_no_fsdp_output_names=output_names(fw_no_fsdp_module),
     )
 

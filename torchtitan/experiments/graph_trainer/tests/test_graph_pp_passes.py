@@ -16,6 +16,7 @@ import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.common_fsdp import FSDPTest
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
@@ -31,6 +32,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_output,
+    find_fsdp_unshard_outputs_by_param,
     find_fsdp_unshard_save_node,
     find_fsdp_unshard_save_nodes,
 )
@@ -47,7 +49,13 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+    selective_activation_remat_pass,
+)
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    FSDP_PARAM_FQNS_META,
+)
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.trainer import Trainer
 
@@ -114,6 +122,7 @@ def _trace_dsv3_moe_block_stage(
                 num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
                 max_context_length=seq_len,
                 steps=1,
+                disable_cuda_graphs=True,
             ),
             parallelism=ParallelismConfig(expert_parallel_degree=2),
             checkpoint=CheckpointManager.Config(initial_load_model_only=False),
@@ -438,6 +447,20 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
         traced_block = _trace_dsv3_moe_block_stage(
             fsdp_mesh=self.parallel_dims.get_mesh("fsdp")
         )
+        all_gathers = traced_block.traced.gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.all_gather_into_tensor.default,
+        )
+        self.assertGreater(len(all_gathers), 0)
+        for all_gather in all_gathers:
+            param_fqns = all_gather.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+            self.assertIsNotNone(param_fqns)
+            self.assertEqual(len(param_fqns), 1)
+            (wait,) = all_gather.users
+            self.assertEqual(
+                wait.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META),
+                param_fqns,
+            )
 
         fw_module, bw_module, meta = partition_joint_graph(
             traced_block.traced,
@@ -541,6 +564,12 @@ def _make_graph_module(graph: fx.Graph) -> fx.GraphModule:
     return gm
 
 
+def _quantize_weight_for_graph_test(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return weight, weight, weight
+
+
 def _make_forward_graph_with_unshard_and_replicated_param() -> fx.GraphModule:
     graph = fx.Graph()
     sharded_param = graph.placeholder("sharded_param")
@@ -588,6 +617,86 @@ def _make_forward_graph_with_unshard_and_replicated_param() -> fx.GraphModule:
         args=(sharded_param_uses, replicated_param),
     )
     out = graph.call_function(torch.ops.aten.add.Tensor, args=(params, x))
+    graph.output((out,))
+    return _make_graph_module(graph)
+
+
+def _make_forward_graph_with_quantized_unshard() -> fx.GraphModule:
+    graph = fx.Graph()
+    sharded_param = graph.placeholder("sharded_param")
+    x = graph.placeholder("x")
+    all_gather = graph.call_function(
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        args=(sharded_param, 1, _FAKE_PG),
+    )
+    wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_gather,),
+    )
+    unsharded_param = graph.call_function(
+        torch.ops.aten.view.default,
+        args=(wait, [4]),
+    )
+    quantized_operands = graph.call_function(
+        _quantize_weight_for_graph_test,
+        args=(unsharded_param,),
+    )
+    qdata = graph.call_function(operator.getitem, args=(quantized_operands, 0))
+    fwd_scale = graph.call_function(operator.getitem, args=(quantized_operands, 1))
+    dgrad_scale = graph.call_function(operator.getitem, args=(quantized_operands, 2))
+    operands = graph.call_function(
+        torch.ops.aten.add.Tensor,
+        args=(qdata, fwd_scale),
+    )
+    operands = graph.call_function(
+        torch.ops.aten.add.Tensor,
+        args=(operands, dgrad_scale),
+    )
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(operands, x))
+    graph.output((out,))
+    return _make_graph_module(graph)
+
+
+def _make_forward_graph_with_annotated_unshard() -> fx.GraphModule:
+    graph = fx.Graph()
+    sharded_param = graph.placeholder("sharded_param")
+    x = graph.placeholder("x")
+    all_gather = graph.call_function(
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        args=(sharded_param, 1, _FAKE_PG),
+    )
+    wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_gather,),
+    )
+    view = graph.call_function(torch.ops.aten.view.default, args=(wait, [4]))
+    unsharded_param = graph.call_function(torch.ops.aten.clone.default, args=(view,))
+    compute = graph.call_function(torch.ops.aten.relu.default, args=(unsharded_param,))
+    backward = graph.call_function(torch.ops.aten.neg.default, args=(unsharded_param,))
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(compute, x))
+    graph.output((out, backward))
+
+    fsdp_meta = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+    for node in (all_gather, wait, view, unsharded_param):
+        node.meta["custom"] = fsdp_meta
+    backward.meta["custom"] = fsdp_meta
+    backward.meta["autograd_backward"] = True
+    return _make_graph_module(graph)
+
+
+def _make_forward_graph_with_direct_unshard() -> fx.GraphModule:
+    graph = fx.Graph()
+    sharded_param = graph.placeholder("sharded_param")
+    x = graph.placeholder("x")
+    all_gather = graph.call_function(
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        args=(sharded_param, 1, _FAKE_PG),
+    )
+    wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_gather,),
+    )
+    out = graph.call_function(torch.ops.aten.add.Tensor, args=(wait, x))
     graph.output((out,))
     return _make_graph_module(graph)
 
@@ -653,6 +762,18 @@ def _make_backward_graph_without_fsdp() -> fx.GraphModule:
 
 
 class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
+    def test_forward_pattern_batch_lookup(self) -> None:
+        gm = _make_forward_graph_with_unshard_and_replicated_param()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param, replicated_param, _ = gm.graph.find_nodes(op="placeholder")
+
+        outputs_by_param = find_fsdp_unshard_outputs_by_param(
+            (sharded_param, replicated_param)
+        )
+
+        self.assertEqual(len(outputs_by_param[sharded_param]), 1)
+        self.assertEqual(outputs_by_param[replicated_param], ())
+
     def test_forward_pattern_matches_reshard_force_save_pattern(self) -> None:
         gm = _make_forward_graph_with_unshard_and_replicated_param()
         deduplicate_fsdp_unshard_chains_pass(gm)
@@ -682,7 +803,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             ("sharded_param", "replicated_param"),
         )
         self.assertEqual(split.unshard_flat_param_indices, (0, 1))
-        self.assertEqual(split.num_fw_unsharded_param_inputs, 2)
+        self.assertEqual(split.num_fw_param_inputs, 2)
         self.assertEqual(split.fw_no_fsdp_flat_input_indices, (2,))
         self.assertIn(
             torch.ops._c10d_functional.all_gather_into_tensor.default,
@@ -691,6 +812,228 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         self.assertIn(torch.ops.aten.cat.default, _call_targets(split.unshard_module))
         self.assertNotIn(
             torch.ops._c10d_functional.all_gather_into_tensor.default,
+            _call_targets(split.fw_no_fsdp_module),
+        )
+
+    def test_forward_split_passes_through_shard_saved_for_backward(self) -> None:
+        gm = _make_forward_graph_with_direct_unshard()
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+        output = gm.graph.find_nodes(op="output")[0]
+        (forward_output,) = output.args[0]
+        output.args = ((forward_output, sharded_param),)
+        gm.graph.lint()
+        gm.recompile()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        split = split_forward_fsdp_collectives(
+            gm,
+            num_params=1,
+            fwd_input_names=("sharded_param", "x"),
+            fwd_flat_input_indices=(0, 1),
+        )
+
+        self.assertIsNotNone(split.unshard_module)
+        if split.unshard_module is None:
+            self.fail("Expected forward FSDP split to extract an unshard graph")
+        self.assertEqual(split.num_fw_param_inputs, 2)
+        self.assertEqual(len(_placeholder_names(split.fw_no_fsdp_module)), 3)
+        unshard_output = split.unshard_module.graph.find_nodes(op="output")[0]
+        self.assertEqual(len(unshard_output.all_input_nodes), 2)
+
+    def test_forward_split_keeps_quantization_in_unshard_chain(self) -> None:
+        gm = _make_forward_graph_with_quantized_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+        unshard_outputs = find_fsdp_unshard_save_nodes(sharded_param)
+
+        self.assertEqual(len(unshard_outputs), 1)
+        self.assertIs(unshard_outputs[0].target, _quantize_weight_for_graph_test)
+
+        split = split_forward_fsdp_collectives(
+            gm,
+            num_params=2,
+            fwd_input_names=("sharded_param", "x"),
+            fwd_flat_input_indices=(0, 2),
+        )
+
+        self.assertIsNotNone(split.unshard_module)
+        if split.unshard_module is None:
+            self.fail("Expected quantized FSDP unshard graph")
+        self.assertIn(
+            _quantize_weight_for_graph_test,
+            _call_targets(split.unshard_module),
+        )
+        self.assertNotIn(
+            _quantize_weight_for_graph_test,
+            _call_targets(split.fw_no_fsdp_module),
+        )
+        self.assertIn(operator.getitem, _call_targets(split.fw_no_fsdp_module))
+        self.assertEqual(split.fw_no_fsdp_flat_input_indices, (2,))
+
+    def test_forward_trace_annotation_stops_before_compute(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+
+        self.assertIs(unshard_output.target, torch.ops.aten.clone.default)
+
+    def test_forward_trace_annotation_includes_multi_input_reconstruction(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        graph = gm.graph
+        sharded_param, reconstruction_input = graph.find_nodes(op="placeholder")
+        (unsharded_param,) = graph.find_nodes(
+            op="call_function", target=torch.ops.aten.clone.default
+        )
+        forward_consumer = next(
+            user
+            for user in unsharded_param.users
+            if not user.meta.get("autograd_backward", False)
+        )
+        with graph.inserting_before(forward_consumer):
+            reconstruction = graph.call_function(
+                torch.ops.aten.mul.Tensor,
+                args=(unsharded_param, reconstruction_input),
+            )
+        reconstruction.meta["custom"] = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+        forward_consumer.replace_input_with(unsharded_param, reconstruction)
+        graph.lint()
+        gm.recompile()
+
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+
+        self.assertIs(unshard_output, reconstruction)
+
+    def test_forward_trace_annotation_ignores_rematerialized_output(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+        unshard_output.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(find_fsdp_unshard_save_nodes(sharded_param), (unshard_output,))
+
+    def test_forward_trace_annotation_ignores_unrelated_placeholder(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param, unrelated = gm.graph.find_nodes(op="placeholder")
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+        unrelated.meta.update(unshard_output.meta)
+
+        self.assertEqual(find_fsdp_unshard_save_nodes(sharded_param), (unshard_output,))
+
+    def test_forward_trace_annotation_rejects_mismatched_parameter(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+        (wait,) = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.wait_tensor.default,
+        )
+        wait.meta["custom"] = {FSDP_PARAM_FQNS_META: ("other.weight",)}
+
+        with self.assertRaisesRegex(ValueError, "trace metadata does not match"):
+            find_fsdp_unshard_save_nodes(sharded_param)
+
+    def test_forward_trace_annotation_rejects_lost_consumer_input(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+        forward_consumer = next(
+            user
+            for user in unshard_output.users
+            if not user.meta.get("autograd_backward", False)
+        )
+        unshard_output.meta.clear()
+        forward_consumer.args = ()
+
+        with self.assertRaisesRegex(ValueError, "lost input path"):
+            find_fsdp_unshard_save_nodes(sharded_param)
+
+    def test_forward_trace_annotation_rejects_lost_boundary(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param = gm.graph.find_nodes(op="placeholder")[0]
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+        unshard_output.meta.clear()
+        for consumer in unshard_output.users:
+            consumer.meta.clear()
+
+        with self.assertRaisesRegex(ValueError, "lost its annotated unshard output"):
+            find_fsdp_unshard_save_nodes(sharded_param)
+
+    def test_forward_trace_annotation_rejects_unrelated_replacement(self) -> None:
+        gm = _make_forward_graph_with_annotated_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        sharded_param, unrelated = gm.graph.find_nodes(op="placeholder")
+        (unshard_output,) = find_fsdp_unshard_save_nodes(sharded_param)
+        unshard_output.meta.clear()
+        unshard_output.replace_all_uses_with(unrelated)
+
+        with self.assertRaisesRegex(ValueError, "no longer depends on parameter"):
+            find_fsdp_unshard_save_nodes(sharded_param)
+
+    def test_forward_split_finds_bucketed_unshard_from_annotation(self) -> None:
+        gm = _make_forward_graph_with_direct_unshard()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        graph = gm.graph
+        sharded_param = graph.find_nodes(op="placeholder")[0]
+        old_all_gather = graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.all_gather_into_tensor.default,
+        )[0]
+        old_wait = graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.wait_tensor.default,
+        )[0]
+
+        with graph.inserting_before(old_all_gather):
+            bucket = graph.call_function(
+                torch.ops.bucketing._pre_bucket_all_gather.default,
+                args=([sharded_param], 1, torch.float32, [0], 0),
+            )
+            shard = graph.call_function(
+                torch.ops.aten.slice.Tensor,
+                args=(bucket, 0, 0, 4),
+            )
+            bucket_all_gather = graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 1, _FAKE_PG),
+                kwargs={"out": bucket},
+            )
+            bucket_wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default,
+                args=(bucket_all_gather,),
+            )
+            replacement = graph.call_function(
+                torch.ops.aten.view.default,
+                args=(bucket_wait, [4]),
+            )
+        old_wait.replace_all_uses_with(replacement)
+        graph.erase_node(old_wait)
+        graph.erase_node(old_all_gather)
+        graph.lint()
+        gm.recompile()
+
+        self.assertEqual(find_fsdp_unshard_save_nodes(sharded_param), (replacement,))
+        split = split_forward_fsdp_collectives(
+            gm,
+            num_params=1,
+            fwd_input_names=("sharded_param", "x"),
+            fwd_flat_input_indices=(0, 1),
+        )
+
+        self.assertIsNotNone(split.unshard_module)
+        if split.unshard_module is None:
+            self.fail("Expected bucketed FSDP unshard graph")
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            _call_targets(split.unshard_module),
+        )
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
             _call_targets(split.fw_no_fsdp_module),
         )
 

@@ -155,7 +155,7 @@ class _StageGraphMeta:
     bw_no_fsdp_output_names: tuple[str, ...] = ()
     reduce_grad_input_names: tuple[str, ...] = ()
     unshard_flat_param_indices: tuple[int, ...] = ()
-    num_fw_unsharded_param_inputs: int = 0
+    num_fw_param_inputs: int = 0
     is_last_stage: bool = False
 
 
@@ -199,21 +199,15 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
     compiled: bool = False
 
     def __post_init__(self) -> None:
-        num_unsharded_inputs = self.meta.num_fw_unsharded_param_inputs
-        if num_unsharded_inputs > self.meta.num_flat_param_values:
-            raise ValueError(
-                "GraphPP forward graph needs more unsharded params than "
-                f"metadata has: {num_unsharded_inputs} > "
-                f"{self.meta.num_flat_param_values}"
-            )
+        num_param_inputs = self.meta.num_fw_param_inputs
         if len(self.meta.fwd_input_names) != (
-            num_unsharded_inputs + len(self.meta.fwd_flat_input_indices)
+            num_param_inputs + len(self.meta.fwd_flat_input_indices)
         ):
             raise ValueError(
-                "GraphPP forward input metadata must be an unsharded-param "
+                "GraphPP forward input metadata must be a parameter-value "
                 "prefix followed by traced flat input indices: "
                 f"names={self.meta.fwd_input_names}, "
-                f"num_unsharded={num_unsharded_inputs}, "
+                f"num_params={num_param_inputs}, "
                 f"flat_indices={self.meta.fwd_flat_input_indices}"
             )
 
@@ -235,9 +229,9 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
 
         ``flat_param_values`` is the live stage parameter list flattened with
         the tracer's subclass rules. The unshard graph consumes only the flat
-        parameters that own an all-gather chain and returns one flat value for
-        every original parameter input. Replicated parameters pass through
-        unchanged so later forward calls can use a uniform parameter prefix.
+        parameters that own an all-gather chain and returns the parameter-derived
+        values consumed by the forward graph. Replicated parameters and raw shards
+        needed by backward rematerialization pass through unchanged.
         """
 
         if (
@@ -264,14 +258,12 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         unsharded_param_values = list(
             _execute_graph_module(self.modules.unshard, unshard_args)
         )
-        if (
-            runtime_validate
-            and len(unsharded_param_values) != self.meta.num_flat_param_values
-        ):
+        expected_num_outputs = self.meta.num_fw_param_inputs
+        if runtime_validate and len(unsharded_param_values) != expected_num_outputs:
             raise ValueError(
-                "GraphPP unshard graph output count must match flat parameter "
-                "count: "
-                f"{len(unsharded_param_values)} != {self.meta.num_flat_param_values}"
+                "GraphPP unshard graph output count must match its forward "
+                "parameter input count: "
+                f"{len(unsharded_param_values)} != {expected_num_outputs}"
             )
         return unsharded_param_values
 
@@ -305,14 +297,19 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
     ) -> list[Any]:
         """Pack the extracted forward graph inputs in placeholder order."""
 
-        num_unsharded_inputs = self.meta.num_fw_unsharded_param_inputs
+        num_param_inputs = self.meta.num_fw_param_inputs
+        expected_num_param_inputs = (
+            self.meta.num_flat_param_values
+            if self.modules.unshard is None
+            else num_param_inputs
+        )
         if (
             runtime_validate
-            and len(unsharded_param_values) != self.meta.num_flat_param_values
+            and len(unsharded_param_values) != expected_num_param_inputs
         ):
             raise ValueError(
-                "GraphPP forward expected one unsharded value per flat param: "
-                f"{len(unsharded_param_values)} != {self.meta.num_flat_param_values}"
+                "GraphPP forward parameter input count mismatch: "
+                f"{len(unsharded_param_values)} != {expected_num_param_inputs}"
             )
 
         flat_user_inputs = self._flat_user_forward_inputs(
@@ -326,24 +323,32 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
             *flat_buffer_values,
             *flat_user_inputs,
         ]
-        # Forward placeholders are a prefix of unsharded parameter values
+        # Forward placeholders are a prefix of parameter-derived values
         # followed by explicit indices into params, buffers, and user inputs.
-        fw_args = list(unsharded_param_values[:num_unsharded_inputs])
-        flat_input_names = self.meta.fwd_input_names[num_unsharded_inputs:]
+        fw_args = list(unsharded_param_values[:num_param_inputs])
+        flat_input_names = self.meta.fwd_input_names[num_param_inputs:]
         for name, flat_index in zip(
             flat_input_names,
             self.meta.fwd_flat_input_indices,
             strict=True,
         ):
+            runtime_flat_index = flat_index
+            if self.modules.unshard is not None:
+                # The traced parameter prefix may contain unused aliases from
+                # parametrized modules. The unshard graph omits those leaves,
+                # shifting every following buffer and user input to the left.
+                runtime_flat_index -= (
+                    self.meta.num_flat_param_values - num_param_inputs
+                )
             if runtime_validate and (
-                flat_index < 0 or flat_index >= len(flat_inputs)
+                runtime_flat_index < 0 or runtime_flat_index >= len(flat_inputs)
             ):
                 raise ValueError(
                     "GraphPP forward placeholder index is out of range: "
-                    f"{name} indexes {flat_index}, but runtime has "
+                    f"{name} indexes {runtime_flat_index}, but runtime has "
                     f"{len(flat_inputs)} flattened inputs"
                 )
-            fw_args.append(flat_inputs[flat_index])
+            fw_args.append(flat_inputs[runtime_flat_index])
         return fw_args
 
     def _split_forward_outputs(
@@ -1126,7 +1131,7 @@ def _build_stage_graphs(
         bw_no_fsdp_output_names=fsdp_bw.bw_no_fsdp_output_names,
         reduce_grad_input_names=fsdp_bw.reduce_grad_input_names,
         unshard_flat_param_indices=fsdp_fw.unshard_flat_param_indices,
-        num_fw_unsharded_param_inputs=fsdp_fw.num_fw_unsharded_param_inputs,
+        num_fw_param_inputs=fsdp_fw.num_fw_param_inputs,
         is_last_stage=stage.is_last,
     )
     stage.graphs = GraphTrainerStageGraphs(
