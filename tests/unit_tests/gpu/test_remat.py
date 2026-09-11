@@ -16,7 +16,11 @@ import torch
 import torch_remat as remat
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
-from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.attention import FlexInnerAttention, GQAttention
+from torchtitan.models.common.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+    UlyssesCPFlexInnerAttention,
+)
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
@@ -389,6 +393,76 @@ class TestRematRegions(unittest.TestCase):
                     ),
                     expected_counts,
                 )
+
+    def test_cp_inner_attention_region_controls_compute_and_communication(self):
+        for inner_attention, num_redistributions_per_forward in (
+            (KVAllGatherCPFlexInnerAttention.Config().build(), 2),
+            (UlyssesCPFlexInnerAttention.Config().build(), 4),
+        ):
+            for save_regions, num_forwards in (
+                ([], 2),
+                (["attention.inner_attention"], 1),
+            ):
+                with self.subTest(
+                    inner_attention=type(inner_attention).__name__,
+                    save_regions=save_regions,
+                ):
+                    torch.manual_seed(42)
+                    baseline = _RematModel(_AttentionBlock())
+                    baseline.layers["0"].attention.inner_attention = deepcopy(
+                        inner_attention
+                    )
+                    remat_model = deepcopy(baseline)
+                    RegionAC.Config(save_regions=save_regions).build().apply(
+                        remat_model
+                    )
+
+                    num_redistributions = 0
+                    num_attention_forwards = 0
+
+                    def redistribute(x, *args, **kwargs):
+                        nonlocal num_redistributions
+                        num_redistributions += 1
+                        return x
+
+                    def inner_attention_forward(self, q, k, v, **kwargs):
+                        nonlocal num_attention_forwards
+                        num_attention_forwards += 1
+                        return q + k + v
+
+                    with (
+                        patch(
+                            "torchtitan.models.common.cp_attention.spmd_mesh_group",
+                            return_value=object(),
+                        ),
+                        patch(
+                            "torchtitan.models.common.cp_attention.spmd.redistribute",
+                            side_effect=redistribute,
+                        ),
+                        patch.object(
+                            FlexInnerAttention,
+                            "forward",
+                            new=inner_attention_forward,
+                        ),
+                    ):
+                        x_TD = torch.randn(3, 4)
+                        expected = _run_forward_backward(baseline, x_TD)
+                        num_redistributions = 0
+                        num_attention_forwards = 0
+                        actual = _run_forward_backward(remat_model, x_TD)
+
+                    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                    for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                        torch.testing.assert_close(
+                            actual_grad, expected_grad, rtol=0, atol=0
+                        )
+
+                    self.assertEqual(num_attention_forwards, num_forwards)
+                    self.assertEqual(
+                        num_redistributions,
+                        num_forwards * num_redistributions_per_forward,
+                    )
 
     def test_feed_forward_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
