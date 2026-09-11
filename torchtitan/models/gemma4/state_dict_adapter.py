@@ -55,15 +55,6 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
             "layers.{}.ple.per_layer_input_gate.weight": "model.language_model.layers.{}.per_layer_input_gate.weight",
             "layers.{}.ple.per_layer_projection.weight": "model.language_model.layers.{}.per_layer_projection.weight",
             "layers.{}.ple.post_per_layer_input_norm.weight": "model.language_model.layers.{}.post_per_layer_input_norm.weight",
-            # Non-MoE MLP
-            "layers.{}.feed_forward.w1.weight": "model.language_model.layers.{}.mlp.gate_proj.weight",
-            "layers.{}.feed_forward.w3.weight": "model.language_model.layers.{}.mlp.up_proj.weight",
-            "layers.{}.feed_forward.w2.weight": "model.language_model.layers.{}.mlp.down_proj.weight",
-            # MoE MLP
-            "layers.{}.moe.routed_experts.inner_experts.w1_EFD": "model.language_model.layers.{}.mlp.experts.{}.gate_proj.weight",
-            "layers.{}.moe.routed_experts.inner_experts.w3_EFD": "model.language_model.layers.{}.mlp.experts.{}.up_proj.weight",
-            "layers.{}.moe.routed_experts.inner_experts.w2_EDF": "model.language_model.layers.{}.mlp.experts.{}.down_proj.weight",
-            "layers.{}.moe.router.gate.weight": "model.language_model.layers.{}.mlp.gate.weight",
             # Layer norms
             "layers.{}.attention_norm.weight": "model.language_model.layers.{}.input_layernorm.weight",
             "layers.{}.post_attention_norm.weight": "model.language_model.layers.{}.post_attention_layernorm.weight",
@@ -90,13 +81,6 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
             "model.language_model.layers.{}.per_layer_input_gate.weight": "layers.{}.ple.per_layer_input_gate.weight",
             "model.language_model.layers.{}.per_layer_projection.weight": "layers.{}.ple.per_layer_projection.weight",
             "model.language_model.layers.{}.post_per_layer_input_norm.weight": "layers.{}.ple.post_per_layer_input_norm.weight",
-            "model.language_model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.language_model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.language_model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            "model.language_model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
-            "model.language_model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
-            "model.language_model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
-            "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.post_attention_norm.weight",
             "model.language_model.layers.{}.pre_feedforward_layernorm.weight": "layers.{}.ffn_norm.weight",
@@ -119,13 +103,6 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.per_layer_input_gate.weight": "layers.{}.ple.per_layer_input_gate.weight",
             "model.layers.{}.per_layer_projection.weight": "layers.{}.ple.per_layer_projection.weight",
             "model.layers.{}.post_per_layer_input_norm.weight": "layers.{}.ple.post_per_layer_input_norm.weight",
-            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
-            "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.post_attention_norm.weight",
             "model.layers.{}.pre_feedforward_layernorm.weight": "layers.{}.ffn_norm.weight",
@@ -136,6 +113,47 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "lm_head.weight",
         }
 
+        # Dynamically populate MLP and MoE mappings per-layer based on the config
+        for i, layer in enumerate(self.model_config.layers):
+            if getattr(layer, "moe", None) is not None:
+                # Routed Experts (Gemma-4 HF stores them as stacked tensors gate_up_proj and down_proj)
+                self.to_hf_map[f"layers.{i}.moe.routed_experts.inner_experts.w1_EFD"] = f"model.language_model.layers.{i}.experts.gate_up_proj"
+                self.to_hf_map[f"layers.{i}.moe.routed_experts.inner_experts.w3_EFD"] = f"model.language_model.layers.{i}.experts.gate_up_proj"
+                self.to_hf_map[f"layers.{i}.moe.routed_experts.inner_experts.w2_EDF"] = f"model.language_model.layers.{i}.experts.down_proj"
+                self.to_hf_map[f"layers.{i}.moe.router.gate.weight"] = f"model.language_model.layers.{i}.router.proj.weight"
+                
+                # We handle splitting/concatenating gate_up_proj in from_hf/to_hf custom logic.
+                self.from_hf_map[f"model.language_model.layers.{i}.experts.down_proj"] = f"layers.{i}.moe.routed_experts.inner_experts.w2_EDF"
+                self.from_hf_map[f"model.layers.{i}.experts.down_proj"] = f"layers.{i}.moe.routed_experts.inner_experts.w2_EDF"
+                self.from_hf_map[f"model.language_model.layers.{i}.experts.gate_up_proj"] = f"layers.{i}.moe.routed_experts.inner_experts.gate_up_proj"
+                self.from_hf_map[f"model.layers.{i}.experts.gate_up_proj"] = f"layers.{i}.moe.routed_experts.inner_experts.gate_up_proj"
+                self.from_hf_map[f"model.language_model.layers.{i}.router.proj.weight"] = f"layers.{i}.moe.router.gate.weight"
+                self.from_hf_map[f"model.layers.{i}.router.proj.weight"] = f"layers.{i}.moe.router.gate.weight"
+                
+                # Shared Experts (Dense MLP)
+                if layer.moe.shared_experts is not None:
+                    self.to_hf_map[f"layers.{i}.moe.shared_experts.w1.weight"] = f"model.language_model.layers.{i}.mlp.gate_proj.weight"
+                    self.to_hf_map[f"layers.{i}.moe.shared_experts.w3.weight"] = f"model.language_model.layers.{i}.mlp.up_proj.weight"
+                    self.to_hf_map[f"layers.{i}.moe.shared_experts.w2.weight"] = f"model.language_model.layers.{i}.mlp.down_proj.weight"
+                    self.from_hf_map[f"model.language_model.layers.{i}.mlp.gate_proj.weight"] = f"layers.{i}.moe.shared_experts.w1.weight"
+                    self.from_hf_map[f"model.language_model.layers.{i}.mlp.up_proj.weight"] = f"layers.{i}.moe.shared_experts.w3.weight"
+                    self.from_hf_map[f"model.language_model.layers.{i}.mlp.down_proj.weight"] = f"layers.{i}.moe.shared_experts.w2.weight"
+                    self.from_hf_map[f"model.layers.{i}.mlp.gate_proj.weight"] = f"layers.{i}.moe.shared_experts.w1.weight"
+                    self.from_hf_map[f"model.layers.{i}.mlp.up_proj.weight"] = f"layers.{i}.moe.shared_experts.w3.weight"
+                    self.from_hf_map[f"model.layers.{i}.mlp.down_proj.weight"] = f"layers.{i}.moe.shared_experts.w2.weight"
+
+            elif getattr(layer, "feed_forward", None) is not None:
+                # Regular Dense MLP
+                self.to_hf_map[f"layers.{i}.feed_forward.w1.weight"] = f"model.language_model.layers.{i}.mlp.gate_proj.weight"
+                self.to_hf_map[f"layers.{i}.feed_forward.w3.weight"] = f"model.language_model.layers.{i}.mlp.up_proj.weight"
+                self.to_hf_map[f"layers.{i}.feed_forward.w2.weight"] = f"model.language_model.layers.{i}.mlp.down_proj.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.mlp.gate_proj.weight"] = f"layers.{i}.feed_forward.w1.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.mlp.up_proj.weight"] = f"layers.{i}.feed_forward.w3.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.mlp.down_proj.weight"] = f"layers.{i}.feed_forward.w2.weight"
+                self.from_hf_map[f"model.layers.{i}.mlp.gate_proj.weight"] = f"layers.{i}.feed_forward.w1.weight"
+                self.from_hf_map[f"model.layers.{i}.mlp.up_proj.weight"] = f"layers.{i}.feed_forward.w3.weight"
+                self.from_hf_map[f"model.layers.{i}.mlp.down_proj.weight"] = f"layers.{i}.feed_forward.w2.weight"
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert TorchTitan checkpoint to HuggingFace format."""
         hf_state_dict = {}
@@ -143,37 +161,25 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
 
         for key, value in state_dict.items():
             if "moe.routed_experts.inner_experts" in key:
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
+                new_key = to_hf_map.get(key)
+                if new_key is None:
                     continue
-                m = re.search(r"\d+", key)
-                if m is None:
-                    raise ValueError(f"Expected layer index in key '{key}'")
-                layer_num = m.group(0)
-                new_abstract_key = to_hf_map[abstract_key]
-
+                # For Gemma-4 MoE, HF stores experts as stacked tensors, so we don't split by expert_num.
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[abstract_key] = value.placements
-                    self.grouped_expert_weight_shape[abstract_key] = value.shape
-                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
-                    local_expert_fqn = self._get_local_experts_weights(
-                        new_abstract_key,
-                        abstract_key,
-                        layer_num,
-                        value,
-                    )
-                    hf_state_dict.update(local_expert_fqn)
-                else:
-                    moe_layer = next(
-                        l for l in self.model_config.layers if getattr(l, "moe", None) is not None
-                    )
-                    split_values = self._split_experts_weights(
-                        value,
-                        moe_layer.moe.num_experts,
-                    )
-                    for expert_num in range(moe_layer.moe.num_experts):
-                        new_key = new_abstract_key.format(layer_num, expert_num)
-                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
+                    # Gather the tensor
+                    value = value.full_tensor()
+                
+                if "w1_EFD" in key:
+                    # We need to wait for w3 to concatenate them. Store w1 temporarily.
+                    if not hasattr(self, "_temp_w1"):
+                        self._temp_w1 = {}
+                    self._temp_w1[new_key] = value
+                elif "w3_EFD" in key:
+                    w1_val = self._temp_w1.pop(new_key)
+                    # Concatenate w1 and w3 along dim=1 to form gate_up_proj
+                    hf_state_dict[new_key] = torch.cat([w1_val, value], dim=1)
+                elif "w2_EDF" in key:
+                    hf_state_dict[new_key] = value
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
@@ -182,10 +188,14 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                     raise ValueError(f"Expected layer index in key '{key}'")
                 layer_num = m.group(0)
 
-                new_key = to_hf_map.get(abstract_key)
+                new_key = to_hf_map.get(key)
+                if new_key is None:
+                    new_key = to_hf_map.get(abstract_key)
+                    if new_key is not None:
+                        new_key = new_key.format(layer_num)
+                
                 if new_key is None:
                     continue
-                new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
             else:
                 if key == "lm_head.weight" and getattr(self.model_config, "enable_weight_tying", True):
@@ -258,6 +268,31 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                 if stacked_value is not None:
                     state_dict[new_key] = stacked_value
 
+            elif "experts.gate_up_proj" in key:
+                # Custom handling for Gemma-4 MoE routed experts gate_up_proj
+                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                m = re.search(r"\d+", key)
+                if m is None:
+                    continue
+                layer_num = m.group(0)
+                
+                # Split gate_up_proj into w1 and w3
+                # Shape is [num_experts, 2 * hidden_dim, dim]
+                # We need to chunk along dim 1
+                w1_val, w3_val = torch.chunk(value, 2, dim=1)
+                state_dict[f"layers.{layer_num}.moe.routed_experts.inner_experts.w1_EFD"] = w1_val
+                state_dict[f"layers.{layer_num}.moe.routed_experts.inner_experts.w3_EFD"] = w3_val
+                
+                # TorchTitan MoE expects an expert_bias_E buffer. Since HF doesn't have it, we initialize it to zero here.
+                moe_layer = next(
+                    l for l in self.model_config.layers if getattr(l, "moe", None) is not None
+                )
+                if not hasattr(self, "_expert_bias_E_set"):
+                    self._expert_bias_E_set = set()
+                if layer_num not in self._expert_bias_E_set:
+                    state_dict[f"layers.{layer_num}.moe.expert_bias_E"] = torch.zeros(moe_layer.moe.num_experts, dtype=torch.float32)
+                    self._expert_bias_E_set.add(layer_num)
+
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 m = re.search(r"\d+", key)
@@ -265,10 +300,14 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                     raise ValueError(f"Expected layer index in HF key '{key}'")
                 layer_num = m.group(0)
 
-                new_key = self.from_hf_map.get(abstract_key)
+                new_key = self.from_hf_map.get(key)
+                if new_key is None:
+                    new_key = self.from_hf_map.get(abstract_key)
+                    if new_key is not None:
+                        new_key = new_key.format(layer_num)
+                
                 if new_key is None:
                     continue
-                new_key = new_key.format(layer_num)
                 state_dict[new_key] = value
             else:
                 new_key = self.from_hf_map.get(key)

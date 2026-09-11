@@ -142,6 +142,7 @@ def _build_gemma4_layers(
     global_attn_interval: int = 6,
     num_experts: int | None = None,
     top_k: int | None = None,
+    shared_experts_dim: int | None = None,
     ple_dim: int | None = None,
     num_kv_shared_layers: int = 0,
 ) -> list[Gemma4TransformerBlock.Config]:
@@ -266,6 +267,17 @@ def _build_gemma4_layers(
                 comm_backend="standard",
                 hidden_dim=dim,
             )
+            if shared_experts_dim is not None:
+                shared_experts_cfg = _make_gemma4_ffn_config(
+                    dim=dim,
+                    hidden_dim=shared_experts_dim,
+                    w1_param_init=_LINEAR_INIT,
+                    w2w3_param_init=_depth_init(layer_id),
+                    tp_gemm_backend=tp_gemm_backend,
+                )
+            else:
+                shared_experts_cfg = None
+
             moe_cfg = Gemma4MoE.Config(
                 num_experts=num_experts,
                 routed_experts=RoutedExperts.Config(
@@ -288,7 +300,7 @@ def _build_gemma4_layers(
                         param_init=_LINEAR_INIT,
                     ),
                 ),
-                shared_experts=None,
+                shared_experts=shared_experts_cfg,
             )
             ffn_cfg = None
         else:
@@ -335,6 +347,7 @@ def _create_gemma4_config(
     rope_dim: int = 256,
     num_experts: int | None = None,
     top_k: int | None = None,
+    shared_experts_dim: int | None = None,
     ple_dim: int | None = None,
     num_kv_shared_layers: int = 0,
     final_logit_softcapping: float | None = None,
@@ -397,6 +410,7 @@ def _create_gemma4_config(
             global_attn_interval=global_attn_interval,
             num_experts=num_experts,
             top_k=top_k,
+            shared_experts_dim=shared_experts_dim,
             ple_dim=ple_dim,
             num_kv_shared_layers=num_kv_shared_layers,
         ),
@@ -435,8 +449,8 @@ _FLAVOR_SPECS: dict[str, dict[str, Any]] = {
         global_kv_heads=1, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
     ),
     "26b_a4b": dict(
-        dim=2816, n_heads=16, n_kv_heads=8, n_layers=30, hidden_dim=2112,
-        num_experts=16, top_k=4,
+        dim=2816, n_heads=16, n_kv_heads=8, n_layers=30, hidden_dim=704,
+        num_experts=128, top_k=8, shared_experts_dim=2112,
         global_kv_heads=2, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
     ),
     "31b": dict(
