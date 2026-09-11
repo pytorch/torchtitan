@@ -135,13 +135,17 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                 self.from_hf_map[f"model.language_model.layers.{i}.router.per_expert_scale"] = f"layers.{i}.moe.router.per_expert_scale"
                 self.from_hf_map[f"model.layers.{i}.router.per_expert_scale"] = f"layers.{i}.moe.router.per_expert_scale"
                 
-                # Dual Normalization Mappings
+                # MoE Normalization Mappings
+                self.to_hf_map[f"layers.{i}.moe.routed_experts.inner_experts.moe_ffn_norm.weight"] = f"model.language_model.layers.{i}.pre_feedforward_layernorm_2.weight"
+                self.to_hf_map[f"layers.{i}.post_ffn_norm_1.weight"] = f"model.language_model.layers.{i}.post_feedforward_layernorm_1.weight"
+                self.to_hf_map[f"layers.{i}.moe_post_ffn_norm.weight"] = f"model.language_model.layers.{i}.post_feedforward_layernorm_2.weight"
+
                 self.from_hf_map[f"model.language_model.layers.{i}.pre_feedforward_layernorm_2.weight"] = f"layers.{i}.moe.routed_experts.inner_experts.moe_ffn_norm.weight"
                 self.from_hf_map[f"model.layers.{i}.pre_feedforward_layernorm_2.weight"] = f"layers.{i}.moe.routed_experts.inner_experts.moe_ffn_norm.weight"
                 self.from_hf_map[f"model.language_model.layers.{i}.post_feedforward_layernorm_2.weight"] = f"layers.{i}.moe_post_ffn_norm.weight"
                 self.from_hf_map[f"model.layers.{i}.post_feedforward_layernorm_2.weight"] = f"layers.{i}.moe_post_ffn_norm.weight"
-                self.from_hf_map[f"model.language_model.layers.{i}.post_feedforward_layernorm_1.weight"] = f"layers.{i}.post_ffn_norm.weight"
-                self.from_hf_map[f"model.layers.{i}.post_feedforward_layernorm_1.weight"] = f"layers.{i}.post_ffn_norm.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.post_feedforward_layernorm_1.weight"] = f"layers.{i}.post_ffn_norm_1.weight"
+                self.from_hf_map[f"model.layers.{i}.post_feedforward_layernorm_1.weight"] = f"layers.{i}.post_ffn_norm_1.weight"
 
             if getattr(layer, "feed_forward", None) is not None:
                 # Regular Dense MLP (used for both dense models and shared experts in MoE)

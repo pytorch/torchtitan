@@ -290,19 +290,17 @@ class Gemma4TransformerBlock(TransformerBlock):
         use_global_attention: bool = False
         post_attention_norm: RMSNorm.Config
         post_ffn_norm: RMSNorm.Config
+        post_ffn_norm_1: RMSNorm.Config | None = None
+        moe_post_ffn_norm: RMSNorm.Config | None = None
         ple: Gemma4LayerPLE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
         self.use_global_attention = config.use_global_attention
         self.attention = config.attention.build()
-        if config.feed_forward is not None:
-            self.feed_forward = config.feed_forward.build()
-            self.moe = None
-        elif config.moe is not None:
-            self.moe = config.moe.build()
-            self.feed_forward = None
-        else:
+        self.feed_forward = config.feed_forward.build() if config.feed_forward is not None else None
+        self.moe = config.moe.build() if config.moe is not None else None
+        if self.feed_forward is None and self.moe is None:
             raise ValueError(
                 "Either feed_forward or moe must be provided for Gemma4TransformerBlock"
             )
@@ -310,6 +308,8 @@ class Gemma4TransformerBlock(TransformerBlock):
         self.post_attention_norm = config.post_attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.post_ffn_norm = config.post_ffn_norm.build()
+        self.post_ffn_norm_1 = config.post_ffn_norm_1.build() if config.post_ffn_norm_1 is not None else None
+        self.moe_post_ffn_norm = config.moe_post_ffn_norm.build() if config.moe_post_ffn_norm is not None else None
         self.ple = config.ple.build() if config.ple is not None else None
         self.register_buffer("layer_scalar", torch.ones(1))
 
@@ -320,16 +320,15 @@ class Gemma4TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
         layer_ple_input: torch.Tensor | None = None,
         shared_kv_states: dict | None = None,
-    ):
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         layer_mask = attention_masks
         if isinstance(attention_masks, dict):
-            layer_mask = attention_masks[
-                "global" if self.use_global_attention else "sliding_window"
-            ]
+            mask_key = "global" if self.use_global_attention else "sliding_window"
+            layer_mask = attention_masks.get(mask_key)
 
         attn_out = self.attention(
             self.attention_norm(x),
@@ -343,12 +342,21 @@ class Gemma4TransformerBlock(TransformerBlock):
             attn_out, stored_kv = attn_out
 
         h = x + self.post_attention_norm(attn_out)
-        mlp_out = (
-            self.moe(self.ffn_norm(h))
-            if self.moe is not None
-            else self.feed_forward(self.ffn_norm(h))
-        )
-        h = h + self.post_ffn_norm(mlp_out)
+        if self.moe is not None:
+            mlp_out = (
+                self.post_ffn_norm_1(self.feed_forward(self.ffn_norm(h)))
+                if self.feed_forward is not None
+                else 0
+            )
+            moe_out = self.moe_post_ffn_norm(self.moe(h))
+            h = h + self.post_ffn_norm(mlp_out + moe_out)
+        else:
+            mlp_out = (
+                self.feed_forward(self.ffn_norm(h))
+                if self.feed_forward is not None
+                else 0
+            )
+            h = h + self.post_ffn_norm(mlp_out)
 
         if self.ple is not None and layer_ple_input is not None:
             h = self.ple(h, layer_ple_input)

@@ -32,7 +32,7 @@ from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
-from .moe import Gemma4GroupedExperts, Gemma4MoE
+from .moe import Gemma4GroupedExperts, Gemma4MoE, Gemma4TokenChoiceTopKRouter
 from .ple import Gemma4LayerPLE, Gemma4PerLayerEmbedding
 from .model import (
     Gemma4Attention,
@@ -280,16 +280,19 @@ def _build_gemma4_layers(
 
             moe_cfg = Gemma4MoE.Config(
                 num_experts=num_experts,
+                load_balance_coeff=None,
                 routed_experts=RoutedExperts.Config(
                     inner_experts=Gemma4GroupedExperts.Config(
                         dim=dim,
                         hidden_dim=layer_hidden_dim,
                         num_experts=num_experts,
+                        moe_ffn_norm=norm_cfg,
                     ),
                     token_dispatcher=token_dispatcher,
                 ),
-                router=TokenChoiceTopKRouter.Config(
+                router=Gemma4TokenChoiceTopKRouter.Config(
                     num_experts=num_experts,
+                    dim=dim,
                     top_k=top_k or 4,
                     score_func="softmax",
                     route_norm=True,
@@ -300,9 +303,9 @@ def _build_gemma4_layers(
                         param_init=_LINEAR_INIT,
                     ),
                 ),
-                shared_experts=shared_experts_cfg,
+                shared_experts=None,
             )
-            ffn_cfg = None
+            ffn_cfg = shared_experts_cfg
         else:
             moe_cfg = None
             ffn_cfg = _make_gemma4_ffn_config(
@@ -320,6 +323,8 @@ def _build_gemma4_layers(
                 post_attention_norm=norm_cfg,
                 ffn_norm=norm_cfg,
                 post_ffn_norm=norm_cfg,
+                post_ffn_norm_1=norm_cfg if moe_cfg is not None else None,
+                moe_post_ffn_norm=norm_cfg if moe_cfg is not None else None,
                 attention=attention_cfg,
                 feed_forward=ffn_cfg,
                 moe=moe_cfg,
