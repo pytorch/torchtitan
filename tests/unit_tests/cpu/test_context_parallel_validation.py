@@ -196,11 +196,13 @@ class TestGptOssUlysses(unittest.TestCase):
 
         from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
 
-        inner_attention_module = inner_attention(inner_attention.Config())
-
         with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
             parallelize_gptoss(
-                SimpleNamespace(modules=lambda: [inner_attention_module]),
+                SimpleNamespace(
+                    config=SimpleNamespace(
+                        first_full_attention_backend=inner_attention.Config()
+                    )
+                ),
                 parallel_dims=SimpleNamespace(cp_enabled=True),
                 training=None,
                 parallelism=None,

@@ -67,8 +67,9 @@ def parallelize_gptoss(
     skip_dp: bool = False,
 ):
     # TODO(fegin): Shard per-head sinks over CP to support Ulysses.
-    if parallel_dims.cp_enabled and any(
-        isinstance(module, UlyssesCPInnerAttention) for module in model.modules()
+    if parallel_dims.cp_enabled and isinstance(
+        model.config.first_full_attention_backend,
+        UlyssesCPInnerAttention.Config,
     ):
         raise NotImplementedError(
             "GPT-OSS does not support Ulysses CP because its per-head sinks "

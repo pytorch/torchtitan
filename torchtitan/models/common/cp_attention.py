@@ -17,7 +17,7 @@ import spmd_types as spmd
 
 import torch
 
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
@@ -41,6 +41,10 @@ _HEAD_DIM = 1
 class CPInnerAttention(ABC):
     """Inner attention that owns its context-parallel behavior."""
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
     @classmethod
     @abstractmethod
     def cp_shard(
@@ -58,7 +62,7 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
+    class Config(CPInnerAttention.Config, FlexInnerAttention.Config):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
         """Dtype of the backward reduce-scatter."""
 
@@ -114,6 +118,10 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
 
 class UlyssesCPInnerAttention(CPInnerAttention):
     """Move CP sharding between the token and head dimensions."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(CPInnerAttention.Config):
+        pass
 
     @classmethod
     def cp_shard(
@@ -178,7 +186,7 @@ class UlyssesCPFlexInnerAttention(UlyssesCPInnerAttention, FlexInnerAttention):
     """FlexInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
+    class Config(UlyssesCPInnerAttention.Config, FlexInnerAttention.Config):
         pass
 
 
@@ -186,5 +194,5 @@ class UlyssesCPVarlenInnerAttention(UlyssesCPInnerAttention, VarlenInnerAttentio
     """VarlenInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(VarlenInnerAttention.Config):
+    class Config(UlyssesCPInnerAttention.Config, VarlenInnerAttention.Config):
         pass

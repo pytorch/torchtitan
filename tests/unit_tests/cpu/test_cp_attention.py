@@ -23,15 +23,16 @@ from torchtitan.models.common.cp_attention import (
     CPInnerAttention,
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
 
 
 class TestKernelSelection(unittest.TestCase):
     def test_cp_kernel_is_a_flex_kernel(self):
-        self.assertIsInstance(
-            KVAllGatherCPFlexInnerAttention.Config(), FlexInnerAttention.Config
-        )
+        config = KVAllGatherCPFlexInnerAttention.Config()
+        self.assertIsInstance(config, CPInnerAttention.Config)
+        self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_cp_kernel_inherits_flex_fields(self):
         config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
@@ -42,9 +43,7 @@ class TestKernelSelection(unittest.TestCase):
             get_attention_config("allgather_cp_flex")
 
     def test_plain_flex_is_not_a_cp_kernel(self):
-        kernel = get_attention_config("flex")._owner
-        assert kernel is not None
-        self.assertFalse(issubclass(kernel, CPInnerAttention))
+        self.assertNotIsInstance(get_attention_config("flex"), CPInnerAttention.Config)
 
     def test_cp_inner_attention_owns_input_sharding(self):
         batch = {"input": torch.arange(8)}
@@ -227,9 +226,9 @@ class TestAllGatherCollective(unittest.TestCase):
 
 class TestUlysses(unittest.TestCase):
     def test_is_still_a_flex_kernel(self):
-        self.assertIsInstance(
-            UlyssesCPFlexInnerAttention.Config(), FlexInnerAttention.Config
-        )
+        config = UlyssesCPFlexInnerAttention.Config()
+        self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
+        self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_is_not_an_attention_backend(self):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
@@ -285,9 +284,9 @@ class TestUlysses(unittest.TestCase):
 
 class TestUlyssesVarlen(unittest.TestCase):
     def test_is_still_a_varlen_kernel(self):
-        self.assertIsInstance(
-            UlyssesCPVarlenInnerAttention.Config(), VarlenInnerAttention.Config
-        )
+        config = UlyssesCPVarlenInnerAttention.Config()
+        self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
+        self.assertIsInstance(config, VarlenInnerAttention.Config)
 
     def test_uses_shared_input_sharding(self):
         self.assertIs(
