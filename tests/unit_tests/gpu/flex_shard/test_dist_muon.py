@@ -28,6 +28,7 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     build_dist_muon,
     ComputeLayout,
+    MatrixBatchLayout,
     Owned,
 )
 from torchtitan.distributed.flex_shard.dist_muon import (
@@ -48,6 +49,256 @@ class TestDistMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_fused_gate_and_qkv_match_independent_matrix_updates(self):
+        lr = 0.03
+        matrix_columns = 4
+        gate_rows = 3
+        head_dim = 3
+        num_fused_heads = 5
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+
+        gate_up_value = (
+            torch.arange(2 * gate_rows * matrix_columns, device=device)
+            .reshape(2 * gate_rows, matrix_columns)
+            .float()
+            .div_(11)
+        )
+        qkv_value = (
+            torch.arange(
+                num_fused_heads * head_dim * matrix_columns,
+                device=device,
+            )
+            .reshape(num_fused_heads * head_dim, matrix_columns)
+            .float()
+            .div_(13)
+        )
+
+        def distributed_parameter(value: torch.Tensor) -> torch.nn.Parameter:
+            return torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, (Shard(0),))
+            )
+
+        gate_up = distributed_parameter(gate_up_value)
+        qkv = distributed_parameter(qkv_value)
+        gate_up_fqn = "layers.0.feed_forward.w13.weight"
+        qkv_fqn = "layers.0.attention.wqkv.weight"
+        optimizer = build_dist_muon(
+            [
+                {
+                    "params": [gate_up, qkv],
+                    "param_names": [gate_up_fqn, qkv_fqn],
+                }
+            ],
+            compute_sharding_by_fqn={
+                gate_up_fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Owned()},
+                    matrix_batch=MatrixBatchLayout(
+                        matrix_rows=gate_rows,
+                        num_interleaved_matrices=2,
+                    ),
+                ),
+                qkv_fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(
+                            dim=0,
+                            block_size=head_dim,
+                        )
+                    },
+                ),
+            },
+            bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
+            lr=lr,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+        )
+
+        gate_up_grad = gate_up_value.sin()
+        qkv_grad = qkv_value.cos()
+        gate_up.grad = distribute_tensor(gate_up_grad.clone(), mesh, (Shard(0),))
+        qkv.grad = distribute_tensor(qkv_grad.clone(), mesh, (Shard(0),))
+
+        gate_up_matrices = gate_up_value.view(gate_rows, 2, matrix_columns).permute(
+            1, 0, 2
+        )
+        gate_up_grad_matrices = gate_up_grad.view(gate_rows, 2, matrix_columns).permute(
+            1, 0, 2
+        )
+        reference_gate_up = [
+            torch.nn.Parameter(matrix.clone()) for matrix in gate_up_matrices
+        ]
+        reference_qkv = [
+            torch.nn.Parameter(matrix.clone())
+            for matrix in qkv_value.view(num_fused_heads, head_dim, matrix_columns)
+        ]
+        for parameter, grad in zip(
+            reference_gate_up,
+            gate_up_grad_matrices,
+            strict=True,
+        ):
+            parameter.grad = grad.clone()
+        for parameter, grad in zip(
+            reference_qkv,
+            qkv_grad.view(num_fused_heads, head_dim, matrix_columns),
+            strict=True,
+        ):
+            parameter.grad = grad.clone()
+        reference_optimizer = torch.optim.Muon(
+            [*reference_gate_up, *reference_qkv],
+            lr=lr,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+        )
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        expected_gate_up = torch.stack(
+            [parameter.detach() for parameter in reference_gate_up],
+            dim=1,
+        ).reshape_as(gate_up_value)
+        expected_qkv = torch.cat([parameter.detach() for parameter in reference_qkv])
+        expected_gate_up_local = distribute_tensor(
+            expected_gate_up,
+            mesh,
+            (Shard(0),),
+        ).to_local()
+        expected_qkv_local = distribute_tensor(
+            expected_qkv,
+            mesh,
+            (Shard(0),),
+        ).to_local()
+        torch.testing.assert_close(
+            gate_up.to_local(), expected_gate_up_local, rtol=0, atol=1e-3
+        )
+        torch.testing.assert_close(
+            qkv.to_local(), expected_qkv_local, rtol=0, atol=1e-3
+        )
+
+    @with_comms
+    def test_concatenated_gate_and_up_match_independent_matrix_updates(self):
+        lr = 0.03
+        matrix_rows = 3
+        matrix_columns = 4
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = (
+            torch.arange(2 * matrix_rows * matrix_columns, device=device)
+            .reshape(2 * matrix_rows, matrix_columns)
+            .float()
+            .div_(11)
+        )
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Shard(0),))
+        )
+        fqn = "layers.0.feed_forward.w13.weight"
+        optimizer = build_dist_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(
+                            dim=0,
+                            block_size=matrix_rows,
+                        )
+                    },
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            lr=lr,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+        )
+
+        grad = value.sin()
+        parameter.grad = distribute_tensor(grad.clone(), mesh, (Shard(0),))
+        reference_parameters = [
+            torch.nn.Parameter(matrix.clone())
+            for matrix in value.view(2, matrix_rows, matrix_columns)
+        ]
+        for reference_parameter, reference_grad in zip(
+            reference_parameters,
+            grad.view(2, matrix_rows, matrix_columns),
+            strict=True,
+        ):
+            reference_parameter.grad = reference_grad.clone()
+        reference_optimizer = torch.optim.Muon(
+            reference_parameters,
+            lr=lr,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+        )
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        expected = torch.cat(
+            [
+                reference_parameter.detach()
+                for reference_parameter in reference_parameters
+            ]
+        )
+        expected_local = distribute_tensor(
+            expected,
+            mesh,
+            (Shard(0),),
+        ).to_local()
+        torch.testing.assert_close(
+            parameter.to_local(), expected_local, rtol=0, atol=1e-3
+        )
+
+    @with_comms
+    def test_owned_matrix_batch_rejects_nonreplicated_other_axis(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, self.world_size),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
+        value = torch.arange(
+            32,
+            device=torch.device(self.device_type, self.rank),
+            dtype=torch.float32,
+        ).reshape(8, 4)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value, mesh, (Shard(0), Shard(1)))
+        )
+        fqn = "layers.0.feed_forward.w13.weight"
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "every other storage mesh axis to be replicated",
+        ):
+            build_dist_muon(
+                [{"params": [parameter], "param_names": [fqn]}],
+                compute_sharding_by_fqn={
+                    fqn: ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Owned()},
+                        matrix_batch=MatrixBatchLayout(
+                            matrix_rows=4,
+                            num_interleaved_matrices=2,
+                        ),
+                    )
+                },
+                bucket_configs=[BucketConfig(patterns=(fqn,))],
+            )
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
