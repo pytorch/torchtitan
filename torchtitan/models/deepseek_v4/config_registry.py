@@ -702,3 +702,19 @@ def deepseek_v4_flash_8k_ep16_blk32_no_ac(
     config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
     config.model_spec.ac = None
     return config
+
+
+def deepseek_v4_flash_8k_ep16_blk16(seq_len: int | None = 8192) -> Trainer.Config:
+    """F21. Composed base with block_size 16 instead of 32.
+
+    128 -> 32 was +15.8 % on its own and composed cleanly with EP=16. This asks
+    whether the DSA mask granularity has further to give or has bottomed out.
+    Finer blocks cut wasted score area but raise mask overhead and shrink the
+    GEMM tiles, so a reversal here is the expected way for the lever to end.
+    """
+    config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 16
+    return config
