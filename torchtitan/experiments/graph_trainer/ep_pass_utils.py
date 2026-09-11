@@ -324,9 +324,14 @@ def chunk_symbol_hints_for_mode(
 
 
 def _placeholder_symbol_hints(gm: fx.GraphModule) -> dict[object, int]:
+    chunk_symbols = chunk_symbol_hints_for_mode(gm).keys()
     hints: dict[object, int] = {}
     for node in gm.graph.nodes:
         if node.op != "placeholder" or (val := tensor_meta(node)) is None:
+            continue
+        # Keep all dimension hints of chunk inputs, but exclude independent
+        # metadata inputs whose runtime size queries must remain dynamic.
+        if not any(free_symbols(extent) & chunk_symbols for extent in val.shape):
             continue
         for dim, extent in enumerate(val.shape):
             _record_symbols_from_extent(

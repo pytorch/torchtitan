@@ -16,11 +16,10 @@ from typing import Any, Literal, TYPE_CHECKING
 import spmd_types as spmd
 
 import torch
-import torch.distributed as dist
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attention import FlexInnerAttention
 
@@ -33,7 +32,7 @@ __all__ = [
     "UlyssesCPFlexInnerAttention",
 ]
 
-_SEQ_DIM = 0
+_TOKEN_DIM = 0
 _HEAD_DIM = 1
 
 
@@ -93,12 +92,16 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP attention requires an active multi-rank CP mesh axis."
+            )
         k_THK, v_THV = (
             spmd.redistribute(
                 x,
                 cp_group,
-                src=spmd.S(_SEQ_DIM),
+                src=spmd.S(_TOKEN_DIM),
                 dst=spmd.R,
                 backward_options={"op_dtype": self.reduce_dtype},
             )
@@ -139,18 +142,6 @@ class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
             input_dict["attention_masks"] = attention_masks
         return input_dict
 
-    @staticmethod
-    def _reshard(
-        x: torch.Tensor, cp_group: dist.ProcessGroup, *, src: int, dst: int
-    ) -> torch.Tensor:
-        """Move the CP sharding of ``x`` from tensor dim ``src`` to ``dst``."""
-        return spmd.redistribute(
-            x.contiguous(),
-            cp_group,
-            src=spmd.S(src),
-            dst=spmd.S(dst),
-        )
-
     def forward(
         self,
         q_THK: torch.Tensor,
@@ -158,12 +149,26 @@ class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP attention requires an active multi-rank CP mesh axis."
+            )
         # Shard heads instead of tokens: (T/cp, H, *) -> (T, H/cp, *).
         q_THK, k_THK, v_THV = (
-            self._reshard(x, cp_group, src=_SEQ_DIM, dst=_HEAD_DIM)
+            spmd.redistribute(
+                x,
+                cp_group,
+                src=spmd.S(_TOKEN_DIM),
+                dst=spmd.S(_HEAD_DIM),
+            )
             for x in (q_THK, k_THK, v_THV)
         )
         out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
-        return self._reshard(out_THV, cp_group, src=_HEAD_DIM, dst=_SEQ_DIM)
+        return spmd.redistribute(
+            out_THV,
+            cp_group,
+            src=spmd.S(_HEAD_DIM),
+            dst=spmd.S(_TOKEN_DIM),
+        )

@@ -141,29 +141,30 @@ class GraphTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
+        input_dict: dict[str, Any] | list[dict[str, Any]],
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
                 input_dict=input_dict,
-                labels=labels,
                 global_valid_tokens=global_valid_tokens,
             )
 
         assert isinstance(input_dict, dict)
-        assert isinstance(labels, torch.Tensor)
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
 
         with sl.log_trace_span("preprocess_inputs"):
             inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
-                {**input_dict, "labels": labels},
+                input_dict,
                 parallel_dims=self.parallel_dims,
                 parallelism=self.config.parallelism,
             )
-            self.ntokens_seen += labels.numel()
+            # MTP returns one labels tensor per prediction; index 0 contains
+            # the complete main-model labels used for token accounting.
+            self.ntokens_seen += (
+                labels[0].numel() if isinstance(labels, tuple) else labels.numel()
+            )
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = [
@@ -228,8 +229,8 @@ class GraphTrainer(Trainer):
     def _make_fx_forward_backward_step(
         self,
         model: nn.Module,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor,
         params: list[torch.Tensor],
         extra_kwargs: dict[str, Any],
@@ -330,9 +331,7 @@ class GraphTrainer(Trainer):
                     args, kwargs = prepared
         return args, kwargs
 
-    def train_step(
-        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ):
+    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
             self
         )
