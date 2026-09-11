@@ -130,20 +130,21 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                 self.from_hf_map[f"model.language_model.layers.{i}.router.proj.weight"] = f"layers.{i}.moe.router.gate.weight"
                 self.from_hf_map[f"model.layers.{i}.router.proj.weight"] = f"layers.{i}.moe.router.gate.weight"
                 
-                # Shared Experts (Dense MLP)
-                if layer.moe.shared_experts is not None:
-                    self.to_hf_map[f"layers.{i}.moe.shared_experts.w1.weight"] = f"model.language_model.layers.{i}.mlp.gate_proj.weight"
-                    self.to_hf_map[f"layers.{i}.moe.shared_experts.w3.weight"] = f"model.language_model.layers.{i}.mlp.up_proj.weight"
-                    self.to_hf_map[f"layers.{i}.moe.shared_experts.w2.weight"] = f"model.language_model.layers.{i}.mlp.down_proj.weight"
-                    self.from_hf_map[f"model.language_model.layers.{i}.mlp.gate_proj.weight"] = f"layers.{i}.moe.shared_experts.w1.weight"
-                    self.from_hf_map[f"model.language_model.layers.{i}.mlp.up_proj.weight"] = f"layers.{i}.moe.shared_experts.w3.weight"
-                    self.from_hf_map[f"model.language_model.layers.{i}.mlp.down_proj.weight"] = f"layers.{i}.moe.shared_experts.w2.weight"
-                    self.from_hf_map[f"model.layers.{i}.mlp.gate_proj.weight"] = f"layers.{i}.moe.shared_experts.w1.weight"
-                    self.from_hf_map[f"model.layers.{i}.mlp.up_proj.weight"] = f"layers.{i}.moe.shared_experts.w3.weight"
-                    self.from_hf_map[f"model.layers.{i}.mlp.down_proj.weight"] = f"layers.{i}.moe.shared_experts.w2.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.router.scale"] = f"layers.{i}.moe.router.scale"
+                self.from_hf_map[f"model.layers.{i}.router.scale"] = f"layers.{i}.moe.router.scale"
+                self.from_hf_map[f"model.language_model.layers.{i}.router.per_expert_scale"] = f"layers.{i}.moe.router.per_expert_scale"
+                self.from_hf_map[f"model.layers.{i}.router.per_expert_scale"] = f"layers.{i}.moe.router.per_expert_scale"
+                
+                # Dual Normalization Mappings
+                self.from_hf_map[f"model.language_model.layers.{i}.pre_feedforward_layernorm_2.weight"] = f"layers.{i}.moe.routed_experts.inner_experts.moe_ffn_norm.weight"
+                self.from_hf_map[f"model.layers.{i}.pre_feedforward_layernorm_2.weight"] = f"layers.{i}.moe.routed_experts.inner_experts.moe_ffn_norm.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.post_feedforward_layernorm_2.weight"] = f"layers.{i}.moe_post_ffn_norm.weight"
+                self.from_hf_map[f"model.layers.{i}.post_feedforward_layernorm_2.weight"] = f"layers.{i}.moe_post_ffn_norm.weight"
+                self.from_hf_map[f"model.language_model.layers.{i}.post_feedforward_layernorm_1.weight"] = f"layers.{i}.post_ffn_norm.weight"
+                self.from_hf_map[f"model.layers.{i}.post_feedforward_layernorm_1.weight"] = f"layers.{i}.post_ffn_norm.weight"
 
-            elif getattr(layer, "feed_forward", None) is not None:
-                # Regular Dense MLP
+            if getattr(layer, "feed_forward", None) is not None:
+                # Regular Dense MLP (used for both dense models and shared experts in MoE)
                 self.to_hf_map[f"layers.{i}.feed_forward.w1.weight"] = f"model.language_model.layers.{i}.mlp.gate_proj.weight"
                 self.to_hf_map[f"layers.{i}.feed_forward.w3.weight"] = f"model.language_model.layers.{i}.mlp.up_proj.weight"
                 self.to_hf_map[f"layers.{i}.feed_forward.w2.weight"] = f"model.language_model.layers.{i}.mlp.down_proj.weight"
@@ -282,16 +283,6 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                 w1_val, w3_val = torch.chunk(value, 2, dim=1)
                 state_dict[f"layers.{layer_num}.moe.routed_experts.inner_experts.w1_EFD"] = w1_val
                 state_dict[f"layers.{layer_num}.moe.routed_experts.inner_experts.w3_EFD"] = w3_val
-                
-                # TorchTitan MoE expects an expert_bias_E buffer. Since HF doesn't have it, we initialize it to zero here.
-                moe_layer = next(
-                    l for l in self.model_config.layers if getattr(l, "moe", None) is not None
-                )
-                if not hasattr(self, "_expert_bias_E_set"):
-                    self._expert_bias_E_set = set()
-                if layer_num not in self._expert_bias_E_set:
-                    state_dict[f"layers.{layer_num}.moe.expert_bias_E"] = torch.zeros(moe_layer.moe.num_experts, dtype=torch.float32)
-                    self._expert_bias_E_set.add(layer_num)
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
