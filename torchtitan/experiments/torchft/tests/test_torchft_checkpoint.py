@@ -163,7 +163,9 @@ class TestFTCheckpointManager(unittest.TestCase):
 
         manager.close()
 
-    def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
+    def _manager(
+        self, participating_rank: int, *, cursor_enabled: bool = True
+    ) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
             enable=True,
             async_mode="disabled",
@@ -175,7 +177,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             exclude_from_loading=[],
             initial_load_path=None,
             initial_load_model_only=False,
-            enable_ft_dataloader_checkpoints=True,
+            enable_ft_dataloader_checkpoints=cursor_enabled,
         )
         return TorchFTCheckpointManager(
             config,
@@ -209,6 +211,23 @@ class TestFTCheckpointManager(unittest.TestCase):
             bystander = self._manager(participating_rank=1)
             self.assertIs(False, bystander.save(curr_step=5))
             bystander.close()
+
+    def test_non_owner_skips_save_and_purge_when_cursor_disabled(self):
+        manager = self._manager(participating_rank=1, cursor_enabled=False)
+        self.addCleanup(manager.close)
+        # Enable retention so the base purge conditions allow this rank to purge.
+        manager.keep_latest_k = 2
+
+        with (
+            mock.patch("torch.distributed.get_rank", return_value=0),
+            mock.patch.object(dist_checkpoint, "save") as full_save,
+        ):
+            saved = manager.save(curr_step=1)
+            should_purge = manager._should_purge()
+
+        self.assertIs(saved, False)
+        full_save.assert_not_called()
+        self.assertIs(should_purge, False)
 
     def test_load_restores_ft_checkpoint_before_main_checkpoint(self):
         manager = self._manager(participating_rank=0)

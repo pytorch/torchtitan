@@ -146,19 +146,14 @@ class TorchFTCheckpointManager(CheckpointManager):
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 
-        if not self.enable_ft_dataloader_checkpoints or (
-            self.ft_manager
-            # pyrefly: ignore [missing-attribute]
-            and self.ft_manager.participating_rank() == 0
-        ):
+        if self._is_checkpoint_owner():
             return super()._save(curr_step, last_step)
-        if self.enable_ft_dataloader_checkpoints:
-            assert self.ft_manager is not None
-            logger.info(
-                "Replica %d doesn't save checkpoint.",
-                # pyrefly: ignore [missing-attribute]
-                self.ft_manager.participating_rank(),
-            )
+        assert self.ft_manager is not None
+        logger.info(
+            "Replica %s doesn't save the full checkpoint.",
+            # pyrefly: ignore [missing-attribute]
+            self.ft_manager.participating_rank(),
+        )
         # The per-replica dataloader checkpoint above is a side channel, not the
         # checkpoint this return value describes, so a replica that skipped the
         # full save reports False.
@@ -189,13 +184,15 @@ class TorchFTCheckpointManager(CheckpointManager):
         if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.save_future = None
 
+    def _is_checkpoint_owner(self) -> bool:
+        if self.ft_manager is None:
+            return True
+        # A missing participating rank does not grant checkpoint ownership.
+        # pyrefly: ignore [missing-attribute]
+        return self.ft_manager.participating_rank() == 0
+
     def _should_purge(self) -> bool:
-        if not super()._should_purge():
-            return False
-        if self.enable_ft_dataloader_checkpoints:
-            # pyrefly: ignore [missing-attribute]
-            return bool(self.ft_manager and self.ft_manager.participating_rank() == 0)
-        return True
+        return super()._should_purge() and self._is_checkpoint_owner()
 
     def _ft_folder(self) -> str:
         return filesystem.join(self.folder, f"ft-replicat-{self.ft_replica_id}")
