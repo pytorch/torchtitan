@@ -10,7 +10,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -472,4 +472,58 @@ def deepseek_v4_flash_8k_all(seq_len: int | None = 8192) -> Trainer.Config:
         inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
         if isinstance(inner, FlexAttention.Config):
             inner.block_size = 32
+    return config
+
+
+# --- round 1b: what the no-AC failure and the memory headroom point at -------
+#
+# F1 (no AC) OOMed at step 1 with the GPU at 275.26 of 276.50 GiB. Model memory
+# is 10.66 GiB, so 43 layers at 8192 tokens want **~265 GiB** of activations
+# without checkpointing, against FullAC's ~84 GiB -- roughly 3x, needing
+# ~180 GiB more than exists. FullAC is load-bearing at 8k, so the lever is the
+# middle rung rather than removing it.
+#
+# The 8k reference sits at 95.14 GiB (34.4 %), leaving ~180 GiB. Batch is the
+# most reliable lever found across all three models on this cluster (+58 %
+# cumulative on Kimi, +43 % on Kimi's first three steps alone), and it is still
+# at one microbatch here.
+
+
+def deepseek_v4_flash_8k_sac(seq_len: int | None = 8192) -> Trainer.Config:
+    """F6. SelectiveAC at 8k -- the middle rung between FullAC and none.
+
+    SAC recomputes less than FullAC while storing far less than no AC, so it
+    should land between 95 GiB and the ~265 GiB no-AC wanted. Prior results are
+    genuinely mixed and both are explicable: -10.2 % on Kimi (it cost +28.75
+    GiB there and bought nothing), and -85 % on `pro` -- but every `pro` SAC run
+    sat at or past the ~90 % memory cliff, so that number measured the cliff,
+    not SAC. Here there is room for it to be measured honestly for once.
+    """
+    config = _flash_8k(seq_len)
+    config.activation_checkpoint = SelectiveAC.Config()
+    return config
+
+
+def deepseek_v4_flash_8k_bs2(seq_len: int | None = 8192) -> Trainer.Config:
+    """F7. 2x microbatch (16384 tokens/rank), projected ~134 GiB.
+
+    The 8k reference uses 95.14 GiB for 8192 tokens/rank; the token-dependent
+    part is ~39 GiB (it was 56.14 GiB at 4096), so doubling should land near
+    134 GiB and stay far clear of the retry threshold.
+    """
+    config = _flash_8k(seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    return config
+
+
+def deepseek_v4_flash_8k_bs3(seq_len: int | None = 8192) -> Trainer.Config:
+    """F8. 3x microbatch (24576 tokens/rank), projected ~173 GiB.
+
+    Judge memory at step 6 or later -- peak drifts well past step 2 on this
+    cluster -- and check the log for `CUDA memory allocation retries`: any
+    nonzero count means the run is in the collapse regime whatever the reported
+    peak says.
+    """
+    config = _flash_8k(seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 24576
     return config
