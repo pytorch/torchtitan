@@ -8,6 +8,7 @@
 
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
@@ -61,7 +62,13 @@ def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
