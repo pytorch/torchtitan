@@ -8,12 +8,23 @@
 
 import importlib.util
 import unittest
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
 
 import torch
+from attn_gym.linear.context_parallel import ContextParallelRouting
 
 from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, Sigmoid
-from torchtitan.models.common.attention import create_varlen_metadata_for_document
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.common.attention import (
+    create_varlen_metadata_for_document,
+    KDAAttentionMetadata,
+)
+from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.kimi_k3.cp_kda import (
+    ContextParallelInnerKDA,
+    ContextParallelKDAAttentionMetadata,
+)
 
 _HAS_ATTENTION_GYM_KDA = (
     importlib.util.find_spec("attn_gym") is not None
@@ -57,6 +68,7 @@ def _kda_config() -> KDA.Config:
         output_gate=linear(32, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=128,
+            conv_kernel_size=4,
             kernel=KDAKernel.Config(),
         ),
         output_norm=GatedRMSNorm.Config(
@@ -66,6 +78,76 @@ def _kda_config() -> KDA.Config:
         ),
         output_proj=linear(projection_dim, 32),
     )
+
+
+class TestKDAContextParallelMetadata(unittest.TestCase):
+    def test_fragments_follow_the_explicit_permutation(self):
+        from torchtitan.distributed.context_parallel import get_token_fragments
+
+        permutation = torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]])
+
+        self.assertEqual(
+            get_token_fragments(8, cp_size=2, permutation=permutation),
+            [[(0, 2), (6, 8)], [(2, 6)]],
+        )
+
+    def test_backend_builds_routing_from_global_varlen_metadata(self):
+        varlen = create_varlen_metadata_for_document(torch.tensor([0, 1, 0, 1]))
+        attention_metadata = KDAAttentionMetadata(
+            varlen=varlen,
+            num_conv_history_tokens=3,
+        )
+        group = SimpleNamespace(size=lambda: 2)
+        permutation = torch.tensor([[0, 3, 1, 2]])
+        routing = cast(ContextParallelRouting, object())
+
+        with patch(
+            "torchtitan.models.kimi_k3.cp_kda.ContextParallelRouting.from_fragments",
+            return_value=routing,
+        ) as build_routing, patch(
+            "torchtitan.models.kimi_k3.cp_kda.spmd_mesh_group",
+            return_value=group,
+        ), patch(
+            "torchtitan.models.kimi_k3.cp_kda.dist.get_rank", return_value=0
+        ):
+            kda_metadata = ContextParallelInnerKDA.prepare_cp_metadata(
+                attention_metadata,
+                permutation=permutation,
+            )
+
+        self.assertIs(kda_metadata.cp_routing, routing)
+        build_routing.assert_called_once_with(
+            cu_seqlens_global=[0, 2, 4],
+            fragments=[[(0, 1), (3, 4)], [(1, 3)]],
+            cp_rank=0,
+            device=varlen.cu_seq_q.device,
+            conv_history=3,
+        )
+
+    def test_metadata_annotates_cp_routing_tensors(self):
+        varlen = create_varlen_metadata_for_document(torch.tensor([0, 1, 0, 1]))
+        routing = ContextParallelRouting.from_fragments(
+            cu_seqlens_global=[0, 2, 4],
+            fragments=[[(0, 2)], [(2, 4)]],
+            cp_rank=0,
+            device="cpu",
+            conv_history=3,
+        )
+        metadata = ContextParallelKDAAttentionMetadata(
+            varlen=varlen,
+            num_conv_history_tokens=3,
+            cp_routing=routing,
+        )
+
+        with patch("torchtitan.models.kimi_k3.cp_kda.spmd.assert_type") as annotate:
+            metadata.annotate_spmd_types()
+
+        annotated_tensors = [call.args[0] for call in annotate.call_args_list]
+        for value in vars(routing).values():
+            if isinstance(value, torch.Tensor):
+                self.assertTrue(
+                    any(value is annotated for annotated in annotated_tensors)
+                )
 
 
 @unittest.skipUnless(
@@ -96,10 +178,13 @@ class TestKDA(unittest.TestCase):
             device="cuda",
             dtype=torch.int32,
         )
-        masks = create_varlen_metadata_for_document(positions_T)
+        attention_metadata = KDAAttentionMetadata(
+            varlen=create_varlen_metadata_for_document(positions_T),
+            num_conv_history_tokens=3,
+        )
 
         model = self._make_kda()
-        packed_TD = model(x_TD, masks)
+        packed_TD = model(x_TD, attention_metadata)
         independent_TD = torch.cat(
             [model(document_TD, None) for document_TD in x_TD.split(lengths)]
         )

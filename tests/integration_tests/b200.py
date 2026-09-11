@@ -45,6 +45,18 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=2,
         ),
         IntegrationTestDefinition(
+            configs=[recipes.kimi_k3_debugmodel_mm_allgather_kv_cp2],
+            test_descr="Kimi K3 multimodal K/V all-gather context parallelism",
+            test_name="kimi_k3_mm_allgather_kv_cp",
+            ngpu=2,
+        ),
+        IntegrationTestDefinition(
+            configs=[recipes.kimi_k3_debugmodel_mm_ulysses_cp2],
+            test_descr="Kimi K3 multimodal Ulysses context parallelism",
+            test_name="kimi_k3_mm_ulysses_cp",
+            ngpu=2,
+        ),
+        IntegrationTestDefinition(
             configs=[
                 recipes.deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
                 recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,

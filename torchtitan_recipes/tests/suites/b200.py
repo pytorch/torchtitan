@@ -115,6 +115,61 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     return config
 
 
+def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.attention.kda import InnerKDA
+    from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+    from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
+
+    from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    InnerKDA: ContextParallelInnerKDA,
+                }
+            ),
+        ],
+    )
+
+
+def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.attention.kda import InnerKDA
+    from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+    from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
+
+    from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: UlyssesCPFlexInnerAttention,
+                    InnerKDA: ContextParallelInnerKDA,
+                }
+            ),
+        ],
+    )
+
+
 def _configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     """Apply the common two-GPU Dist-MoE integration-test topology."""
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime

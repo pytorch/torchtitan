@@ -15,6 +15,7 @@ from .activation import (
     UnaryActivationFn,
 )
 from .attention import (
+    AttentionMetadata,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttentionMetadata,
@@ -26,6 +27,7 @@ from .attention import (
     get_sliding_window_mask_mod,
     GQAttention,
     InnerAttention,
+    KDAAttentionMetadata,
     QKVLinear,
     ScaledDotProductInnerAttention,
     SlidingWindowFlexInnerAttention,
@@ -51,6 +53,7 @@ from .norm import GatedRMSNorm
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "AttentionMetadata",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
@@ -77,6 +80,7 @@ __all__ = [
     "GroupedLinear",
     "Identity",
     "InnerAttention",
+    "KDAAttentionMetadata",
     "LayerNorm",
     "Linear",
     "MoE",

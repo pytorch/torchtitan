@@ -35,7 +35,7 @@ from torchtitan.models.kimi_k2_7.sharding import set_moonvit_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
-    from torchtitan.models.kimi_k3.kda import KDA
+    from torchtitan.models.common.attention.kda import KDA
     from torchtitan.models.kimi_k3.model import (
         KimiK3Model,
         KimiK3TransformerBlock,
@@ -53,6 +53,7 @@ def set_kimi_k3_sharding_config(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    cp_enabled: bool,
 ) -> None:
     """Fill ``sharding_config`` on all Kimi K3 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
@@ -65,7 +66,11 @@ def set_kimi_k3_sharding_config(
         _set_multimodal_decoder_boundary_sharding(
             config, layer_input_layout, enable_sp=enable_sp
         )
-        set_moonvit_sharding_config(config.vision_encoder, projector_norm="post_norm")
+        set_moonvit_sharding_config(
+            config.vision_encoder,
+            projector_norm="post_norm",
+            include_cp_axis=cp_enabled,
+        )
     for layer_cfg in config.layers:
         _set_kimi_k3_layer_sharding(
             layer_cfg,
@@ -173,12 +178,19 @@ def _set_kda_sharding(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
     kda_cfg.forget_a.sharding_config = replicate_weight
-    kda_cfg.output_norm.sharding_config = replicate_weight
     kda_cfg.output_proj.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
+    kda_cfg.output_norm.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        in_src_shardings={
+            "x_THV": head_placement,
+            "gate_THV": head_placement,
+        },
+        out_src_shardings=head_placement,
+    )
     for name in ("q_conv", "k_conv", "v_conv"):
         getattr(kda_cfg, name).sharding_config = ShardingConfig(
             state_shardings={"weight": parameter_placement},

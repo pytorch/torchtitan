@@ -44,8 +44,8 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.models.common.activation import SiTUGLU
+from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.kimi_k3 import build_model_config
-from torchtitan.models.kimi_k3.kda import InnerKDA
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor

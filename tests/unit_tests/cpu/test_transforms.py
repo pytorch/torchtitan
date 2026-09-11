@@ -512,6 +512,61 @@ class TestContextParallelTransform(unittest.TestCase):
                 expected_backends,
             )
 
+    def test_transforms_nested_kda_backend(self):
+        from torchtitan.models.common.attention.kda import InnerKDA
+        from torchtitan.models.kimi_k3 import build_model_config
+        from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
+
+        model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                InnerKDA: ContextParallelInnerKDA,
+            }
+        ).transform(model)
+
+        assert model.vision_encoder is not None
+        self.assertIsInstance(
+            model.vision_encoder.block.attn.inner_attention,
+            FlexInnerAttention.Config,
+        )
+        for layer in model.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPFlexInnerAttention.Config,
+                )
+            else:
+                assert layer.delta_attention is not None
+                self.assertIsInstance(
+                    layer.delta_attention.inner_kda,
+                    ContextParallelInnerKDA.Config,
+                )
+
+    def test_transforms_mtp_layers(self):
+        from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+        from torchtitan_recipes.tests.models.deepseek_v3 import (
+            deepseek_v3_debugmodel_mtp,
+        )
+
+        model = deepseek_v3_debugmodel_mtp().model
+        assert isinstance(model, MTPDecoder.Config)
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+            }
+        ).transform(model)
+
+        for layers in (model.layers, model.mtp_layers):
+            self.assertTrue(layers)
+            for layer in layers:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPFlexInnerAttention.Config,
+                )
+
     def test_lora_runs_after_context_parallelism(self):
         transform_cls = getattr(transform_api, "LoRATransform", None)
         self.assertIsNotNone(transform_cls, "LoRATransform is not exported")

@@ -44,7 +44,7 @@ class TestPackedVarlenAttentionMetadata(unittest.TestCase):
         )
 
         with patch(
-            "torchtitan.models.common.attention.spmd.assert_type"
+            "torchtitan.models.common.attention.attention.spmd.assert_type"
         ) as assert_type:
             metadata.annotate_spmd_types()
 
@@ -135,7 +135,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             return q_THK
 
         with patch(
-            "torchtitan.models.common.attention._varlen_attn",
+            "torchtitan.models.common.attention.attention._varlen_attn",
             side_effect=_identity_varlen,
         ):
             out_TD = attention(x_TD, metadata, positions_T)
@@ -185,7 +185,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             return out_THV
 
         with patch(
-            "torchtitan.models.common.attention._varlen_attn",
+            "torchtitan.models.common.attention.attention._varlen_attn",
             side_effect=_varlen_with_lse,
         ):
             out_THV = inner_attention(
@@ -213,7 +213,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             return q_THK
 
         with patch(
-            "torchtitan.models.common.attention._varlen_attn",
+            "torchtitan.models.common.attention.attention._varlen_attn",
             side_effect=_identity_varlen,
         ):
             logits_TV = model(tokens_T, positions_T, metadata)

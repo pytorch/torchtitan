@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
     InnerAttention,
+    KDAAttentionMetadata,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -396,7 +397,8 @@ class Decoder(BaseModel):
         max_context_length: int | None = None,
     ) -> AttentionMetadata:
         attention_metadata: dict[
-            type[InnerAttention], FlexAttentionMetadata | VarlenAttentionMetadata
+            type[InnerAttention],
+            FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata,
         ] = {}
         for layer_config in self.config.layers:
             for _, config, _, _ in layer_config.traverse(InnerAttention.Config):

@@ -49,13 +49,13 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
-
 __all__ = [
     "AttentionMetadata",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
+    "KDAAttentionMetadata",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
@@ -101,6 +101,19 @@ class VarlenAttentionMetadata(NamedTuple):
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
+@dataclass(frozen=True, slots=True)
+class KDAAttentionMetadata:
+    """Per-batch sequence metadata consumed by KDA."""
+
+    varlen: VarlenAttentionMetadata | None
+    num_conv_history_tokens: int
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate sequence offsets."""
+        if self.varlen is not None:
+            self.varlen.annotate_spmd_types()
+
+
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
 def varlen_attn(*args, **kwargs):
     return _varlen_attn(*args, **kwargs)
@@ -121,10 +134,14 @@ def local_head_split(
     head_dim: int,
     *,
     dp_shard_dim: int = 0,
+    cp_shard_dim: int | None = None,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    if cp_shard_dim is not None:
+        input_type["cp"] = spmd.S(cp_shard_dim)
+        output_type["cp"] = spmd.S(cp_shard_dim)
     with spmd.local():
         if spmd.is_type_checking():
             spmd.assert_type(t, input_type)
@@ -146,7 +163,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | None":
+        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default
@@ -160,9 +177,9 @@ class InnerAttention(Module):
         # SimpleFSDP may replace the runtime class; preserve the backend key.
         self.attention_metadata_key: type[InnerAttention] = type(self)
 
-
 AttentionMetadata = Mapping[
-    type[InnerAttention], FlexAttentionMetadata | VarlenAttentionMetadata
+    type[InnerAttention],
+    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata,
 ]
 
 

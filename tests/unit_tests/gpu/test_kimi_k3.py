@@ -11,8 +11,9 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import KDAAttentionMetadata
+from torchtitan.models.common.attention.kda import KDAKernel
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
@@ -147,10 +148,17 @@ class TestKimiK3(unittest.TestCase):
             for layer in model.layers.values()
             if layer.attention is not None
         )
+        kda_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.delta_attention is not None
+        )
         # MLA layers read the BlockMask; KDA layers read document offsets.
         self.assertIsInstance(attention_metadata[full_attention_backend], BlockMask)
+        self.assertIsInstance(attention_metadata[kda_backend], KDAAttentionMetadata)
+        assert attention_metadata[kda_backend].varlen is not None
         torch.testing.assert_close(
-            attention_metadata[InnerKDA].cu_seq_q,
+            attention_metadata[kda_backend].varlen.cu_seq_q,
             torch.tensor([0, 4], dtype=torch.int32),
         )
 
@@ -163,8 +171,15 @@ class TestKimiK3(unittest.TestCase):
         padding_mask = torch.zeros(12, dtype=torch.bool)
         padding_mask[7:] = True
         masks = model._get_attention_metadata(positions, padding_mask=padding_mask)
+        kda_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.delta_attention is not None
+        )
+        assert isinstance(masks[kda_backend], KDAAttentionMetadata)
+        assert masks[kda_backend].varlen is not None
         torch.testing.assert_close(
-            masks[InnerKDA].cu_seq_q,
+            masks[kda_backend].varlen.cu_seq_q,
             torch.tensor([0, 3, 7, 12], dtype=torch.int32),
         )
 
