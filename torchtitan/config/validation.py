@@ -1,0 +1,44 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Validation across configuration components."""
+
+from typing import cast, TYPE_CHECKING
+
+from torchtitan.models.common.attention import BaseAttention
+
+if TYPE_CHECKING:
+    from torchtitan.config import ParallelismConfig
+    from torchtitan.protocols.module import Module
+
+__all__ = ["validate_context_parallel"]
+
+
+def validate_context_parallel(
+    model: "Module.Config", parallelism: "ParallelismConfig"
+) -> None:
+    """Validate that each inner attention matches the CP configuration."""
+    from torchtitan.models.common.cp_attention import CPInnerAttention
+
+    cp_enabled = parallelism.context_parallel_degree > 1
+    for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
+        # traverse returns the base config type.
+        attention = cast(BaseAttention.Config, traversed)
+        owner = attention.inner_attention._owner
+        is_cp_attention = owner is not None and issubclass(owner, CPInnerAttention)
+        if is_cp_attention == cp_enabled:
+            continue
+        if cp_enabled:
+            raise ValueError(
+                f"{fqn}.inner_attention must use CPInnerAttention, such as "
+                "KVAllGatherCPFlexInnerAttention, when the context parallel degree is "
+                "larger than 1. Apply ContextParallelTransform; see an example in "
+                "torchtitan_recipes/muse_glimmer.py."
+            )
+        raise ValueError(
+            f"{fqn}.inner_attention is CPInnerAttention but the context "
+            "parallel degree is 1. Select a non-CP kernel."
+        )

@@ -156,6 +156,18 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
+def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
+    """Return a non-singleton process group from the current SPMD mesh."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        return None
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return None
+    group = mesh.get_group(axis_name)
+    return group if group.size() > 1 else None
+
+
 def spmd_local_context(
     *local_axes: str,
 ) -> contextlib.AbstractContextManager[None]:
