@@ -71,6 +71,7 @@ class TestKernelSelection(unittest.TestCase):
             result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
                 attention_metadata,
                 permutation=permutation,
+                config=KVAllGatherCPFlexInnerAttention.Config(),
             )
 
         assert isinstance(result, dict)
@@ -102,6 +103,7 @@ class TestKernelSelection(unittest.TestCase):
             result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
                 block_mask,
                 permutation=permutation,
+                config=KVAllGatherCPFlexInnerAttention.Config(),
             )
 
         self.assertIs(result, sharded_block_mask)

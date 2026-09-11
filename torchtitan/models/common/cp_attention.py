@@ -97,6 +97,7 @@ class CPInnerAttention(
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
+        config: Configurable.Config,
     ) -> _LocalAttentionMetadataT:
         """Prepare this backend's metadata for rank-local CP execution."""
         raise NotImplementedError
@@ -123,8 +124,10 @@ class KVAllGatherCPFlexInnerAttention(
         attention_metadata: FlexAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
+        config: Configurable.Config,
     ) -> FlexAttentionMetadata:
         """Prepare FlexAttention BlockMasks for rank-local execution."""
+        del config
         if isinstance(attention_metadata, BlockMask):
             return cls._shard_block_mask(
                 attention_metadata,
@@ -318,8 +321,9 @@ class UlyssesCPInnerAttention(
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
+        config: Configurable.Config,
     ) -> _GlobalAttentionMetadataT:
-        del cls, permutation
+        del cls, permutation, config
         return attention_metadata
 
     def forward(

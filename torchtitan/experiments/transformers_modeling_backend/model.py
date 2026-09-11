@@ -1262,6 +1262,7 @@ class HFTransformerModel(BaseModel):
                 ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
                     input_dict["attention_masks"],
                     permutation=permutation,
+                    config=KVAllGatherCPFlexInnerAttention.Config(),
                 )
             input_dict = context_parallel.shard_tensors(
                 input_dict,

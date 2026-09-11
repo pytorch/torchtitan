@@ -178,6 +178,7 @@ def main():
         batch["attention_masks"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
             batch["attention_masks"],
             permutation=permutation,
+            config=KVAllGatherCPFlexInnerAttention.Config(),
         )
         batch = context_parallel.shard_tensors(
             batch,
