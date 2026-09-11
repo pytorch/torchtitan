@@ -8,6 +8,7 @@ import importlib
 import inspect
 import unittest
 from dataclasses import dataclass
+from unittest import mock
 
 import pytest
 
@@ -282,7 +283,11 @@ class TestShippedCpRecipes(unittest.TestCase):
     def test_every_cp_recipe_passes_the_gate(self):
         checked = 0
         for name, fn in self._recipes():
-            config = fn()
+            with mock.patch(
+                "torchtitan.components.quantization.float8.has_cuda_capability",
+                return_value=True,
+            ):
+                config = fn()
             if config.parallelism.context_parallel_degree == 1:
                 continue
             with self.subTest(recipe=name):
