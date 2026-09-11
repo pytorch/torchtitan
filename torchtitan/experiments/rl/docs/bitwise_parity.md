@@ -44,7 +44,7 @@ same accumulation order. Three groups of fixes make that hold.
 - **Flash attention split-k:** FA3 picks `num_splits` from the sequence length,
   changing the partial-sum reduction tree. Forced to `num_splits=1` when
   `is_in_batch_invariant_mode()` is True
-  (`torchtitan/models/common/attention.py`, `VarlenAttention.forward`); FA2 is
+  (`torchtitan/models/common/attention.py`, `VarlenInnerAttention.forward`); FA2 is
   already batch-invariant.
 - **NCCL collectives:** all-reduce may use ring/tree algorithms with varying
   channel counts, reordering the cross-rank reduction. Forced to single-channel
@@ -63,18 +63,18 @@ back to the trainer's ops:
 - **Attention (Varlen / Flex / GPT-OSS):** the generator must run the same
   attention kernel as the trainer for whichever backend the config uses.
   - *Varlen* (Qwen3, the default): the generator runs torchtitan's own
-    `VarlenAttention` through vLLM's `CUSTOM` backend -- the same FA3 varlen
+    `VarlenInnerAttention` through vLLM's `CUSTOM` backend -- the same FA3 varlen
     kernel as the trainer. The shared `num_splits=1` fix above removes the only
     batch-dependent split-k, so the two match bitwise.
   - *Flex* (Qwen3 flex): the generator runs vLLM's `FLEX_ATTENTION` backend.
     `BatchInvariantFlexConverter` (a `ModelConfigConverter` wired in via
     `converters=[BatchInvariantFlexConverter.Config()]`) pins
-    `BLOCK_M = BLOCK_N = 16` and `BACKEND = "TRITON"` on every `FlexAttention`
+    `BLOCK_M = BLOCK_N = 16` and `BACKEND = "TRITON"` on every `FlexInnerAttention`
     layer, so both sides use the same Triton tile size and avoid the
     `flex_decode` kernel.
   - *GPT-OSS* (varlen + per-layer sliding window + attention sinks): the same
     `CUSTOM` varlen path and `num_splits=1` as Varlen, with the sliding-window
-    size baked into each layer's `VarlenAttention` config (identical on both
+    size baked into each layer's `VarlenInnerAttention` config (identical on both
     sides). The attention sinks are a post-softmax rescale
     (`apply_attention_sink_rescale`, `sigmoid(lse - sinks)`); the vLLM wrapper's
     `_inject_attention_sinks` installs that same rescale as the generator

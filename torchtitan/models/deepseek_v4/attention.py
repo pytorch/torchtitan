@@ -11,7 +11,7 @@ import torch
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common.attention import BaseAttention, FlexAttention
+from torchtitan.models.common.attention import BaseAttention, FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -27,7 +27,7 @@ def _assert_spmd_attention_type(tensor, *, tp):
         )
 
 
-class DSV4FlexAttention(FlexAttention):
+class DSV4FlexInnerAttention(FlexInnerAttention):
     """DeepSeek sparse attention core for DeepSeek-V4.
 
     The core attends over the concatenated KV sequence ``[0, L + n_cmp + 1)``,
@@ -59,7 +59,7 @@ class DSV4FlexAttention(FlexAttention):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
+    class Config(FlexInnerAttention.Config):
         window_size: int
         compress_ratio: int
         softmax_scale: float
@@ -134,7 +134,7 @@ class DSV4FlexAttention(FlexAttention):
         selected_indices: torch.Tensor,
         device,
     ) -> BlockMask:
-        """Build a FlexAttention block mask from selected KV indices.
+        """Build a FlexInnerAttention block mask from selected KV indices.
 
         Args:
             bsz: Batch size.
@@ -205,11 +205,11 @@ class DSV4FlexAttention(FlexAttention):
         """Run DSV4 sparse attention over a folded token stream."""
         if attention_masks is not None:
             raise ValueError(
-                "DSV4FlexAttention does not accept attention_masks; "
+                "DSV4FlexInnerAttention does not accept attention_masks; "
                 "the DSA block mask is built internally."
             )
         if attn_sink is None:
-            raise ValueError("DSV4FlexAttention requires attn_sink")
+            raise ValueError("DSV4FlexInnerAttention requires attn_sink")
 
         seqlen, _, head_dim = q.size()
         n_cmp = 0 if cmp_k is None else cmp_k.size(0)
@@ -229,7 +229,7 @@ class DSV4FlexAttention(FlexAttention):
             if self.compress_ratio == 4:
                 if idx_q is None or idx_k is None or idx_w is None:
                     raise ValueError(
-                        "DSV4FlexAttention requires idx_q, idx_k, "
+                        "DSV4FlexInnerAttention requires idx_q, idx_k, "
                         "and idx_w when compress_ratio=4"
                     )
                 cmp_topk = Indexer.select(
@@ -277,9 +277,9 @@ class DSV4FlexAttention(FlexAttention):
             )
 
 
-class SlidingWindowAttention(DSV4FlexAttention):
+class SlidingWindowAttention(DSV4FlexInnerAttention):
     @dataclass(kw_only=True, slots=True)
-    class Config(DSV4FlexAttention.Config):
+    class Config(DSV4FlexInnerAttention.Config):
         pass
 
     def forward(  # pyrefly: ignore[bad-param-name-override]
@@ -298,9 +298,9 @@ class SlidingWindowAttention(DSV4FlexAttention):
         )
 
 
-class HeavilyCompressedAttention(DSV4FlexAttention):
+class HeavilyCompressedAttention(DSV4FlexInnerAttention):
     @dataclass(kw_only=True, slots=True)
-    class Config(DSV4FlexAttention.Config):
+    class Config(DSV4FlexInnerAttention.Config):
         pass
 
     def forward(  # pyrefly: ignore[bad-param-name-override]
@@ -321,9 +321,9 @@ class HeavilyCompressedAttention(DSV4FlexAttention):
         )
 
 
-class CompressedSparseAttention(DSV4FlexAttention):
+class CompressedSparseAttention(DSV4FlexInnerAttention):
     @dataclass(kw_only=True, slots=True)
-    class Config(DSV4FlexAttention.Config):
+    class Config(DSV4FlexInnerAttention.Config):
         pass
 
     def forward(  # pyrefly: ignore[bad-param-name-override]
@@ -355,14 +355,14 @@ class Attention(BaseAttention):
 
     The module projects Q/KV, applies pre- and post-phase RoPE, prepares
     optional compressed/indexer tensors, and delegates sparse attention to
-    ``DSV4FlexAttention``.
+    ``DSV4FlexInnerAttention``.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         dim: int
         n_heads: int
-        inner_attention: DSV4FlexAttention.Config  # pyrefly: ignore [bad-override]
+        inner_attention: DSV4FlexInnerAttention.Config  # pyrefly: ignore [bad-override]
         rope: RoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64

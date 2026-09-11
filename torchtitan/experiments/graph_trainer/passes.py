@@ -156,7 +156,7 @@ def compile_time_passes(
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
 ) -> list[Callable]:
-    """Cleanup, FlexAttention annotation, and regional_inductor passes.
+    """Cleanup, FlexInnerAttention annotation, and regional_inductor passes.
 
     If precompile is enabled, these are applied before serialization so
     that compiled Triton kernels are baked into the artifact. Otherwise
@@ -373,7 +373,7 @@ def final_inductor_compile_passes(
     only depends on compile config; model- and parallelism-aware rewrites stay
     in ``compile_time_passes``.
     """
-    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
 
     passes: list[Callable] = []
     inductor_compilation = compile_config.inductor_compilation
@@ -387,12 +387,12 @@ def final_inductor_compile_passes(
             )
         )
     elif inductor_compilation == "regional":
-        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # FlexInnerAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         passes.append(
             functools.partial(
                 annotate_flex_attention_for_regional_inductor_pass,
-                flex_compile_config=FlexAttention.inductor_configs,
+                flex_compile_config=FlexInnerAttention.inductor_configs,
             )
         )
         if compile_config.numerics_changing_optim:
@@ -426,7 +426,7 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexAttention annotation, regional_inductor, and cudagraph.
+    FlexInnerAttention annotation, regional_inductor, and cudagraph.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.

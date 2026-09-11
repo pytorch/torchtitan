@@ -25,7 +25,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.common.attention import ScaledDotProductAttention
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.tools.logging import logger
 
@@ -51,11 +51,11 @@ def _get_graph_modules(
     return modules
 
 
-class GraphTrainerScaledDotProductAttention(ScaledDotProductAttention):
+class GraphTrainerScaledDotProductInnerAttention(ScaledDotProductInnerAttention):
     """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ScaledDotProductAttention.Config):
+    class Config(ScaledDotProductInnerAttention.Config):
         pass
 
     def forward(
@@ -92,13 +92,13 @@ def build_decoder_config_for_backend(
     cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
     tests, however, use SDPA to exercise *backend-agnostic* graph machinery
     (precompile-artifact serialization, custom codegen, context parallel, bitwise
-    determinism) without FlexAttention's ``BlockMask``, which is unpicklable (its
+    determinism) without FlexInnerAttention's ``BlockMask``, which is unpicklable (its
     ``mask_mod`` closures are Python code objects), is not a tensor (so it breaks
     pipeline-parallel split-backward, which calls ``.requires_grad`` on every stage
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductAttention.Config()``.
+    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
     The adapter adds a singleton batch around the flat graph-trainer inputs and
     delegates to the common batched SDPA implementation. Production code never
     reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
@@ -109,7 +109,9 @@ def build_decoder_config_for_backend(
 
     config = config_builder(attn_backend="flex", **builder_kwargs)
     for layer in config.layers:
-        layer.attention.inner_attention = GraphTrainerScaledDotProductAttention.Config()
+        layer.attention.inner_attention = (
+            GraphTrainerScaledDotProductInnerAttention.Config()
+        )
     return config
 
 
