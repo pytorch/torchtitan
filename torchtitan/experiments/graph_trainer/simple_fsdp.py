@@ -23,8 +23,12 @@ from torch.distributed._tensor import (
     Shard,
 )
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor._dtensor_spec import DTensorSpec
+from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
+from torch.distributed.tensor._utils import (
+    compute_local_shape_and_global_offset,
+    compute_local_stride,
+)
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
 from torchtitan.components.quantization._fsdp_tensor import (
@@ -167,16 +171,20 @@ def _distribute_dtensor(
     # HSDP case needs 2 placements for 2D outer_mesh
     current_placements = (Replicate(),) * len(dp_placements)
     target_placements = tuple(dp_placements)
+    # The outer mesh distributes the TP/EP-local tensor, not the global tensor.
+    local_meta = TensorMeta(
+        tensor._local_tensor.shape, tensor._local_tensor.stride(), tensor.dtype
+    )
 
     current_spec = DTensorSpec(
         mesh=outer_mesh,
         placements=current_placements,
-        tensor_meta=inner_spec.tensor_meta,
+        tensor_meta=local_meta,
     )
     target_spec = DTensorSpec(
         mesh=outer_mesh,
         placements=target_placements,
-        tensor_meta=inner_spec.tensor_meta,
+        tensor_meta=local_meta,
     )
     result_tensor = redistribute_local_tensor(
         tensor._local_tensor,
@@ -303,10 +311,27 @@ class ReplicateComputation(Module):
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
             dp_mesh = self.device_mesh
+            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
+            non_dp_mesh_dim_names = tuple(
+                x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
+            )
+            non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
+            # Recover the TP/EP-local shape from global metadata, including uneven
+            # shards. DP-local sizes alone cannot recover uneven shard lengths.
+            local_shape, _ = compute_local_shape_and_global_offset(
+                x.shape, non_dp_mesh, non_dp_placements, skip_offset=True
+            )
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
+            # Preserve the input's logical dimension order when projecting its
+            # layout onto the TP/EP-local shape.
+            local_stride = compute_local_stride(x.stride(), local_shape)
             sharded_dtensor = DTensor.from_local(
-                sharded_local_tensor, dp_mesh, self.param_sharding
+                sharded_local_tensor,
+                dp_mesh,
+                self.param_sharding,
+                shape=torch.Size(local_shape),
+                stride=local_stride,
             )
 
             # the actual FSDP's fwd all-gather & bwd reduce-scatter
@@ -322,12 +347,6 @@ class ReplicateComputation(Module):
             replicated_local_tensor = replicated_dtensor.to_local(
                 grad_placements=self.grad_placements
             )
-
-            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
-            non_dp_mesh_dim_names = tuple(
-                x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
-            )
-            non_dp_mesh = x._spec.mesh[non_dp_mesh_dim_names]
 
             if self.non_dp_mesh_types is not None:
                 output = replicated_local_tensor
@@ -346,7 +365,11 @@ class ReplicateComputation(Module):
                         )
             else:
                 output = DTensor.from_local(
-                    replicated_local_tensor, non_dp_mesh, non_dp_placements
+                    replicated_local_tensor,
+                    non_dp_mesh,
+                    non_dp_placements,
+                    shape=x.shape,
+                    stride=x.stride(),
                 )
         elif non_dp_mesh_dims == 0:
             output = x.redistribute(
@@ -451,7 +474,8 @@ def data_parallel(
                 mod.register_parameter(
                     p_name,
                     nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
+                        distribute_tensor_func(p, device_mesh, param_sharding),
+                        requires_grad=p.requires_grad,
                     ),
                 )
 
