@@ -19,7 +19,7 @@ import torch
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attention import FlexInnerAttention
 
@@ -90,7 +90,11 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP attention requires an active multi-rank CP mesh axis."
+            )
         k_THK, v_THV = (
             spmd.redistribute(
                 x,

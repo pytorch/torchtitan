@@ -1079,6 +1079,9 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
