@@ -6,14 +6,14 @@
 
 """Model config transforms. See README.md for what belongs here."""
 
-from .apply import apply_transforms, transform_model_config
-from .base import ModelConfigTransform, retype_node
+from .apply import apply_transforms, transform_model_config_
+from .base import convert_config_type, ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 
 __all__ = [
     "ModelConfigTransform",
     "apply_transforms",
-    "transform_model_config",
-    "retype_node",
+    "transform_model_config_",
+    "convert_config_type",
     "ContextParallelTransform",
 ]
