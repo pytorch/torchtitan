@@ -89,6 +89,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    GraphStateSpec,
     minimal_fx_tracer,
     run_traced,
 )
@@ -150,7 +151,10 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 parallelism=SimpleNamespace(),
             )
 
-        traced_result = SimpleNamespace(state_fqns=[])
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         with patch(
             "torchtitan.experiments.graph_trainer.common_utils."
             "get_default_transformer_block_buckets",
@@ -3647,7 +3651,11 @@ class TestChunkPasses(TestCase):
     def _compile_config_for_ep_overlap_test(self):
         from types import SimpleNamespace
 
-        traced_result = SimpleNamespace(num_static_inputs=2, state_fqns=[])
+        traced_result = SimpleNamespace(
+            num_static_inputs=2,
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(

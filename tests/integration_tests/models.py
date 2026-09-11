@@ -7,6 +7,9 @@
 
 import torchtitan_recipes.tests.models as recipes
 
+from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+
 from tests.integration_tests import OverrideDefinitions
 
 
@@ -78,6 +81,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
             ),
+            seed_config=deepseek_v3_debugmodel,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -192,6 +196,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
+            seed_config=gpt_oss_debugmodel_flex,
             use_real_pg=True,
         ),
         OverrideDefinitions(
