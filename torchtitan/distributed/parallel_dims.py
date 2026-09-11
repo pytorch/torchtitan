@@ -80,11 +80,17 @@ class ParallelDims:
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
     _multi_axis_meshes: dict[tuple[str, ...], DeviceMesh] = field(default_factory=dict)
     _world_mesh: DeviceMesh | None = None
+    _pp_mesh_override: DeviceMesh | None = None
 
     @classmethod
     def from_config(
-        cls, parallelism_config: ParallelismConfig, world_size: int
+        cls,
+        parallelism_config: ParallelismConfig,
+        world_size: int,
+        *,
+        pp_mesh_override: DeviceMesh | None = None,
     ) -> ParallelDims:
+        """Construct parallel dimensions with an optional physical PP mesh."""
         return cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             dp_shard=parallelism_config.data_parallel_shard_degree,
@@ -94,6 +100,7 @@ class ParallelDims:
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
             spmd_backend=parallelism_config.spmd_backend,
+            _pp_mesh_override=pp_mesh_override,
         )
 
     def __post_init__(self):
@@ -287,6 +294,13 @@ class ParallelDims:
             "ep": full_sparse_mesh["ep"],
             "efsdp": full_sparse_mesh["efsdp"],
         }
+        if self._pp_mesh_override is not None:
+            if self._pp_mesh_override.size() != self.pp:
+                raise ValueError(
+                    "PP mesh override size must match the configured PP degree: "
+                    f"{self._pp_mesh_override.size()} != {self.pp}."
+                )
+            self._single_axis_meshes["pp"] = self._pp_mesh_override
         if self.spmd_backend == "spmd_types":
             assert spmd_dense_mesh_for_fwdbwd is not None
             self._single_axis_meshes["dp"] = spmd_dense_mesh_for_fwdbwd["dp"]
