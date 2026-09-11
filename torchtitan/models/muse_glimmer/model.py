@@ -297,13 +297,6 @@ class MuseGlimmerModel(Decoder):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layers[0].attention.inner_attention, VarlenAttention.Config
-            ):
-                raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
-                )
             from .sharding import set_muse_glimmer_sharding_config
 
             set_muse_glimmer_sharding_config(
@@ -374,11 +367,6 @@ class MuseGlimmerModel(Decoder):
         max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         from .sharding import vision_bank_indices_placement
 
         batch: dict[str, Any] = dict(input_dict)
@@ -436,12 +424,8 @@ class MuseGlimmerModel(Decoder):
             enable_sp=parallelism.enable_sequence_parallel
         )
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            batch = self._cp_shard_inputs(
+                batch, input_sharding, parallel_dims, parallelism
             )
         if parallelism.spmd_backend == "spmd_types":
             if (

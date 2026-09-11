@@ -40,6 +40,7 @@ __all__ = [
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
+    "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
@@ -156,6 +157,18 @@ def spmd_mesh_size(axis_name: str) -> int:
     if axis_name not in names:
         return 1
     return mesh.size(names.index(axis_name))
+
+
+def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
+    """Return a non-singleton process group from the current SPMD mesh."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        return None
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return None
+    group = mesh.get_group(axis_name)
+    return group if group.size() > 1 else None
 
 
 def spmd_local_context(
