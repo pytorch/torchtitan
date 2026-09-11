@@ -8,7 +8,7 @@
 
 Structurally follows ``torchtitan/models/qwen3_5/vision_encoder.py`` (nested
 ``Config`` dataclasses, ``ModuleDict`` layer stack, shared
-``Linear``/``LayerNorm``/``FlexAttention``), with Muse Glimmer-specific internals:
+``Linear``/``LayerNorm``/``FlexInnerAttention``), with Muse Glimmer-specific internals:
 
 - patches are pre-extracted by a ``Linear`` ``conv1`` (a full-patch-kernel Conv
   expressed as a linear over flattened patches),
@@ -17,7 +17,7 @@ Structurally follows ``torchtitan/models/qwen3_5/vision_encoder.py`` (nested
 - complex 2D RoPE (the same complex backend as the LLM; see
   :meth:`ComplexRoPE.apply_rotary_emb`),
 - per-image block-diagonal attention with an additional sparse-window variant
-  (``sparse_attention_factor``), realized as FlexAttention ``BlockMask``s built
+  (``sparse_attention_factor``), realized as FlexInnerAttention ``BlockMask``s built
   from segment ids (the document-mask pattern),
 - pixel-shuffle spatial downsampling at the output.
 
@@ -505,7 +505,7 @@ class MuseGlimmerVisionEncoder(Module):
         global_slens = _annotate_vision_activation_type(
             torch.tensor(all_global_slens, device=device, dtype=torch.int32)
         )
-        # BlockMask creation and use in FlexAttention are blackboxed from
+        # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
         with spmd.no_typecheck():
             global_mask = create_block_diagonal_mask(
