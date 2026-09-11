@@ -37,6 +37,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_sequence_parallel_placement,
     token_id_placement,
+    token_id_sequence_parallel_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
@@ -268,6 +269,10 @@ class TestSpmdLayout(DTensorTestBase):
             ((MeshAxisName.DP, MeshAxisName.CP),),
         )
         self.assertEqual(
+            token_id_sequence_parallel_placement().partition_spec,
+            ((MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP),),
+        )
+        self.assertEqual(
             dense_activation_placement(tp=spmd.R, cp=spmd.S(0)).partition_spec,
             ((MeshAxisName.DP, MeshAxisName.CP), None),
         )
@@ -450,6 +455,34 @@ class TestSpmdLayout(DTensorTestBase):
 
         self.assertEqual(comm_mode.get_total_counts(), 1)
         self.assertTrue(torch.equal(result, torch.ones(8, 2, device=self.device_type)))
+
+    @with_comms
+    def test_spmd_redistribute_per_axis_shards_token_ids(self):
+        """R@TP token IDs chunk T when moving to the 1D sequence-parallel layout."""
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, 1, 4),
+            mesh_dim_names=("dp", "cp", "tp"),
+        )
+        x = torch.arange(8, device=self.device_type)
+        src = token_id_placement()
+        dst = token_id_sequence_parallel_placement()
+        spmd_validate_redistributions(
+            ShardingConfig(
+                in_src_shardings={"input_ids_T": src},
+                in_dst_shardings={"input_ids_T": dst},
+            )
+        )
+
+        comm_mode = CommDebugMode()
+        with comm_mode:
+            result = spmd_redistribute_per_axis(x, mesh, src, dst)
+
+        # convert(R, S(0)) is a local chunk, not a collective.
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        tp_rank = mesh.get_local_rank("tp")
+        expected = torch.arange(tp_rank * 2, tp_rank * 2 + 2, device=self.device_type)
+        self.assertTrue(torch.equal(result, expected))
 
 
 class TestParallelDimsMeshOperations(unittest.TestCase):

@@ -12,7 +12,7 @@ from typing import ClassVar
 
 from torchtitan.protocols.module import Module
 
-__all__ = ["ModelConfigTransform", "retype_node"]
+__all__ = ["ModelConfigTransform", "convert_config_type"]
 
 
 class ModelConfigTransform(ABC):
@@ -29,33 +29,23 @@ class ModelConfigTransform(ABC):
     def transform(self, model: Module.Config) -> Module.Config:
         """Rewrite ``model`` and return its root.
 
-        Rewrite nodes in place. Return a different config to replace the root
+        Rewrite configs in place. Return a different config to replace the root
         itself, as a transform that wraps the whole model does.
         """
 
 
-def retype_node(
-    existing: Module.Config,
-    replacement: type[Module],
-    **updates: object,
+def convert_config_type(
+    existing: Module.Config, replacement: type[Module]
 ) -> Module.Config:
     """Build ``replacement``'s config from ``existing``, keeping its fields.
 
-    Updates set fields defined by the replacement config. Requiring
-    inheritance preserves wrappers added by earlier transforms.
+    Requiring inheritance preserves wrappers added by earlier transforms.
     """
     if not issubclass(replacement.Config, type(existing)):
         raise ValueError(
             f"{replacement.__qualname__}.Config must inherit "
             f"{type(existing).__qualname__}."
         )
-    replacement_fields = {f.name for f in fields(replacement.Config) if f.init}
-    unknown_fields = updates.keys() - replacement_fields
-    if unknown_fields:
-        names = ", ".join(sorted(unknown_fields))
-        raise ValueError(
-            f"{replacement.__qualname__}.Config has no init field: {names}."
-        )
-    values = {f.name: getattr(existing, f.name) for f in fields(existing)}
-    values.update(updates)
-    return replacement.Config(**values)
+    return replacement.Config(
+        **{f.name: getattr(existing, f.name) for f in fields(existing)}
+    )

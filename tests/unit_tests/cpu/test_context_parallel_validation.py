@@ -190,23 +190,16 @@ class TestUlyssesConfigValidation(unittest.TestCase):
 
 
 class TestGptOssUlysses(unittest.TestCase):
-    def _parallelize(self, config_factory, inner_attention):
+    def _parallelize(self, inner_attention):
         from types import SimpleNamespace
 
         from torchtitan.models.gpt_oss.parallelize import parallelize_gptoss
 
-        config = config_factory()
-        ContextParallelTransform(inner_attention=inner_attention).transform(
-            config.model_spec.model
-        )
-        config.parallelism.spmd_backend = "spmd_types"
-        config.parallelism.context_parallel_degree = 2
-        config.parallelism.context_parallel_load_balancer = None
-        config.__post_init__()
+        inner_attention_module = inner_attention(inner_attention.Config())
 
         with self.assertRaisesRegex(NotImplementedError, "Ulysses CP"):
             parallelize_gptoss(
-                SimpleNamespace(config=config.model_spec.model),
+                SimpleNamespace(modules=lambda: [inner_attention_module]),
                 parallel_dims=SimpleNamespace(cp_enabled=True),
                 training=None,
                 parallelism=None,
@@ -217,15 +210,13 @@ class TestGptOssUlysses(unittest.TestCase):
 
     def test_rejects_flex(self):
         from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
-        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
 
-        self._parallelize(gpt_oss_debugmodel_flex, UlyssesCPFlexInnerAttention)
+        self._parallelize(UlyssesCPFlexInnerAttention)
 
     def test_rejects_varlen(self):
         from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
-        from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel
 
-        self._parallelize(gpt_oss_debugmodel, UlyssesCPVarlenInnerAttention)
+        self._parallelize(UlyssesCPVarlenInnerAttention)
 
 
 class TestHeadDivisibility(unittest.TestCase):
@@ -299,6 +290,16 @@ class TestShippedCpRecipes(unittest.TestCase):
             checked += 1
         # Ensure recipe discovery found at least one CP recipe.
         self.assertGreater(checked, 0)
+
+    def test_allows_mtp_cp_on_spmd_types(self):
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_mtp,
+        )
+
+        config = deepseek_v3_debugmodel_mtp()
+        config.parallelism.spmd_backend = "spmd_types"
+        config.parallelism.context_parallel_degree = 2
+        config.model_spec.model.update_from_config(config=config)
 
 
 class TestFluxConfigCpValidation(unittest.TestCase):

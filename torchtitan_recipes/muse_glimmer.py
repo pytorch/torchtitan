@@ -6,6 +6,7 @@
 
 """Context-parallel Muse Glimmer recipes."""
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
@@ -60,6 +61,8 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     """
     config = muse_glimmer_30b()
     config.model_spec = model_registry("30B", attn_backend="varlen")
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(

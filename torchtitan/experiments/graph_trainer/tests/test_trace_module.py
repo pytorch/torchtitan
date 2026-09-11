@@ -1556,6 +1556,7 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_deepseek_v3(self):
+        from torchtitan.models.common.aux_loss import AuxLoss
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
@@ -1563,6 +1564,9 @@ class TestTraceModels(unittest.TestCase):
         config = build_config(
             attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
         )
+        # Aux losses normalize by the step's global valid-token count, which
+        # the trainer sets; there is no training context here.
+        AuxLoss.set_step_denominator(torch.tensor(float(self.BATCH_SIZE)))
         self._run_model_test(
             DeepSeekV3Model,
             config,
@@ -1959,6 +1963,7 @@ class TestTraceFSDP(FSDPTest):
         )
 
     def test_deepseek_v3_fsdp(self):
+        from torchtitan.models.common.aux_loss import AuxLoss
         from torchtitan.models.deepseek_v3 import deepseekv3_configs
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
@@ -1966,6 +1971,8 @@ class TestTraceFSDP(FSDPTest):
         config = build_config(
             attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
         )
+        # 2 matches the batch used inside _run_fsdp_model_test.
+        AuxLoss.set_step_denominator(torch.tensor(2.0))
         self._run_fsdp_model_test(
             DeepSeekV3Model,
             config,
@@ -2089,8 +2096,11 @@ class TestTraceContextParallel(FSDPTest):
                     % config.training.max_context_length
                 )
                 trainer.forward_backward_step(
-                    input_dict={"input": tokens, "positions": positions},
-                    labels=labels,
+                    input_dict={
+                        "input": tokens,
+                        "positions": positions,
+                        "labels": labels,
+                    },
                     global_valid_tokens=torch.tensor(
                         labels.numel(), device=trainer.device
                     ),
