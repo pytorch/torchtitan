@@ -18,6 +18,7 @@ from torch._guards import tracing, TracingContext
 from torch._subclasses import FakeTensorMode
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
@@ -338,6 +339,9 @@ class TracedResult:
         state_fqns: Trace-time module parameter/buffer FQNs.
         graph_state: Per-tensor mappings for trainer-owned state flattened after
             module state.
+        num_optimizer_state_inputs: Number of logical optimizer-state inputs.
+        num_runtime_mesh_inputs: Number of DeviceMesh inputs between state and
+            user inputs.
     """
 
     gm: torch.fx.GraphModule
@@ -357,6 +361,8 @@ class TracedResult:
     # state related
     state_fqns: list[str]
     graph_state: GraphStateSpec = GraphStateSpec()
+    num_optimizer_state_inputs: int = 0
+    num_runtime_mesh_inputs: int = 0
 
     @property
     def num_static_inputs(self) -> int:
@@ -474,6 +480,7 @@ def minimal_fx_tracer(
         }
         state_flat, state_spec = pytree.tree_flatten(state_tree)
         num_state_inputs = len(state_flat)
+        num_optimizer_state_inputs = len(pytree.tree_flatten(optim_state)[0])
         num_mesh_inputs = len(trace_meshes)
 
         if any(not isinstance(value, torch.Tensor) for value in graph_state_t.values()):
@@ -515,7 +522,7 @@ def minimal_fx_tracer(
         unwrapped_args, input_layouts = _unwrap_subclasses(full_args)
         fake_mode = FakeTensorMode(
             allow_non_fake_inputs=True,
-            shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+            shape_env=ShapeEnv(),
         )
         fake_args = tuple(
             _fakeify_input(fake_mode, a, input_name=f"input_{i}")
@@ -631,6 +638,8 @@ def minimal_fx_tracer(
             output_spec=output_spec,
             state_fqns=state_fqns,
             graph_state=graph_state_spec,
+            num_optimizer_state_inputs=num_optimizer_state_inputs,
+            num_runtime_mesh_inputs=num_mesh_inputs,
         )
 
     return _trace_with_args
