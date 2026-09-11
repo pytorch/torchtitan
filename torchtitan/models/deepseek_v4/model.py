@@ -9,6 +9,7 @@ from typing import cast, TYPE_CHECKING
 
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -19,6 +20,7 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import ModuleList
 
+from .attention import dsv4_mask_key, DSV4FlexAttention
 from .mhc import HcHead, HcPost, HcPre
 
 if TYPE_CHECKING:
@@ -216,16 +218,45 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
+        self.mask_cache: dict[tuple[str, int, torch.device], BlockMask] = {}
+
     def get_attention_masks(
         self,
-        positions,
+        positions: torch.Tensor,
         *,
-        padding_mask=None,
-        max_num_documents=None,
-        max_context_length=None,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ):
-        del positions, padding_mask, max_num_documents, max_context_length
-        return None
+        seqlen = positions.shape[0]
+        device = positions.device
+        masks: dict[str, BlockMask] = {}
+        blocks = [
+            *self.layers.values(),
+            *self.mtp_layers,
+        ]
+        window_sizes: dict[str, int] = {}
+        block_sizes: dict[str, int | tuple[int, int]] = {}
+        for block in blocks:
+            assert isinstance(block, DeepSeekV4TransformerBlock)
+            inner = block.attention.inner_attention
+            if not isinstance(inner, DSV4FlexAttention):
+                continue
+            key = dsv4_mask_key(inner.compress_ratio)
+            if key is None:
+                continue
+            assert window_sizes.setdefault(key, inner.window_size) == inner.window_size
+            assert block_sizes.setdefault(key, inner.block_size) == inner.block_size
+            if key in masks:
+                continue
+
+            cache_key = (key, seqlen, device)
+            cached = self.mask_cache.get(cache_key)
+            if cached is None:
+                cached = inner.build_block_mask(seqlen=seqlen, device=device)
+                self.mask_cache[cache_key] = cached
+            masks[key] = cached
+        return masks
 
     def forward(
         self,
