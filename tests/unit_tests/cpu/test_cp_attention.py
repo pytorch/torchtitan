@@ -13,7 +13,7 @@ from unittest import mock
 import torch
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
@@ -84,25 +84,30 @@ class TestCpGroup(unittest.TestCase):
 
     def test_cp_axis_above_one_yields_its_group(self):
         with _in_mesh(8):
-            group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+            group = spmd_mesh_group(MeshAxisName.CP)
+            assert group is not None
             self.assertEqual(group.size(), 8)
 
-    def test_no_mesh_context_is_an_error(self):
-        with self.assertRaisesRegex(RuntimeError, "No active SPMD mesh"):
-            require_spmd_mesh_axis_group(MeshAxisName.CP)
+    def test_no_mesh_context_returns_none(self):
+        with mock.patch(
+            "torchtitan.distributed.spmd_types.current_spmd_mesh", return_value=None
+        ):
+            self.assertIsNone(spmd_mesh_group(MeshAxisName.CP))
 
-    def test_degree_one_is_an_error(self):
-        with _in_mesh(1), self.assertRaisesRegex(RuntimeError, "multiple ranks"):
-            require_spmd_mesh_axis_group(MeshAxisName.CP)
+    def test_degree_one_returns_none(self):
+        with _in_mesh(1):
+            self.assertIsNone(spmd_mesh_group(MeshAxisName.CP))
 
-    def test_mesh_without_a_cp_axis_is_an_error(self):
-        with _in_mesh(None), self.assertRaisesRegex(RuntimeError, "has no 'cp' axis"):
-            require_spmd_mesh_axis_group(MeshAxisName.CP)
+    def test_mesh_without_a_cp_axis_returns_none(self):
+        with _in_mesh(None):
+            self.assertIsNone(spmd_mesh_group(MeshAxisName.CP))
 
     def test_forward_without_a_cp_group_is_an_error(self):
         num_tokens, heads, head_dim = 8, 2, 16
         q, k, v = (torch.randn(num_tokens, heads, head_dim) for _ in range(3))
-        with _in_mesh(1), self.assertRaisesRegex(RuntimeError, "multiple ranks"):
+        with _in_mesh(1), self.assertRaisesRegex(
+            RuntimeError, "active multi-rank CP mesh axis"
+        ):
             self._kernel().forward(q, k, v)
 
     def test_cp_inner_attention_holds_no_mesh_state(self):

@@ -18,7 +18,7 @@ import torch.distributed as dist
 from torch.distributed.tensor.experimental._context_parallel import flex_cp_allgather
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import require_spmd_mesh_axis_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attention import FlexAttention
 
@@ -85,7 +85,11 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexAttention):
         **kwargs,
     ) -> torch.Tensor:
         # TODO(fegin): replace flex_cp_allgather with spmd_types.redistribute.
-        cp_group = require_spmd_mesh_axis_group(MeshAxisName.CP)
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP attention requires an active multi-rank CP mesh axis."
+            )
         pg_name = dist._get_process_group_name(cp_group)
         k_THK, v_THV = flex_cp_allgather(
             k_THK.contiguous(), v_THV.contiguous(), _SEQ_DIM, pg_name

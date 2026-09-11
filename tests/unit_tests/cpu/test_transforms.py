@@ -11,9 +11,9 @@ import unittest
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
+    convert_config_type,
     ModelConfigTransform,
-    retype_node,
-    transform_model_config,
+    transform_model_config_,
 )
 
 from torchtitan.models.common.attention import FlexAttention
@@ -66,13 +66,13 @@ class _Boom(ModelConfigTransform):
         raise ValueError("boom")
 
 
-class TestRetypeNode(unittest.TestCase):
+class TestConvertConfigType(unittest.TestCase):
     def test_keeps_the_fields_of_the_config_it_replaces(self):
         existing = FlexAttention.Config()
         existing.block_size = (256, 128)
         existing.kernel_options = {"BACKEND": "FLASH"}
 
-        swapped = retype_node(existing, KVAllGatherCPFlexInnerAttention)
+        swapped = convert_config_type(existing, KVAllGatherCPFlexInnerAttention)
 
         self.assertIsInstance(swapped, KVAllGatherCPFlexInnerAttention.Config)
         self.assertEqual(swapped.block_size, (256, 128))
@@ -82,7 +82,7 @@ class TestRetypeNode(unittest.TestCase):
         # A non-subclass would drop fields added by an earlier transform.
         existing = KVAllGatherCPFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
-            retype_node(existing, FlexAttention)
+            convert_config_type(existing, FlexAttention)
 
 
 class TestOrdering(unittest.TestCase):
@@ -142,7 +142,7 @@ class TestTransformModel(unittest.TestCase):
 
     def test_rewrites_a_bare_model_spec(self):
         spec = self._spec()
-        spec.model = transform_model_config(
+        spec.model = transform_model_config_(
             spec.model,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
@@ -156,14 +156,14 @@ class TestTransformModel(unittest.TestCase):
         a spec that no ``Trainer.Config`` owns yet.
         """
         spec = self._spec()
-        transform_model_config(
+        transform_model_config_(
             spec.model,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
 
     def test_orders_transforms(self):
         _Record.order = []
-        transform_model_config(
+        transform_model_config_(
             self._spec().model,
             [_Third(), _First(), _Second()],
         )

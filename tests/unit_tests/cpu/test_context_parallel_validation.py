@@ -149,6 +149,16 @@ class TestShippedCpRecipes(unittest.TestCase):
         # Ensure recipe discovery found at least one CP recipe.
         self.assertGreater(checked, 0)
 
+    def test_allows_mtp_cp_on_spmd_types(self):
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_mtp,
+        )
+
+        config = deepseek_v3_debugmodel_mtp()
+        config.parallelism.spmd_backend = "spmd_types"
+        config.parallelism.context_parallel_degree = 2
+        config.model_spec.model.update_from_config(config=config)
+
 
 class TestFluxConfigCpValidation(unittest.TestCase):
     """Flux is not a ``Decoder`` and is covered by the same central gate."""

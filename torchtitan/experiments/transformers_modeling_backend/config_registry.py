@@ -20,6 +20,7 @@ from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
+from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 from . import model_registry
@@ -33,7 +34,7 @@ class TransformersBackendConfig(Trainer.Config):
 
 
 def transformers_modeling_backend_debugmodel(
-    seq_len: int = 2048,
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> TransformersBackendConfig:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return TransformersBackendConfig(
@@ -71,7 +72,7 @@ def transformers_modeling_backend_debugmodel(
 
 
 def transformers_modeling_backend_debugmodel_moe(
-    seq_len: int = 2048,
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> TransformersBackendConfig:
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from torchtitan.protocols.model import BaseModel
     from torchtitan.trainer import Trainer
 
-__all__ = ["apply_transforms", "transform_model_config"]
+__all__ = ["apply_transforms", "transform_model_config_"]
 
 
 def _ordered(
@@ -58,7 +58,7 @@ def _reject_conflicts(transforms: list[ModelConfigTransform]) -> None:
                 )
 
 
-def transform_model_config(
+def transform_model_config_(
     model: Module.Config, transforms: list[ModelConfigTransform]
 ) -> Module.Config:
     """Apply every transform to ``model`` and return the rewritten root.
@@ -85,7 +85,7 @@ def apply_transforms(
     assert working.model_spec is not None, "model_spec must be set before transforms."
     working.model_spec.model = cast(
         "BaseModel.Config",
-        transform_model_config(working.model_spec.model, transforms),
+        transform_model_config_(working.model_spec.model, transforms),
     )
     working.__post_init__()
     return working

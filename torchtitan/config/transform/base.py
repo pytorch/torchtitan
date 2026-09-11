@@ -12,7 +12,7 @@ from typing import ClassVar
 
 from torchtitan.protocols.module import Module
 
-__all__ = ["ModelConfigTransform", "retype_node"]
+__all__ = ["ModelConfigTransform", "convert_config_type"]
 
 
 class ModelConfigTransform(ABC):
@@ -29,12 +29,14 @@ class ModelConfigTransform(ABC):
     def transform(self, model: Module.Config) -> Module.Config:
         """Rewrite ``model`` and return its root.
 
-        Rewrite nodes in place. Return a different config to replace the root
+        Rewrite configs in place. Return a different config to replace the root
         itself, as a transform that wraps the whole model does.
         """
 
 
-def retype_node(existing: Module.Config, replacement: type[Module]) -> Module.Config:
+def convert_config_type(
+    existing: Module.Config, replacement: type[Module]
+) -> Module.Config:
     """Build ``replacement``'s config from ``existing``, keeping its fields.
 
     Requiring inheritance preserves wrappers added by earlier transforms.

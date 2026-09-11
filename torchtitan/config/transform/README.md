@@ -24,13 +24,13 @@ config = apply_transforms(
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
 
-Use `transform_model_config` when there is no trainer config, such as with a bare
+Use `transform_model_config_` when there is no trainer config, such as with a bare
 `ModelSpec`. It rewrites the model config in place and returns the root. It does
 not copy or validate the config.
 
 ```python
 spec = model_registry("0.6B", attn_backend="varlen")
-spec.model = transform_model_config(spec.model, [LMHeadCastTransform()])
+spec.model = transform_model_config_(spec.model, [LMHeadCastTransform()])
 ```
 
 ## What belongs here
@@ -39,7 +39,7 @@ Use `model_registry` to select the base architecture, attention algorithm, and
 attention metadata format. For example, FlexAttention consumes a `BlockMask`,
 while VarlenAttention consumes cumulative sequence offsets.
 
-Use a transform for options that replace or wrap nodes in the built tree.
+Use a transform for options that replace or wrap configs in the built tree.
 Context parallelism, TP GEMM backends, MoE communication backends,
 quantization, and LoRA belong in transforms.
 
@@ -58,7 +58,7 @@ with the attention code. Only the transform that installs it belongs here.
 ## Writing a transform
 
 Subclass `ModelConfigTransform`. Use a keyword-only dataclass for transform options.
-Implement `transform`, rewrite nodes in place, and return the model root. Return
+Implement `transform`, rewrite configs in place, and return the model root. Return
 a different config only when replacing the root.
 
 ```python
@@ -75,9 +75,9 @@ class MyTransform(ModelConfigTransform):
 A transform sees only the model config. Pass any required training or
 parallelism value to the transform.
 
-Use `retype_node` to change a node implementation. The replacement config must
-inherit from the current config type. This preserves fields and wrappers from
-earlier transforms.
+Use `convert_config_type` to replace one config implementation with another.
+The replacement config must inherit from the current config type. This preserves
+fields and wrappers from earlier transforms.
 
 Use `run_after` to set the order. Use `conflicts_with` to reject incompatible
 transforms. `apply_transforms` checks conflicts and sorts transforms before

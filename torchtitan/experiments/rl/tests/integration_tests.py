@@ -28,8 +28,13 @@ from tests.integration_tests import OverrideDefinitions
 from torchtitan.tools.logging import logger
 
 
+_KEEP_ZERO_STD_REWARD_GROUPS = (
+    "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups"
+)
+
+
 def build_rl_test_list() -> list[OverrideDefinitions]:
-    return [
+    test_list = [
         OverrideDefinitions(
             [
                 [
@@ -251,6 +256,23 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
     ]
+
+    # CI can use random-init policies whose rollout groups all receive the same
+    # reward. Keep those groups so the trainer cannot wait forever for a batch.
+    for test in test_list:
+        updated_override_args = []
+        for override_args in test.override_args:
+            if _KEEP_ZERO_STD_REWARD_GROUPS not in override_args:
+                logger.warning(
+                    f"RL integration test {test.test_name} overrides "
+                    "drop_zero_std_reward_groups=False to prevent a random-init "
+                    "policy from stalling the trainer"
+                )
+                override_args = [*override_args, _KEEP_ZERO_STD_REWARD_GROUPS]
+            updated_override_args.append(override_args)
+        test.override_args = updated_override_args
+
+    return test_list
 
 
 def run_single_test(
