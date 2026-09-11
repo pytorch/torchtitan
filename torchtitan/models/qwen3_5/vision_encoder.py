@@ -294,7 +294,7 @@ class PatchMerger(Module):
 
 
 class Qwen35VisionEncoder(Module):
-    """Qwen3.5 Vision Encoder with FlexAttention.
+    """Qwen3.5 Vision Encoder with FlexInnerAttention.
 
     Processes visual items as one packed patch sequence.
     """
@@ -423,7 +423,7 @@ class Qwen35VisionEncoder(Module):
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = x + learned_pos
 
-        # BlockMask creation and use in FlexAttention are blackboxed from
+        # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
         with spmd.no_typecheck():
             attention_mask = create_block_diagonal_mask(

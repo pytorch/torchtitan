@@ -78,11 +78,11 @@ def _apply_regional_inductor(traced_result):
     from torch.fx.graph import CodeGen
     from torch.fx.passes.regional_inductor import regional_inductor
 
-    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
 
     annotate_flex_attention_for_regional_inductor_pass(
         traced_result.gm,
-        flex_compile_config=FlexAttention.inductor_configs,
+        flex_compile_config=FlexInnerAttention.inductor_configs,
     )
 
     fake_inputs = _graph_placeholder_fake_inputs(traced_result.gm)
@@ -1791,7 +1791,7 @@ class TestMetadataPropagation(unittest.TestCase):
 
 
 # Large head_dims (qwen3 head_dim=128, deepseek qk_head_dim=192) run in bf16:
-# the FlexAttention Triton kernel's fp32 shared-memory footprint exceeds the
+# the FlexInnerAttention Triton kernel's fp32 shared-memory footprint exceeds the
 # H100 default limit (~99KB) -> "InductorError: out of resource:
 # triton_tem_fused_flex_attention". bf16 halves the smem so the kernel fits.
 # SDPA never hit this; it only surfaced once flex became the default LM backend.
@@ -1799,7 +1799,7 @@ class TestMetadataPropagation(unittest.TestCase):
 
 
 def _disable_flex_autotune():
-    """Disable FlexAttention max_autotune; returns the originals to restore.
+    """Disable FlexInnerAttention max_autotune; returns the originals to restore.
 
     max_autotune searches flex block sizes that exceed the H100 shared-memory
     limit for larger head_dims (qwen3 head_dim=128, deepseek qk_head_dim=192),
@@ -1810,24 +1810,24 @@ def _disable_flex_autotune():
     """
     from torch.nn.attention.flex_attention import flex_attention
 
-    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
 
-    orig = (FlexAttention.inductor_configs, FlexAttention._compiled_flex_attn)
-    FlexAttention.inductor_configs = {
-        **FlexAttention.inductor_configs,
+    orig = (FlexInnerAttention.inductor_configs, FlexInnerAttention._compiled_flex_attn)
+    FlexInnerAttention.inductor_configs = {
+        **FlexInnerAttention.inductor_configs,
         "max_autotune": False,
         "coordinate_descent_tuning": False,
     }
-    FlexAttention._compiled_flex_attn = torch.compile(
-        flex_attention, options=FlexAttention.inductor_configs
+    FlexInnerAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexInnerAttention.inductor_configs
     )
     return orig
 
 
 def _restore_flex_autotune(orig):
-    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
 
-    FlexAttention.inductor_configs, FlexAttention._compiled_flex_attn = orig
+    FlexInnerAttention.inductor_configs, FlexInnerAttention._compiled_flex_attn = orig
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -2012,7 +2012,7 @@ class TestTraceModels(unittest.TestCase):
 
     def test_deepseek_v3_flex_attention(self):
         """Tests if we can propagate fwd node metadata reliably through backward.
-        Annotates FlexAttention.forward via annotate_fn before
+        Annotates FlexInnerAttention.forward via annotate_fn before
         tracing so compile_with_inductor flows into the graph naturally.
         """
         from torch.fx.traceback import annotate_fn
@@ -2020,7 +2020,7 @@ class TestTraceModels(unittest.TestCase):
 
         from torchtitan.models.common.attention import (
             create_attention_mask,
-            FlexAttention,
+            FlexInnerAttention,
             get_causal_mask_mod,
             get_document_mask_mod,
         )
@@ -2060,7 +2060,7 @@ class TestTraceModels(unittest.TestCase):
                         ),
                         q_norm=RMSNorm.Config(normalized_shape=1),
                         kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
-                        inner_attention=FlexAttention.Config(),
+                        inner_attention=FlexInnerAttention.Config(),
                         wq=Linear.Config(
                             in_features=dim,
                             out_features=n_heads * qk_head_dim,
@@ -2107,16 +2107,16 @@ class TestTraceModels(unittest.TestCase):
             KV_LEN=seq_len,
         )
 
-        # Annotate FlexAttention.forward so compile_with_inductor flows into
+        # Annotate FlexInnerAttention.forward so compile_with_inductor flows into
         # the traced graph. Restore the original after tracing.
-        orig_forward = FlexAttention.forward
-        FlexAttention.forward = annotate_fn(
+        orig_forward = FlexInnerAttention.forward
+        FlexInnerAttention.forward = annotate_fn(
             {
                 "compile_with_inductor": {
-                    "inductor_configs": FlexAttention.inductor_configs
+                    "inductor_configs": FlexInnerAttention.inductor_configs
                 }
             }
-        )(FlexAttention.forward)
+        )(FlexInnerAttention.forward)
         try:
             train_step = make_train_step(model, get_loss)
             maybe_register_blockmask_pytree_node()
@@ -2124,7 +2124,7 @@ class TestTraceModels(unittest.TestCase):
                 tokens, block_mask, labels
             )
         finally:
-            FlexAttention.forward = orig_forward
+            FlexInnerAttention.forward = orig_forward
 
         # Verify flex attention HOPs got the annotation
         for node in traced.gm.graph.nodes:
@@ -2237,13 +2237,13 @@ class TestTraceModels(unittest.TestCase):
             for n in traced.gm.graph.nodes
             if "flex_attention" in str(n.target) and "backward" not in str(n.target)
         ]
-        self.assertGreater(len(flex_nodes), 0, "No FlexAttentionHOP nodes found")
+        self.assertGreater(len(flex_nodes), 0, "No FlexInnerAttentionHOP nodes found")
 
-        from torchtitan.models.common.attention import FlexAttention
+        from torchtitan.models.common.attention import FlexInnerAttention
 
         annotate_flex_attention_for_regional_inductor_pass(
             traced.gm,
-            flex_compile_config=FlexAttention.inductor_configs,
+            flex_compile_config=FlexInnerAttention.inductor_configs,
         )
 
         for node in flex_nodes:
@@ -2704,7 +2704,7 @@ class TestTraceContextParallel(FSDPTest):
 
     # Pinned to the SDPA backend: this validates CP all_gather-before-SDPA
     # codegen, which requires the scaled_dot_product op. The default
-    # FlexAttention backend has no SDPA op and flex + CP is unsupported anyway
+    # FlexInnerAttention backend has no SDPA op and flex + CP is unsupported anyway
     # (torch's _create_cp_block_mask requires seq_len divisible by 2 *
     # BLOCK_SIZE, here 128 < 256; see the aot_fx_trace_llama3_fsdp_tp_cp
     # integration flavor). SDPA has native CP support and emits the SDPA op.

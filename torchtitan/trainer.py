@@ -50,7 +50,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
@@ -154,12 +154,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if (
                 self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
-                and any(self.model_spec.model.traverse(FlexAttention.Config))
+                and any(self.model_spec.model.traverse(FlexInnerAttention.Config))
             ):
-                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
                 raise ValueError(
                     "Selective activation checkpointing (SAC) is not supported "
-                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "with FlexInnerAttention while SPMD typechecking is enabled. "
                     "Use full activation checkpointing, disable activation "
                     "checkpointing, or switch to a non-Flex attention backend."
                 )
@@ -202,7 +202,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             if self.dataloader.max_num_documents is None:
                 for fqn, _, _, _ in self.model_spec.model.traverse(
-                    VarlenAttention.Config
+                    VarlenInnerAttention.Config
                 ):
                     raise ValueError(
                         "CUDA graphs require fixed-shape varlen document "

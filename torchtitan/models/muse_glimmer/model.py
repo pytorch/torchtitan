@@ -24,12 +24,12 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -408,7 +408,9 @@ class MuseGlimmerModel(Decoder):
         padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
                 batch["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
@@ -542,16 +544,16 @@ class MuseGlimmerModel(Decoder):
         # Varlen carries each layer's sliding window in its own kernel arg (baked at
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
-        if isinstance(inner_attn, VarlenAttention.Config):
+        if isinstance(inner_attn, VarlenInnerAttention.Config):
             return create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-        if not isinstance(inner_attn, FlexAttention.Config):
+        if not isinstance(inner_attn, FlexInnerAttention.Config):
             raise TypeError(
-                "Muse Glimmer requires FlexAttention or VarlenAttention for "
+                "Muse Glimmer requires FlexInnerAttention or VarlenInnerAttention for "
                 f"sliding-window masks, got {type(inner_attn).__name__}"
             )
 

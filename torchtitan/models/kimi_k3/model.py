@@ -24,8 +24,8 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
-    FlexAttention,
-    VarlenAttention,
+    FlexInnerAttention,
+    VarlenInnerAttention,
     VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -79,7 +79,9 @@ class KimiMLAAttention(BaseAttention):
         wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+        inner_attention: Module.Config = field(
+            default_factory=FlexInnerAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -350,7 +352,9 @@ class KimiK3Model(Decoder):
         padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
                 batch["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
@@ -396,7 +400,7 @@ class KimiK3Model(Decoder):
 
         if attn_config is None:
             quadratic_attention = None
-        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
+        elif isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
             # Under varlen both consumers read the same document offsets.
             quadratic_attention = kda_metadata
         else:

@@ -83,7 +83,7 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.models.common.attention import (
     create_attention_mask,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
@@ -206,7 +206,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     gen_config = config.generator
 
     attention_backend = config.model_spec.model.first_full_attention_backend
-    use_flex = isinstance(attention_backend, FlexAttention.Config)
+    use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).
@@ -336,7 +336,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     ``get_causal_mask_mod``, and extract per-document logprobs.
     """
     inner_attn = model.config.layers[0].attention.inner_attention
-    assert isinstance(inner_attn, FlexAttention.Config)
+    assert isinstance(inner_attn, FlexInnerAttention.Config)
     block_size = inner_attn.block_size
 
     batch_invariant = is_in_batch_invariant_mode()

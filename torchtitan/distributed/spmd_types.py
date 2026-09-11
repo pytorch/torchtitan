@@ -186,18 +186,6 @@ def spmd_local_context(
     return spmd.set_current_mesh(local_axes=active_axes)
 
 
-def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
-    """Return a non-singleton process group from the current SPMD mesh."""
-    mesh = current_spmd_mesh()
-    if mesh is None:
-        return None
-    names = mesh.mesh_dim_names or ()
-    if axis_name not in names:
-        return None
-    group = mesh.get_group(axis_name)
-    return group if group.size() > 1 else None
-
-
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""

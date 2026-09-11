@@ -23,8 +23,8 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.attention import (
     AttentionMasksType,
-    FlexAttention,
-    VarlenAttention,
+    FlexInnerAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -125,7 +125,9 @@ class KimiK25Model(DeepSeekV3Model):
         padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
                 batch["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,

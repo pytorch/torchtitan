@@ -48,7 +48,7 @@ This backend uses the TorchTitan SPMD type system.
 
 ### Attention
 
-Attention runs on **FlexAttention**. `attn_mask_type` selects the flex mask:
+Attention runs on **FlexInnerAttention**. `attn_mask_type` selects the flex mask:
 `causal` (plain causal) or `block_causal` (causal + same-document, for packed /
 SFT sequences).
 

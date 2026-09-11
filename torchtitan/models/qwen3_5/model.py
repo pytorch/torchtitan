@@ -26,8 +26,8 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
-    FlexAttention,
-    VarlenAttention,
+    FlexInnerAttention,
+    VarlenInnerAttention,
     VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -394,7 +394,9 @@ class Qwen35Model(Decoder):
         positions = batch.get("positions")
         if positions is not None:
             inner = self.config.first_full_attention_backend
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
                 batch["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
@@ -482,14 +484,14 @@ class Qwen35Model(Decoder):
             and deltanet_metadata.cu_seq_q.numel() == 2
             and not (
                 attn_config is not None
-                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
+                and isinstance(attn_config.inner_attention, VarlenInnerAttention.Config)
             )
         ):
             deltanet_metadata = None
 
         if attn_config is None:
             quadratic_attention = None
-        elif isinstance(attn_config.inner_attention, VarlenAttention.Config):
+        elif isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
             # Under varlen both consumers read the same document offsets.
             quadratic_attention = deltanet_metadata
         else:

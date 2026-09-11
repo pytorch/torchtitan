@@ -16,7 +16,7 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 
 
@@ -67,7 +67,7 @@ class _Boom(ModelConfigTransform):
 
 class TestConvertConfigType(unittest.TestCase):
     def test_keeps_the_fields_of_the_config_it_replaces(self):
-        existing = FlexAttention.Config()
+        existing = FlexInnerAttention.Config()
         existing.block_size = (256, 128)
         existing.kernel_options = {"BACKEND": "FLASH"}
 
@@ -81,7 +81,7 @@ class TestConvertConfigType(unittest.TestCase):
         # A non-subclass would drop fields added by an earlier transform.
         existing = KVAllGatherCPFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
-            convert_config_type(existing, FlexAttention)
+            convert_config_type(existing, FlexInnerAttention)
 
 
 class TestOrdering(unittest.TestCase):
@@ -188,7 +188,7 @@ class TestContextParallelTransform(unittest.TestCase):
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
         with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
-            ContextParallelTransform(inner_attention=FlexAttention)
+            ContextParallelTransform(inner_attention=FlexInnerAttention)
 
 
 if __name__ == "__main__":
