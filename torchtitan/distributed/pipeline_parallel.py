@@ -35,7 +35,11 @@ from torchtitan.tools.logging import logger
 
 # These are the public entrypoints for model-specific PP setup. Helpers in this
 # module are implementation details and stay private.
-__all__ = ["pipeline_llm", "pipeline_with_first_stage_modules"]
+__all__ = [
+    "llm_split_with_pinned_modules",
+    "pipeline_llm",
+    "pipeline_with_first_stage_modules",
+]
 
 
 def _build_get_mesh_callback(
@@ -76,16 +80,7 @@ def pipeline_llm(
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
     stage_class: type[PipelineStage] = PipelineStage,
-    last_stage_modules: Sequence[str] = (),
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    """Split ``model`` into pipeline stages and build the schedule.
-
-    ``last_stage_modules`` names modules the generated split pins to the last
-    stage, next to the head, for a model whose output is aggregated there;
-    ``pipeline_with_first_stage_modules`` is the same thing for the first
-    stage. Both are ignored when ``parallelism.module_fqns_per_model_part``
-    spells the split out.
-    """
     pp_mesh = parallel_dims.get_mesh("pp")
 
     (
@@ -98,11 +93,7 @@ def pipeline_llm(
     module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = _generate_llm_fqn_per_model_part(
-            num_virtual_stages,
-            num_layers,
-            input_weight,
-            output_weight,
-            last_stage_modules=last_stage_modules,
+            num_virtual_stages, num_layers, input_weight, output_weight
         )
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
@@ -156,6 +147,64 @@ def pipeline_llm(
     return pp_schedule, model_parts, has_first_stage, has_last_stage
 
 
+def llm_split_with_pinned_modules(
+    model: nn.Module,
+    *,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    model_config: BaseModel.Config,
+    first_stage_module_fqns: Sequence[str] = (),
+    last_stage_module_fqns: Sequence[str] = (),
+) -> tuple[list[list[str]], ParallelismConfig]:
+    """The split ``pipeline_llm`` generates, with modules pinned to both ends.
+
+    The auto-generated LLM stage split only knows about decoder modules
+    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). A model with
+    more than that says so here: ``first_stage_module_fqns`` are prepended to
+    the first stage (those the model actually has -- e.g. a vision encoder
+    whose features are spliced into the embeddings), and
+    ``last_stage_module_fqns`` are appended to the last (e.g. modules that
+    aggregate the whole model's output and must run where ``lm_head`` does).
+    Neither counts as a layer, so the layer distribution is unchanged.
+
+    Returns the split, and a copy of ``parallelism`` that spells it out: the
+    fields that would otherwise derive one -- ``pipeline_parallel_layers_per_stage``
+    and ``pipeline_parallel_virtual_stages_per_rank`` -- are cleared, because
+    they have been read by now and ``pipeline_llm`` takes the explicit split in
+    preference to them. Clearing them here is also what keeps the config's
+    invariant that at most one field describes the split, so every caller that
+    spells a split out gets that right by construction.
+
+    A caller passes the config on to ``pipeline_llm`` and may read the split
+    for itself; ``pipeline_with_first_stage_modules`` is the common case,
+    where it does not need to look at it.
+    """
+    (
+        num_virtual_stages,
+        num_layers,
+        input_weight,
+        output_weight,
+    ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+    fqn_per_part = _generate_llm_fqn_per_model_part(
+        num_virtual_stages,
+        num_layers,
+        input_weight,
+        output_weight,
+        last_stage_modules=last_stage_module_fqns,
+    )
+    fqn_per_part[0][:0] = [
+        module_fqn
+        for module_fqn in first_stage_module_fqns
+        if getattr(model, module_fqn, None) is not None
+    ]
+    return fqn_per_part, dataclasses.replace(
+        parallelism,
+        module_fqns_per_model_part=fqn_per_part,
+        pipeline_parallel_layers_per_stage=None,
+        pipeline_parallel_virtual_stages_per_rank=None,
+    )
+
+
 def pipeline_with_first_stage_modules(
     model: nn.Module,
     *,
@@ -163,7 +212,7 @@ def pipeline_with_first_stage_modules(
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
-    last_stage_modules: Sequence[str] = (),
+    last_stage_module_fqns: Sequence[str] = (),
     **kwargs,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     """Co-locate additional model modules with the first pipeline stage.
@@ -174,44 +223,24 @@ def pipeline_with_first_stage_modules(
     stage's FQN list before delegating to ``pipeline_llm``. On other stages, the
     modules are pruned to ``None``; the model's ``forward`` must tolerate that.
 
-    ``last_stage_modules`` does the same at the other end, for a model whose
-    output is aggregated next to the head; it reaches the generated split
-    here because this function hands ``pipeline_llm`` a split that is already
-    spelled out.
+    ``last_stage_module_fqns`` does the same at the other end, for a model
+    whose output is aggregated next to the head. A caller that needs the split
+    itself calls ``llm_split_with_pinned_modules`` and hands the result over
+    through ``parallelism.module_fqns_per_model_part``, which is what this
+    function does for it.
 
     NOTE: This adds load to stage 0 that the auto split does not model
     (``input_weight`` only accounts for ``tok_embeddings``). Use
     ``parallelism.pipeline_parallel_first_stage_less_layers`` to rebalance.
     """
     if parallelism.module_fqns_per_model_part is None:
-        (
-            num_virtual_stages,
-            num_layers,
-            input_weight,
-            output_weight,
-        ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
-        fqn_per_part = _generate_llm_fqn_per_model_part(
-            num_virtual_stages,
-            num_layers,
-            input_weight,
-            output_weight,
-            last_stage_modules=last_stage_modules,
-        )
-        present_module_fqns = [
-            module_fqn
-            for module_fqn in first_stage_module_fqns
-            if getattr(model, module_fqn, None) is not None
-        ]
-        fqn_per_part[0][:0] = present_module_fqns
-        # This function spells the split out, which makes
-        # pipeline_parallel_layers_per_stage dead from here on: it has been
-        # read above, and pipeline_llm takes the explicit split in preference
-        # to it. Clearing it says so, and keeps the config's invariant that
-        # the two never describe the split at the same time.
-        parallelism = dataclasses.replace(
-            parallelism,
-            module_fqns_per_model_part=fqn_per_part,
-            pipeline_parallel_layers_per_stage=None,
+        _, parallelism = llm_split_with_pinned_modules(
+            model,
+            parallel_dims=parallel_dims,
+            parallelism=parallelism,
+            model_config=model_config,
+            first_stage_module_fqns=first_stage_module_fqns,
+            last_stage_module_fqns=last_stage_module_fqns,
         )
 
     return pipeline_llm(

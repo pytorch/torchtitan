@@ -12,12 +12,19 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
+    llm_split_with_pinned_modules,
 )
 
 
 @dataclass
 class _FakeParallelDims:
     pp: int
+
+
+class _FakeModelWithTower:
+    """Only ``vision_encoder`` is present, so only it is pinned."""
+
+    vision_encoder = object()
 
 
 @dataclass
@@ -98,24 +105,24 @@ class TestGenerateLLMFqnPerModelPart(unittest.TestCase):
         }
         self.assertNotIn(32, reachable)
 
-        (
-            num_virtual_stages,
-            num_layers,
-            input_weight,
-            output_weight,
-        ) = _get_pipeline_metadata(
+        num_virtual_stages = _get_pipeline_metadata(
             _FakeParallelDims(pp=8), parallelism, _FakeModelConfig(num_layers=33)
-        )
+        )[0]
         self.assertEqual(num_virtual_stages, 32)
 
-        fqns = _generate_llm_fqn_per_model_part(
-            num_virtual_stages,
-            num_layers,
-            input_weight,
-            output_weight,
-            last_stage_modules=("output_res_proj", "output_res_norm"),
+        fqns, spelled_out = llm_split_with_pinned_modules(
+            _FakeModelWithTower(),
+            parallel_dims=_FakeParallelDims(pp=8),
+            parallelism=parallelism,
+            model_config=_FakeModelConfig(num_layers=33),
+            first_stage_module_fqns=("vision_encoder", "absent_module"),
+            last_stage_module_fqns=("output_res_proj", "output_res_norm"),
         )
-        fqns[0][:0] = ["vision_encoder"]
+        # The config it hands back spells the split out and carries no field
+        # that would derive one, so it survives the exclusivity check.
+        self.assertEqual(spelled_out.module_fqns_per_model_part, fqns)
+        self.assertIsNone(spelled_out.pipeline_parallel_virtual_stages_per_rank)
+        self.assertIsNone(spelled_out.pipeline_parallel_layers_per_stage)
         self.assertEqual(len(fqns), 32)
         self.assertEqual(sum(_layers_per_stage(fqns)), 33)
         self.assertEqual(fqns[0][:2], ["vision_encoder", "tok_embeddings"])

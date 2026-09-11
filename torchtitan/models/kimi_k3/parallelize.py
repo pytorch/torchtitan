@@ -30,9 +30,8 @@ from torchtitan.distributed.fsdp import (
 )
 
 from torchtitan.distributed.pipeline_parallel import (
-    _generate_llm_fqn_per_model_part,
-    _get_pipeline_metadata,
-    pipeline_with_first_stage_modules,
+    llm_split_with_pinned_modules,
+    pipeline_llm,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.kimi_k3.layout import (
@@ -164,42 +163,6 @@ def _kimi_k3_last_stage_modules(model: nn.Module) -> tuple[str, ...]:
     return tuple(n for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS if hasattr(model, n))
 
 
-def _module_fqns_per_model_part(model: nn.Module, kwargs: dict) -> list[list[str]]:
-    """The split core applies, recomputed here to read the layer map off it.
-
-    The same inputs give the same split on every rank, so this replaces a
-    collective: the config's split when there is one, otherwise core's
-    generated one with this model's pinned modules, in core's own order --
-    the aggregation modules through ``last_stage_modules`` and the tower
-    prepended to the first stage, the way
-    ``pipeline_with_first_stage_modules`` does it.
-    """
-    parallelism = kwargs["parallelism"]
-    if parallelism.module_fqns_per_model_part is not None:
-        return parallelism.module_fqns_per_model_part
-    (
-        num_virtual_stages,
-        num_layers,
-        input_weight,
-        output_weight,
-    ) = _get_pipeline_metadata(
-        kwargs["parallel_dims"], parallelism, kwargs["model_config"]
-    )
-    fqns = _generate_llm_fqn_per_model_part(
-        num_virtual_stages,
-        num_layers,
-        input_weight,
-        output_weight,
-        last_stage_modules=_kimi_k3_last_stage_modules(model),
-    )
-    fqns[0][:0] = [
-        fqn
-        for fqn in _KIMI_K3_FIRST_STAGE_FQNS
-        if getattr(model, fqn, None) is not None
-    ]
-    return fqns
-
-
 def _schedule_stages(schedule: _PipelineSchedule) -> list[AttnResPipelineStage]:
     """The stages a schedule holds on this rank."""
     if isinstance(schedule, PipelineScheduleSingle):
@@ -235,19 +198,27 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
     # Core's split places the embedding, the layers and the head. On top of
     # it the vision tower goes to the stage that holds the embedding (vision
     # features are spliced into the embeddings; nothing vision-side crosses a
-    # stage boundary), which is core's first-stage entry, and the AttnRes
-    # aggregation modules to the stage that holds the head, since the final
-    # block attention runs there.
-    (
-        pp_schedule,
-        model_parts,
-        has_first_stage,
-        has_last_stage,
-    ) = pipeline_with_first_stage_modules(
+    # stage boundary) and the AttnRes aggregation modules to the stage that
+    # holds the head, since the final block attention runs there. Core builds
+    # that split; this function keeps the one object and both hands it over
+    # and reads the layer map off it, so no rank recomputes it and none of
+    # them can disagree.
+    parallelism = kwargs.pop("parallelism")
+    module_fqns_per_model_part = parallelism.module_fqns_per_model_part
+    if module_fqns_per_model_part is None:
+        module_fqns_per_model_part, parallelism = llm_split_with_pinned_modules(
+            model,
+            parallel_dims=kwargs["parallel_dims"],
+            parallelism=parallelism,
+            model_config=kwargs["model_config"],
+            first_stage_module_fqns=_KIMI_K3_FIRST_STAGE_FQNS,
+            last_stage_module_fqns=_kimi_k3_last_stage_modules(model),
+        )
+
+    pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
         model,
+        parallelism=parallelism,
         stage_class=AttnResPipelineStage,
-        first_stage_module_fqns=_KIMI_K3_FIRST_STAGE_FQNS,
-        last_stage_modules=_kimi_k3_last_stage_modules(model),
         **kwargs,
     )
 
@@ -261,9 +232,7 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
     # config's FQNs, or the generated ones from the same metadata and the same
     # pinned modules, so every rank reads the same layer-to-stage map off it
     # with no collective; the schedule owns stage-to-rank.
-    layer_to_stage = layer_to_stage_from_split(
-        _module_fqns_per_model_part(model, kwargs)
-    )
+    layer_to_stage = layer_to_stage_from_split(module_fqns_per_model_part)
     layout = infer_block_layout_tables_from_stages(
         stages,
         stage_to_rank=dict(stages[0].stage_index_to_group_rank),
