@@ -23,6 +23,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_map,
     ShardingConfig,
 )
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 
 if TYPE_CHECKING:
     from torchtitan.models.gemma4.model import Gemma4Model, Gemma4TransformerBlock
@@ -32,6 +33,7 @@ def set_gemma4_sharding_config(
     config: "Gemma4Model.Config",
     *,
     enable_sp: bool,
+    enable_ep: bool = False,
 ) -> None:
     """Fill ``sharding_config`` on all Gemma-4 sub-configs.
 
@@ -43,14 +45,29 @@ def set_gemma4_sharding_config(
     ``enable_sp`` controls SequenceParallel (decoupled from TP).
     """
     set_decoder_sharding_config(config, enable_sp=enable_sp)
+    if getattr(config, "ple", None) is not None:
+        replicate_param = dense_param_placement(tp=spmd.R)
+        config.ple.tok_embeddings_per_layer.sharding_config = ShardingConfig(
+            state_shardings={"weight": replicate_param}
+        )
+        config.ple.per_layer_model_projection.sharding_config = ShardingConfig(
+            state_shardings={"weight": replicate_param}
+        )
+        config.ple.per_layer_projection_norm.sharding_config = ShardingConfig(
+            state_shardings={"weight": replicate_param}
+        )
+
     for layer_cfg in config.layers:
-        _set_gemma4_layer_sharding(layer_cfg, enable_sp=enable_sp)
+        _set_gemma4_layer_sharding(
+            layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
+        )
 
 
 def _set_gemma4_layer_sharding(
     layer_cfg: "Gemma4TransformerBlock.Config",
     *,
     enable_sp: bool,
+    enable_ep: bool = False,
 ) -> None:
     """Set sharding on one Gemma-4 transformer layer.
 
@@ -84,9 +101,9 @@ def _set_gemma4_layer_sharding(
         )
 
     qkv = layer_cfg.attention.qkv_linear
-    if hasattr(qkv, "wq"):
+    if hasattr(qkv, "wq") and qkv.wq is not None:
         qkv.wq.sharding_config = colwise_config()
-    if hasattr(qkv, "wk"):
+    if hasattr(qkv, "wk") and qkv.wk is not None:
         qkv.wk.sharding_config = colwise_config()
     if hasattr(qkv, "wv") and qkv.wv is not None:
         qkv.wv.sharding_config = colwise_config()
@@ -123,4 +140,23 @@ def _set_gemma4_layer_sharding(
             layer_cfg.feed_forward,
             attn_x_layout=attn_x_layout,
             enable_sp=enable_sp,
+        )
+    elif getattr(layer_cfg, "moe", None) is not None:
+        set_moe_sharding_config(
+            layer_cfg.moe,
+            attn_x_layout=attn_x_layout,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
+
+    if getattr(layer_cfg, "ple", None) is not None:
+        replicate_param = dense_param_placement(tp=spmd.R)
+        layer_cfg.ple.per_layer_input_gate.sharding_config = ShardingConfig(
+            state_shardings={"weight": replicate_param}
+        )
+        layer_cfg.ple.per_layer_projection.sharding_config = ShardingConfig(
+            state_shardings={"weight": replicate_param}
+        )
+        layer_cfg.ple.post_per_layer_input_norm.sharding_config = ShardingConfig(
+            state_shardings={"weight": replicate_param}
         )

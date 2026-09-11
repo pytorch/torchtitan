@@ -31,33 +31,34 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
+from .ple import Gemma4LayerPLE, Gemma4PerLayerEmbedding
 
 
 class Gemma4QKVLinear(BaseQKVLinear):
-    """Separate Q, K, and optional V projection supporting attention_k_eq_v."""
+    """Separate Q, optional K, and optional V projection supporting attention_k_eq_v and shared KV."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseQKVLinear.Config):
         wq: Linear.Config
-        wk: Linear.Config
+        wk: Linear.Config | None = None
         wv: Linear.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.wq = config.wq.build()
-        self.wk = config.wk.build()
+        self.wk = config.wk.build() if config.wk is not None else None
         self.wv = config.wv.build() if config.wv is not None else None
 
     def forward(
         self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         xq = self.wq(x)
-        xk = self.wk(x)
-        xv = self.wv(x) if self.wv is not None else xk
+        xk = self.wk(x) if self.wk is not None else None
+        xv = self.wv(x) if self.wv is not None else None
         return (
             local_head_split(xq, self.head_dim),
-            local_head_split(xk, self.head_dim),
-            local_head_split(xv, self.head_dim),
+            local_head_split(xk, self.head_dim) if xk is not None else None,
+            local_head_split(xv, self.head_dim) if xv is not None else None,
         )
 
 
@@ -75,27 +76,10 @@ class Gemma4RoPE(CosSinRoPE):
         base = cfg.theta
         partial_rotary_factor = getattr(cfg, "partial_rotary_factor", 1.0)
 
-        if partial_rotary_factor < 1.0:
-            # Proportional RoPE (HF Gemma-4):
-            # Only rotate the first partial_rotary_factor proportion of head_dim,
-            # with frequencies normalized across the full head_dim.
-            rope_angles = int(partial_rotary_factor * dim // 2)
-            inv_freq_rotated = 1.0 / (
-                base ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32) / dim)
-            )
-            nope_angles = dim // 2 - rope_angles
-            if nope_angles > 0:
-                inv_freq = torch.cat(
-                    [inv_freq_rotated, torch.zeros(nope_angles, dtype=torch.float32)],
-                    dim=0,
-                )
-            else:
-                inv_freq = inv_freq_rotated
-        else:
-            inv_freq = 1.0 / (
-                base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-            )
-
+        rotary_dim = int(dim * partial_rotary_factor)
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+        )
         t = torch.arange(
             max_context_length, dtype=inv_freq.dtype, device=inv_freq.device
         )
@@ -105,6 +89,41 @@ class Gemma4RoPE(CosSinRoPE):
         cos = theta.cos()
         sin = theta.sin()
         return torch.cat([cos, sin], dim=-1)
+
+    @staticmethod
+    def apply_rotary_emb(
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        rope_cache: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        rotary_dim = rope_cache.shape[-1] // 2
+        cos = rope_cache[..., :rotary_dim]
+        sin = rope_cache[..., rotary_dim:]
+
+        if rotary_dim < query.shape[-1]:
+            q_rot = query[..., :rotary_dim].float()
+            q_pass = query[..., rotary_dim:]
+            xq_out = (q_rot * cos) + (CosSinRoPE._rotate_half(q_rot) * sin)
+            query_out = torch.cat([xq_out.type_as(query), q_pass], dim=-1)
+        else:
+            query_f = query.float()
+            query_out = ((query_f * cos) + (CosSinRoPE._rotate_half(query_f) * sin)).type_as(query)
+
+        if key is None:
+            return query_out
+
+        if rotary_dim < key.shape[-1]:
+            k_rot = key[..., :rotary_dim].float()
+            k_pass = key[..., rotary_dim:]
+            xk_out = (k_rot * cos) + (CosSinRoPE._rotate_half(k_rot) * sin)
+            key_out = torch.cat([xk_out.type_as(key), k_pass], dim=-1)
+        else:
+            key_f = key.float()
+            key_out = ((key_f * cos) + (CosSinRoPE._rotate_half(key_f) * sin)).type_as(key)
+
+        return query_out, key_out
 
 
 class Gemma4GlobalSDPA(Module):
@@ -187,35 +206,55 @@ class Gemma4GlobalSDPA(Module):
 
 
 class Gemma4Attention(GQAttention):
-    """Gemma-4 GQA with unit attention scale, QK RMSNorm, and V RMSNorm."""
+    """Gemma-4 GQA with unit attention scale, QK RMSNorm, V RMSNorm, and Shared KV Cache."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
         attn_scale: float = 1.0
         v_norm: RMSNorm.Config | None = None
+        is_kv_shared_layer: bool = False
+        store_full_length_kv: bool = False
+        layer_type: str = "sliding"
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.scaling = config.attn_scale
         self.v_norm = config.v_norm.build() if config.v_norm is not None else None
+        self.is_kv_shared_layer = getattr(config, "is_kv_shared_layer", False)
+        self.store_full_length_kv = getattr(config, "store_full_length_kv", False)
+        self.layer_type = getattr(config, "layer_type", "sliding")
+        if self.is_kv_shared_layer:
+            self.k_norm = None
 
     def forward(
         self,
         x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        shared_kv_states: dict | None = None,
     ) -> torch.Tensor:
         xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
-        if self.q_norm is not None and self.k_norm is not None:
+        if self.q_norm is not None:
             xq_THK = self.q_norm(xq_THK)
-            xk_THK = self.k_norm(xk_THK)
+
         if positions is not None and positions.shape[0] != xq_THK.shape[0]:
-            # Under TP Sequence Parallelism, query tokens are sharded across TP ranks.
-            # Slice positions locally to match this rank's token count.
             positions = positions[: xq_THK.shape[0]]
-        xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
-        if self.v_norm is not None:
-            xv_THV = self.v_norm(xv_THV)
+
+        if self.is_kv_shared_layer and shared_kv_states is not None:
+            xk_THK, xv_THV = shared_kv_states[self.layer_type]
+            xq_THK = self.rope(xq_THK, None, positions)
+        else:
+            if self.k_norm is not None and xk_THK is not None:
+                xk_THK = self.k_norm(xk_THK)
+            if xv_THV is None and xk_THK is not None:
+                xv_THV = xk_THK
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
+            if self.v_norm is not None and xv_THV is not None:
+                xv_THV = self.v_norm(xv_THV)
+
+        stored_kv = None
+        if self.store_full_length_kv and shared_kv_states is not None:
+            stored_kv = (xk_THK, xv_THV)
 
         out_THV = self.inner_attention(
             xq_THK,
@@ -225,7 +264,11 @@ class Gemma4Attention(GQAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
-        return self.wo(out_THV.view(out_THV.shape[0], -1))
+        out = self.wo(out_THV.view(out_THV.shape[0], -1))
+        
+        if self.store_full_length_kv:
+            return out, stored_kv
+        return out
 
 
 class Gemma4FeedForward(FeedForward):
@@ -247,18 +290,27 @@ class Gemma4TransformerBlock(TransformerBlock):
         use_global_attention: bool = False
         post_attention_norm: RMSNorm.Config
         post_ffn_norm: RMSNorm.Config
+        ple: Gemma4LayerPLE.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
         self.use_global_attention = config.use_global_attention
         self.attention = config.attention.build()
-        if config.feed_forward is None:
-            raise ValueError("feed_forward configuration must be provided")
-        self.feed_forward = config.feed_forward.build()
+        if config.feed_forward is not None:
+            self.feed_forward = config.feed_forward.build()
+            self.moe = None
+        elif config.moe is not None:
+            self.moe = config.moe.build()
+            self.feed_forward = None
+        else:
+            raise ValueError(
+                "Either feed_forward or moe must be provided for Gemma4TransformerBlock"
+            )
         self.attention_norm = config.attention_norm.build()
         self.post_attention_norm = config.post_attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.post_ffn_norm = config.post_ffn_norm.build()
+        self.ple = config.ple.build() if config.ple is not None else None
         self.register_buffer("layer_scalar", torch.ones(1))
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -270,6 +322,8 @@ class Gemma4TransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        layer_ple_input: torch.Tensor | None = None,
+        shared_kv_states: dict | None = None,
     ):
         layer_mask = attention_masks
         if isinstance(attention_masks, dict):
@@ -277,11 +331,32 @@ class Gemma4TransformerBlock(TransformerBlock):
                 "global" if self.use_global_attention else "sliding_window"
             ]
 
-        h = x + self.post_attention_norm(
-            self.attention(self.attention_norm(x), layer_mask, positions)
+        attn_out = self.attention(
+            self.attention_norm(x),
+            layer_mask,
+            positions,
+            shared_kv_states=shared_kv_states,
         )
-        h = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
+        
+        stored_kv = None
+        if getattr(self.attention, "store_full_length_kv", False):
+            attn_out, stored_kv = attn_out
+
+        h = x + self.post_attention_norm(attn_out)
+        mlp_out = (
+            self.moe(self.ffn_norm(h))
+            if self.moe is not None
+            else self.feed_forward(self.ffn_norm(h))
+        )
+        h = h + self.post_ffn_norm(mlp_out)
+
+        if self.ple is not None and layer_ple_input is not None:
+            h = self.ple(h, layer_ple_input)
+
         h = h * self.layer_scalar
+        
+        if getattr(self.attention, "store_full_length_kv", False):
+            return h, stored_kv
         return h
 
 
@@ -295,6 +370,8 @@ class Gemma4Model(Decoder):
         sliding_window_size: int = 4096
         global_attn_interval: int = 6
         enable_sliding_window: bool = True
+        ple: Gemma4PerLayerEmbedding.Config | None = None
+        final_logit_softcapping: float | None = None
 
         def update_from_config(self, *, config, **kwargs) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -320,7 +397,9 @@ class Gemma4Model(Decoder):
             from torchtitan.models.gemma4.sharding import set_gemma4_sharding_config
 
             set_gemma4_sharding_config(
-                self, enable_sp=config.parallelism.enable_sequence_parallel
+                self,
+                enable_sp=config.parallelism.enable_sequence_parallel,
+                enable_ep=getattr(config.parallelism, "expert_parallel_degree", 1) > 1,
             )
 
         def get_nparams_and_flops(
@@ -347,6 +426,8 @@ class Gemma4Model(Decoder):
         self.embed_scale = config.dim**0.5
         self.sliding_window_size = config.sliding_window_size
         self.enable_sliding_window = config.enable_sliding_window
+        self.ple = config.ple.build() if config.ple is not None else None
+        self.final_logit_softcapping = config.final_logit_softcapping
 
     def forward(
         self,
@@ -354,15 +435,46 @@ class Gemma4Model(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
     ):
-        h = (
+        base_embed = (
             self.tok_embeddings(tokens) * self.embed_scale
             if self.tok_embeddings is not None
             else tokens
         )
-        for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
+        per_layer_inputs = (
+            self.ple(tokens, base_embed)
+            if self.ple is not None and self.tok_embeddings is not None
+            else None
+        )
+
+        shared_kv_states = {}
+        h = base_embed
+        for idx, layer in enumerate(self.layers.values()):
+            layer_ple_input = (
+                per_layer_inputs[..., idx, :]
+                if per_layer_inputs is not None
+                else None
+            )
+            layer_out = layer(
+                h,
+                attention_masks,
+                positions,
+                layer_ple_input=layer_ple_input,
+                shared_kv_states=shared_kv_states,
+            )
+            if getattr(layer.attention, "store_full_length_kv", False):
+                h, stored_kv = layer_out
+                if stored_kv is not None:
+                    shared_kv_states[layer.attention.layer_type] = stored_kv
+            else:
+                h = layer_out
         h = self.norm(h) if self.norm is not None else h
-        return h if self._skip_lm_head or self.lm_head is None else self.lm_head(h)
+        if self._skip_lm_head or self.lm_head is None:
+            return h
+        logits = self.lm_head(h)
+        if self.final_logit_softcapping is not None:
+            cap = self.final_logit_softcapping
+            logits = torch.tanh(logits / cap) * cap
+        return logits
 
     def get_attention_masks(self, positions: torch.Tensor) -> AttentionMasksType | None:
         attn_config = self.config.first_attention
