@@ -166,25 +166,35 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
         hf_state_dict = {}
         to_hf_map = self.to_hf_map
 
+        temp_experts = {}
         for key, value in state_dict.items():
             if "moe.routed_experts.inner_experts" in key:
                 new_key = to_hf_map.get(key)
                 if new_key is None:
                     continue
-                # For Gemma-4 MoE, HF stores experts as stacked tensors, so we don't split by expert_num.
-                if isinstance(value, DTensor):
-                    # Gather the tensor
-                    value = value.full_tensor()
-                
-                if "w1_EFD" in key:
-                    # We need to wait for w3 to concatenate them. Store w1 temporarily.
-                    if not hasattr(self, "_temp_w1"):
-                        self._temp_w1 = {}
-                    self._temp_w1[new_key] = value
-                elif "w3_EFD" in key:
-                    w1_val = self._temp_w1.pop(new_key)
-                    # Concatenate w1 and w3 along dim=1 to form gate_up_proj
-                    hf_state_dict[new_key] = torch.cat([w1_val, value], dim=1)
+
+                if "w1_EFD" in key or "w3_EFD" in key:
+                    if new_key not in temp_experts:
+                        temp_experts[new_key] = {}
+                    which = "w1" if "w1_EFD" in key else "w3"
+                    temp_experts[new_key][which] = value
+                    if "w1" in temp_experts[new_key] and "w3" in temp_experts[new_key]:
+                        w1_val = temp_experts[new_key].pop("w1")
+                        w3_val = temp_experts[new_key].pop("w3")
+                        del temp_experts[new_key]
+                        if isinstance(w1_val, DTensor):
+                            assert isinstance(w3_val, DTensor)
+                            cat_local = torch.cat(
+                                [w1_val.to_local(), w3_val.to_local()], dim=1
+                            )
+                            hf_state_dict[new_key] = DTensor.from_local(
+                                cat_local,
+                                device_mesh=w1_val.device_mesh,
+                                placements=w1_val.placements,
+                                run_check=False,
+                            )
+                        else:
+                            hf_state_dict[new_key] = torch.cat([w1_val, w3_val], dim=1)
                 elif "w2_EDF" in key:
                     hf_state_dict[new_key] = value
                 elif "moe_ffn_norm.weight" in key:
@@ -286,11 +296,26 @@ class Gemma4StateDictAdapter(MoEStateDictAdapter):
                 if m is None:
                     continue
                 layer_num = m.group(0)
-                
+
                 # Split gate_up_proj into w1 and w3
                 # Shape is [num_experts, 2 * hidden_dim, dim]
-                # We need to chunk along dim 1
-                w1_val, w3_val = torch.chunk(value, 2, dim=1)
+                # We chunk along dim 1
+                if isinstance(value, DTensor):
+                    w1_local, w3_local = torch.chunk(value.to_local(), 2, dim=1)
+                    w1_val = DTensor.from_local(
+                        w1_local.contiguous(),
+                        device_mesh=value.device_mesh,
+                        placements=value.placements,
+                        run_check=False,
+                    )
+                    w3_val = DTensor.from_local(
+                        w3_local.contiguous(),
+                        device_mesh=value.device_mesh,
+                        placements=value.placements,
+                        run_check=False,
+                    )
+                else:
+                    w1_val, w3_val = torch.chunk(value, 2, dim=1)
                 state_dict[f"layers.{layer_num}.moe.routed_experts.inner_experts.w1_EFD"] = w1_val
                 state_dict[f"layers.{layer_num}.moe.routed_experts.inner_experts.w3_EFD"] = w3_val
 
