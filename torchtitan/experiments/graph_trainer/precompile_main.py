@@ -42,6 +42,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -123,6 +124,24 @@ def _common_setup(config):
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
+    # Auxiliary losses normalize by the step's global valid-token count, which
+    # the training loop derives from the data; precompile has no batches, so
+    # use the configured budget.  TODO: the traced graph bakes this value, so
+    # it goes stale if the per-step count varies (e.g. with padding).
+    num_pp_microbatches = (
+        config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+    )
+    num_tokens_per_grad_step = (
+        config.training.num_tokens_per_microbatch_per_dp_rank
+        * num_pp_microbatches
+        * (parallel_dims.dp_replicate * parallel_dims.dp_shard)
+    )
+    num_tokens_per_train_step = config.training.num_tokens_per_train_step
+    if num_tokens_per_train_step < 0:
+        num_tokens_per_train_step = num_tokens_per_grad_step
+    AuxLoss.set_step_denominator(
+        torch.tensor(num_tokens_per_train_step, dtype=torch.int64, device=device)
+    )
     model_config.update_from_config(config=config)
 
     logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")

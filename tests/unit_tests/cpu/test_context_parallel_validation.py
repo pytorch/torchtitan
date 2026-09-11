@@ -32,6 +32,15 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "VarlenAttention"):
             config.model_spec.model.update_from_config(config=config)
 
+    def test_allows_mtp_cp(self):
+        from torchtitan.models.deepseek_v3.config_registry import (
+            deepseek_v3_debugmodel_mtp,
+        )
+
+        config = deepseek_v3_debugmodel_mtp()
+        config.parallelism.context_parallel_degree = 2
+        config.model_spec.model.update_from_config(config=config)
+
 
 if __name__ == "__main__":
     unittest.main()

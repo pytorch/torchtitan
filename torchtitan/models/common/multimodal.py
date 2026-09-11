@@ -12,27 +12,8 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
-import contextlib
-
 import spmd_types as spmd
 import torch
-
-from torchtitan.distributed.spmd_types import spmd_mesh_size
-
-
-def multimodal_context() -> contextlib.AbstractContextManager[None]:
-    """Use a DP-local mesh while preparing multimodal inputs.
-
-    The vision encoder and the vision->text scatter run
-    per-DP-rank on that rank's own images: the pixel tensors are DP-local
-    (``V@DP``), so the region must execute with DP treated as a local axis.
-    After the scatter the tensor is token-aligned again and global DP batch
-    sharding resumes. This is a no-op when DP is size 1.
-    """
-    if spmd_mesh_size("dp") > 1:
-        return spmd.set_current_mesh(local_axes=("dp",))
-    return contextlib.nullcontext()
-
 
 def get_vision_positions(
     tokens: torch.Tensor,

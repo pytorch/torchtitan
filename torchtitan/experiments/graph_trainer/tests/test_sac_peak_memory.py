@@ -68,8 +68,7 @@ def _measure_step(
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     loss = trainer.forward_backward_step(
-        input_dict={"input": tokens, "positions": positions},
-        labels=labels,
+        input_dict={"input": tokens, "positions": positions, "labels": labels},
         global_valid_tokens=global_valid_tokens,
     )
     torch.cuda.synchronize()

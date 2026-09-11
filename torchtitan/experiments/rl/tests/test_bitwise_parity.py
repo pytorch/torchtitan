@@ -218,16 +218,12 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
-            # batch_invariant_ops covers mm/addmm/_log_softmax/mean but not bmm
-            # (the MoE router gate lowers to bmm in the vLLM inference graph), and
-            # the v2 logprob Triton kernel bypasses the aten overrides. Apply the
-            # same generator-side patches the production VLLMGenerator does.
+            # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
+            # same generator-side patch the production VLLMGenerator does.
             from torchtitan.experiments.rl.batch_invariance import (
                 force_logprobs_fn_for_batch_invariance,
-                patch_bmm_for_batch_invariance,
             )
 
-            patch_bmm_for_batch_invariance()
             force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 

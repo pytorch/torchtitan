@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,7 +16,13 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
+from torchtitan.distributed.spmd_types import (
+    maybe_set_sparse_mesh,
+    spmd_local_context,
+    spmd_mesh_size,
+    spmd_sparse_mesh,
+)
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
@@ -184,6 +192,7 @@ class TokenChoiceTopKRouter(Module):
         score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
+        aux_loss: AuxLoss.Config | None = None
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -196,6 +205,7 @@ class TokenChoiceTopKRouter(Module):
         self.score_func = config.score_func
         self.route_norm = config.route_norm
         self.route_scale = config.route_scale
+        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
 
     def _debug_force_load_balance_routing(
@@ -290,7 +300,7 @@ class TokenChoiceTopKRouter(Module):
         Returns:
             topk_scores_TK: Routing scores ``(T, K)``.
             topk_expert_ids_TK: Expert indices ``(T, K)``.
-            scores_TE: Full routing scores ``(T, E)``.
+            routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         scores_TE = self.gate(x_TD)
 
@@ -327,11 +337,160 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_TK = topk_scores_TK / denominator
         topk_scores_TK = topk_scores_TK * self.route_scale
 
+        # Build a one-hot boolean routing map (T, E) marking the experts each
+        # token is routed to. Under TP/SP the router outputs are sharded on the
+        # token dimension; scatter_ writes along the replicated expert
+        # dimension and therefore needs no redistribution.
+        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+            -1,
+            topk_expert_ids_TK,
+            True,
+        )
+
+        # Auxiliary load-balance loss (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
+        # The gradient is injected into topk_scores_TK on backward; the loss
+        # itself keeps its forward-side metric accumulation from being re-run
+        # by activation checkpointing (see ``AuxLoss.inject``).  The
+        # routing map is passed in so the loss counts exactly the tokens this
+        # router counted: once the router masks padding positions out of the
+        # map, the loss and its token count follow without further changes.
+        if self.training and self.aux_loss is not None:
+            topk_scores_TK = self.aux_loss(
+                scores_TE,
+                routing_map_TE,
+                carrier=topk_scores_TK,
+            )
+
         return (
             topk_scores_TK,
             topk_expert_ids_TK,
-            scores_TE,
+            routing_map_TE,
         )
+
+
+class MicrobatchWiseLoadBalanceLoss(AuxLoss):
+    """Per-forward MoE load-balance gradient (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
+
+    The balancing unit is one forward's folded token stream (a DP-local
+    microbatch).  Global (corpus-level) balance is left to the
+    auxiliary-loss-free bias path (``expert_bias_E``); this loss only
+    discourages extreme load imbalance within individual forwards (samples),
+    per the DeepSeek-V3 design (Sec 2.1.2, "Complementary Sequence-Wise
+    Auxiliary Loss").
+
+    With ``E`` experts, top-``K`` selection and ``T`` tokens per forward:
+
+    Eq. 18: ``f_i = (E / (K T)) * sum_t 1[token t routes to expert i]``
+    Eq. 19: ``p_i = (1 / T) * sum_t s'_t,i``,
+            where ``s'_t,i = s_t,i / sum_j s_t,j`` is the per-token
+            normalized score.
+    Eq. 17: ``L_bal = sum_i f_i * p_i``
+
+    The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
+    per-token-normalized value, while ``AuxLoss`` scales every auxiliary
+    loss by ``1 / global_valid_tokens`` (the step's valid-token count), so the
+    sum-type form keeps the injected weight at ``coeff * L_bal``.
+
+    The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
+    folded token dim, hence Partial over the mesh axes that shard it (CP
+    always, plus TP under EP).  They are all-reduced to Invariant before
+    the formula, so every rank computes the same per-forward loss.  The
+    one-hot counts are non-differentiable: the gradient reaches the router
+    only through the normalized-score sums and the top-k score carrier.
+    ``T`` is the forward's token count: the code evaluates Eq. 18 in the
+    T-free form ``f_i = E * counts_i / sum_j counts_j``, which equals
+    ``(E / (K T)) * counts_i`` because each token contributes K entries, so
+    ``sum_j counts_j = K T``.  That needs no shape or mesh-degree assumption
+    and follows any masking the router applies to the routing map.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AuxLoss.Config):
+        """Same fields as ``AuxLoss.Config``; this loss adds no knobs.
+
+        A distinct Config is required even without new fields: ``Config.build()``
+        constructs the class that owns the config (``__init_subclass__`` sets
+        ``_owner``), so a router configured with ``AuxLoss.Config`` would
+        build a plain ``AuxLoss``, which has no ``forward``.
+        """
+
+    def _reduce_token_partials(
+        self, partial_E: torch.Tensor, axes: tuple[str, ...]
+    ) -> torch.Tensor:
+        """Partial -> Invariant all-reduce over the token-partition axes.
+
+        Axes are passed by name, so spmd_types resolves them against the
+        ambient mesh and no DeviceMesh escapes into model code; an inactive
+        axis is skipped rather than run as a no-op collective.  ``P -> I`` is
+        an all-reduce in forward with an identity backward: the reduced sums,
+        and hence the loss and its gradient, are identical on every rank of
+        the reduction group.
+        """
+        for axis in axes:
+            if spmd_mesh_size(axis) == 1:
+                # No mesh context or a size-1 axis: nothing shards the tokens.
+                continue
+            partial_E = spmd.redistribute(
+                partial_E,
+                axis,
+                src=spmd.Partial,
+                dst=spmd.Invariant,
+                backward_options={"op_dtype": partial_E.dtype},
+            )
+        return partial_E
+
+    def forward(
+        self,
+        scores_TE: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the per-forward balance loss and inject its gradient.
+
+        Args:
+            scores_TE: Router scores ``(T, E)`` for the forward's tokens.
+            routing_map_TE: One-hot routing map ``(T, E)`` for the same tokens,
+                as counted by the router.
+            carrier: Tensor whose backward path carries the injected
+                gradient (the router's top-k scores).
+
+        Returns:
+            ``carrier`` unchanged (identity forward).
+        """
+        # Mark DP local for the counts arithmetic: each DP rank owns an
+        # independent token stream, so DP must not be reduced; only the
+        # global axes that shard the stream (CP, TP under EP) are.
+        with spmd_local_context("dp"):
+            E = scores_TE.size(-1)
+            # Axes that shard the router output's token dim: CP in every
+            # layout, TP only under EP, which distributes tokens over TP (the
+            # gate computes and emits dense_sequence_parallel_placement
+            # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
+            # same reason).
+            axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
+
+            # Eq. 18: per-expert routing frequency counts_i over the forward's
+            # tokens, then f_i = E * counts_i / sum_j counts_j (so
+            # sum_i f_i = E).  The latter is the (E / (K T)) form with
+            # T = sum_j counts_j / K, so it needs no token count, shape or mesh
+            # degree and follows any masking the router applies to the map.
+            # The map is cast to float before the reduction: casting a Partial
+            # tensor is non-linear and rejected by spmd_types.
+            counts_E = self._reduce_token_partials(
+                routing_map_TE.to(scores_TE.dtype).sum(dim=0), axes
+            )
+            f_E = F.normalize(counts_E, p=1, dim=0) * E
+
+            # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
+            # scores.  F.normalize's eps clamp only guards an all-zero score
+            # row: the scores are non-negative, so the norm is a plain sum.
+            probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+            p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
+
+            # Eq. 17: L_bal = sum_i f_i * p_i
+            loss = (f_E * p_E).sum()
+            return self.inject(loss, carrier=carrier)
 
 
 class MoE(Module):
@@ -408,21 +567,13 @@ class MoE(Module):
         sequence-shards tokens across TP, the caller must provide a TP-divisible
         token count.
         """
-        # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
+        # topk scores and expert IDs have shape (T, K); the routing map (T, E)
+        # marks the experts each token is routed to (built inside the router).
         (
             topk_scores_TK,
             topk_expert_ids_TK,
-            scores_TE,
+            routing_map_TE,
         ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
-
-        # Build a one-hot routing map (T, E) marking the experts each token
-        # is routed to. Under TP/SP the router outputs are token-sharded;
-        # scatter_ writes along the replicated expert dim with no redistribution.
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1,
-            topk_expert_ids_TK,
-            True,
-        )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,

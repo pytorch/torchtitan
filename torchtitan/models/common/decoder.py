@@ -316,7 +316,11 @@ class Decoder(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+    ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
         # Function-local import avoids a circular import
         # (context_parallel.api -> models.common -> decoder).

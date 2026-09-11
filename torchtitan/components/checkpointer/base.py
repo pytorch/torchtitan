@@ -24,8 +24,11 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Configurable, Function
+from torchtitan.observability import structured_logger as sl
+from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import GarbageCollection
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
@@ -205,6 +208,13 @@ class BaseCheckpointManager(Configurable, ABC):
     save_future: Future | None
     folder: str
     keep_latest_k: int
+    states: dict[str, Any]
+    exclude_from_loading: list[str]
+    initial_load_path: str | None
+    initial_load_model_only: bool
+    initial_load_in_hf: bool
+    initial_load_in_hf_quantized: bool
+    sd_adapter: BaseStateDictAdapter | None
     purge_exempt: Callable[[int], bool] | None = None
     purge_thread: threading.Thread | None
     purge_queue: queue.Queue[str | None]
@@ -213,23 +223,107 @@ class BaseCheckpointManager(Configurable, ABC):
     _STEP_DIR_PATTERN = r"step-(0|[1-9]\d*)"
 
     # A disabled manager returns early from ``__init__`` without setting up any
-    # state, so none of its attributes exist. The public entry points below own
-    # that check once, on behalf of every implementation, and dispatch to the
-    # ``_``-prefixed hooks only when enabled. Subclasses override the hooks, not
-    # these methods: overriding a public method here would silently bypass the
-    # guard and run against uninitialized state.
+    # state, so none of its attributes exist. Public entry points must perform
+    # this check before accessing manager state; overrides must preserve it.
 
+    @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""
         if not self.enable:
             return False
-        return self._load(step)
 
+        with sl.log_trace_span("checkpoint_load"):
+            model_only = False
+            from_hf = False
+            from_quantized = False
+
+            has_checkpoint_folder = self._storage.isdir(self.folder)
+            load_step = -1
+            if has_checkpoint_folder:
+                load_step = self._find_load_step() if step == -1 else step
+
+            if step != -1 and not has_checkpoint_folder:
+                raise FileNotFoundError(
+                    f"--checkpoint.load_step={step} not found because "
+                    f"checkpoint.folder {self.folder} does not exist"
+                )
+
+            if load_step == -1:
+                model_only = self.initial_load_model_only
+                from_hf = self.initial_load_in_hf
+                from_quantized = self.initial_load_in_hf_quantized
+
+                if from_hf:
+                    assert model_only, (
+                        "Only model can be loaded when loading from "
+                        "HF's safetensors checkpoint."
+                    )
+                if from_quantized:
+                    assert (
+                        from_hf
+                    ), "Quantized checkpoint can only be loaded from HF format"
+
+                if self.initial_load_path:
+                    checkpoint_id = self.initial_load_path
+                    if not self._storage.isdir(checkpoint_id):
+                        raise ValueError(
+                            f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
+                        )
+                    if from_hf:
+                        logger.info(
+                            "Loading from HF safetensors from "
+                            f"--checkpoint.initial_load_path: {checkpoint_id}"
+                        )
+                elif from_hf:
+                    assert (
+                        self.sd_adapter and self.sd_adapter.hf_assets_path
+                    ), "from_hf=True requires sd_adapter and hf_assets_path."
+                    checkpoint_id = self.sd_adapter.hf_assets_path
+                    if not self._storage.isdir(checkpoint_id):
+                        raise ValueError(
+                            "model.hf_assets_path is being used to load HF weights "
+                            "but the path is not valid. Either make sure hf_assets_path "
+                            "is correct or provide a valid checkpoint.initial_load_path"
+                        )
+                    logger.info(
+                        "Loading HF safetensors from "
+                        f"--model.hf_assets_path: {checkpoint_id}"
+                    )
+                else:
+                    logger.info("No checkpoint was provided, this is a fresh start.")
+                    return False
+            else:
+                step = load_step
+                # Step 0 is a seed checkpoint, which holds model state only.
+                model_only = step == 0
+                checkpoint_id = self._create_checkpoint_id(step)
+                if not self._storage.isdir(checkpoint_id):
+                    raise FileNotFoundError(
+                        f"--checkpoint.load_step={step} not found at {checkpoint_id}"
+                    )
+
+            logger.info("Loading the checkpoint from %s.", checkpoint_id)
+            begin = time.monotonic()
+            self._load_checkpoint(
+                self._states_to_load(model_only),
+                checkpoint_id,
+                from_hf=from_hf,
+                from_quantized=from_quantized,
+            )
+            GarbageCollection.collect("GC collection for checkpoint loading.")
+            logger.info(
+                "Finished loading the checkpoint in %.2f seconds.",
+                time.monotonic() - begin,
+            )
+            return True
+
+    @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> bool:
         """Persist state for ``curr_step``."""
         if not self.enable:
             return False
-        return self._save(curr_step, last_step)
+        with sl.log_trace_span("checkpoint_save"):
+            return self._save(curr_step, last_step)
 
     def maybe_wait_for_staging(self) -> None:
         """Block until asynchronous staging for the last save completes."""
@@ -282,8 +376,29 @@ class BaseCheckpointManager(Configurable, ABC):
         return filesystem.join(folder, f"step-{step}")
 
     @abstractmethod
-    def _load(self, step: int = -1) -> bool:
-        """Implement ``load``. Only called when checkpointing is enabled."""
+    def _load_checkpoint(
+        self,
+        states: dict[str, Any],
+        checkpoint_id: str,
+        *,
+        from_hf: bool,
+        from_quantized: bool,
+    ) -> None:
+        """Restore ``states`` from a resolved checkpoint source."""
+
+    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
+        """Select the live state objects that must be restored."""
+        if model_only:
+            return {MODEL: self.states[MODEL]}
+
+        for exclude_key in self.exclude_from_loading:
+            if exclude_key not in self.states:
+                raise ValueError(f"{exclude_key} not found in state_dict.")
+        return {
+            key: value
+            for key, value in self.states.items()
+            if key not in self.exclude_from_loading
+        }
 
     @abstractmethod
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
@@ -316,12 +431,15 @@ class BaseCheckpointManager(Configurable, ABC):
 
     @abstractmethod
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
-        """Whether ``checkpoint_dir`` holds a checkpoint this manager can load.
+        """Whether ``checkpoint_dir`` holds a completed checkpoint.
 
-        A directory whose save was interrupted exists but has no metadata, so
-        resuming from it would fail; this is what keeps it out of
-        ``_find_load_step``.
+        This includes model-only exports that retention must preserve even
+        when they cannot restore the full training state.
         """
+
+    @abstractmethod
+    def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
+        """Whether automatic loading may select ``checkpoint_dir``."""
 
     def _find_load_step(self, folder: str = "") -> int:
         """The highest step in ``folder`` that can actually be loaded.
@@ -342,14 +460,14 @@ class BaseCheckpointManager(Configurable, ABC):
         if not self._storage.isdir(folder):
             return -1
 
-        valid_steps = []
+        resumable_steps = []
         for dirname in self._storage.listdir(folder):
             step = self._parse_step(dirname)
             if step is None:
                 continue
-            if self._is_valid_checkpoint(filesystem.join(folder, dirname)):
-                valid_steps.append(step)
-        return max(valid_steps) if valid_steps else -1
+            if self._is_resumable_checkpoint(filesystem.join(folder, dirname)):
+                resumable_steps.append(step)
+        return max(resumable_steps) if resumable_steps else -1
 
     def _purge_stale_checkpoints(
         self,

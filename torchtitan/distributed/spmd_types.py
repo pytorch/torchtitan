@@ -35,6 +35,7 @@ __all__ = [
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
+    "spmd_local_context",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
@@ -153,6 +154,24 @@ def spmd_mesh_size(axis_name: str) -> int:
     if axis_name not in names:
         return 1
     return mesh.size(names.index(axis_name))
+
+
+def spmd_local_context(
+    *local_axes: str,
+) -> contextlib.AbstractContextManager[None]:
+    """Context manager treating the named mesh axes as local axes.
+
+    Local axes retain per-coordinate SPMD semantics during global type
+    checking: each coordinate selects an independent tensor, and only the
+    remaining axes describe that tensor's global sharding. This is a no-op for
+    axes with size 1.
+    """
+    active_axes = tuple(
+        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
+    )
+    if not active_axes:
+        return contextlib.nullcontext()
+    return spmd.set_current_mesh(local_axes=active_axes)
 
 
 def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:

@@ -14,6 +14,7 @@ import time
 import unittest
 import uuid
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
 from unittest import mock
@@ -39,6 +40,7 @@ from torchtitan.components.checkpointer.dcp import (
 )
 from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.config import Function
+from torchtitan.observability import structured_logger as sl
 
 
 class FakeOptimizersContainer:
@@ -384,7 +386,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(len(mock_save.call_args_list), 3)
         manager.close()
 
-    @mock.patch("torchtitan.components.checkpointer.dcp.logger")
+    @mock.patch("torchtitan.components.checkpointer.base.logger")
     def test_load_returns_false_when_no_checkpoint_folder(self, mock_logger):
         cfg = self.trainer_config.checkpoint
         cfg.folder = "nonexistent"
@@ -696,6 +698,7 @@ class TestCheckpointManager(unittest.TestCase):
 
         # Verify that `maybe_wait_for_staging` actually waits for staging future to complete
         staging_future = manager.staging_future
+        manager.save_future.add_done_callback.assert_called_once()
         manager.maybe_wait_for_staging()
         staging_future.result.assert_called_once()
 
@@ -786,6 +789,42 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual([("purge", 10), "save"], calls)
         save_future.set_result(None)
         manager.close()
+
+    def test_async_save_logs_duration_when_future_completes(self):
+        trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
+        checkpoint_config = trainer_config.checkpoint
+        checkpoint_config.async_mode = "async"
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=checkpoint_config,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        save_future: Future[None] = Future()
+
+        with (
+            mock.patch.object(manager, "dcp_save", return_value=save_future),
+            mock.patch(
+                "torchtitan.components.checkpointer.dcp.GarbageCollection.collect"
+            ),
+            mock.patch.object(sl, "log_trace_scalar") as log_trace_scalar,
+            mock.patch(
+                "torchtitan.components.checkpointer.dcp.time.monotonic",
+                side_effect=[0.0, 10.0, 10.5, 12.0],
+            ),
+        ):
+            manager.save(curr_step=10, last_step=False)
+            save_future.set_exception(RuntimeError("save failed"))
+
+        log_trace_scalar.assert_called_once_with(
+            {"train.checkpoint_write.native_dcp.execute.async_total.latency_ms": 2000.0}
+        )
+        with self.assertRaisesRegex(RuntimeError, "save failed"):
+            manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
@@ -1170,10 +1209,10 @@ class TestFindLoadStepRemote(unittest.TestCase):
         manager._storage = _FilesystemCheckpointStorage()
         return manager
 
-    def test_returns_max_valid_step(self):
+    def test_returns_latest_resumable_step(self):
         self._write(f"{self.root}/step-10/.metadata")
         self._write(f"{self.root}/step-20/.metadata")
-        # step-30 has no core metadata -> not a valid checkpoint.
+        # step-30 has no core metadata, so it cannot be resumed.
         self._write(f"{self.root}/step-30/some_shard")
         # Complete directories outside the canonical naming scheme must be ignored.
         self._write(f"{self.root}/step-40.backup/.metadata")
@@ -1183,10 +1222,18 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
         self.assertEqual(self._manager()._find_load_step(folder=self.root), 20)
 
-    def test_step_zero_is_valid(self):
+    def test_step_zero_is_resumable(self):
         self._write(f"{self.root}/step-0/.metadata")
 
         self.assertEqual(self._manager()._find_load_step(folder=self.root), 0)
+
+    def test_skips_hf_only_export_when_selecting_resume_step(self):
+        self._write(f"{self.root}/step-10/.metadata")
+        self._write(f"{self.root}/step-20/model.safetensors.index.json")
+        manager = self._manager()
+
+        self.assertTrue(manager._is_valid_checkpoint(f"{self.root}/step-20"))
+        self.assertEqual(manager._find_load_step(folder=self.root), 10)
 
     def test_missing_folder_returns_negative_one(self):
         self.assertEqual(self._manager()._find_load_step(folder=self.root), -1)
@@ -1248,6 +1295,83 @@ class TestFilesystemCheckpointStorage(unittest.TestCase):
         self.assertTrue(self.storage.isdir(f"{root}/step-1"))
         self.assertTrue(self.storage.isfile(f"{root}/step-1/.metadata"))
         self.assertEqual(["step-1"], self.storage.listdir(root))
+
+
+class TestBaseCheckpointManagerTracing(unittest.TestCase):
+    def _manager(self, *, enable: bool = True):
+        manager = mock.Mock(spec=BaseCheckpointManager)
+        manager.enable = enable
+        manager._save.return_value = True
+        manager.folder = "/checkpoint"
+        manager._storage = mock.Mock()
+        manager._storage.isdir.return_value = True
+        manager._create_checkpoint_id.return_value = "/checkpoint/step-10"
+        manager._states_to_load.return_value = mock.sentinel.states
+        return manager
+
+    def test_enabled_save_and_load_trace_backend_hooks(self):
+        events = []
+
+        @contextmanager
+        def trace_span(name):
+            events.append(f"{name}_start")
+            yield
+            events.append(f"{name}_end")
+
+        manager = self._manager()
+        manager._save.side_effect = lambda *_args: events.append("save") or True
+        manager._load_checkpoint.side_effect = lambda *_args, **_kwargs: events.append(
+            "load"
+        )
+
+        with mock.patch.object(sl, "log_trace_span", side_effect=trace_span):
+            self.assertTrue(BaseCheckpointManager.save(manager, curr_step=10))
+            self.assertTrue(BaseCheckpointManager.load(manager, step=10))
+
+        self.assertEqual(
+            events,
+            [
+                "checkpoint_save_start",
+                "save",
+                "checkpoint_save_end",
+                "checkpoint_load_start",
+                "load",
+                "checkpoint_load_end",
+            ],
+        )
+        manager._save.assert_called_once_with(10, False)
+        manager._load_checkpoint.assert_called_once_with(
+            mock.sentinel.states,
+            "/checkpoint/step-10",
+            from_hf=False,
+            from_quantized=False,
+        )
+
+    def test_disabled_save_and_load_do_not_trace_or_call_backend_hooks(self):
+        manager = self._manager(enable=False)
+
+        with mock.patch.object(sl, "log_trace_span") as log_trace_span:
+            self.assertFalse(BaseCheckpointManager.save(manager, curr_step=10))
+            self.assertFalse(BaseCheckpointManager.load(manager, step=10))
+
+        log_trace_span.assert_not_called()
+        manager._save.assert_not_called()
+        manager._load_checkpoint.assert_not_called()
+
+    def test_public_save_and_load_disable_grad_before_backend_calls(self):
+        manager = self._manager()
+        grad_enabled = []
+        manager._save.side_effect = (
+            lambda *_args: grad_enabled.append(torch.is_grad_enabled()) or True
+        )
+        manager._load_checkpoint.side_effect = (
+            lambda *_args, **_kwargs: grad_enabled.append(torch.is_grad_enabled())
+        )
+
+        BaseCheckpointManager.save(manager, curr_step=10)
+        BaseCheckpointManager.load(manager, step=10)
+
+        self.assertEqual([False, False], grad_enabled)
 
 
 class TestShouldPurge(unittest.TestCase):
@@ -1331,7 +1455,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
 
 class TestSharedDiscoveryAndRetention(unittest.TestCase):
     """_find_load_step and _purge_stale_checkpoints live on the base; each
-    manager supplies only _is_valid_checkpoint."""
+    manager supplies its resumable and completed-checkpoint predicates."""
 
     def _manager(self, *, keep_latest_k: int, entries: list[str]):
         manager = CheckpointManager.__new__(CheckpointManager)

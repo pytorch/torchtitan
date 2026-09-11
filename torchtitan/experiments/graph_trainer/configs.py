@@ -86,6 +86,19 @@ class GraphTrainerCompileConfig(CompileConfig):
     partitioning contracts depend on canonical graph structure.
     """
 
+    enable_inplace_graph_gradient_accumulation: bool = False
+    """Accumulate SPMD AOT gradients in-place into trainer-owned buffers.
+
+    This makes gradient accumulation CUDA-graph safe by avoiding clones of
+    replay-owned gradient outputs.
+
+    TODO: Add support for:
+        GraphPP
+        precompile
+        parameter aliases
+        custom pass pipelines.
+    """
+
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.

@@ -20,6 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     token_id_placement,
+    token_id_sequence_parallel_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -48,10 +49,6 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 _replicate_weight = ShardingConfig(
     state_shardings={"weight": _dense_param_rep},
 )
-
-
-def dense_token_ids_sequence_parallel_placement():
-    return token_id_placement()
 
 
 def hc_head_input_sequence_parallel_placement():
@@ -267,13 +264,15 @@ def set_deepseek_v4_layer_sharding(
         )
         router_cfg = layer_cfg.moe.router
         if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
-            input_ids_src_placement = dense_activation_placement(
-                tp=spmd.R, cp=spmd.S(0)
-            )
+            # tokens / input_ids_T enter the model TP-replicated. MoE keeps
+            # activations sequence-parallel only on the SP+EP path, so hash
+            # ids must shard T the same way. Otherwise x is all-gathered or
+            # unreplicated on TP and the full token-id tensor matches.
+            input_ids_src_placement = token_id_placement()
             input_ids_dst_placement = (
-                dense_token_ids_sequence_parallel_placement()
-                if enable_ep
-                else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+                token_id_sequence_parallel_placement()
+                if enable_sp and enable_ep
+                else token_id_placement()
             )
             moe_sharding_config = layer_cfg.moe.sharding_config or ShardingConfig()
             in_src_shardings = moe_sharding_config.in_src_shardings or {}

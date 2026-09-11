@@ -10,7 +10,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.distributed.pipeline_parallel import pipeline_vlm
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
@@ -1128,7 +1128,10 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_qwen3_5,
-        pipelining_fn=pipeline_vlm,
+        pipelining_fn=partial(
+            pipeline_with_first_stage_modules,
+            first_stage_module_fqns=("vision_encoder",),
+        ),
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Qwen35StateDictAdapter,
     )
