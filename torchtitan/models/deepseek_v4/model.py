@@ -63,6 +63,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         input_ids_T: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
@@ -83,11 +85,16 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
+            assert self.moe is not None
             ffn_input = self.ffn_norm(x)
             if getattr(self.moe.router, "hash", False):
-                x = self.moe(ffn_input, input_ids_T=input_ids_T)
+                x = self.moe(
+                    ffn_input,
+                    padding_mask=padding_mask,
+                    input_ids_T=input_ids_T,
+                )
             else:
-                x = self.moe(ffn_input)
+                x = self.moe(ffn_input, padding_mask=padding_mask)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
@@ -228,6 +235,7 @@ class DeepSeekV4Model(Decoder):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -244,7 +252,13 @@ class DeepSeekV4Model(Decoder):
 
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
-            h = layer(h, input_ids_T, attention_masks, positions)
+            h = layer(
+                h,
+                input_ids_T,
+                attention_masks,
+                positions,
+                padding_mask=padding_mask,
+            )
 
         prev_hc_hidden = h
         main_hidden = self.hc_head(h)
@@ -260,6 +274,7 @@ class DeepSeekV4Model(Decoder):
             tokens,
             attention_masks,
             positions,
+            padding_mask,
         )
         return [
             self.lm_head(item) if self.lm_head is not None else item for item in outputs
@@ -271,6 +286,7 @@ class DeepSeekV4Model(Decoder):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
         mtp_outputs = []
@@ -289,6 +305,7 @@ class DeepSeekV4Model(Decoder):
                 valid_mask,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

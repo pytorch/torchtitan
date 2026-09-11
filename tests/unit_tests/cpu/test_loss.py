@@ -70,13 +70,21 @@ class TestLoss(unittest.TestCase):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
         labels = torch.arange(8)
+        padding_mask = torch.tensor(
+            [False, False, False, False, False, False, True, True]
+        )
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
         ):
             input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
-                {"input": tokens, "labels": labels, "positions": positions},
+                {
+                    "input": tokens,
+                    "labels": labels,
+                    "positions": positions,
+                    "padding_mask": padding_mask,
+                },
                 parallel_dims=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
@@ -104,6 +112,7 @@ class TestLoss(unittest.TestCase):
             ),
         )
         self.assertEqual(len(extra_kwargs["mtp_input_valid_masks"]), 2)
+        torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
 
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
@@ -435,8 +444,8 @@ class _FakeDecoder(nn.Module):
 
 
 class _IdentityDecoderBlock(nn.Module):
-    def forward(self, hidden, attention_masks, positions):
-        del attention_masks, positions
+    def forward(self, hidden, attention_masks, positions, *, padding_mask=None):
+        del attention_masks, positions, padding_mask
         return hidden
 
 
@@ -448,8 +457,10 @@ class _AddMTPBlock(nn.Module):
         mtp_input_valid_mask,
         attention_masks,
         positions,
+        *,
+        padding_mask=None,
     ):
-        del attention_masks, positions
+        del attention_masks, positions, padding_mask
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 
