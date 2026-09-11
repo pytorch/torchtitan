@@ -60,6 +60,34 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     return {}
 
 
+def thread_cap_env(num_threads: int) -> dict[str, str]:
+    """Per-proc launch env that caps BLAS/OMP thread pools to ``num_threads``.
+
+    Monarch does not set ``OMP_NUM_THREADS`` on the procs it spawns (torchrun and
+    Ray do), so each co-located trainer/generator proc otherwise sizes its BLAS/OMP
+    pool to every core on the host. With N procs sharing one host that is N-way
+    oversubscription and the cores thrash, starving the generator GPUs. The cap must
+    live in the LAUNCH env because BLAS thread pools are sized at first import, before
+    the actor runs. Applied to both roles; overridable per key via ``launcher.env``.
+    """
+    n = str(num_threads)
+    return {
+        "OMP_NUM_THREADS": n,
+        "MKL_NUM_THREADS": n,
+        "OPENBLAS_NUM_THREADS": n,
+    }
+
+
+def default_thread_cap(total_local_procs: int) -> int:
+    """Threads per proc that partition the host's cores without oversubscription.
+
+    Mirrors what Ray does implicitly via ``num_cpus`` per actor: divide the host's
+    cores evenly across the co-located procs so the thread pools sum to <= cores.
+    """
+    cpu_count = os.cpu_count() or 1
+    return max(1, cpu_count // max(1, total_local_procs))
+
+
 def _preimport_torch() -> None:
     """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
     # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
@@ -191,6 +219,7 @@ def spawn_proc_mesh(
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
+    common_env: dict[str, str] | None = None,
     generator_env: dict[str, str] | None = None,
 ) -> tuple[ProcMesh, list[ProcMesh]]:
     """Spawn the trainer and generator proc meshes.
@@ -203,10 +232,16 @@ def spawn_proc_mesh(
             both roles are spawned on ``this_host()`` by using non-overlapping
             GPU ranges.
         num_generators: Number of generator proc meshes to spawn.
+        common_env: Launch env applied to every proc of both roles (e.g. the
+            BLAS/OMP thread cap).
+        generator_env: Launch env applied to generator procs only; merged on top
+            of ``common_env`` (generator-specific keys win).
 
     Returns:
         The ``(trainer_mesh, generator_meshes)`` proc meshes.
     """
+    common_env = common_env or {}
+    generator_launch_env = {**common_env, **(generator_env or {})}
     total_generator_gpus = num_generators * per_generator_world_size
     total_gpus = trainer_world_size + total_generator_gpus
     logger.info(
@@ -230,6 +265,7 @@ def spawn_proc_mesh(
             gpus_per_node,
             bootstrap=_preimport_torch,
             role="trainer",
+            extra_env=common_env,
         )
         generator_meshes = [
             _spawn_proc_mesh(
@@ -238,7 +274,7 @@ def spawn_proc_mesh(
                 gpus_per_node,
                 bootstrap=_bootstrap_generator,
                 role="generator",
-                extra_env=generator_env,
+                extra_env=generator_launch_env,
             )
             for gen_host_mesh in generator_host_meshes
         ]
@@ -251,7 +287,7 @@ def spawn_proc_mesh(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,
             bootstrap_command=default_bootstrap_cmd().with_env(
-                provisioner.allocate(trainer_world_size)
+                provisioner.allocate(trainer_world_size, extra_env=common_env)
             ),
         )
         generator_meshes = [
@@ -260,7 +296,7 @@ def spawn_proc_mesh(
                 bootstrap=_bootstrap_generator,
                 bootstrap_command=default_bootstrap_cmd().with_env(
                     provisioner.allocate(
-                        per_generator_world_size, extra_env=generator_env
+                        per_generator_world_size, extra_env=generator_launch_env
                     )
                 ),
             )
@@ -287,11 +323,22 @@ async def main():
         per_generator_world_size = _compute_generator_world_size(
             config.generator.parallelism
         )
+        # Cap BLAS/OMP threads per proc so co-located procs don't oversubscribe the
+        # host's cores. Default partitions cores across all local procs; any key in
+        # `launcher.env` overrides it (e.g. OMP_NUM_THREADS = "16", or raise to opt out).
+        total_local_procs = (
+            trainer_world_size + config.num_generators * per_generator_world_size
+        )
+        common_env = {
+            **thread_cap_env(default_thread_cap(total_local_procs)),
+            **config.launcher.env,
+        }
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
+            common_env=common_env,
             generator_env=breakable_cudagraph_env(config.generator),
         )
         await rl_trainer.setup_async(
