@@ -20,10 +20,10 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -264,7 +264,7 @@ class Decoder(BaseModel):
     ) -> BlockMask:
         """Build a flex-attention BlockMask from mask_mods (ANDed together),
         respecting the config's block_size and batch-invariant mode."""
-        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
+        assert isinstance(attn_config.inner_attention, FlexInnerAttention.Config)
         seq_len = positions.shape[0]
         return create_attention_mask(
             and_masks(*mask_mods),
@@ -316,7 +316,9 @@ class Decoder(BaseModel):
         padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
                 batch["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
@@ -373,9 +375,9 @@ class Decoder(BaseModel):
             # pipeline stage holding only linear-attention blocks) → no masks.
             return None
         inner_attn = attn_config.inner_attention
-        if isinstance(inner_attn, FlexAttention.Config):
+        if isinstance(inner_attn, FlexInnerAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)
-        elif isinstance(inner_attn, VarlenAttention.Config):
+        elif isinstance(inner_attn, VarlenInnerAttention.Config):
             return create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
@@ -384,6 +386,6 @@ class Decoder(BaseModel):
             )
         else:
             raise TypeError(
-                f"Only VarlenAttention and FlexAttention support attention masks, "
+                f"Only VarlenInnerAttention and FlexInnerAttention support attention masks, "
                 f"got {type(inner_attn).__name__}"
             )

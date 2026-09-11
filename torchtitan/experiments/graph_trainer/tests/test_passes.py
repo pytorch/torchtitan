@@ -2156,7 +2156,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
         inputs = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
         labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
         # The dataloader supplies per-document positions, which the trainer
-        # requires to build the block-causal FlexAttention mask.
+        # requires to build the block-causal FlexInnerAttention mask.
         positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
             self.BATCH_SIZE
         )

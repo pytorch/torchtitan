@@ -14,7 +14,7 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import (
@@ -310,7 +310,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
                 wkv=Linear.Config(in_features=dim, out_features=dim),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
-            inner_attention=VarlenAttention.Config(),
+            inner_attention=VarlenInnerAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_context_length=16),
         ).build()
 

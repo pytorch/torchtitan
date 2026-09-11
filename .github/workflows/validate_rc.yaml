@@ -90,13 +90,13 @@ jobs:
           "$RUNNER_TEMP/validate-rc-venv/bin/python" - <<'PY'
           import torch
           import torch.nn.functional as F
-          from torchtitan.models.common.attention import ScaledDotProductAttention
+          from torchtitan.models.common.attention import ScaledDotProductInnerAttention
           from torchtitan.models.llama3 import model_registry
 
           torch.manual_seed(42)
           model_spec = model_registry("debugmodel")
           for layer_config in model_spec.model.layers:
-              layer_config.attention.inner_attention = ScaledDotProductAttention.Config()
+              layer_config.attention.inner_attention = ScaledDotProductInnerAttention.Config()
 
           model = model_spec.model.build()
           model.init_states(buffer_device=torch.device("cpu"))
