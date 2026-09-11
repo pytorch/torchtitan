@@ -18,7 +18,7 @@ from torchtitan.models.common import (
     Linear,
     ScaledBiasRowwiseLinear,
 )
-from torchtitan.models.common.attention import QKVLinear, VarlenAttention
+from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import (
     fused_qkv_param_init,
     get_attention_config,
@@ -154,7 +154,7 @@ def _build_muse_glimmer_attention(
     # Varlen carries the per-layer sliding window as an FA3 kernel arg (mirrors
     # gpt_oss). The flex path instead selects a window-keyed BlockMask in
     # Attention.forward, so it leaves inner_attention's window at the default.
-    if window is not None and isinstance(inner_attention, VarlenAttention.Config):
+    if window is not None and isinstance(inner_attention, VarlenInnerAttention.Config):
         inner_attention = dataclasses.replace(
             inner_attention, window_size=(window - 1, 0)
         )

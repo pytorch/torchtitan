@@ -21,7 +21,7 @@ def _use_spmd_types(config: Trainer.Config, *, typechecking: bool) -> None:
     """Select the SPMD-typed backend for a test configuration.
 
     Type checking forces activation checkpointing off: it rejects selective AC
-    with FlexAttention, which the debug models use. It is also unsupported
+    with FlexInnerAttention, which the debug models use. It is also unsupported
     under compile and under pipeline parallelism.
     """
     config.parallelism.spmd_backend = "spmd_types"

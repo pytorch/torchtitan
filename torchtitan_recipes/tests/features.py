@@ -18,7 +18,10 @@ from torchtitan.config.transform import apply_transforms, ContextParallelTransfo
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 
-from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+    UlyssesCPFlexInnerAttention,
+)
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel,
@@ -380,6 +383,19 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
+    """Attention reshards the CP axis onto the head dimension."""
+    config = llama3_debugmodel()
+    _use_spmd_types(config, typechecking=True)
+    config.parallelism.context_parallel_degree = 2
+    # Head-sharded attention has no per-rank sequence imbalance to balance.
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
     )
 
 

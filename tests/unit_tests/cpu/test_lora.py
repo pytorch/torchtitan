@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from torchtitan.components.lora import _get_lora_cls, LoRAConverter
 from torchtitan.components.quantization import Float8LinearConverter
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
@@ -77,7 +77,7 @@ def test_lora_forward():
     tokens = torch.randint(0, vocab_size, (num_tokens,))
     positions = torch.arange(seq_len).repeat(num_documents)
     attention_masks = model.get_attention_masks(positions)
-    # The default attention backend is FlexAttention, which does not support
+    # The default attention backend is FlexInnerAttention, which does not support
     # backward on CPU; this is a forward-only shape check, so run under no_grad.
     with torch.no_grad():
         output = model(tokens, attention_masks=attention_masks, positions=positions)
@@ -309,7 +309,7 @@ def test_lora_preserves_frozen_config_type_checks():
             self.proj = config.proj.build()
 
     model_config = AttentionHolder.Config(
-        inner_attention=FlexAttention.Config(),
+        inner_attention=FlexInnerAttention.Config(),
         proj=Linear.Config(in_features=4, out_features=4),
     )
 
@@ -317,7 +317,7 @@ def test_lora_preserves_frozen_config_type_checks():
         LoRAConverter.Config(rank=2, alpha=4.0, target_modules=["proj"])
     ).convert(model_config)
 
-    assert isinstance(model_config.inner_attention, FlexAttention.Config)
+    assert isinstance(model_config.inner_attention, FlexInnerAttention.Config)
     model = model_config.build()
     assert not model.proj.weight.requires_grad
     assert model.proj.lora_a.weight.requires_grad
