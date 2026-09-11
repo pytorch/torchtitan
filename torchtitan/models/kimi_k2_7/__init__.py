@@ -37,7 +37,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model
 from .parallelize import parallelize_kimi_k2_5
-from .qk_clip import QKClipFlexAttention, register_qk_clip_hook
+from .qk_clip import QKClipFlexInnerAttention, register_qk_clip_hook
 from .state_dict_adapter import KimiK25StateDictAdapter
 
 from .vision_encoder import (
@@ -189,10 +189,10 @@ def _vision_encoder_config(
     )
 
 
-def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexAttention.Config:
+def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Config:
     if attn_backend != "flex":
-        raise ValueError("Kimi QK clipping requires the FlexAttention backend.")
-    return QKClipFlexAttention.Config()
+        raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
+    return QKClipFlexInnerAttention.Config()
 
 
 def _register_optimizer_hooks(
