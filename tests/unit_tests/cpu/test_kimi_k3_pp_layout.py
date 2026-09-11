@@ -9,12 +9,10 @@
 import unittest
 from types import SimpleNamespace
 
-import torch.nn as nn
-
 from torchtitan.models.kimi_k3.layout import (
     BlockLayoutTables,
     infer_block_layout_tables_from_stages,
-    local_layer_to_stage,
+    layer_to_stage_from_split,
 )
 
 
@@ -102,20 +100,15 @@ class TestRouting(unittest.TestCase):
                 stages, layer_to_stage=scrambled, **common
             )
 
-    def test_local_map_reads_the_stage_modules(self):
-        class _Part(nn.Module):
-            def __init__(self, ids):
-                super().__init__()
-                self.layers = nn.ModuleDict({str(i): nn.Linear(2, 2) for i in ids})
-
-        stages = [
-            SimpleNamespace(stage_index=0, submod=_Part(range(0, 5))),
-            SimpleNamespace(stage_index=2, submod=_Part(range(12, 18))),
+    def test_the_map_is_read_off_the_split(self):
+        """Every rank computes the split, so the layer-to-stage map needs no
+        collective; only ``layers.<n>`` names count, pinned modules do not."""
+        split = [
+            ["tok_embeddings", "vision_encoder", "layers.0", "layers.1"],
+            ["layers.2"],
+            ["layers.3", "norm", "lm_head", "output_res_proj"],
         ]
-        local = local_layer_to_stage(stages)
-        self.assertEqual({local[i] for i in range(0, 5)}, {0})
-        self.assertEqual({local[i] for i in range(12, 18)}, {2})
-        self.assertEqual(len(local), 11)
+        self.assertEqual(layer_to_stage_from_split(split), {0: 0, 1: 0, 2: 1, 3: 2})
 
 
 if __name__ == "__main__":

@@ -20,8 +20,6 @@ With ``cache=False`` no rank keeps anything and every hop carries the whole
 stack: the plain transport, kept for comparison.
 """
 
-import torch.distributed as dist
-
 
 class BlockLayoutTables:
     """Per-stage routing of the block stack for one micro-batch."""
@@ -158,8 +156,7 @@ def infer_block_layout_tables_from_stages(
     """Build :class:`BlockLayoutTables` for the stages a rank holds.
 
     ``layer_to_stage`` is the global map, layer id to stage id, that
-    :func:`gather_layer_to_stage` collects from every rank: a rank sees only
-    its own stages, so the map cannot be read locally. Any split is accepted
+    :func:`layer_to_stage_from_split` reads off the split. Any split is accepted
     as long as every layer sits on exactly one stage and each stage holds a
     contiguous run of layers in stage order, which is what the routing
     assumes; anything else raises rather than producing tables that are wrong
@@ -199,35 +196,18 @@ def infer_block_layout_tables_from_stages(
     )
 
 
-def local_layer_to_stage(stages) -> dict[int, int]:
-    """The layer-to-stage map of the stages this rank holds."""
-    layer_to_stage: dict[int, int] = {}
-    for stage in stages:
-        submod = getattr(stage, "submod", None)
-        layers = getattr(submod, "layers", None)
-        stage_idx = getattr(stage, "stage_index", None)
-        if layers is None or stage_idx is None:
-            continue
-        for key in layers.keys():
-            try:
-                layer_id = int(key)
-            except (TypeError, ValueError):
-                continue
-            layer_to_stage[layer_id] = stage_idx
-    return layer_to_stage
+def layer_to_stage_from_split(module_fqns_per_model_part) -> dict[int, int]:
+    """The global layer-to-stage map, read off the split.
 
-
-def gather_layer_to_stage(stages, group) -> dict[int, int]:
-    """The global layer-to-stage map, one all-gather over the pipeline group.
-
-    Every rank contributes the map of its own stages; the union is the split
-    the trainer actually applied, uneven stages included.
+    ``module_fqns_per_model_part`` is the split core applies (the config's, or
+    the generated one), a pure function of the config that every rank computes
+    identically, so no collective is needed to learn where a layer sits.
     """
-    local = local_layer_to_stage(stages)
-    gathered: list[dict[int, int] | None] = [None] * dist.get_world_size(group)
-    dist.all_gather_object(gathered, local, group=group)
-    merged: dict[int, int] = {}
-    for part in gathered:
-        assert part is not None
-        merged.update(part)
-    return merged
+    layer_to_stage: dict[int, int] = {}
+    for stage_idx, names in enumerate(module_fqns_per_model_part):
+        for name in names:
+            prefix, _, layer = name.partition(".")
+            if prefix != "layers" or not layer.isdigit():
+                continue
+            layer_to_stage[int(layer)] = stage_idx
+    return layer_to_stage
