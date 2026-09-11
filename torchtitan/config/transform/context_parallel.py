@@ -13,7 +13,7 @@ from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.cp_attention import CPInnerAttention
 from torchtitan.protocols.module import Module
 
-from .base import ModelConfigTransform, retype_node
+from .base import convert_config_type, ModelConfigTransform
 
 __all__ = ["ContextParallelTransform"]
 
@@ -42,7 +42,7 @@ class ContextParallelTransform(ModelConfigTransform):
         for _, traversed, _, _ in model.traverse(BaseAttention.Config):
             # traverse returns the base config type.
             attention = cast(BaseAttention.Config, traversed)
-            attention.inner_attention = retype_node(
+            attention.inner_attention = convert_config_type(
                 attention.inner_attention, self.inner_attention
             )
         return model

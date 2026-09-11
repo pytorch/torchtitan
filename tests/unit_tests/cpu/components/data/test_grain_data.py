@@ -100,6 +100,11 @@ class RowToTokens(SampleProcessor):
         return TextSequence(
             input_ids=tokens[:-1],
             labels=tokens[1:],
+            positions=(
+                None
+                if "positions" not in sample
+                else np.asarray(sample["positions"], dtype=np.int64)
+            ),
         )
 
 
@@ -116,10 +121,12 @@ class PairCollator(Collator):
         return self._num_rows
 
     def __call__(self, rows) -> TrainerBatch:
-        inputs, labels = zip(*rows)
-        return {
-            key: torch.stack([row[key] for row in inputs]) for key in inputs[0]
-        }, torch.stack(labels)
+        row_inputs, labels = zip(*rows)
+        inputs = {
+            key: torch.stack([row[key] for row in row_inputs]) for key in row_inputs[0]
+        }
+        inputs["labels"] = torch.stack(labels)
+        return inputs
 
 
 class VerifyFilterOrder(SampleProcessor):
@@ -890,9 +897,143 @@ def test_packing_yields_rows_and_loader_batches(packing_type):
         max_context_length=8,
         num_tokens_per_batch=16,
     )
-    inputs, labels = next(iter(loader))
+    inputs = next(iter(loader))
     assert inputs["input"].shape == (16,)
-    assert labels.shape == (16,)
+    assert inputs["labels"].shape == (16,)
+
+
+@pytest.mark.parametrize(
+    "packing_type",
+    [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
+)
+def test_packing_document_cap_preserves_all_documents(packing_type):
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"tokens": [1, 10 + index, 2]} for index in range(6))
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_batch=12,
+        max_num_documents=4,
+    )
+
+    rows = list(
+        packing_type(dataset=documents).build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False,
+                repeat=False,
+            ),
+        )
+    )
+
+    assert len(rows) > 1
+    assert rows[0].padding_mask is not None
+    assert int(rows[0].padding_mask.sum()) == 4
+    assert rows[0].positions is not None
+    assert (
+        np.count_nonzero((rows[0].positions == 0) & ~rows[0].padding_mask)
+        == context.max_num_documents
+    )
+    real_input_ids = []
+    for row in rows:
+        assert row.positions is not None
+        assert row.padding_mask is not None
+        assert (
+            np.count_nonzero((row.positions == 0) & ~row.padding_mask)
+            <= context.max_num_documents
+        )
+        assert int(row.positions.max()) < context.max_context_length
+        real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
+    assert real_input_ids == [1, 10, 1, 11, 1, 12, 1, 13, 1, 14, 1, 15]
+
+
+def test_document_aware_concat_packing_restores_exactly():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"tokens": [1, 10 + index, 2]} for index in range(6))
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_batch=12,
+        max_num_documents=4,
+    )
+    config = ConcatThenSplitPackingConfig(dataset=documents)
+    policy = dataset_iteration_policy(shuffle=False, repeat=True)
+    iterator = iter(config.build(context=context, dataset_iteration_policy=policy))
+
+    next(iterator)
+    state = iterator.get_state()
+    expected = [next(iterator) for _ in range(4)]
+
+    restored = iter(config.build(context=context, dataset_iteration_policy=policy))
+    restored.set_state(state)
+    actual = [next(restored) for _ in range(4)]
+
+    for actual_row, expected_row in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(actual_row.input_ids, expected_row.input_ids)
+        np.testing.assert_array_equal(actual_row.labels, expected_row.labels)
+        np.testing.assert_array_equal(actual_row.positions, expected_row.positions)
+        np.testing.assert_array_equal(
+            actual_row.padding_mask, expected_row.padding_mask
+        )
+
+
+@pytest.mark.parametrize(
+    "packing_type",
+    [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
+)
+def test_packing_splits_positioned_long_documents(packing_type):
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {
+                    "tokens": list(range(15)),
+                    "positions": list(range(14)),
+                },
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_batch=8,
+        max_num_documents=2,
+    )
+
+    packing = packing_type(dataset=documents)
+    if isinstance(packing, FirstFitPackingConfig):
+        packing = replace(packing, num_packing_bins=1)
+
+    rows = list(
+        packing.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(
+                shuffle=False,
+                repeat=False,
+            ),
+        )
+    )
+
+    assert len(rows) == 2
+    real_input_ids = []
+    for row in rows:
+        assert row.positions is not None
+        assert row.padding_mask is not None
+        assert (
+            np.count_nonzero((row.positions == 0) & ~row.padding_mask)
+            <= context.max_num_documents
+        )
+        assert int(row.positions.max()) < context.max_context_length
+        real_input_ids.extend(row.input_ids[row.labels != IGNORE_INDEX].tolist())
+    assert real_input_ids == list(range(14))
 
 
 def test_first_fit_num_packing_bins_is_independent_of_token_budget(monkeypatch):
@@ -1003,10 +1144,13 @@ def test_unpacked_text_collator_creates_range_positions():
         labels=np.asarray([2, 3, 4]),
     )
 
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
+    labels = inputs["labels"]
 
     assert inputs["input"][:3].tolist() == [1, 2, 3]
     assert inputs["positions"][:3].tolist() == [0, 1, 2]
+    assert not inputs["padding_mask"][:3].any()
+    assert inputs["padding_mask"][3:].all()
     assert labels[:3].tolist() == [2, 3, 4]
     assert (labels[3:] == IGNORE_INDEX).all()
 
@@ -1019,7 +1163,7 @@ def test_unpacked_text_collator_pads_positions_within_context_window():
         labels=np.asarray([2, 3, 4]),
     )
 
-    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
     assert len(inputs["positions"]) == CONTEXT.num_tokens_per_batch
     assert int(inputs["positions"].max()) < CONTEXT.max_context_length
@@ -1031,7 +1175,7 @@ def test_text_collator_counts_unmasked_labels():
         labels=np.asarray([2, 3, IGNORE_INDEX]),
     )
 
-    inputs, _ = TextCollator.Config().build(context=CONTEXT)([sequence])
+    inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
     assert inputs["num_valid_tokens"] == 2
     assert inputs["input"][:3].tolist() == [1, 2, 3]
@@ -1049,10 +1193,10 @@ def test_text_collator_falls_back_to_pageable_without_accelerator(monkeypatch):
     # which is how CPU-only test runs and CI execute this path.
     monkeypatch.setattr(collators, "HAS_PIN_MEMORY", False)
 
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
+    inputs = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
 
     assert not inputs["input"].is_pinned()
-    assert not labels.is_pinned()
+    assert not inputs["labels"].is_pinned()
     assert inputs["input"][:3].tolist() == [1, 2, 3]
 
 
@@ -1061,11 +1205,11 @@ def test_text_collator_falls_back_to_pageable_without_accelerator(monkeypatch):
     reason="page-locking host memory requires an accelerator",
 )
 def test_text_collator_allocates_page_locked_batches():
-    inputs, labels = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
+    inputs = TextCollator.Config().build(context=CONTEXT)([_text_sequence()])
 
     assert inputs["input"].is_pinned()
     assert inputs["positions"].is_pinned()
-    assert labels.is_pinned()
+    assert inputs["labels"].is_pinned()
 
 
 def test_loader_batches_carry_valid_token_count():
@@ -1085,7 +1229,8 @@ def test_loader_batches_carry_valid_token_count():
         num_tokens_per_batch=CONTEXT.num_tokens_per_batch,
     )
 
-    input_dict, labels = next(iter(loader))
+    input_dict = next(iter(loader))
+    labels = input_dict["labels"]
 
     assert input_dict["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 3
     loader.close()
@@ -1113,7 +1258,8 @@ def test_pack_then_pack_then_collate_preserves_aligned_pairs():
         )
     )
 
-    inputs, labels = TextCollator.Config().build(context=context)([packed])
+    inputs = TextCollator.Config().build(context=context)([packed])
+    labels = inputs["labels"]
 
     assert inputs["input"][:3].tolist() == [1, 3, 4]
     assert labels[:3].tolist() == [2, 4, 5]
@@ -1150,7 +1296,7 @@ def test_sft_labels_survive_packing_and_collation():
             )
         )
     )
-    _, labels = TextCollator.Config().build(context=CONTEXT)([packed])
+    labels = TextCollator.Config().build(context=CONTEXT)([packed])["labels"]
 
     assert labels[0].item() == IGNORE_INDEX
     assert labels[1].item() == IGNORE_INDEX
@@ -1232,7 +1378,7 @@ def test_chat_processor_rejects_non_single_turn_messages():
         )
 
 
-def test_first_fit_drops_rows_longer_than_sequence_length():
+def test_first_fit_chunks_rows_longer_than_sequence_length():
     recipe = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(
@@ -1242,17 +1388,22 @@ def test_first_fit_drops_rows_longer_than_sequence_length():
                 )
             ),
             processor=RowToTokens.Config(),
-        )
+        ),
+        num_packing_bins=1,
     )
 
-    sequence = next(
-        iter(
-            recipe.build(
-                context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy()
-            )
+    sequences = list(
+        recipe.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
     )
-    assert sequence.input_ids[0].item() == 1
+    real_input_ids = [
+        token
+        for sequence in sequences
+        for token in sequence.input_ids[sequence.labels != IGNORE_INDEX].tolist()
+    ]
+    assert real_input_ids == [*range(19), 1, 10, 11]
 
 
 class AddRandomOffset(SampleProcessor):
@@ -1339,8 +1490,8 @@ def test_loader_restores_configured_random_map():
     restored.load_state_dict(state)
     actual = next(iter(restored))
 
-    assert torch.equal(expected[0]["input"], actual[0]["input"])
-    assert torch.equal(expected[1], actual[1])
+    assert torch.equal(expected["input"], actual["input"])
+    assert torch.equal(expected["labels"], actual["labels"])
 
 
 def test_loader_exact_restore_with_nonempty_packing_buffers():
@@ -1383,9 +1534,9 @@ def test_loader_exact_restore_with_nonempty_packing_buffers():
     restored.load_state_dict(state)
     actual = next(iter(restored))
 
-    assert torch.equal(expected[0]["input"], actual[0]["input"])
-    assert torch.equal(expected[0]["positions"], actual[0]["positions"])
-    assert torch.equal(expected[1], actual[1])
+    assert torch.equal(expected["input"], actual["input"])
+    assert torch.equal(expected["positions"], actual["positions"])
+    assert torch.equal(expected["labels"], actual["labels"])
 
 
 def test_loader_exact_restore_with_map_mix_before_first_fit():
@@ -1451,9 +1602,9 @@ def test_loader_exact_restore_with_map_mix_before_first_fit():
     actual = [next(restored_iterator) for _ in range(8)]
 
     for expected_batch, actual_batch in zip(expected, actual, strict=True):
-        assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
-        assert torch.equal(expected_batch[0]["positions"], actual_batch[0]["positions"])
-        assert torch.equal(expected_batch[1], actual_batch[1])
+        assert torch.equal(expected_batch["input"], actual_batch["input"])
+        assert torch.equal(expected_batch["positions"], actual_batch["positions"])
+        assert torch.equal(expected_batch["labels"], actual_batch["labels"])
 
 
 def test_loader_exact_restore_with_nested_weighted_mix():
@@ -1513,9 +1664,9 @@ def test_loader_exact_restore_with_nested_weighted_mix():
     actual = [next(restored_iterator) for _ in range(8)]
 
     for expected_batch, actual_batch in zip(expected, actual):
-        assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
-        assert torch.equal(expected_batch[0]["positions"], actual_batch[0]["positions"])
-        assert torch.equal(expected_batch[1], actual_batch[1])
+        assert torch.equal(expected_batch["input"], actual_batch["input"])
+        assert torch.equal(expected_batch["positions"], actual_batch["positions"])
+        assert torch.equal(expected_batch["labels"], actual_batch["labels"])
 
 
 def test_empty_shard_rejected():
@@ -1607,7 +1758,8 @@ def test_concat_then_split_normalizes_split_continuation_positions():
     collator = TextCollator.Config().build(
         context=replace(CONTEXT, max_context_length=5, num_tokens_per_batch=5)
     )
-    first_inputs, first_labels = collator([rows[0]])
+    first_inputs = collator([rows[0]])
+    first_labels = first_inputs["labels"]
 
     assert first_inputs["input"].tolist() == [0, 1, 2, 3, 4]
     assert first_labels.tolist() == [1, 2, 3, 4, 5]
@@ -1731,12 +1883,12 @@ def test_loader_batches_exact_rows_and_preserves_finite_tail(finite_rows_loader)
     batches = list(finite_rows_loader)
 
     assert len(batches) == 3
-    assert batches[0][0]["input"].tolist() == [[0], [1]]
-    assert batches[0][1].tolist() == [[0], [1]]
-    assert batches[1][0]["input"].tolist() == [[2], [3]]
-    assert batches[1][1].tolist() == [[2], [3]]
-    assert batches[2][0]["input"].tolist() == [[4]]
-    assert batches[2][1].tolist() == [[4]]
+    assert batches[0]["input"].tolist() == [[0], [1]]
+    assert batches[0]["labels"].tolist() == [[0], [1]]
+    assert batches[1]["input"].tolist() == [[2], [3]]
+    assert batches[1]["labels"].tolist() == [[2], [3]]
+    assert batches[2]["input"].tolist() == [[4]]
+    assert batches[2]["labels"].tolist() == [[4]]
 
 
 def mock_grain_loader():
@@ -1804,15 +1956,15 @@ def test_indexed_jsonl_loader_restores_exactly_on_each_rank(tmp_path):
         actual = [next(restored_iterator) for _ in range(4)]
 
         for expected_batch, actual_batch in zip(expected, actual):
-            assert torch.equal(expected_batch[0]["input"], actual_batch[0]["input"])
+            assert torch.equal(expected_batch["input"], actual_batch["input"])
             assert torch.equal(
-                expected_batch[0]["positions"],
-                actual_batch[0]["positions"],
+                expected_batch["positions"],
+                actual_batch["positions"],
             )
-            assert torch.equal(expected_batch[1], actual_batch[1])
+            assert torch.equal(expected_batch["labels"], actual_batch["labels"])
 
 
-def test_first_fit_oversized_row_does_not_discard_buffered_row():
+def test_first_fit_oversized_row_preserves_chunks_and_buffered_rows():
     recipe = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=RowsSourceConfig(
@@ -1823,20 +1975,23 @@ def test_first_fit_oversized_row_does_not_discard_buffered_row():
                 )
             ),
             processor=RowToTokens.Config(),
+        ),
+        num_packing_bins=1,
+    )
+
+    sequences = list(
+        recipe.build(
+            context=CONTEXT,
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
     )
 
-    sequence = next(
-        iter(
-            recipe.build(
-                context=CONTEXT,
-                dataset_iteration_policy=dataset_iteration_policy(),
-            )
-        )
-    )
-
-    assert sequence.input_ids.tolist() == [1, 2, 3, 4, 5, 10, 11] + [0] * 11
-    assert sequence.labels.tolist() == [2, 3, 4, 5, 6, 11, 12] + [IGNORE_INDEX] * 11
+    real_input_ids = [
+        token
+        for sequence in sequences
+        for token in sequence.input_ids[sequence.labels != IGNORE_INDEX].tolist()
+    ]
+    assert real_input_ids == [1, 2, 3, 4, 5, *range(20, 39), 10, 11]
 
 
 def test_loader_passes_read_options_to_map_conversion(monkeypatch):

@@ -36,10 +36,11 @@ __all__ = [
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
+    "spmd_local_context",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
-    "require_spmd_mesh_axis_group",
     "spmd_dense_mesh",
+    "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
@@ -158,22 +159,36 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
-def require_spmd_mesh_axis_group(
-    axis_name: MeshAxisName,
-) -> torch.distributed.ProcessGroup:
-    """Return an active multi-rank SPMD mesh axis group."""
+def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
+    """Return a non-singleton process group from the current SPMD mesh."""
     mesh = current_spmd_mesh()
     if mesh is None:
-        raise RuntimeError("No active SPMD mesh.")
-    mesh_axis_names = mesh.mesh_dim_names or ()
-    if axis_name not in mesh_axis_names:
-        raise RuntimeError(f"The active SPMD mesh has no {axis_name.value!r} axis.")
+        return None
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return None
     group = mesh.get_group(axis_name)
-    if group.size() == 1:
-        raise RuntimeError(
-            f"The {axis_name.value!r} mesh axis must have multiple ranks."
-        )
-    return group
+    return group if group.size() > 1 else None
+
+
+def spmd_local_context(
+    *local_axes: str,
+) -> contextlib.AbstractContextManager[None]:
+    """Context manager treating the named mesh axes as local axes.
+
+    Local axes retain per-coordinate SPMD semantics during global type
+    checking: each coordinate selects an independent tensor, and only the
+    remaining axes describe that tensor's global sharding.  This is a no-op
+    outside spmd_types and for axes with size 1.
+    """
+    if get_spmd_backend() != "spmd_types":
+        return contextlib.nullcontext()
+    active_axes = tuple(
+        dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
+    )
+    if not active_axes:
+        return contextlib.nullcontext()
+    return spmd.set_current_mesh(local_axes=active_axes)
 
 
 @contextlib.contextmanager
@@ -372,7 +387,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
         # 3) If one side has no PartitionSpec, synthesize the simple
         # one-axis-per-dim form from its S(dim) local types.
         ndim = (
-            len(src.partition_spec)
+            len(src.partition_spec)  # pyrefly: ignore [bad-argument-type]
             if dst.partition_spec is None
             else len(dst.partition_spec)
         )

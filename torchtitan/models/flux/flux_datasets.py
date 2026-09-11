@@ -218,8 +218,8 @@ class FluxCollator(Collator):
 
     def __call__(self, rows: Sequence[FluxSample]) -> TrainerBatch:
         batch = default_collate(list(rows))
-        labels = batch.pop("image")
-        return batch, labels
+        batch["labels"] = batch.pop("image")
+        return batch
 
 
 DATASETS: dict[str, SingleDatasetConfig] = {
