@@ -221,8 +221,7 @@ def cp_shard(
         ),
     )
 
-    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
-    # on the Q seq dimension, not KV.
+    # BlockMask has shape [B, H, Q, KV]. Only Q can be sequence-sharded.
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
         assert isinstance(attention_masks, (BlockMask, dict))
