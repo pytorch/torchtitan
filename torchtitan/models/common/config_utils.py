@@ -19,11 +19,11 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
-    FlexAttention,
+    FlexInnerAttention,
     FusedQKVLinear,
     GQAttention,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_gemm import (
@@ -79,25 +79,25 @@ def get_attention_config(
 
     Language models always use block_causal masking (the dataloaders always
     emit per-document positions), so every backend here is a masked attention
-    backend. ``ScaledDotProductAttention`` only supports a boolean ``is_causal``
+    backend. ``ScaledDotProductInnerAttention`` only supports a boolean ``is_causal``
     flag and cannot consume per-document positions, so it is not a valid
     language-model backend (it remains available for Flux, which builds it
     directly).
     """
     if backend == "flex":
-        return FlexAttention.Config()
+        return FlexInnerAttention.Config()
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
         if not has_cuda_capability(9, 0):
             raise ValueError(
-                "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+                "Flash backend of FlexInnerAttention is only supported on Hopper or Blackwell"
             )
-        return FlexAttention.Config(
+        return FlexInnerAttention.Config(
             block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
         )
     elif backend == "varlen":
-        return VarlenAttention.Config()
+        return VarlenInnerAttention.Config()
     elif backend == "sdpa":
         raise ValueError(
             "sdpa is no longer supported for language models; positions are "
