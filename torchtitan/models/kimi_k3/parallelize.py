@@ -4,15 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import cast
 
 import torch.nn as nn
-
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
 )
+
+from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
 
 from torchtitan.config import (
     CompileConfig,
@@ -163,25 +163,60 @@ def _kimi_k3_last_stage_modules(model: nn.Module) -> tuple[str, ...]:
     return tuple(n for n in _KIMI_ATTN_RES_LAST_STAGE_FQNS if hasattr(model, n))
 
 
-def _schedule_stages(schedule: _PipelineSchedule) -> list[AttnResPipelineStage]:
-    """The stages a schedule holds on this rank."""
+def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
+    """``stage`` rebuilt as an :class:`AttnResPipelineStage` from its own fields.
+
+    Core builds plain ``PipelineStage``s and K3 swaps each for its subclass
+    here, rather than threading a stage class through core's pipelining. The
+    rebuilt stage wraps the same, already parallelized module, so the model
+    parts core returned are still the objects the stages run. Building a stage
+    only reads its process group (the per-direction P2P groups, when enabled,
+    are cached per group), so nothing collective runs a second time.
+    """
+    assert isinstance(stage, PipelineStage)
+    rebuilt = AttnResPipelineStage(
+        stage.submod,
+        stage.stage_index,
+        stage.num_stages,
+        stage.device,
+        group=stage.group,
+        dw_builder=stage.dw_builder,
+        get_mesh=stage._mesh_cache._get_mesh_cb,
+    )
+    # The schedule wrote its stage-to-rank map onto the stage it was handed.
+    rebuilt.stage_index_to_group_rank = stage.stage_index_to_group_rank
+    return rebuilt
+
+
+def _swap_in_attn_res_stages(
+    schedule: _PipelineSchedule,
+) -> list[AttnResPipelineStage]:
+    """Replace the stages a schedule holds on this rank with AttnRes stages.
+
+    A schedule keeps its stages in ``_stage`` (one per rank) or ``_stages``
+    (several per rank) and nowhere else, so replacing those is the whole swap.
+    """
     if isinstance(schedule, PipelineScheduleSingle):
-        stages = [schedule._stage]
-    elif isinstance(schedule, PipelineScheduleMulti):
-        stages = list(schedule._stages)
-    else:
-        raise RuntimeError(
-            f"Unexpected pipeline schedule class {type(schedule).__name__}."
-        )
-    assert all(isinstance(s, AttnResPipelineStage) for s in stages)
-    return cast(list[AttnResPipelineStage], stages)
+        rebuilt = _as_attn_res_stage(schedule._stage)
+        schedule._stage = rebuilt
+        return [rebuilt]
+    if isinstance(schedule, PipelineScheduleMulti):
+        rebuilt_stages = [_as_attn_res_stage(s) for s in schedule._stages]
+        held: list[_PipelineStageBase] = list(rebuilt_stages)
+        schedule._stages = held
+        return rebuilt_stages
+    raise RuntimeError(f"Unexpected pipeline schedule class {type(schedule).__name__}.")
 
 
 def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
     """``pipelining_fn`` for Kimi K3.
 
-    Builds the schedule on :class:`AttnResPipelineStage` over core's split with
-    this model's pinned modules, then gives every stage the routing tables
+    Builds the schedule with core's pipelining over core's split with this
+    model's pinned modules, rebuilds each stage it holds on this rank as an
+    :class:`AttnResPipelineStage` from the constructed stage's own fields (a
+    small local swap instead of an intrusive change to core's stage
+    construction; whether a stage subclass is the right abstraction for the
+    attention residual is still open), then gives every stage the routing tables
     computed from that split: the layer-to-stage map is read off the split
     and the stage-to-rank map is the schedule's own.
 
@@ -218,11 +253,10 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
     pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
         model,
         parallelism=parallelism,
-        stage_class=AttnResPipelineStage,
         **kwargs,
     )
 
-    stages = _schedule_stages(pp_schedule)
+    stages = _swap_in_attn_res_stages(pp_schedule)
     model_config = kwargs["model_config"]
     layer_cfgs = model_config.layers
     n_layers = len(layer_cfgs)
