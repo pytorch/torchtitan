@@ -29,6 +29,7 @@ def build_minimal_trainer(
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
     compile_enable_inplace_graph_gradient_accumulation: bool = False,
+    compile_enable_deferred_fsdp_gradient_sync: bool = False,
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
     compile_ep_overlap_chunk_dim: str = "batch",
@@ -67,6 +68,9 @@ def build_minimal_trainer(
                 enable_inplace_graph_gradient_accumulation=(
                     compile_enable_inplace_graph_gradient_accumulation
                 ),
+                enable_deferred_fsdp_gradient_sync=(
+                    compile_enable_deferred_fsdp_gradient_sync
+                ),
                 passes=[] if compile_passes is None else list(compile_passes),
                 disable_passes=(
                     []
@@ -104,6 +108,7 @@ def build_minimal_trainer(
         trainer._graph_runner = None
         trainer._trainable_params = None
         trainer._graph_gradient_state = None
+        trainer._graph_with_deferred_fsdp_reductions = None
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),

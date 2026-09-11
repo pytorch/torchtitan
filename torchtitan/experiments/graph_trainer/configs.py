@@ -99,6 +99,16 @@ class GraphTrainerCompileConfig(CompileConfig):
         custom pass pipelines.
     """
 
+    enable_deferred_fsdp_gradient_sync: bool = False
+    """Reduce FSDP gradients once after all SPMD accumulation microbatches.
+
+    Pre-reduction gradients (before reduce_scatter) accumulated first
+    as ingraph mutation (add_). Then final FSDP reduction (reduce_scatter)
+    happens once.
+
+    Requires enable_inplace_graph_gradient_accumulation = True
+    """
+
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.

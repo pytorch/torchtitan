@@ -7,6 +7,7 @@
 import unittest
 from collections import Counter
 from copy import deepcopy
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -22,10 +23,16 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     compute_parameter_gradients,
     maybe_register_blockmask_pytree_node,
 )
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.deferred_fsdp_reductions import (
+    _fsdp_collective_counts,
+    build_graph_with_deferred_fsdp_reductions,
+)
 from torchtitan.experiments.graph_trainer.gradient_accumulation import (
     _storage_keys,
     GraphGradientState,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.utils import flatten_graph_values
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _copy_fwd_metadata_to_bw_nodes,
     extract_module_state,
@@ -40,6 +47,7 @@ from torchtitan.experiments.graph_trainer.passes import (
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
+from torchtitan.experiments.graph_trainer.runner import GraphRunner
 
 
 def get_loss(logits, labels):
@@ -160,10 +168,79 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
+    def test_deferred_fsdp_config_requires_supported_accumulation(self):
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        trainer = object.__new__(GraphTrainer)
+        trainer.config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                mode="aot_fx_trace",
+                enable_inplace_graph_gradient_accumulation=False,
+                enable_deferred_fsdp_gradient_sync=True,
+            ),
+            parallelism=SimpleNamespace(),
+        )
+        trainer.parallel_dims = SimpleNamespace(pp_enabled=False)
+        trainer.model_parts = [object()]
+        trainer.gradient_accumulation_steps = 2
+
+        with self.assertRaisesRegex(ValueError, "inplace_graph_gradient"):
+            trainer._validate_inplace_graph_gradient_accumulation_config()
+
+        trainer.config.compile.enable_inplace_graph_gradient_accumulation = True
+        trainer.gradient_accumulation_steps = 1
+        with self.assertRaisesRegex(ValueError, "at least two"):
+            trainer._validate_inplace_graph_gradient_accumulation_config()
+
+        trainer.gradient_accumulation_steps = 2
+        trainer._validate_inplace_graph_gradient_accumulation_config()
+
+    def test_deferred_fsdp_runs_the_whole_microbatch_window(self):
+        from contextlib import nullcontext
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+        model = SimpleNamespace(
+            preprocess_inputs=MagicMock(
+                side_effect=lambda batch, **kwargs: (
+                    batch["input"],
+                    batch["labels"],
+                    {},
+                )
+            )
+        )
+        gradient_state = SimpleNamespace(prepare_for_backward=MagicMock())
+        graph_runner = MagicMock(return_value=torch.tensor(3.0))
+        trainer = object.__new__(GraphTrainer)
+        trainer.config = SimpleNamespace(
+            compile=SimpleNamespace(enable_deferred_fsdp_gradient_sync=True),
+            parallelism=SimpleNamespace(),
+        )
+        trainer.sdc_replayer = None
+        trainer.model_parts = [model]
+        trainer.parallel_dims = SimpleNamespace()
+        trainer.device = torch.device("cpu")
+        trainer.ntokens_seen = 0
+        trainer.train_context = nullcontext
+        trainer._ensure_graph_gradient_state = MagicMock(return_value=gradient_state)
+        trainer._graph_runner = graph_runner
+
+        microbatch_groups = [
+            [{"input": torch.ones(2), "labels": torch.ones(2)}],
+            [{"input": torch.full((2,), 2.0), "labels": torch.ones(2)}],
+        ]
+        losses = list(
+            trainer._run_microbatch_groups(microbatch_groups, torch.tensor(4))
+        )
+
+        self.assertEqual(losses, [torch.tensor(3.0)])
+        self.assertEqual(trainer.ntokens_seen, 4)
+        gradient_state.prepare_for_backward.assert_called_once_with()
+        graph_runner.assert_called_once()
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_cuda_graph_numerics_match_external_accumulation(self):
-        from types import SimpleNamespace
-
         from torchtitan.components.optimizer import (
             OptimizersContainer,
             ParamGroupConfig,
@@ -2378,6 +2455,173 @@ class TestTraceFSDP(FSDPTest):
             torch.testing.assert_close(
                 parameter_test.to_local(), parameter_ref.to_local()
             )
+
+    def _run_deferred_fsdp_gradient_sync_case(
+        self,
+        *,
+        enable_cudagraph: bool,
+    ) -> None:
+        from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+
+        torch.manual_seed(42)
+        self._setup()
+        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        model_ref = data_parallel(
+            nn.Linear(8, 4, device="cuda"),
+            device_mesh=fsdp_mesh,
+            mode="fully_shard",
+        )
+        model_test = data_parallel(
+            nn.Linear(8, 4, device="cuda"),
+            device_mesh=fsdp_mesh,
+            mode="fully_shard",
+        )
+        model_test.load_state_dict(model_ref.state_dict())
+        optimizer_ref = torch.optim.SGD(model_ref.parameters(), lr=0.1)
+        optimizer_test = torch.optim.SGD(model_test.parameters(), lr=0.1)
+        gradient_state = GraphGradientState.create(model_test, [optimizer_test])
+
+        def train_step(
+            gradient_buffers,
+            inputs,
+            targets,
+            global_valid_tokens,
+            extra_kwargs,
+        ):
+            del gradient_buffers, extra_kwargs
+            loss = (
+                torch.nn.functional.mse_loss(
+                    model_test(inputs),
+                    targets,
+                    reduction="sum",
+                )
+                / global_valid_tokens
+            )
+            grads = torch.autograd.grad(loss, tuple(model_test.parameters()))
+            return [loss, *grads]
+
+        microbatch_steps = [
+            [
+                (
+                    torch.randn(3, 8, device="cuda"),
+                    torch.randn(3, 4, device="cuda"),
+                    {},
+                )
+                for _ in range(3)
+            ]
+            for _ in range(3)
+        ]
+        microbatches = microbatch_steps[0]
+        global_valid_tokens = torch.tensor(
+            sum(target.numel() for _, target, _ in microbatches),
+            device="cuda",
+        )
+        traced = minimal_fx_tracer(
+            train_step,
+            module=model_test,
+            graph_state=gradient_state.graph_state,
+        )(
+            *microbatches[0][:2],
+            global_valid_tokens,
+            microbatches[0][2],
+        )
+        num_flat_parameters = len(flatten_graph_values(list(model_test.parameters())))
+        graph_with_deferred_fsdp_reductions = build_graph_with_deferred_fsdp_reductions(
+            traced,
+            num_flat_parameters=num_flat_parameters,
+            num_microbatches=len(microbatches),
+            compile_config=GraphTrainerCompileConfig(
+                enable_passes=False,
+                disable_passes=[] if enable_cudagraph else ["cudagraph_pass"],
+            ),
+            enable_cudagraph=enable_cudagraph,
+        )
+        run = GraphRunner(
+            graph_with_deferred_fsdp_reductions.traced_result,
+            module=model_test,
+            graph_state=gradient_state.graph_state,
+            validate_user_inputs=True,
+        )
+
+        for microbatches in microbatch_steps:
+            optimizer_ref.zero_grad(set_to_none=False)
+            optimizer_test.zero_grad(set_to_none=False)
+            loss_ref = torch.zeros((), device="cuda")
+            for inputs, targets, _ in microbatches:
+                loss = (
+                    torch.nn.functional.mse_loss(
+                        model_ref(inputs),
+                        targets,
+                        reduction="sum",
+                    )
+                    / global_valid_tokens
+                )
+                loss.backward()
+                loss_ref += loss.detach()
+            runtime_calls = tuple(
+                ((inputs, targets, global_valid_tokens, extra_kwargs), {})
+                for inputs, targets, extra_kwargs in microbatches
+            )
+            loss_test = run(*runtime_calls)
+            torch.cuda.synchronize()
+
+            torch.testing.assert_close(loss_test, loss_ref)
+            for parameter_ref, parameter_test in zip(
+                model_ref.parameters(), model_test.parameters(), strict=True
+            ):
+                torch.testing.assert_close(
+                    parameter_test.grad.to_local(),
+                    parameter_ref.grad.to_local(),
+                )
+            optimizer_ref.step()
+            optimizer_test.step()
+            for parameter_ref, parameter_test in zip(
+                model_ref.parameters(), model_test.parameters(), strict=True
+            ):
+                torch.testing.assert_close(
+                    parameter_test.to_local(),
+                    parameter_ref.to_local(),
+                )
+        self.assertGreater(graph_with_deferred_fsdp_reductions.num_all_gathers, 0)
+        self.assertGreater(
+            graph_with_deferred_fsdp_reductions.num_gradient_collectives, 0
+        )
+        first_collectives = _fsdp_collective_counts(
+            graph_with_deferred_fsdp_reductions.gm.first
+        )
+        middle_collectives = _fsdp_collective_counts(
+            graph_with_deferred_fsdp_reductions.gm.middle
+        )
+        final_collectives = _fsdp_collective_counts(
+            graph_with_deferred_fsdp_reductions.gm.final
+        )
+        self.assertEqual(
+            graph_with_deferred_fsdp_reductions.num_all_gathers,
+            first_collectives[0] - middle_collectives[0],
+        )
+        self.assertEqual(first_collectives[1:], middle_collectives[1:])
+        self.assertEqual(middle_collectives[0], final_collectives[0])
+        self.assertEqual(
+            graph_with_deferred_fsdp_reductions.num_gradient_collectives,
+            sum(final_collectives[1:]) - sum(middle_collectives[1:]),
+        )
+        if enable_cudagraph:
+            from torchtitan.distributed.cudagraph import CUDAGraphWrapper
+
+            self.assertIsInstance(
+                graph_with_deferred_fsdp_reductions.gm.forward, CUDAGraphWrapper
+            )
+
+    def test_deferred_fsdp_gradient_sync_matches_per_microbatch_sync(self):
+        self._run_deferred_fsdp_gradient_sync_case(enable_cudagraph=False)
+
+    def test_deferred_fsdp_gradient_sync_cuda_graph(self):
+        from torchtitan.distributed.cudagraph import cudagraph_teardown
+
+        try:
+            self._run_deferred_fsdp_gradient_sync_case(enable_cudagraph=True)
+        finally:
+            cudagraph_teardown()
 
     def _run_fsdp_model_test(
         self,

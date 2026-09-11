@@ -34,6 +34,13 @@ _FSDP_UNSHARD_CONSUMER_INPUT_PATHS = "fsdp_unshard_consumer_input_paths"
 _FSDP_UNSHARD_ANNOTATED = "fsdp_unshard_annotated"
 
 
+_BUCKETED_REDUCE_SCATTER_SPLITS = {
+    torch.ops.aten.split.Tensor,
+    torch.ops.aten.split_with_sizes.default,
+    torch.ops.aten.split_with_sizes_copy.default,
+}
+
+
 def is_wait_tensor(node: fx.Node) -> bool:
     return (
         node.op == "call_function"
@@ -42,10 +49,10 @@ def is_wait_tensor(node: fx.Node) -> bool:
 
 
 def is_all_gather_into_tensor(node: fx.Node) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.all_gather_into_tensor.default
-    )
+    return node.op == "call_function" and node.target in {
+        torch.ops._c10d_functional.all_gather_into_tensor.default,
+        torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+    }
 
 
 def is_reduce_scatter_tensor(node: fx.Node) -> bool:
@@ -386,23 +393,31 @@ def find_fsdp_unshard_save_nodes(param_placeholder: fx.Node) -> tuple[fx.Node, .
     return find_fsdp_unshard_outputs(param_placeholder)
 
 
-def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
+def find_fsdp_reduce_grad_input(
+    param_grad_output: Any,
+    *,
+    allow_bucket_fanout: bool = False,
+) -> fx.Node | None:
     """Return the split point before an FSDP reduce-grad epilogue.
 
-    The backward FSDP/DDP/HSDP tail is traced as a unary chain ending in the
-    synced grad output:
+    The backward FSDP/DDP/HSDP tail is traced as a chain ending in the synced
+    grad output:
 
         local_grad -> cast/view* -> reduce_scatter -> wait -> sharded_grad
         local_grad -> cast/view* -> all_reduce -> wait -> replicated_grad
         local_grad -> cast/view* -> all_reduce -> wait -> reduce_scatter
           -> wait -> grad
+        local_grads -> pre_bucket -> reduce_scatter -> wait -> split
+          -> getitem/view* -> grads
 
     GraphPP splits at the input to the earliest grad-sync collective in that
     suffix. The cast remains in ``bw_no_fsdp`` so microbatch accumulation
     happens in FSDP's reduce dtype, and ``reduce_grad`` contains only the
     scheduled collective epilogue. Values that are not FX nodes, such as
     ``None`` parameter-grad slots, are not collective outputs and are preserved
-    by the caller.
+    by the caller. ``allow_bucket_fanout`` is reserved for callers that dedupe
+    shared bucketed gradient inputs before accumulating them; GraphPP's per-parameter
+    accumulation must retain the default behavior.
 
     TODO(sanketpurandare): requires upstream change: FSDP trace/passes should
     annotate reduce-grad collective regions for downstream graph extraction.
@@ -414,7 +429,15 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     reduce_grad_input = None
     while isinstance(node, fx.Node) and len(node.all_input_nodes) == 1:
         input_node = node.all_input_nodes[0]
-        if len(input_node.users) > 1:
+        is_bucket_split_output = (
+            node.op == "call_function"
+            and node.target == operator.getitem
+            and input_node.op == "call_function"
+            and input_node.target in _BUCKETED_REDUCE_SCATTER_SPLITS
+        )
+        if len(input_node.users) > 1 and not (
+            allow_bucket_fanout and is_bucket_split_output
+        ):
             break
         previous_node = node
         node = input_node
