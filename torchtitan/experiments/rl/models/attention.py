@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
-class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
+class PyTorchVarlenInnerAttentionBackend(FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -55,17 +55,17 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        return PyTorchVarlenAttentionImpl
+        return PyTorchVarlenInnerAttentionImpl
 
     @staticmethod
     def get_builder_cls():
-        class PyTorchVarlenAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+        class PyTorchVarlenInnerAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
             _cudagraph_support = AttentionCGSupport.ALWAYS
 
-        return PyTorchVarlenAttentionMetadataBuilder
+        return PyTorchVarlenInnerAttentionMetadataBuilder
 
 
-class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
+class PyTorchVarlenInnerAttentionImpl(FlashAttentionImpl):
     """
     Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
     Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel

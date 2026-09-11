@@ -672,7 +672,7 @@ def prepare_ep_overlap_trace_call_inputs(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
-    """Bind FlexAttention mask lengths to fake token-grid dims during tracing."""
+    """Bind FlexInnerAttention mask lengths to fake token-grid dims during tracing."""
     if not compile_config.ep_overlap.enabled:
         return None
     _, chunk_strategy, _ = validate_ep_overlap_config(compile_config.ep_overlap)

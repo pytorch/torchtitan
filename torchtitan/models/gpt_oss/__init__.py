@@ -24,7 +24,7 @@ from torchtitan.models.common import (
 from torchtitan.models.common.attention import (
     FusedQKVLinear,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -89,7 +89,7 @@ def _make_gptoss_attn_config(
     inner_attention = get_attention_config(attn_backend)
 
     if sliding_window_size is not None and isinstance(
-        inner_attention, VarlenAttention.Config
+        inner_attention, VarlenInnerAttention.Config
     ):
         inner_attention = dataclasses.replace(
             inner_attention, window_size=(sliding_window_size - 1, 0)
