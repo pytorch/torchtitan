@@ -38,6 +38,8 @@ class OverrideDefinitions:
     timeout: int | None = None
     golden_numerics_path: str | None = None
     """Run through loss_compare.py using this mode-specific golden path."""
+    seed_config: Callable[[], Trainer.Config] | None = None
+    """Model-equivalent config used to create the seed checkpoint."""
     use_real_pg: bool = False
     """Whether the test requires communication semantics from a real PG."""
     configs: Sequence[Callable[[], Trainer.Config]] = ()

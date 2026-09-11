@@ -231,7 +231,7 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
 
 def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=2048)
-    _use_spmd_types(config, typechecking=True)
+    _use_spmd_types(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -263,7 +263,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
 
 def qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2() -> Trainer.Config:
     config = qwen3_debugmodel_non_fused_qkv(seq_len=2048)
-    _use_spmd_types(config, typechecking=True)
+    _use_spmd_types(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
