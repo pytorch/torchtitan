@@ -194,10 +194,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if issubclass(pp_schedule_class, PipelineScheduleMulti):
                     if not self.parallelism.pipeline_parallel_per_direction_p2p:
                         raise ValueError(
-                            "Looped pipeline CUDA graphs require independent "
-                            "forward and backward P2P process groups. Set "
-                            "parallelism.pipeline_parallel_per_direction_p2p=True "
-                            "or disable CUDA graphs."
+                            "Looped pipeline CUDA graphs require one process group "
+                            "per directed physical-rank edge. Set parallelism."
+                            "pipeline_parallel_per_direction_p2p=True or disable "
+                            "CUDA graphs."
                         )
 
             if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
