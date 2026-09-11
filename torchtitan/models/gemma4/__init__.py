@@ -63,6 +63,15 @@ _LINEAR_INIT = {
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
+_EXPERTS_INIT: dict[str, Callable] = {
+    "w1_EFD": _LINEAR_INIT["weight"],
+    "w2_EDF": _LINEAR_INIT["weight"],
+    "w3_EFD": _LINEAR_INIT["weight"],
+}
+_ROUTER_PARAM_INIT: dict[str, Callable] = {
+    "scale": nn.init.ones_,
+    "per_expert_scale": nn.init.ones_,
+}
 
 
 def _output_linear_init(dim: int) -> dict[str, Callable]:
@@ -287,6 +296,11 @@ def _build_gemma4_layers(
                         hidden_dim=layer_hidden_dim,
                         num_experts=num_experts,
                         moe_ffn_norm=norm_cfg,
+                        param_init={
+                            "w1_EFD": _LINEAR_INIT["weight"],
+                            "w2_EDF": _depth_init(layer_id)["weight"],
+                            "w3_EFD": _depth_init(layer_id)["weight"],
+                        },
                     ),
                     token_dispatcher=token_dispatcher,
                 ),
@@ -302,6 +316,7 @@ def _build_gemma4_layers(
                         bias=False,
                         param_init=_LINEAR_INIT,
                     ),
+                    param_init=_ROUTER_PARAM_INIT,
                 ),
                 shared_experts=None,
             )

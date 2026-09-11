@@ -29,6 +29,13 @@ if TYPE_CHECKING:
     from torchtitan.models.gemma4.model import Gemma4Model, Gemma4TransformerBlock
 
 
+_GEMMA4_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
+    "w1_EFD": spmd.S(1),
+    "w2_EDF": spmd.S(2),
+    "w3_EFD": spmd.S(1),
+}
+
+
 def set_gemma4_sharding_config(
     config: "Gemma4Model.Config",
     *,
@@ -82,6 +89,10 @@ def _set_gemma4_layer_sharding(
     layer_cfg.post_attention_norm.sharding_config = norm
     layer_cfg.ffn_norm.sharding_config = norm
     layer_cfg.post_ffn_norm.sharding_config = norm
+    if getattr(layer_cfg, "post_ffn_norm_1", None) is not None:
+        layer_cfg.post_ffn_norm_1.sharding_config = norm
+    if getattr(layer_cfg, "moe_post_ffn_norm", None) is not None:
+        layer_cfg.moe_post_ffn_norm.sharding_config = norm
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
@@ -141,13 +152,24 @@ def _set_gemma4_layer_sharding(
             attn_x_layout=attn_x_layout,
             enable_sp=enable_sp,
         )
-    elif getattr(layer_cfg, "moe", None) is not None:
+
+    if getattr(layer_cfg, "moe", None) is not None:
         set_moe_sharding_config(
             layer_cfg.moe,
-            attn_x_layout=attn_x_layout,
-            enable_sp=enable_sp,
             enable_ep=enable_ep,
+            enable_sp=enable_sp,
+            expert_param_layout=_GEMMA4_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
+        replicate_param = dense_param_placement(tp=spmd.R)
+        layer_cfg.moe.router.sharding_config = ShardingConfig(
+            state_shardings={
+                "scale": replicate_param,
+                "per_expert_scale": replicate_param,
+            }
+        )
+        inner = layer_cfg.moe.routed_experts.inner_experts
+        if getattr(inner, "moe_ffn_norm", None) is not None:
+            inner.moe_ffn_norm.sharding_config = norm
 
     if getattr(layer_cfg, "ple", None) is not None:
         replicate_param = dense_param_placement(tp=spmd.R)

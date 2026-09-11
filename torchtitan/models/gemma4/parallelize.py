@@ -18,7 +18,11 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
+from torchtitan.distributed.fsdp import (
+    apply_fsdp_to_decoder,
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+)
 from torchtitan.models.gemma4.model import Gemma4Model
 from torchtitan.tools.logging import logger
 
@@ -96,12 +100,22 @@ def parallelize_gemma4(
     # the all-gather but still installs the MixedPrecisionPolicy.
     if parallelism.spmd_backend == "spmd_types":
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
     else:
         names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
         dp_mesh = parallel_dims.get_mesh(names)
         dp_mesh_dims = None
+        edp_mesh = None
+        edp_mesh_dims = None
+        if parallel_dims.ep_enabled:
+            edp_mesh_names = (
+                ["dp_replicate", "efsdp"]
+                if parallel_dims.dp_replicate_enabled
+                else ["efsdp"]
+            )
+            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
     apply_fsdp_to_decoder(
         model,
@@ -111,7 +125,10 @@ def parallelize_gemma4(
         pp_enabled=parallel_dims.pp_enabled,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 

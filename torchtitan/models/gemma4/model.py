@@ -287,6 +287,7 @@ class Gemma4TransformerBlock(TransformerBlock):
         self.attention = config.attention.build()
         self.feed_forward = config.feed_forward.build() if config.feed_forward is not None else None
         self.moe = config.moe.build() if config.moe is not None else None
+        self.moe_enabled = self.moe is not None
         if self.feed_forward is None and self.moe is None:
             raise ValueError(
                 "Either feed_forward or moe must be provided for Gemma4TransformerBlock"

@@ -37,6 +37,11 @@ class Gemma4GroupedExperts(GroupedExperts):
         super().__init__(config)
         self.moe_ffn_norm = config.moe_ffn_norm.build() if config.moe_ffn_norm is not None else None
 
+    def reset_parameters(self) -> None:
+        nn.init.trunc_normal_(self.w1_EFD, std=0.02)
+        nn.init.trunc_normal_(self.w2_EDF, std=0.02)
+        nn.init.trunc_normal_(self.w3_EFD, std=0.02)
+
     def forward(
         self,
         x_RD: torch.Tensor,
@@ -90,6 +95,10 @@ class Gemma4TokenChoiceTopKRouter(TokenChoiceTopKRouter):
         self.dim = config.dim
         self.scale = nn.Parameter(torch.ones(self.dim))
         self.per_expert_scale = nn.Parameter(torch.ones(self.num_experts))
+
+    def reset_parameters(self) -> None:
+        nn.init.ones_(self.scale)
+        nn.init.ones_(self.per_expert_scale)
 
     def _select_experts(
         self,
