@@ -7,6 +7,7 @@
 """Context-parallel attention kernel selection and mesh lookup."""
 
 import unittest
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
@@ -35,6 +36,22 @@ from torchtitan.models.common.cp_attention import (
     UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.protocols.module import Module
+
+
+class _MetadataCpBackend(CPInnerAttention, Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(CPInnerAttention.Config, Module.Config):
+        def cp_shard_metadata(self, input_dict, load_balancer):
+            return input_dict
+
+
+class _MixedCpModel(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        backends: list[Module.Config]
+
+
 class TestKernelSelection(unittest.TestCase):
     def test_cp_kernel_is_a_flex_kernel(self):
         config = KVAllGatherCPFlexInnerAttention.Config()
@@ -69,7 +86,9 @@ class TestKernelSelection(unittest.TestCase):
             sharded_block_mask,
             sharded_sliding_block_mask,
         )
-        result = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, load_balancer)
+        result = KVAllGatherCPFlexInnerAttention.Config().cp_shard_metadata(
+            batch, load_balancer
+        )
 
         self.assertIs(result, batch)
         self.assertIs(result["input"], batch["input"])
@@ -94,7 +113,9 @@ class TestKernelSelection(unittest.TestCase):
         batch = {"attention_masks": block_mask}
         load_balancer = mock.Mock(spec=ContextParallelLoadBalancer)
         load_balancer.shard.return_value = (sharded_block_mask,)
-        result = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, load_balancer)
+        result = KVAllGatherCPFlexInnerAttention.Config().cp_shard_metadata(
+            batch, load_balancer
+        )
 
         self.assertIs(result["attention_masks"], sharded_block_mask)
         load_balancer.shard.assert_called_once_with([block_mask], (2,))
@@ -238,11 +259,15 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         create_load_balancer.assert_called_once_with(selected_mask, 2)
 
-    def test_shards_inputs_once_and_first_backend_metadata_once(self):
+    def test_shards_inputs_once_and_metadata_once_per_backend(self):
         from torchtitan.models.common.decoder import Decoder
 
-        model_config = SimpleNamespace(
-            first_full_attention_backend=KVAllGatherCPFlexInnerAttention.Config()
+        model_config = _MixedCpModel.Config(
+            backends=[
+                KVAllGatherCPFlexInnerAttention.Config(),
+                KVAllGatherCPFlexInnerAttention.Config(),
+                _MetadataCpBackend.Config(),
+            ]
         )
 
         model = object.__new__(Decoder)
@@ -263,7 +288,11 @@ class TestDecoderCpSharding(unittest.TestCase):
         )
 
         with mock.patch.object(
-            KVAllGatherCPFlexInnerAttention,
+            KVAllGatherCPFlexInnerAttention.Config,
+            "cp_shard_metadata",
+            side_effect=lambda inputs, *_args: inputs,
+        ) as shard_all_gather, mock.patch.object(
+            _MetadataCpBackend.Config,
             "cp_shard_metadata",
             side_effect=lambda inputs, *_args: inputs,
         ) as shard_metadata:
@@ -286,6 +315,7 @@ class TestDecoderCpSharding(unittest.TestCase):
             cp_mesh=cp_mesh,
         )
         load_balancer.shard_inputs.assert_called_once_with(batch)
+        shard_all_gather.assert_called_once_with(batch, load_balancer)
         shard_metadata.assert_called_once_with(batch, load_balancer)
 
 
@@ -465,7 +495,7 @@ class TestUlysses(unittest.TestCase):
         mask = object()
         batch = {"input": torch.arange(8), "attention_masks": mask}
 
-        result = UlyssesCPFlexInnerAttention.cp_shard_metadata(
+        result = UlyssesCPFlexInnerAttention.Config().cp_shard_metadata(
             batch, mock.Mock(spec=ContextParallelLoadBalancer)
         )
 
@@ -508,8 +538,8 @@ class TestUlyssesVarlen(unittest.TestCase):
 
     def test_uses_shared_metadata_sharding(self):
         self.assertIs(
-            UlyssesCPVarlenInnerAttention.cp_shard_metadata.__func__,
-            UlyssesCPFlexInnerAttention.cp_shard_metadata.__func__,
+            UlyssesCPVarlenInnerAttention.Config.cp_shard_metadata,
+            UlyssesCPFlexInnerAttention.Config.cp_shard_metadata,
         )
 
     def test_dispatches_to_varlen_inner_attention(self):
