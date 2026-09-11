@@ -251,6 +251,16 @@ class ParallelismConfig:
     pipeline_parallel_max_active_stages: Annotated[int, tyro.conf.Suppress] = 3
     """Maximum FSDP stages kept unsharded by a looped pipeline schedule."""
 
+    pipeline_parallel_unshard_lookahead: Annotated[
+        Literal["default", "auto"] | tuple[int, ...], tyro.conf.Suppress
+    ] = "default"
+    """FSDP prefetch distance for a looped pipeline schedule.
+
+    ``"default"`` prefetches the full residency window. ``"auto"`` selects
+    PyTorch's rank-aware policy. A tuple provides one explicit distance per
+    pipeline group rank.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -291,6 +301,26 @@ class ParallelismConfig:
             )
         if self.pipeline_parallel_max_active_stages < 1:
             raise ValueError("pipeline_parallel_max_active_stages must be positive")
+        lookahead = self.pipeline_parallel_unshard_lookahead
+        if isinstance(lookahead, str):
+            valid_lookahead = lookahead in {"default", "auto"}
+        elif isinstance(lookahead, tuple):
+            valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
+                not isinstance(value, bool)
+                and isinstance(value, int)
+                and 1 <= value <= self.pipeline_parallel_max_active_stages
+                for value in lookahead
+            )
+        else:
+            valid_lookahead = False
+        if not valid_lookahead:
+            raise ValueError(
+                "pipeline_parallel_unshard_lookahead must be 'default', 'auto', "
+                "or a tuple with one integer per pipeline rank within "
+                "[1, pipeline_parallel_max_active_stages="
+                f"{self.pipeline_parallel_max_active_stages}], got {lookahead!r} "
+                f"for pipeline degree {self.pipeline_parallel_degree}"
+            )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
             or (
