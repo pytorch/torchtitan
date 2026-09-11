@@ -675,3 +675,30 @@ def deepseek_v4_flash_8k_ep16_blk32_batch4(
     config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
     config.training.num_tokens_per_microbatch_per_dp_rank = 32768
     return config
+
+
+def deepseek_v4_flash_8k_ep16_blk32_sac(seq_len: int | None = 8192) -> Trainer.Config:
+    """F19. Composed winners with SelectiveAC instead of FullAC.
+
+    Less recompute, more activation memory. The composed base should sit near
+    50 GiB of the ~276 GiB card, so the trade is affordable here even though
+    it was not at the EP=64 / block_size 128 base.
+    """
+    config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
+    config.model_spec.ac = SelectiveAC.Config()
+    return config
+
+
+def deepseek_v4_flash_8k_ep16_blk32_no_ac(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """F20. Composed winners with no AC at all.
+
+    no_ac OOMed on the plain 8k base wanting ~265 GiB. The composed base frees
+    roughly 49 GiB, which should bring that under the card -- but only if the
+    savings are in the activation term rather than beside it, which is exactly
+    what this run measures.
+    """
+    config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
+    config.model_spec.ac = None
+    return config
