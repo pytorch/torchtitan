@@ -208,7 +208,7 @@ class PrecompiledFxTraceArtifact:
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int]
     # user_inputs_spec is intentionally omitted: it can contain
-    # FlexAttention _MaskModWrapper objects that are not picklable,
+    # FlexInnerAttention _MaskModWrapper objects that are not picklable,
     # and the mask_mod is already compiled into standalone Inductor
     # HOPs (AOTCompiledArtifact) baked into serialized_gm. The spec
     # is only used for optional runtime validation in run_traced().

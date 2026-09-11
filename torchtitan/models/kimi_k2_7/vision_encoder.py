@@ -444,7 +444,7 @@ class MoonViTEncoder(Module):
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = self.patch_embed(pixel_values) + learned_pos
 
-        # BlockMask creation and use in FlexAttention are blackboxed from
+        # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
         with spmd.no_typecheck():
             attention_mask = create_block_diagonal_mask(

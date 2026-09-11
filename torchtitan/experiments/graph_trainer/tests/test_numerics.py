@@ -360,7 +360,7 @@ GRAPH_PP_DSV3_PP_OPTIONS = (
     " --parallelism.expert_parallel_degree=2"
     " --training.num_tokens_per_microbatch_per_dp_rank=2048"
     # Eager PP cannot be the baseline for ZBVZeroBubble or DualPipeV here:
-    # FlexAttention needs torch.compile, and torch.compile is incompatible with
+    # FlexInnerAttention needs torch.compile, and torch.compile is incompatible with
     # those eager PP schedules. Compare GraphPP schedules against eager
     # Interleaved1F1B instead. TorchTitan gradient clipping is applied per
     # local rank, so different PP schedules can produce different clip
@@ -510,7 +510,7 @@ AUTOPARALLEL_LLAMA3_PARALLELISM = (
 def _run_autoparallel_llama3_loss_compare() -> bool:
     """Run loss_compare for eager SDPA llama3 vs graph_trainer AutoParallel.
 
-    AutoParallel is unsupported on the default FlexAttention backend (dynamo
+    AutoParallel is unsupported on the default FlexInnerAttention backend (dynamo
     export flattens the BlockMask), so both sides use the test-only SDPA backend.
     The eager baseline runs the same SDPA model through GraphTrainer with
     ``mode=None`` (delegates to the core eager path).
@@ -664,7 +664,7 @@ class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
 
     # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
     # positions before attention_masks so input_fn's (tokens, positions) binds
-    # correctly). It is unsupported on the default FlexAttention backend (dynamo
+    # correctly). It is unsupported on the default FlexInnerAttention backend (dynamo
     # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
     # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.
     # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch

@@ -14,19 +14,19 @@ from torchtitan.distributed.compile import (
     _maybe_regional_inductor_backend,
     maybe_regional_inductor,
 )
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 
 
 class TestRegionalInductorBackend(unittest.TestCase):
-    """CPU tests for FlexAttention regional_inductor backend selection.
+    """CPU tests for FlexInnerAttention regional_inductor backend selection.
 
     These exercise only the backend-selection decision and the resulting
     annotation toggle; compilation is never run, so no GPU is required.
     """
 
     def setUp(self):
-        self._flex = FlexAttention(FlexAttention.Config())
+        self._flex = FlexInnerAttention(FlexInnerAttention.Config())
         self._dense = Linear.Config(in_features=4, out_features=4, bias=False).build()
         compile_mod._regional_inductor_enabled = False
 
@@ -55,17 +55,17 @@ class TestRegionalInductorBackend(unittest.TestCase):
 
     def test_region_annotation_follows_flag(self):
         # Disabled -> null context, so no annotation metadata is emitted.
-        ctx = maybe_regional_inductor(FlexAttention.inductor_configs)
+        ctx = maybe_regional_inductor(FlexInnerAttention.inductor_configs)
         self.assertIsInstance(ctx, contextlib.nullcontext)
         # Enabled -> a real annotation context manager.
         compile_mod._regional_inductor_enabled = True
-        ctx = maybe_regional_inductor(FlexAttention.inductor_configs)
+        ctx = maybe_regional_inductor(FlexInnerAttention.inductor_configs)
         self.assertNotIsInstance(ctx, contextlib.nullcontext)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestRegionalInductorCodegen(unittest.TestCase):
-    """GPU test: the compiled program lowers FlexAttention to a triton kernel.
+    """GPU test: the compiled program lowers FlexInnerAttention to a triton kernel.
 
     Compiles flex under aot_eager and inspects the generated code. With the
     regional scoop the flex region produces a triton kernel; with plain
@@ -75,14 +75,14 @@ class TestRegionalInductorCodegen(unittest.TestCase):
     def setUp(self):
         # Disable autotune so codegen is fast and deterministic; the regional
         # annotation reads inductor_configs, so this also speeds up the scoop.
-        self._cfg_backup = dict(FlexAttention.inductor_configs)
-        FlexAttention.inductor_configs["max_autotune"] = False
-        FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
+        self._cfg_backup = dict(FlexInnerAttention.inductor_configs)
+        FlexInnerAttention.inductor_configs["max_autotune"] = False
+        FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
         compile_mod._regional_inductor_enabled = False
 
     def tearDown(self):
-        FlexAttention.inductor_configs.clear()
-        FlexAttention.inductor_configs.update(self._cfg_backup)
+        FlexInnerAttention.inductor_configs.clear()
+        FlexInnerAttention.inductor_configs.update(self._cfg_backup)
         compile_mod._regional_inductor_enabled = False
         torch._dynamo.reset()
 
@@ -92,7 +92,7 @@ class TestRegionalInductorCodegen(unittest.TestCase):
         from torch.nn.attention.flex_attention import create_block_mask
 
         torch._dynamo.reset()
-        attn = FlexAttention(FlexAttention.Config())
+        attn = FlexInnerAttention(FlexInnerAttention.Config())
         seq, heads, dim = 256, 4, 64
         shape = (seq, heads, dim)
         q, k, v = (
@@ -121,7 +121,7 @@ class TestRegionalInductorCodegen(unittest.TestCase):
 
     def test_regional_scoop_lowers_flex_to_triton(self):
         backend = _maybe_regional_inductor_backend(
-            FlexAttention(FlexAttention.Config()), "aot_eager"
+            FlexInnerAttention(FlexInnerAttention.Config()), "aot_eager"
         )
         # Forward + backward flex regions both lower to triton.
         self.assertGreaterEqual(self._triton_flex_kernel_count(backend), 1)
