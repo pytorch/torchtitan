@@ -477,7 +477,7 @@ def kimi_k3_full_attention_layers(num_layers: int) -> set[int]:
 
 
 def _debugmodel(
-    attn_backend: str, moe_comm_backend: str, *, num_layers: int
+    attn_backend: str, moe_comm_backend: str, *, num_layers: int = 24
 ) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
@@ -553,10 +553,12 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 
 kimi_k3_configs = {
-    # 33 layers: two blocks of 12 and the 93-layer model's partial block of 9
-    # (93 = 7 x 12 + 9); 35 units with the embedding and the head, which no
-    # pipeline shape divides, so every split is uneven the way the real one is.
-    "debugmodel": (partial(_debugmodel, num_layers=33), 16384),
+    "debugmodel": (_debugmodel, 16384),
+    # Two blocks of 12 and the 93-layer model's partial block of 9 (93 =
+    # 7 x 12 + 9); 35 units with the embedding and the head, which no pipeline
+    # shape divides, so every split is uneven the way the real one is. Only the
+    # pipeline stress cell uses it; every other flavor keeps "debugmodel".
+    "debugmodel_33_layers": (partial(_debugmodel, num_layers=33), 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }
 

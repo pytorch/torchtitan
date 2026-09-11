@@ -123,6 +123,18 @@ class TestGenerateLLMFqnPerModelPart(unittest.TestCase):
             fqns[31], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
         )
 
+    def test_the_shared_debug_model_keeps_its_depth(self):
+        """This change deepens no flavor but the pipeline stress cell's."""
+        from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+        from torchtitan_recipes.tests.features import (
+            kimi_k3_debugmodel_pp2_vp2,
+            kimi_k3_debugmodel_pp8_vp4,
+        )
+
+        self.assertEqual(len(kimi_k3_debugmodel().model_spec.model.layers), 24)
+        self.assertEqual(len(kimi_k3_debugmodel_pp2_vp2().model_spec.model.layers), 24)
+        self.assertEqual(len(kimi_k3_debugmodel_pp8_vp4().model_spec.model.layers), 33)
+
     def test_the_stage_count_is_validated(self):
         """More stages than units, and a count the schedule refuses."""
         with self.assertRaisesRegex(ValueError, "more than the"):
