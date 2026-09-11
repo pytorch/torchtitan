@@ -17,18 +17,19 @@ import torch.distributed as dist
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     CPInnerAttention,
     KVAllGatherCPFlexInnerAttention,
+    UlyssesCPFlexInnerAttention,
 )
 
 
 class TestKernelSelection(unittest.TestCase):
     def test_cp_kernel_is_a_flex_kernel(self):
         self.assertIsInstance(
-            KVAllGatherCPFlexInnerAttention.Config(), FlexAttention.Config
+            KVAllGatherCPFlexInnerAttention.Config(), FlexInnerAttention.Config
         )
 
     def test_cp_kernel_inherits_flex_fields(self):
@@ -129,7 +130,9 @@ class TestAllGather(unittest.TestCase):
 
         with _in_mesh(8), mock.patch.object(
             spmd, "redistribute", record
-        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+        ), mock.patch.object(
+            FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
+        ):
             KVAllGatherCPFlexInnerAttention(
                 KVAllGatherCPFlexInnerAttention.Config()
             ).forward(q, k, v)
@@ -155,7 +158,9 @@ class TestAllGather(unittest.TestCase):
         q, k, v = (torch.randn(8, 2, 16, dtype=torch.bfloat16) for _ in range(3))
         with _in_mesh(8), mock.patch.object(
             spmd, "redistribute", record
-        ), mock.patch.object(FlexAttention, "forward", lambda self, q, *a, **kw: q):
+        ), mock.patch.object(
+            FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
+        ):
             KVAllGatherCPFlexInnerAttention(config).forward(q, k, v)
         return seen
 
@@ -202,7 +207,7 @@ class TestAllGatherCollective(unittest.TestCase):
             "torchtitan.models.common.cp_attention." "spmd_mesh_group",
             return_value=dist.group.WORLD,
         ), mock.patch.object(
-            FlexAttention, "forward", lambda self, q, k, v, **kw: k + v
+            FlexInnerAttention, "forward", lambda self, q, k, v, **kw: k + v
         ):
             kernel.forward(q, k, v).float().sum().backward()
         k_grad, v_grad = k.grad, v.grad
@@ -217,6 +222,64 @@ class TestAllGatherCollective(unittest.TestCase):
     def test_float32_kv_reach_the_reducing_backward(self):
         for _, grad in self._gather_and_backward(torch.float32):
             self.assertEqual(torch.float32, grad.dtype)
+
+
+class TestUlysses(unittest.TestCase):
+    def test_is_still_a_flex_kernel(self):
+        self.assertIsInstance(
+            UlyssesCPFlexInnerAttention.Config(), FlexInnerAttention.Config
+        )
+
+    def test_is_not_an_attention_backend(self):
+        with self.assertRaisesRegex(ValueError, "Unknown backend"):
+            get_attention_config("ulysses_cp_flex")
+
+    def test_keeps_its_mask_global(self):
+        mask = object()
+        batch = {"input": torch.arange(8), "attention_masks": mask}
+
+        def shard(inputs, *args):
+            self.assertNotIn("attention_masks", inputs)
+            inputs["input"] = inputs["input"][:4]
+            return inputs
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel.api."
+            "prepare_context_parallel_input",
+            side_effect=shard,
+        ):
+            result = UlyssesCPFlexInnerAttention.cp_shard(
+                batch, None, object(), None, None
+            )
+
+        self.assertIs(result["attention_masks"], mask)
+        self.assertEqual(result["input"].shape, (4,))
+
+    def test_reshards_sequence_to_heads_and_back(self):
+        q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
+        calls = []
+
+        def record(x, group, *, src, dst):
+            calls.append((x, group, src, dst))
+            return x
+
+        kernel = UlyssesCPFlexInnerAttention(UlyssesCPFlexInnerAttention.Config())
+        with _in_mesh(2), mock.patch.object(
+            spmd, "redistribute", record
+        ), mock.patch.object(
+            FlexInnerAttention, "forward", lambda self, q, *a, **kw: q
+        ):
+            kernel.forward(q, k, v)
+
+        self.assertEqual(4, len(calls))
+        for _, group, src, dst in calls[:3]:
+            self.assertEqual(2, group.size())
+            self.assertEqual(spmd.S(0), src)
+            self.assertEqual(spmd.S(1), dst)
+        _, group, src, dst = calls[3]
+        self.assertEqual(2, group.size())
+        self.assertEqual(spmd.S(1), src)
+        self.assertEqual(spmd.S(0), dst)
 
 
 if __name__ == "__main__":

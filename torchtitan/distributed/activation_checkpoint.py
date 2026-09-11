@@ -47,7 +47,7 @@ def _get_default_save_ops() -> set:
         # For low precision training, always save the absolute maximum used
         # to compute the scaling factor for quantization.
         torch.ops.aten.max.default,
-        # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
+        # FlexInnerAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
         torch.ops.aten.mm.dtype,

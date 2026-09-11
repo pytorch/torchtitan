@@ -251,7 +251,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
     layers use full causal attention; the per-layer window is baked into each
-    ``VarlenAttention.window_size``.
+    ``VarlenInnerAttention.window_size``.
     """
     num_samples_per_prompt = 8
     seq_len = 2048
