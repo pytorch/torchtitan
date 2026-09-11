@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 from torch.distributed.tensor import DTensor
 
@@ -103,8 +104,9 @@ class GptOssGroupedExperts(GroupedExperts):
         Shape suffixes here describe logical grouped-mm inputs, not physical
         sharding. Under EP, E may be a local shard of experts; under TP,
         expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
+        local token shard. P is the E expert entries plus one tail-slack entry.
+        Keep logical capital suffixes here to avoid encoding a specific
+        parallel layout in these local tensor names.
         """
         if isinstance(self.mlp1_weight_EGD, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
@@ -155,37 +157,47 @@ class GptOssGroupedExperts(GroupedExperts):
             .to(num_tokens_per_expert_E.dtype)
         )
         # shape (E+1,): E expert counts + 1 tail slack for padding
-        num_tokens_per_expert_long = torch.cat(
+        num_tokens_per_expert_P = torch.cat(
             [num_tokens_per_expert_E, tail_slack]
         ).long()
 
-        # G = gate+up dimension (2*F)
-        h_RG = self._grouped_mm(
+        h_RG = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(
             A=x_RD.bfloat16(),
             weight_EOI=mlp1_weight_EGD,
             offs=offsets_E,
         )
-
-        b1 = torch.cat(
+        bias_PG = torch.cat(
             [mlp1_bias_EG, mlp1_bias_EG.new_zeros(1, mlp1_bias_EG.shape[-1])]
         )
-        b1_RG = b1.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
+        bias_RG = bias_PG.repeat_interleave(
+            num_tokens_per_expert_P, dim=0, output_size=x_RD.shape[0]
         )
-        h_RG = h_RG + b1_RG.to(h_RG.dtype)
-
+        remat.recompute_needs_tensor(h_RG)
+        h_RG = h_RG + bias_RG.to(h_RG.dtype)
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
-        h_RD = self._grouped_mm(A=h_RF, weight_EOI=mlp2_weight_EDF, offs=offsets_E)
 
-        # Apply custom autograd function to scale bias in forward but not in backward
-        b2 = torch.cat(
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(
+            A=h_RF,
+            weight_EOI=mlp2_weight_EDF,
+            offs=offsets_E,
+        )
+        bias_PD = torch.cat(
             [mlp2_bias_ED, mlp2_bias_ED.new_zeros(1, mlp2_bias_ED.shape[-1])]
         )
-        b2_RD = b2.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
+        bias_RD = bias_PD.repeat_interleave(
+            num_tokens_per_expert_P, dim=0, output_size=x_RD.shape[0]
         )
-        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
-        return h_RD + b2_RD
+        bias_RD = ScaleBiasForward.apply(bias_RD, tp_degree, out_RD.dtype)
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD + bias_RD
 
 
 class GptOssMoE(MoE):

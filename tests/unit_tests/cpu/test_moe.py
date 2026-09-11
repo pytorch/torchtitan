@@ -9,11 +9,13 @@ import unittest
 import torch
 import torch.nn as nn
 
+from torchtitan.models.common.activation import ActivationFn, SiTUGLU
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.moe import GroupedExperts
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -46,6 +48,59 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_grouped_experts_use_configured_activation(self):
+        activation_fn = ActivationFn.Config(
+            fn=SiTUGLU(beta=4.0, linear_beta=25.0)  # pyrefly: ignore[bad-argument-type]
+        )
+
+        experts = GroupedExperts.Config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+            activation_fn=activation_fn,
+        ).build()
+        gate_RF = torch.randn(3, 8)
+        up_RF = torch.randn(3, 8)
+
+        expected_RF = activation_fn.build()(gate_RF, up_RF)
+        actual_RF = experts._activation(gate_RF, up_RF, torch.tensor([1, 3]))
+        torch.testing.assert_close(actual_RF, expected_RF)
+
+    def test_grouped_experts_use_fused_gate_up_parameter(self):
+        experts = GroupedExperts.Config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+        ).build()
+
+        self.assertEqual(
+            {name for name, _ in experts.named_parameters(recurse=False)},
+            {"w13", "w2_EDF"},
+        )
+        self.assertEqual(tuple(experts.w13.shape), (2, 16, 4))
+
+    def test_grouped_experts_checkpoint_uses_logical_projection_keys(self):
+        source = GroupedExperts.Config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+        ).build()
+        with torch.no_grad():
+            source.w13.copy_(torch.randn_like(source.w13))
+            source.w2_EDF.copy_(torch.randn_like(source.w2_EDF))
+
+        state_dict = source.state_dict()
+        self.assertEqual(set(state_dict), {"w1_EFD", "w2_EDF", "w3_EFD"})
+
+        target = GroupedExperts.Config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+        ).build()
+        target.load_state_dict(state_dict)
+        torch.testing.assert_close(target.w13, source.w13)
+        torch.testing.assert_close(target.w2_EDF, source.w2_EDF)
+
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
         dim = 4

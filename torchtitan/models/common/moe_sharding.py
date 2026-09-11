@@ -169,8 +169,8 @@ def _shared_experts_sharding_configs(
     enable_sp: bool,
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig, ShardingConfig]:
     """Configs for shared FeedForward parent and w1/w2/w3 linears."""
-    # The parent FeedForward converts its input to Replicate once before the
-    # w1/w3 fork. w2 reduces its Partial output to the final MoE boundary layout
+    # The parent FeedForward converts its input to Replicate once before w13.
+    # w2 reduces its Partial output to the final MoE boundary layout
     # used for the routed + shared add: sequence-sharded when SP is enabled and
     # Partial when SP is disabled.
     input_layout = (
@@ -328,7 +328,9 @@ def set_moe_sharding_config(
     ``Shard(1)`` for colwise, ``Shard(2)`` for rowwise, ``Replicate()`` for
     replicated bias. The shared ``GroupedExperts`` (qwen3, deepseek_v3)
     passes ``{"w1_EFD": Shard(1), "w2_EDF": Shard(2), "w3_EFD": Shard(1)}``;
-    ``GptOssGroupedExperts`` passes its mlp1/mlp2 layout.
+    ``GroupedExperts.Config.build`` maps the matching w1/w3 layouts onto its
+    physical ``w13`` parameter. ``GptOssGroupedExperts`` passes its mlp1/mlp2
+    layout.
 
     Args:
         moe_cfg: The ``MoE.Config`` instance to populate.

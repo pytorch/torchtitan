@@ -278,7 +278,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         parameter = torch.nn.Parameter(
             distribute_tensor(value.clone(), mesh, storage_placements)
         )
-        fqn = "layers.0.routed_experts.inner_experts.w1_EFD"
+        fqn = "layers.0.routed_experts.inner_experts.w13"
 
         def make_optimizer(param, shard_order_by_tensor_dim):
             return build_dist_muon(
