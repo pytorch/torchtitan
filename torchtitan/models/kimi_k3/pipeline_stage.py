@@ -52,8 +52,14 @@ from torch.distributed.pipelining._utils import flatten_args
 from torchtitan.models.kimi_k3.layout import BlockLayoutTables
 
 
-class RankStore:
-    """The blocks a rank holds per micro-batch, and the gradient deposits."""
+class PPRankLocalCache:
+    """The blocks a rank holds per micro-batch, and the gradient deposits.
+
+    One instance per rank, shared by every pipeline stage the rank runs. The
+    blocks stay on the device they were produced or received on (no host
+    copy); a micro-batch's blocks are released once the rank's last stage
+    that reads them has run its backward.
+    """
 
     def __init__(self) -> None:
         self._blocks: dict[int, dict[int, torch.Tensor]] = {}
@@ -163,20 +169,20 @@ class AttnResPipelineStage(PipelineStage):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._layout: BlockLayoutTables | None = None
-        self._store: RankStore | None = None
+        self._store: PPRankLocalCache | None = None
         # Per micro-batch, the block order of the assembled stack and the
         # blocks the delta carried in, for the backward split.
         self._order: dict[int, list[int]] = {}
         self._delta_in: dict[int, list[int]] = {}
 
-    def set_routing(self, layout: BlockLayoutTables, store: RankStore) -> None:
+    def set_routing(self, layout: BlockLayoutTables, store: PPRankLocalCache) -> None:
         """Install the routing tables and the rank's store; done once the
         schedule exists, since the tables need the stage-to-rank map."""
         self._layout = layout
         self._store = store
 
     # ----- routing helpers -------------------------------------------- #
-    def _routing(self) -> tuple[BlockLayoutTables, RankStore]:
+    def _routing(self) -> tuple[BlockLayoutTables, PPRankLocalCache]:
         if self._layout is None or self._store is None:
             raise RuntimeError(
                 f"stage {self.stage_index}: set_routing() must run before the "

@@ -39,7 +39,10 @@ from torchtitan.models.kimi_k3.layout import (
     infer_block_layout_tables_from_stages,
     layer_to_stage_from_split,
 )
-from torchtitan.models.kimi_k3.pipeline_stage import AttnResPipelineStage, RankStore
+from torchtitan.models.kimi_k3.pipeline_stage import (
+    AttnResPipelineStage,
+    PPRankLocalCache,
+)
 from torchtitan.tools.logging import logger
 from .model import KimiK3Model
 
@@ -270,7 +273,7 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
         layer_to_stage=layer_to_stage,
         cache=attn_res_cache,
     )
-    store = RankStore()
+    store = PPRankLocalCache()
     for stage in stages:
         stage.set_routing(layout, store)
     logger.info(

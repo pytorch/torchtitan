@@ -12,7 +12,7 @@ import torch
 
 from torchtitan.models.kimi_k3.pipeline_stage import (
     assemble_stack,
-    RankStore,
+    PPRankLocalCache,
     route_payload,
     split_stack_grad,
 )
@@ -60,7 +60,7 @@ class TestCarrier(unittest.TestCase):
         self.assertEqual(deposits, {})
 
     def test_store_accumulates_deposits_and_releases_blocks_separately(self):
-        store = RankStore()
+        store = PPRankLocalCache()
         store.put(0, 0, torch.zeros(4, 2))
         store.deposit(0, 0, torch.ones(4, 2))
         store.deposit(0, 0, torch.ones(4, 2))
