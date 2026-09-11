@@ -875,6 +875,56 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return torch.sum(torch.stack(detached_losses)).to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
+    def _run_microbatch_groups(
+        self,
+        microbatch_groups: list[list[dict[str, Any]]],
+        global_valid_tokens: torch.Tensor,
+    ) -> Iterator[torch.Tensor]:
+        parallel_dims = self.parallel_dims
+        for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
+            input_dict_mbs = []
+            for input_dict in microbatches:
+                for key, value in input_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        input_dict[key] = value.to(self.device, non_blocking=True)
+                input_dict_mbs.append(input_dict)
+
+            if parallel_dims.pp_enabled:
+                fwd_bwd_input_dict = input_dict_mbs
+            else:
+                assert len(input_dict_mbs) == 1
+                fwd_bwd_input_dict = input_dict_mbs[0]
+
+            def fwd_bwd() -> torch.Tensor:
+                return self.forward_backward_step(
+                    input_dict=fwd_bwd_input_dict,
+                    global_valid_tokens=global_valid_tokens,
+                )
+
+            # HSDP replicate all-reduce is a no-op until the last accum group.
+            # Do not toggle under CUDA graphs when accum > 1: the graph is
+            # captured on the first group and replayed for later groups.
+            if getattr(self.parallel_dims, "dp_replicate_enabled", False) and (
+                self.gradient_accumulation_steps == 1
+                or self.config.training.disable_cuda_graphs
+            ):
+                is_last = fwd_bwd_index == self.gradient_accumulation_steps - 1
+                for part in self.model_parts:
+                    part.set_requires_all_reduce(  # pyrefly: ignore[not-callable]
+                        is_last
+                    )
+
+            if self.sdc_replayer is not None and fwd_bwd_index == 0:
+                # Only the step's first gradient-accumulation group is
+                # replay-checked; under PP one group is a complete pipeline
+                # schedule. Later groups exercise the same compute and
+                # communication paths, so checking them too would only add
+                # overhead.
+                loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
+            else:
+                loss = fwd_bwd()
+            yield loss
+
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save per-optimizer-group learning rates for logging
@@ -921,48 +971,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         accumulated_loss: torch.Tensor | None = None
         # int32 is supported by NCCL reductions, unlike bool.
         loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
-        for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
-            input_dict_mbs = []
-            for input_dict in microbatches:
-                for key, value in input_dict.items():
-                    if isinstance(value, torch.Tensor):
-                        input_dict[key] = value.to(self.device, non_blocking=True)
-                input_dict_mbs.append(input_dict)
-
-            if parallel_dims.pp_enabled:
-                fwd_bwd_input_dict = input_dict_mbs
-            else:
-                assert len(input_dict_mbs) == 1
-                fwd_bwd_input_dict = input_dict_mbs[0]
-
-            def fwd_bwd() -> torch.Tensor:
-                return self.forward_backward_step(
-                    input_dict=fwd_bwd_input_dict,
-                    global_valid_tokens=global_valid_tokens,
-                )
-
-            # HSDP replicate all-reduce is a no-op until the last accum group.
-            # Do not toggle under CUDA graphs when accum > 1: the graph is
-            # captured on the first group and replayed for later groups.
-            if getattr(self.parallel_dims, "dp_replicate_enabled", False) and (
-                self.gradient_accumulation_steps == 1
-                or self.config.training.disable_cuda_graphs
-            ):
-                is_last = fwd_bwd_index == self.gradient_accumulation_steps - 1
-                for part in self.model_parts:
-                    part.set_requires_all_reduce(  # pyrefly: ignore[not-callable]
-                        is_last
-                    )
-
-            if self.sdc_replayer is not None and fwd_bwd_index == 0:
-                # Only the step's first gradient-accumulation group is
-                # replay-checked; under PP one group is a complete pipeline
-                # schedule. Later groups exercise the same compute and
-                # communication paths, so checking them too would only add
-                # overhead.
-                loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
-            else:
-                loss = fwd_bwd()
+        for loss in self._run_microbatch_groups(microbatch_groups, global_valid_tokens):
             detached_loss = loss.detach()
             local_loss = (
                 detached_loss.to_local()
