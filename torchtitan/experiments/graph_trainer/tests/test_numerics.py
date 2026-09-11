@@ -882,11 +882,14 @@ class TestSimpleFSDP(FSDPTest):
                 for parameter, original in zip(
                     model.parameters(), reference.parameters(), strict=True
                 ):
+                    # NCCL requires contiguous buffers even for transposed parameters.
+                    reference_grad = original.grad.contiguous()
                     # SimpleFSDP sums gradients across every data-parallel axis.
                     for axis_name in dp_mesh.mesh_dim_names:
                         dist.all_reduce(
-                            original.grad, group=dp_mesh.get_group(axis_name)
+                            reference_grad, group=dp_mesh.get_group(axis_name)
                         )
+                    original.grad.copy_(reference_grad)
                     self._check_layout(parameter.grad, parameter)
                     torch.testing.assert_close(
                         parameter.grad.to_local(),
