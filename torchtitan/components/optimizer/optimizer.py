@@ -330,13 +330,16 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         Optimizer.__init__(self, all_params, {})
 
     def _register_bf16_optimizer_state_hook(self) -> None:
-        """Register a step pre-hook to create Adam optimizer states in bfloat16.
+        """Create and restore Adam optimizer states in bfloat16.
 
         The hook pre-populates optimizer state before Adam's lazy initialization
         runs, so that ``_init_group`` finds non-empty state and skips its own
         fp32 allocation. The fused CUDA kernel then sees the dtype mismatch
         between fp32 params and bf16 states, dispatching to the mixed-precision
         kernel (``FusedAdamMathFunctorMP``).
+
+        A load post-hook reapplies the state dtype after PyTorch's
+        ``load_state_dict`` casts floating-point states to the parameter dtype.
         """
 
         def _bf16_state_init_hook(
@@ -366,9 +369,19 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                                 memory_format=torch.preserve_format,
                             )
 
+        def _bf16_state_load_hook(optimizer: Optimizer) -> None:
+            for group in optimizer.param_groups:
+                for p in group["params"]:
+                    state = optimizer.state.get(p, {})
+                    # Keep step's dtype/device policy and any other state intact.
+                    for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                        if key in state:
+                            state[key] = state[key].to(dtype=torch.bfloat16)
+
         for optim in self.optimizers:
             if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
                 optim.register_step_pre_hook(_bf16_state_init_hook)
+                optim.register_load_state_dict_post_hook(_bf16_state_load_hook)
 
     def init_cache_state_dict(self) -> None:
         """Initialize cached state dict for TorchFT. No-op for base class."""
