@@ -58,7 +58,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     with pytest.raises(ModelBuildReachedError):
         ft.FaultTolerantTrainer(config)
 
-    assert hasattr(built_ffns[0].w1, "lora_a"), "FT ignored the FFN LoRA override"
+    assert hasattr(built_ffns[0].w13, "lora_a"), "FT ignored the FFN LoRA override"
 
 
 def test_ft_chunked_loss_without_pp_binds_lm_head_and_skips_model_projection():

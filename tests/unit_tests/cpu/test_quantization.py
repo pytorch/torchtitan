@@ -398,7 +398,7 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     model_config = config.model_spec.model
     model = model_config.build()
     model.init_states()
-    assert isinstance(model.get_submodule("layers.0.feed_forward.w1"), NVFP4Linear)
+    assert isinstance(model.get_submodule("layers.0.feed_forward.w13"), NVFP4Linear)
 
     sd = model.state_dict()
     # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector
@@ -597,18 +597,15 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     )
     converted = converter.convert(
         FeedForward.Config(
-            w1=Linear.Config(in_features=128, out_features=128),
+            w13=Linear.Config(in_features=128, out_features=256),
             w2=Linear.Config(in_features=128, out_features=128),
-            w3=Linear.Config(in_features=128, out_features=128),
         )
     )
 
-    assert isinstance(converted.w1, MXFP8Linear.Config)
+    assert isinstance(converted.w13, MXFP8Linear.Config)
     assert isinstance(converted.w2, MXFP8Linear.Config)
-    assert isinstance(converted.w3, MXFP8Linear.Config)
-    assert converted.w1.input_activation_format_for_backward == "bf16"
+    assert converted.w13.input_activation_format_for_backward == "bf16"
     assert converted.w2.input_activation_format_for_backward == "mxfp8"
-    assert converted.w3.input_activation_format_for_backward == "bf16"
 
 
 def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
@@ -622,9 +619,8 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
         )
     )
     model_config = FeedForward.Config(
-        w1=Linear.Config(in_features=128, out_features=128),
+        w13=Linear.Config(in_features=128, out_features=256),
         w2=Linear.Config(in_features=128, out_features=128),
-        w3=Linear.Config(in_features=128, out_features=128),
     )
 
     with pytest.raises(
