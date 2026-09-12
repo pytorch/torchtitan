@@ -53,8 +53,8 @@ def deepseek_v3_mxfp8_linear_converter_config(
 
 
 def enable_fused_swiglu(config: Trainer.Config) -> None:
-    # Activate the stock dense-FFN and MoE grouped-expert overrides. The separate
-    # dist-GEMM FFN override is not needed by these configs.
+    # Activate the dense-FFN and grouped-expert Triton activation overrides.
+    # The separate dist-GEMM FFN override is not needed by these configs.
     for override in (
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
         "torchtitan.overrides.fused_swiglu.fused_grouped_experts",

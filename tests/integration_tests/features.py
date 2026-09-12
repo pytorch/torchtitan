@@ -229,9 +229,21 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_cp2_region_ac],
+            test_descr="FSDP+CP with RegionAC",
+            test_name="fsdp+cp_region_ac",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_ulysses_cp2],
             test_descr="Ulysses CP",
             test_name="cp_ulysses",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_ulysses_cp2_region_ac],
+            test_descr="Ulysses CP with RegionAC",
+            test_name="cp_ulysses_region_ac",
             ngpu=2,
         ),
         OverrideDefinitions(
@@ -282,7 +294,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fused_swiglu_tp2],
-            test_descr="Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
+            test_descr="Override: use Triton SwiGLU activation (FSDP2 + TP2)",
             test_name="override_fused_swiglu",
             ngpu=4,
         ),

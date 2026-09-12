@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import spmd_types as spmd
@@ -24,12 +24,18 @@ from torchtitan.distributed.spmd_types import (
     spmd_sparse_mesh,
 )
 from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 
-from .token_dispatcher import LocalTokenDispatcher
+from .token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+    LocalTokenDispatcher,
+)
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -45,25 +51,73 @@ from .token_dispatcher import LocalTokenDispatcher
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
+def _fuse_grouped_experts_sharding(
+    sharding_config: ShardingConfig | None,
+) -> ShardingConfig | None:
+    """Map logical w1/w3 shardings onto the physical w13 parameter."""
+    if sharding_config is None:
+        return None
+    state_shardings = dict(sharding_config.state_shardings)
+    gate_sharding = state_shardings.get("w1_EFD")
+    up_sharding = state_shardings.get("w3_EFD")
+    if (gate_sharding is None) != (up_sharding is None):
+        raise ValueError("w1_EFD and w3_EFD must both define state shardings")
+    if gate_sharding is None:
+        return sharding_config
+    if gate_sharding != up_sharding:
+        raise ValueError("w1_EFD and w3_EFD must use the same state sharding")
+    if "w13" in state_shardings:
+        raise ValueError("state_shardings cannot define both w13 and w1_EFD/w3_EFD")
+
+    del state_shardings["w1_EFD"]
+    del state_shardings["w3_EFD"]
+    state_shardings["w13"] = gate_sharding
+    return replace(sharding_config, state_shardings=state_shardings)
+
+
 class GroupedExperts(Module):
+    """SwiGLU experts with one physical interleaved gate-up parameter.
+
+    ``w13`` has shape ``(E, 2F, D)`` for one grouped GEMM. Its logical view is
+    ``(E, F, 2, D)``, with gate and up interleaved on the size-2 axis.
+    Checkpoints retain the logical ``w1_EFD`` and ``w3_EFD`` keys used by model
+    state-dict adapters.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
         hidden_dim: int
         num_experts: int
+        activation_fn: ActivationFn.Config = field(
+            default_factory=lambda: ActivationFn.Config(
+                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
+            )
+        )
+
+        def build(self, **kwargs):
+            physical_config = replace(
+                self,
+                sharding_config=_fuse_grouped_experts_sharding(self.sharding_config),
+            )
+            return Module.Config.build(physical_config, **kwargs)
 
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
-        self.w1_EFD = nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        self.w13 = nn.Parameter(
+            torch.empty(
+                config.num_experts,
+                2 * config.hidden_dim,
+                config.dim,
+            )
         )
         self.w2_EDF = nn.Parameter(
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
-        self.w3_EFD = nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, config.dim)
-        )
+        self.activation_fn = config.activation_fn.build()
+        self.register_state_dict_post_hook(self._split_w13_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(
         self,
@@ -78,18 +132,15 @@ class GroupedExperts(Module):
         local token shard. Keep logical capital suffixes here to avoid encoding
         a specific parallel layout in these local tensor names.
         """
-        if isinstance(self.w1_EFD, DTensor):
+        if isinstance(self.w13, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EFD = self.w1_EFD.to_local()
+            w13_E2FD = self.w13.to_local()
             assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
         else:
-            w1_EFD = self.w1_EFD
+            w13_E2FD = self.w13
             w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if (
@@ -104,13 +155,53 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
+        E, F2, D = w13_E2FD.shape
+        F = F2 // 2
+        gate_up_R2F = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(
+            A=x_RD.bfloat16(),
+            weight_EOI=w13_E2FD.bfloat16(),
+            offs=offsets_E,
         )
-        h_RF = h_RF * self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
-        )
-        return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
+        gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
+        remat.recompute_needs_tensor(gate_RF, up_RF)
+        h_RF = self._activation(gate_RF, up_RF, offsets_E)
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E)
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
+
+    def _activation(
+        self,
+        gate_RF: torch.Tensor,
+        up_RF: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        del offsets_E
+        return self.activation_fn(gate_RF, up_RF)
+
+    @staticmethod
+    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Expose the physical w13 parameter as logical w1 and w3 keys."""
+        w13_EF2D = state_dict.pop(f"{prefix}w13").unflatten(1, (-1, 2))
+        state_dict[f"{prefix}w1_EFD"] = w13_EF2D[:, :, 0, :].contiguous()
+        state_dict[f"{prefix}w3_EFD"] = w13_EF2D[:, :, 1, :].contiguous()
+
+    @staticmethod
+    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
+        """Merge logical w1 and w3 checkpoint keys into physical w13."""
+        w1_key = f"{prefix}w1_EFD"
+        w3_key = f"{prefix}w3_EFD"
+        if w1_key in state_dict and w3_key in state_dict:
+            state_dict[f"{prefix}w13"] = torch.stack(
+                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
+            ).flatten(1, 2)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
@@ -158,6 +249,28 @@ class RoutedExperts(Module):
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
         """
+        if isinstance(self.token_dispatcher, DeepEPTokenDispatcher):
+            return self._forward_deepep(
+                self.token_dispatcher,
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
+        # TorchAOTokenDispatcher inherits this implementation but is not part
+        # of the RegionAC integration until its runtime path is audited.
+        if (
+            type(self.token_dispatcher) is AllToAllTokenDispatcher
+            and self.token_dispatcher.ep_mesh is not None
+        ):
+            return self._forward_all_to_all(
+                self.token_dispatcher,
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
+
         (
             routed_input_RD,
             num_global_tokens_per_local_expert_e,
@@ -172,11 +285,78 @@ class RoutedExperts(Module):
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
-        out_TD = self.token_dispatcher.combine(
-            routed_output_RD,
-            metadata,
+        out_TD = self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)
+        return out_TD
+
+    def _forward_all_to_all(
+        self,
+        dispatcher: AllToAllTokenDispatcher,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run standard AllToAll with coupled dispatch and combine policy."""
+        recompute_ep_communication = self.remat_should_recompute("ep_communication")
+        dispatch_output = remat.region(
+            dispatcher._dispatch_with_tensor_state,
+            self.remat_region_name("ep_communication.dispatch"),
+            recompute=recompute_ep_communication,
+        )(
             x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
         )
+        routed_input_RD = dispatch_output.routed_input_RD
+        num_tokens_per_local_expert_e = dispatch_output.num_tokens_per_local_expert_e
+        remat.recompute_needs_tensor(routed_input_RD, num_tokens_per_local_expert_e)
+        with maybe_set_sparse_mesh():
+            routed_output_RD = self.inner_experts(
+                routed_input_RD, num_tokens_per_local_expert_e
+            )
+        out_TD = remat.region(
+            dispatcher._combine_with_tensor_state,
+            self.remat_region_name("ep_communication.combine"),
+            recompute=recompute_ep_communication,
+        )(routed_output_RD, dispatch_output, x_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
+
+    def _forward_deepep(
+        self,
+        dispatcher: DeepEPTokenDispatcher,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run DeepEP with one policy controlling dispatch and combine."""
+        recompute_ep_communication = self.remat_should_recompute("ep_communication")
+        dispatch_output = remat.region(
+            dispatcher._dispatch_with_tensor_state,
+            self.remat_region_name("ep_communication.dispatch"),
+            recompute=recompute_ep_communication,
+        )(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        routed_input_RD = dispatch_output.routed_input_RD
+        num_tokens_per_local_expert_e = dispatch_output.num_tokens_per_local_expert_e
+        # GroupedExperts immediately reads both tensors with bare tensor ops.
+        remat.recompute_needs_tensor(routed_input_RD, num_tokens_per_local_expert_e)
+        with maybe_set_sparse_mesh():
+            routed_output_RD = self.inner_experts(
+                routed_input_RD, num_tokens_per_local_expert_e
+            )
+        out_TD = remat.region(
+            dispatcher._combine_with_tensor_state,
+            self.remat_region_name("ep_communication.combine"),
+            recompute=recompute_ep_communication,
+        )(routed_output_RD, dispatch_output)
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def parallelize(self, parallel_dims) -> None:
@@ -344,10 +524,10 @@ class TokenChoiceTopKRouter(Module):
                 "routing_decision",
                 recompute=False,
             )(scores_TE, expert_bias_E, **router_kwargs)
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
 
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
