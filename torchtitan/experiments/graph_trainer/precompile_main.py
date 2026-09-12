@@ -21,6 +21,7 @@ Usage (aot_fx_trace mode):
 """
 
 import contextlib
+import logging
 from typing import Any, cast
 
 import torch
@@ -41,10 +42,14 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _register_coor_ops,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _common_setup(config):
@@ -57,7 +62,6 @@ def _common_setup(config):
         )
 
     parallelism = config.parallelism
-    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
     cp = parallelism.context_parallel_degree
@@ -111,7 +115,6 @@ def _common_setup(config):
         pp=pp,
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
-        spmd_backend=parallelism.spmd_backend,
     )
     parallel_dims.build_mesh()
 
@@ -125,6 +128,24 @@ def _common_setup(config):
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
+    # Auxiliary losses normalize by the step's global valid-token count, which
+    # the training loop derives from the data; precompile has no batches, so
+    # use the configured budget.  TODO: the traced graph bakes this value, so
+    # it goes stale if the per-step count varies (e.g. with padding).
+    num_pp_microbatches = (
+        config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+    )
+    num_tokens_per_grad_step = (
+        config.training.num_tokens_per_microbatch_per_dp_rank
+        * num_pp_microbatches
+        * (parallel_dims.dp_replicate * parallel_dims.dp_shard)
+    )
+    num_tokens_per_train_step = config.training.num_tokens_per_train_step
+    if num_tokens_per_train_step < 0:
+        num_tokens_per_train_step = num_tokens_per_grad_step
+    AuxLoss.set_step_denominator(
+        torch.tensor(num_tokens_per_train_step, dtype=torch.int64, device=device)
+    )
     model_config.update_from_config(config=config)
 
     logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")
@@ -241,7 +262,9 @@ def _precompile_aot_fx_trace(
         )
         extra_kwargs["positions"] = positions
 
-        if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
+        if isinstance(
+            inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+        ):
             extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
                 positions=positions,
             )
@@ -296,11 +319,7 @@ def _precompile_aot_fx_trace(
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
-            precompile_meshes=(
-                get_spmd_precompile_meshes(parallel_dims)
-                if config.parallelism.spmd_backend == "spmd_types"
-                else None
-            ),
+            precompile_meshes=get_spmd_precompile_meshes(parallel_dims),
             prepare_inputs=prepare_trace_inputs,
             prepare_call_inputs=prepare_trace_call_inputs,
         )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
@@ -345,6 +364,7 @@ def _precompile_aot_fx_trace(
 
 
 def main():
+    init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
 

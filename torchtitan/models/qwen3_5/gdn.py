@@ -207,8 +207,8 @@ _recurrent_gdn_fwd.register_autograd(
 class GatedDeltaKernel(Module):
     """Run GDN on rank-local tensors.
 
-    This module provides the boundary that sharding wraps with DTensor-to-local
-    conversion. A pure-torch reference implementation lives in
+    This module provides a local SPMD boundary for the sharding code. A
+    pure-torch reference implementation lives in
     ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
     """
 

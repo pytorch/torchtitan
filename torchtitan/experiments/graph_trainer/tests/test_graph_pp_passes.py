@@ -21,6 +21,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
+    get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
@@ -48,7 +49,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.trainer import Trainer
 
 
@@ -63,22 +64,22 @@ class _Dsv3MoeBlockTrace:
 
 @contextlib.contextmanager
 def _stable_flex_attention_compile_config():
-    original_configs = FlexAttention.inductor_configs
-    original_compiled_flex_attn = FlexAttention._compiled_flex_attn
-    FlexAttention.inductor_configs = {
+    original_configs = FlexInnerAttention.inductor_configs
+    original_compiled_flex_attn = FlexInnerAttention._compiled_flex_attn
+    FlexInnerAttention.inductor_configs = {
         **original_configs,
         "max_autotune": False,
         "coordinate_descent_tuning": False,
     }
-    FlexAttention._compiled_flex_attn = torch.compile(
+    FlexInnerAttention._compiled_flex_attn = torch.compile(
         flex_attention,
-        options=FlexAttention.inductor_configs,
+        options=FlexInnerAttention.inductor_configs,
     )
     try:
         yield
     finally:
-        FlexAttention.inductor_configs = original_configs
-        FlexAttention._compiled_flex_attn = original_compiled_flex_attn
+        FlexInnerAttention.inductor_configs = original_configs
+        FlexInnerAttention._compiled_flex_attn = original_compiled_flex_attn
 
 
 def _trace_dsv3_moe_block_stage(
@@ -90,7 +91,7 @@ def _trace_dsv3_moe_block_stage(
 ) -> _Dsv3MoeBlockTrace:
     """Trace a real DeepSeek V3 MoE decoder block as a GraphPP stage.
 
-    This is intentionally CUDA-only: FlexAttention backward is not supported on
+    This is intentionally CUDA-only: FlexInnerAttention backward is not supported on
     CPU, and these pass tests need to exercise the real BlockMask tracing path
     rather than a maskless SDPA shortcut. The unit test enables EP sharding
     metadata and traces the first MoE layer. When ``fsdp_mesh`` is supplied the
@@ -425,7 +426,6 @@ class _GraphPPDsv3FSDPTest(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
 
@@ -436,7 +436,7 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
 
         self._setup()
         traced_block = _trace_dsv3_moe_block_stage(
-            fsdp_mesh=self.parallel_dims.get_mesh("fsdp")
+            fsdp_mesh=get_simple_fsdp_mesh(self.parallel_dims)
         )
 
         fw_module, bw_module, meta = partition_joint_graph(
@@ -770,7 +770,7 @@ class GraphPPFSDPCollectiveSplitDsv3Test(_GraphPPDsv3FSDPTest):
             raise unittest.SkipTest("real FSDP collective trace requires 2 GPUs")
 
         self._setup()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         traced_block = _trace_dsv3_moe_block_stage(fsdp_mesh=fsdp_mesh)
         deduplicate_fsdp_unshard_chains_pass(
             traced_block.traced.gm,

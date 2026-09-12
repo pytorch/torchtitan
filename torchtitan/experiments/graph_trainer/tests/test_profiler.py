@@ -31,7 +31,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
 )
-from torchtitan.tools.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
+from torchtitan.observability.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Profiler
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
@@ -187,11 +187,11 @@ class TestTraceAnnotationExport(TestCase):
             tempfile.TemporaryDirectory() as tmp,
             patch("torch.distributed.get_rank", return_value=0),
             patch(
-                "torchtitan.tools.profiler.get_cudagraph_annotations",
+                "torchtitan.observability.profiler.get_cudagraph_annotations",
                 return_value=self.ANNOTATIONS,
             ),
             patch(
-                "torchtitan.tools.profiler._EXPORT_SUPPORTS_ANNOTATIONS",
+                "torchtitan.observability.profiler._EXPORT_SUPPORTS_ANNOTATIONS",
                 supports_annotations,
             ),
             patch.object(

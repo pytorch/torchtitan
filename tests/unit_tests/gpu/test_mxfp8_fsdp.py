@@ -19,14 +19,7 @@ from torch.distributed.tensor import DTensor
 pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
-import torchtitan.components.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
-from torchtitan.components.quantization._fsdp_tensor import (  # noqa: E402
-    _UnshardedFSDPTensor,
-)
-from torchtitan.components.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
-from torchtitan.components.quantization.mxfp8.tensor import (  # noqa: E402
-    _LinearShardedTensorWithMXFP8Compute,
-)
+import torchtitan.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
 from torchtitan.distributed.cudagraph import (  # noqa: E402
     cudagraph_teardown,
     CUDAGraphWrapper,
@@ -35,6 +28,11 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
     data_parallel,
     disable_active_parametrization,
     MixedPrecisionPolicy as SimpleFSDPMixedPrecisionPolicy,
+)
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
+from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
+    _LinearShardedTensorWithMXFP8Compute,
 )
 
 

@@ -24,13 +24,13 @@ from torchtitan.models.common import (
 from torchtitan.models.common.attention import (
     FusedQKVLinear,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.linear import ScaledBiasRowwiseLinear
+from torchtitan.models.common.linear import PartialBiasRowwiseLinear
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
@@ -89,7 +89,7 @@ def _make_gptoss_attn_config(
     inner_attention = get_attention_config(attn_backend)
 
     if sliding_window_size is not None and isinstance(
-        inner_attention, VarlenAttention.Config
+        inner_attention, VarlenInnerAttention.Config
     ):
         inner_attention = dataclasses.replace(
             inner_attention, window_size=(sliding_window_size - 1, 0)
@@ -134,7 +134,7 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=ScaledBiasRowwiseLinear.Config(
+        wo=PartialBiasRowwiseLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             bias=True,

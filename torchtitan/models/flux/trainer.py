@@ -7,10 +7,12 @@
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 import spmd_types as spmd
 import torch
 
+from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
@@ -45,11 +47,7 @@ class FluxTrainer(Trainer):
         # Flux samples diffusion noise and timesteps during each model step, so
         # data-parallel ranks need distinct model RNG streams. Dataset
         # transformations such as prompt dropout use Grain's separate RNG.
-        distinct_seed_mesh_dims = (
-            ["cp", "dp_shard", "dp_replicate"]
-            if config.parallelism.spmd_backend == "spmd_types"
-            else ["fsdp", "dp_replicate"]
-        )
+        distinct_seed_mesh_dims = ["cp", "dp_shard", "dp_replicate"]
         dist_utils.set_determinism(
             self.parallel_dims,
             self.device,
@@ -125,8 +123,8 @@ class FluxTrainer(Trainer):
             )
 
     def batch_generator(
-        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        self, data_iterable: Iterable[TrainerBatch]
+    ) -> Iterator[dict[str, Any]]:
         """Override to count transformer tokens (image patches + text tokens)
         instead of raw pixel count from labels.numel().
         """
@@ -134,31 +132,28 @@ class FluxTrainer(Trainer):
         while True:
             data_load_start = time.perf_counter()
             try:
-                batch = next(data_iterator)
+                input_dict = next(data_iterator)
             except StopIteration as ex:
                 raise DataloaderExhaustedError() from ex
-            input_dict, labels = batch
-            bsz = labels.shape[0]
+            bsz = input_dict["labels"].shape[0]
             ntokens_batch = bsz * self.config.training.max_context_length
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
-            yield input_dict, labels
+            yield input_dict
 
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
+        input_dict: dict[str, Any] | list[dict[str, Any]],
         global_valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Perform a single forward and backward pass through the model.
 
         Args:
-            input_dict: Dictionary containing input data including prompts and other metadata
-            labels: Target tensor containing the ground truth image data
+            input_dict: Dictionary containing model inputs and labels.
             global_valid_tokens: Optional tensor tracking the total number of
                 valid tokens across all processes.
                 This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
@@ -171,7 +166,8 @@ class FluxTrainer(Trainer):
             global_valid_tokens is None
         ), "FLUX model don't need to rescale loss by number of global valid tokens"
         assert isinstance(input_dict, dict)
-        assert isinstance(labels, torch.Tensor)
+        input_dict = dict(input_dict)
+        labels = input_dict.pop("labels")
 
         # generate t5 and clip embeddings
         input_dict["image"] = labels
@@ -283,9 +279,7 @@ class FluxTrainer(Trainer):
 
         return loss
 
-    def train_step(
-        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ):
+    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
@@ -297,10 +291,9 @@ class FluxTrainer(Trainer):
         if self.gradient_accumulation_steps > 1:
             raise ValueError("FLUX doesn't support gradient accumulation for now.")
 
-        # pyrefly: ignore [no-matching-overload]
-        input_dict, labels = next(data_iterator)
+        input_dict = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
+        loss = self.forward_backward_step(input_dict=input_dict)
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],

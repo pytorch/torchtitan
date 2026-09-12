@@ -11,13 +11,14 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
-    ScaledBiasRowwiseLinear,
+    PartialBiasRowwiseLinear,
 )
-from torchtitan.models.common.attention import QKVLinear, VarlenAttention
+from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config, make_ffn_config
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -38,7 +39,7 @@ from .model import (
     RMSGainCenterNorm,
     SoftCappedLinear,
 )
-from .parallelize import parallelize_muse_glimmer, pipeline_muse_glimmer
+from .parallelize import parallelize_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 from .vision_encoder import (
@@ -49,7 +50,6 @@ from .vision_encoder import (
 
 __all__ = [
     "parallelize_muse_glimmer",
-    "pipeline_muse_glimmer",
     "set_muse_glimmer_vision_sharding_config",
     "MuseGlimmerModel",
     "muse_glimmer_configs",
@@ -150,7 +150,7 @@ def _build_muse_glimmer_attention(
     # Varlen carries the per-layer sliding window as an FA3 kernel arg (mirrors
     # gpt_oss). The flex path instead selects a window-keyed BlockMask in
     # Attention.forward, so it leaves inner_attention's window at the default.
-    if window is not None and isinstance(inner_attention, VarlenAttention.Config):
+    if window is not None and isinstance(inner_attention, VarlenInnerAttention.Config):
         inner_attention = dataclasses.replace(
             inner_attention, window_size=(window - 1, 0)
         )
@@ -251,10 +251,10 @@ def _vision_linear(in_features: int, out_features: int, *, bias: bool) -> Linear
     )
 
 
-def _vision_scaled_bias_rowwise_linear(
+def _vision_partial_bias_rowwise_linear(
     in_features: int, out_features: int
-) -> ScaledBiasRowwiseLinear.Config:
-    return ScaledBiasRowwiseLinear.Config(
+) -> PartialBiasRowwiseLinear.Config:
+    return PartialBiasRowwiseLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -307,14 +307,14 @@ def muse_glimmer_vision_encoder_config(
                 wq=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wk=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wv=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
-                proj=_vision_scaled_bias_rowwise_linear(
+                proj=_vision_partial_bias_rowwise_linear(
                     num_heads * head_dim, latent_dim
                 ),
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
                 fc1=_vision_linear(latent_dim, mlp_hidden, bias=True),
-                fc2=_vision_scaled_bias_rowwise_linear(mlp_hidden, latent_dim),
+                fc2=_vision_partial_bias_rowwise_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),
         ),
@@ -548,7 +548,15 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_muse_glimmer,
-        pipelining_fn=pipeline_muse_glimmer,
+        pipelining_fn=partial(
+            pipeline_with_first_stage_modules,
+            first_stage_module_fqns=(
+                "vision_encoder",
+                "vision_adapter",
+                "vision_projection",
+                "perception_emb_norm",
+            ),
+        ),
         post_optimizer_build_fn=None,
         state_dict_adapter=MuseGlimmerStateDictAdapter,
     )

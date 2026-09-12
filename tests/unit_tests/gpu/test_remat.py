@@ -180,14 +180,12 @@ class TestRematRegions(unittest.TestCase):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
-            num_expert_groups=2,
-            num_limited_groups=1,
             top_k=1,
         ).build()
 
         def forward(x_TD: torch.Tensor) -> torch.Tensor:
-            topk_scores_TK, _, scores_TE = router(x_TD)
-            return topk_scores_TK.sum() + scores_TE.sum()
+            topk_scores_TK, _, routing_map_TE = router(x_TD)
+            return topk_scores_TK.sum() + routing_map_TE.sum()
 
         with patch.object(
             router,

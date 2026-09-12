@@ -15,18 +15,21 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.spmd_types import (
+    annotate_input_spmd_types,
+    spmd_local_context,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -35,7 +38,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     build_vision_bank_indices,
     gather_vision_embeds,
-    multimodal_context,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -295,13 +297,6 @@ class MuseGlimmerModel(Decoder):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            if parallelism.context_parallel_degree > 1 and isinstance(
-                self.layers[0].attention.inner_attention, VarlenAttention.Config
-            ):
-                raise NotImplementedError(
-                    "Context Parallel only supports SDPA and FlexAttention. "
-                    "Varlen attention is not supported with CP."
-                )
             from .sharding import set_muse_glimmer_sharding_config
 
             set_muse_glimmer_sharding_config(
@@ -368,13 +363,10 @@ class MuseGlimmerModel(Decoder):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         from .sharding import vision_bank_indices_placement
 
         batch: dict[str, Any] = dict(input_dict)
@@ -413,10 +405,18 @@ class MuseGlimmerModel(Decoder):
         batch.pop("special_tokens", None)
 
         positions = batch.get("positions", None)
+        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
 
         input_sharding = {
             **decoder_input_sharding(),
@@ -426,26 +426,21 @@ class MuseGlimmerModel(Decoder):
             enable_sp=parallelism.enable_sequence_parallel
         )
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            batch = self._cp_shard_inputs(
+                batch, input_sharding, parallel_dims, parallelism
             )
-        if parallelism.spmd_backend == "spmd_types":
-            if (
-                parallelism.enable_sequence_parallel
-                and parallel_dims.tp_enabled
-                and "vision_bank_indices_T" in batch
-            ):
-                batch["vision_bank_indices_T"] = spmd.shard(
-                    batch["vision_bank_indices_T"],
-                    parallel_dims.get_dense_tp_mesh().get_group(),
-                    src=spmd.I,
-                    dst=spmd.S(0),
-                )
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        if (
+            parallelism.enable_sequence_parallel
+            and parallel_dims.tp_enabled
+            and "vision_bank_indices_T" in batch
+        ):
+            batch["vision_bank_indices_T"] = spmd.shard(
+                batch["vision_bank_indices_T"],
+                parallel_dims.get_dense_tp_mesh().get_group(),
+                src=spmd.I,
+                dst=spmd.S(0),
+            )
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
@@ -514,7 +509,7 @@ class MuseGlimmerModel(Decoder):
         # is already hidden states, so injection is skipped there.
         if self.tok_embeddings is not None:
             h_TD = self.tok_embeddings(tokens)
-            with multimodal_context():
+            with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
                     h_TD,
                     pixel_values=pixel_values,
@@ -538,6 +533,10 @@ class MuseGlimmerModel(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> AttentionMasksType:
         attn_config = self.config.first_attention
         assert attn_config is not None
@@ -545,11 +544,16 @@ class MuseGlimmerModel(Decoder):
         # Varlen carries each layer's sliding window in its own kernel arg (baked at
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
-        if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
-        if not isinstance(inner_attn, FlexAttention.Config):
+        if isinstance(inner_attn, VarlenInnerAttention.Config):
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+        if not isinstance(inner_attn, FlexInnerAttention.Config):
             raise TypeError(
-                "Muse Glimmer requires FlexAttention or VarlenAttention for "
+                "Muse Glimmer requires FlexInnerAttention or VarlenInnerAttention for "
                 f"sliding-window masks, got {type(inner_attn).__name__}"
             )
 

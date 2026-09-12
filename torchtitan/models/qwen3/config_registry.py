@@ -15,22 +15,22 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     default_adamw,
     LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.components.quantization import NVFP4LinearConverter
-from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import NVFP4LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -78,7 +78,6 @@ def qwen3_debugmodel_nvfp4(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
-    config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
     )
@@ -100,7 +99,6 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
-    config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -261,7 +259,6 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
 
 def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Config:
     config = sft_qwen3_8b_math(seq_len=seq_len)
-    config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     config.compile = CompileConfig(enable=True, components=["model"])
     # Keep the last 15% of decoder layers and the lm_head in bf16.
@@ -533,6 +530,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
                     post_filters=(lambda sample: sample is not None,),
                 ),
             ),
+            max_num_documents=32,
         ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,

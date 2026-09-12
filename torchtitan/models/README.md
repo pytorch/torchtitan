@@ -25,18 +25,18 @@ The folder should be organized as follows
     - In post-training, `to_hf()` helps convert a torchtitan model to HF model, which can be used for inference by other frameworks.
   - This is optional for offline exploration.
 - `sharding.py`
-  - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention `LocalMapConfig` placements are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
+  - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention local SPMD regions are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
   - Call the helper from `Model.Config.update_from_config()` so placements depend on the trainer's `parallelism` settings.
   - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
-  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module.parallelize` resolves the mesh from the declared axes; under `--parallelism.spmd_backend partial_dtensor` only `tp` and `ep` are kept and the rest are ignored.
+  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module.parallelize` resolves the mesh from the declared axes.
 - `parallelize.py`
   - apply training techniques in the following order
-    - `model.parallelize(parallel_dims)` — auto-recursive declarative sharding driven by `sharding_config` (TP, SP, attention `local_map`). Replaces per-model `parallelize_module` plan dicts.
-    - (MoE models) `apply_moe_ep_tp` for expert-parallel + TP on MoE experts (not yet config-based).
+    - `model.parallelize(parallel_dims)` — auto-recursive declarative sharding driven by `sharding_config` (TP, SP, attention `local_spmd`). Replaces per-model `parallelize_module` plan dicts.
+    - (MoE models) routed expert weights follow the sparse mesh axes declared in `sharding_config`; `apply_fsdp_to_decoder` takes `ep_degree` and `edp_mesh` to shard them over the expert FSDP mesh.
     - activation checkpointing
     - `torch.compile`
     - FSDP /  HSDP
-    - NOTE: currently CP support for language models is enabled via a context manager in `torchtitan/train.py`. Ideally no extra work is needed to enable CP.
+    - NOTE: language-model CP goes through `Decoder.preprocess_inputs` -> `prepare_context_parallel_input`. Ideally no extra work is needed to enable CP.
 - `pipeline.py` (optional if model size is small)
   - apply PP
 - `__init__.py`

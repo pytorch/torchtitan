@@ -61,6 +61,8 @@ Pseudo-code
 
 from __future__ import annotations
 
+import logging
+
 import operator
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -101,7 +103,9 @@ from torchtitan.experiments.graph_trainer.registry import (
     register_trace_call_input_preparer,
     register_trace_input_preparer,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 aten = torch.ops.aten
 ChunkMode = Literal["batch", "seq"]
@@ -672,7 +676,7 @@ def prepare_ep_overlap_trace_call_inputs(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
-    """Bind FlexAttention mask lengths to fake token-grid dims during tracing."""
+    """Bind FlexInnerAttention mask lengths to fake token-grid dims during tracing."""
     if not compile_config.ep_overlap.enabled:
         return None
     _, chunk_strategy, _ = validate_ep_overlap_config(compile_config.ep_overlap)

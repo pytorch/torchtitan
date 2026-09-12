@@ -16,7 +16,6 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     LRSchedulersContainer,
     OptimizersContainer,
@@ -44,6 +43,7 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -92,7 +92,7 @@ def kimi_k2_5_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
-    parallelism = ParallelismConfig(spmd_backend="spmd_types")
+    parallelism = ParallelismConfig()
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -137,7 +137,6 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
     )
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
-        spmd_backend="spmd_types",
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
@@ -178,7 +177,6 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("Kimi-VL-A3B", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
-        spmd_backend="spmd_types",
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
@@ -227,7 +225,6 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig(
         pipeline_parallel_schedule="Interleaved1F1B",
         expert_parallel_degree=8,
-        spmd_backend="spmd_types",
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(

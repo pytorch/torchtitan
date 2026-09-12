@@ -12,7 +12,7 @@ Design principles:
 ## Quickstart
 
 ```python
-from torchtitan.tools.logging import init_logger
+from torchtitan.observability.logging import init_logger
 from torchtitan.observability import structured_logger as sl
 
 # console logger (stdout, [titan] prefix)

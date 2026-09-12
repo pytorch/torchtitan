@@ -7,6 +7,11 @@
 
 import torchtitan_recipes.tests.models as recipes
 
+from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan.models.qwen3.config_registry import qwen3_debugmodel_moe_param_groups
+
 from tests.integration_tests import OverrideDefinitions
 
 
@@ -26,6 +31,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
             ),
+            loss_compare_seed_config=llama3_debugmodel,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
@@ -35,6 +41,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
             ),
+            loss_compare_seed_config=llama3_debugmodel,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
@@ -55,6 +62,13 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_mtp_tp2_cp2],
+            test_descr="DeepSeek V3 MTP TP+CP with SP",
+            test_name="deepseek_v3_mtp_tp+cp",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_fsdp8_ep8],
             test_descr="DeepSeek V3 FSDP+EP",
             test_name="deepseek_v3_fsdp+ep",
@@ -71,6 +85,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
             ),
+            loss_compare_seed_config=deepseek_v3_debugmodel,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -86,6 +101,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v4_debugmodel_fsdp2_tp2_ep2],
+            test_descr="DeepSeek V4 FSDP+TP+EP",
+            test_name="deepseek_v4_fsdp+tp+ep",
+            ngpu=4,
+            # Sparse attention / indexer kernels are CUDA-only and unvalidated
+            # on ROCm.
+            skip_rocm_test=True,
+            # Runs on a real PG. Under Fake PG this config's sequence-parallel
+            # collectives return activations that alias their inputs, which
+            # corrupts a saved-for-backward tensor and blows up grad_norm at
+            # step 1. The same config trains cleanly on a real 4-GPU PG
+            # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
+            # collective aliasing under spmd_types is fixed.
+            use_real_pg=True,
+        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             configs=[recipes.qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8],
@@ -95,6 +126,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
             ),
+            loss_compare_seed_config=qwen3_debugmodel_moe_param_groups,
         ),
         OverrideDefinitions(
             configs=[
@@ -169,11 +201,12 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
+            loss_compare_seed_config=gpt_oss_debugmodel_flex,
             use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenAttention",
+            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenInnerAttention",
             test_name="gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
             use_real_pg=True,

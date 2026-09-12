@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
@@ -18,11 +17,11 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     BaseQKVLinear,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -57,7 +56,7 @@ class Attention(BaseAttention):
         qkv_linear: BaseQKVLinear.Config
         wo: Linear.Config  # output projection
         inner_attention: Module.Config = dataclasses.field(
-            default_factory=VarlenAttention.Config
+            default_factory=VarlenInnerAttention.Config
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
@@ -125,10 +124,7 @@ class Attention(BaseAttention):
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
-        sinks = self.sinks
-        if isinstance(sinks, DTensor):
-            sinks = sinks.to_local(grad_placements=sinks.placements)
-        return apply_attention_sink_rescale(out, lse, sinks)
+        return apply_attention_sink_rescale(out, lse, self.sinks)
 
 
 class GptOssTransformerBlock(TransformerBlock):
@@ -171,7 +167,7 @@ class GptOssTransformerBlock(TransformerBlock):
                 ``BlockMask``s from which this layer picks its mask; with varlen,
                 a single ``VarlenMetadata`` shared by all layers (the per-layer
                 causal window is baked into each layer's
-                ``VarlenAttention.window_size``).
+                ``VarlenInnerAttention.window_size``).
             positions: Optional position indices.
 
         Returns:
@@ -235,14 +231,23 @@ class GptOssModel(Decoder):
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> AttentionMasksType:
         attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
         inner_attn = attn_cfg.inner_attention
 
-        if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
-        elif isinstance(inner_attn, FlexAttention.Config):
+        if isinstance(inner_attn, VarlenInnerAttention.Config):
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+        elif isinstance(inner_attn, FlexInnerAttention.Config):
             base_mask_mods = [
                 get_causal_mask_mod(),
                 get_efficient_causal_mask_mod_for_packed_document(positions),
@@ -274,6 +279,6 @@ class GptOssModel(Decoder):
             return masks
         else:
             raise TypeError(
-                f"GPT-OSS supports FlexAttention and VarlenAttention inner attention, "
+                f"GPT-OSS supports FlexInnerAttention and VarlenInnerAttention inner attention, "
                 f"got {type(inner_attn).__name__}"
             )

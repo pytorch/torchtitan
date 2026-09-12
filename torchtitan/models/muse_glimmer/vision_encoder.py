@@ -8,7 +8,7 @@
 
 Structurally follows ``torchtitan/models/qwen3_5/vision_encoder.py`` (nested
 ``Config`` dataclasses, ``ModuleDict`` layer stack, shared
-``Linear``/``LayerNorm``/``FlexAttention``), with Muse Glimmer-specific internals:
+``Linear``/``LayerNorm``/``FlexInnerAttention``), with Muse Glimmer-specific internals:
 
 - patches are pre-extracted by a ``Linear`` ``conv1`` (a full-patch-kernel Conv
   expressed as a linear over flattened patches),
@@ -17,7 +17,7 @@ Structurally follows ``torchtitan/models/qwen3_5/vision_encoder.py`` (nested
 - complex 2D RoPE (the same complex backend as the LLM; see
   :meth:`ComplexRoPE.apply_rotary_emb`),
 - per-image block-diagonal attention with an additional sparse-window variant
-  (``sparse_attention_factor``), realized as FlexAttention ``BlockMask``s built
+  (``sparse_attention_factor``), realized as FlexInnerAttention ``BlockMask``s built
   from segment ids (the document-mask pattern),
 - pixel-shuffle spatial downsampling at the output.
 
@@ -37,7 +37,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
@@ -49,7 +48,7 @@ from torchtitan.protocols.module import Module, ModuleDict
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
     """Annotate a tensor created inside the vision forward."""
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         return spmd.mutate_type(
             tensor,
             src=spmd.R,
@@ -94,10 +93,8 @@ def reorder_patch_vector(
 class _VisionPosEmbed(Module):
     """Bilinearly resample the learned positional grid to (grid_h, grid_w).
 
-    A stateless leaf module so the sharding code can wrap forward with a
-    DTensor->local conversion (``grid_sample`` has no DTensor support). Under TP
-    the ``pos_param`` parameter arrives as a Replicate DTensor; ``local_map``
-    converts it to a local tensor, and the result is wrapped back to Replicate.
+    A stateless leaf module so the sharding code can assign local SPMD types
+    around ``grid_sample``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -138,10 +135,8 @@ class _VisionPosEmbed(Module):
 class _VisionTokenPermute(Module):
     """Advanced-index a token sequence by a permutation: ``x[index]``.
 
-    A stateless leaf module so the sharding code can wrap forward with a
-    DTensor->local conversion. Advanced indexing (``aten.index.Tensor``) rejects
-    a mix of DTensor and plain tensors; running this region on local tensors
-    (both ``x`` and ``index`` converted by ``local_map``) sidesteps that.
+    A stateless leaf module so the sharding code can assign local SPMD types to
+    both ``x`` and ``index`` around the advanced indexing operation.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -271,10 +266,9 @@ class MuseGlimmerVisionEncoder(Module):
         )
         self.ln_post = config.ln_post.build()
 
-        # Stateless leaf modules holding the local-tensor compute that has no
-        # DTensor support (grid_sample, advanced indexing). Under TP their
-        # forwards are wrapped with local_map via sharding_config; on the
-        # single-device path they run on plain tensors unchanged.
+        # Stateless leaf modules holding local-tensor compute for grid_sample
+        # and advanced indexing. Their forwards receive SPMD layouts through
+        # sharding_config.
         self.pos_embed = config.pos_embed.build()
         self.token_permute = config.token_permute.build()
 
@@ -309,8 +303,7 @@ class MuseGlimmerVisionEncoder(Module):
         """Bilinearly resample the learned positional grid to (grid_h, grid_w).
 
         Thin delegator to ``self.pos_embed`` (binds the encoder's scalars); the
-        leaf holds the local-tensor compute and, under TP, the DTensor->local
-        conversion of ``positional_embedding_vlm``. Returns
+        leaf holds the local-tensor compute and its SPMD boundary. Returns
         ``[grid_h*grid_w, latent_dim]``.
         """
         return self.pos_embed(
@@ -330,9 +323,7 @@ class MuseGlimmerVisionEncoder(Module):
 
         The downsample is a fixed permutation of the patch grid, so it is
         expressed as pure view/permute/reshape rather than an ``arange`` gather.
-        These ops have DTensor sharding rules, so this runs natively on a
-        Replicate DTensor under TP (no ``local_map`` needed) and identically on
-        plain tensors single-device.
+        These local view operations preserve the replicated TP layout.
         """
         f = self.downsample_factor
         d = x.shape[-1]
@@ -505,7 +496,7 @@ class MuseGlimmerVisionEncoder(Module):
         global_slens = _annotate_vision_activation_type(
             torch.tensor(all_global_slens, device=device, dtype=torch.int32)
         )
-        # BlockMask creation and use in FlexAttention are blackboxed from
+        # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
         with spmd.no_typecheck():
             global_mask = create_block_diagonal_mask(

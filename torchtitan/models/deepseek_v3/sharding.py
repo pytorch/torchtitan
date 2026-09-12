@@ -18,7 +18,9 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
+    token_id_placement,
+    token_id_sequence_parallel_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
@@ -106,9 +108,8 @@ def _set_deepseek_v3_layer_sharding(
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    # Low-rank projections and norms keep Replicate weights on TP. We still
-    # distribute them (Replicate DTensor) so DTensor activations flow through
-    # without mixing plain Tensor + DTensor in the matmul.
+    # Low-rank projections and norms keep replicated weights on TP so their
+    # SPMD types compose with the surrounding activations.
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
@@ -118,14 +119,14 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_b.sharding_config = colwise_config()
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:
         assert attention.wq is not None
         attention.wq.sharding_config = colwise_config()
     else:
-        # Low-rank: wq_a + q_norm stay Replicate DTensors; wq_b is Colwise.
+        # Low-rank: wq_a + q_norm stay replicated; wq_b is colwise.
         assert attention.wq_a is not None
         assert attention.wq_b is not None
         attention.wq_a.sharding_config = replicate_weight
@@ -172,12 +173,10 @@ def _set_deepseek_v3_mtp_sharding(
         if enable_sp:
             mtp_layer_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
-                    "mtp_input_valid_mask": dense_activation_placement(
-                        tp=spmd.R, cp=spmd.S(0)
-                    ),
+                    "mtp_input_valid_mask": token_id_placement(),
                 },
                 in_dst_shardings={
-                    "mtp_input_valid_mask": activation,
+                    "mtp_input_valid_mask": token_id_sequence_parallel_placement(),
                 },
             )
         mtp_layer_cfg.enorm.sharding_config = norm

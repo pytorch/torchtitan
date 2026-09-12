@@ -4,15 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
+import logging
 
-from torchtitan.tools.logging import logger
+import torch
 
 from .configs import GraphTrainerCompileConfig as CompileConfig
 from .fsdp_passes import (
     autobucketing_reordering_pass,
     transformer_block_bucketing_reordering_pass,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_compile_backend_with_passes(

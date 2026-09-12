@@ -6,6 +6,7 @@
 
 
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -13,7 +14,9 @@ from typing import Any
 
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseTokenizer(ABC, Configurable):

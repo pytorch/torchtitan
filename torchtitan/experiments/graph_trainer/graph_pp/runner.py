@@ -10,6 +10,7 @@ microbatch splitting, and stage metadata initialization. This module only maps
 schedule actions onto bound stage graph executors.
 """
 
+import logging
 from typing import Any, cast
 
 import torch
@@ -40,7 +41,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     flatten_graph_values,
     overlap_fw_bw_sub_actions,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [

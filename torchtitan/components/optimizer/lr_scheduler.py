@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+import logging
 import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -13,9 +14,11 @@ from typing import Any, Literal
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger
 
 from .optimizer import OptimizersContainer
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = [
     "LRSchedulersContainer",

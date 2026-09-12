@@ -584,23 +584,6 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             ngpu=4,
             disabled=True,
         ),
-        # MinimalAsyncEP avoids the standard all-to-all load-balancing path and
-        # is expected to remain CUDA-graphable under its constrained topology.
-        OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.deepseek_v3",
-                    "--config graph_trainer_deepseek_v3_debugmodel_minimal_async_ep",
-                    "--compile.mode aot_fx_trace",
-                    "--compile.memory_policy full",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 4",
-                ],
-            ],
-            "aot_fx_trace deepseek_v3 MinimalAsyncEP",
-            "aot_fx_trace_deepseek_v3_minimal_async_ep",
-            ngpu=4,
-        ),
     ]
 
 
@@ -732,12 +715,12 @@ def _build_autoparallel_tests() -> list[OverrideDefinitions]:
     return [
         # Uses the SDPA backend: AutoParallel's dynamo export
         # (_dynamo_graph_capture_for_export) pytree-flattens the default
-        # FlexAttention BlockMask to plain (Fake)Tensors, so flex_attention then
+        # FlexInnerAttention BlockMask to plain (Fake)Tensors, so flex_attention then
         # fails with "'FakeTensor' object has no attribute 'BLOCK_SIZE'". SDPA is
         # maskless (is_causal) and carries no BlockMask, and its input_fn
         # (tokens, positions) binds correctly now that Decoder.forward lists
         # positions before attention_masks.
-        # TODO: re-test on FlexAttention once BlockMask survives AutoParallel
+        # TODO: re-test on FlexInnerAttention once BlockMask survives AutoParallel
         # graph capture.
         # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
         # #186754 (2026-06-24) removed propagate_single_input_strategy in favor

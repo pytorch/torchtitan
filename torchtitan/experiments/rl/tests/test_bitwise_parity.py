@@ -83,13 +83,13 @@ from torchtitan.experiments.rl.models.vllm_registry import (
 )
 from torchtitan.models.common.attention import (
     create_attention_mask,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
+from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -113,7 +113,6 @@ def build_trainer_model(
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     parallel_dims = ParallelDims(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -122,7 +121,6 @@ def build_trainer_model(
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
         world_size=dist.get_world_size(),
-        spmd_backend=parallelism.spmd_backend,
     )
     train_context = dist_utils.get_spmd_context(
         parallel_dims=parallel_dims,
@@ -140,7 +138,7 @@ def build_trainer_model(
 
     # Mirror PolicyTrainer._build_model: fill sharding configs (and any other
     # parallelism-driven config mutations) on the model config BEFORE build,
-    # so each Module is constructed with its ShardingConfig / LocalMapConfig.
+    # so each Module is constructed with its ShardingConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
     model_spec.model.update_from_config(
@@ -208,7 +206,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     gen_config = config.generator
 
     attention_backend = config.model_spec.model.first_full_attention_backend
-    use_flex = isinstance(attention_backend, FlexAttention.Config)
+    use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).
@@ -220,16 +218,12 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         os.environ["VLLM_ATTENTION_BACKEND"] = "CUSTOM"
         if gen_config.debug.batch_invariant:
             set_batch_invariance(True)
-            # batch_invariant_ops covers mm/addmm/_log_softmax/mean but not bmm
-            # (the MoE router gate lowers to bmm in the vLLM inference graph), and
-            # the v2 logprob Triton kernel bypasses the aten overrides. Apply the
-            # same generator-side patches the production VLLMGenerator does.
+            # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
+            # same generator-side patch the production VLLMGenerator does.
             from torchtitan.experiments.rl.batch_invariance import (
                 force_logprobs_fn_for_batch_invariance,
-                patch_bmm_for_batch_invariance,
             )
 
-            patch_bmm_for_batch_invariance()
             force_logprobs_fn_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
@@ -294,12 +288,11 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
     vllm_sd = vllm_model.state_dict()
-    if wrapper.parallel_dims.spmd_backend == "spmd_types":
-        vllm_sd = plain_tensor_to_dtensor_state_dict(
-            vllm_sd,
-            state_dict_layouts=wrapper.get_state_dict_layouts(),
-            parallel_dims=wrapper.parallel_dims,
-        )
+    vllm_sd = plain_tensor_to_dtensor_state_dict(
+        vllm_sd,
+        state_dict_layouts=wrapper.get_state_dict_layouts(),
+        parallel_dims=wrapper.parallel_dims,
+    )
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -316,10 +309,9 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    if wrapper.parallel_dims.spmd_backend == "spmd_types":
-        vllm_model.load_state_dict(
-            dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
-        )
+    vllm_model.load_state_dict(
+        dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
+    )
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -344,7 +336,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     ``get_causal_mask_mod``, and extract per-document logprobs.
     """
     inner_attn = model.config.layers[0].attention.inner_attention
-    assert isinstance(inner_attn, FlexAttention.Config)
+    assert isinstance(inner_attn, FlexInnerAttention.Config)
     block_size = inner_attn.block_size
 
     batch_invariant = is_in_batch_invariant_mode()
@@ -949,4 +941,5 @@ class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
 
 
 if __name__ == "__main__":
+    init_logger()
     unittest.main()

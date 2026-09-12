@@ -17,8 +17,8 @@ from torch.nn.attention import (
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import warn_once
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
-class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
+class PyTorchVarlenInnerAttentionBackend(FlashAttentionBackend):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -55,17 +55,17 @@ class PyTorchVarlenAttentionBackend(FlashAttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        return PyTorchVarlenAttentionImpl
+        return PyTorchVarlenInnerAttentionImpl
 
     @staticmethod
     def get_builder_cls():
-        class PyTorchVarlenAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
+        class PyTorchVarlenInnerAttentionMetadataBuilder(FlashAttentionMetadataBuilder):
             _cudagraph_support = AttentionCGSupport.ALWAYS
 
-        return PyTorchVarlenAttentionMetadataBuilder
+        return PyTorchVarlenInnerAttentionMetadataBuilder
 
 
-class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
+class PyTorchVarlenInnerAttentionImpl(FlashAttentionImpl):
     """
     Custom vLLM attention backend impl using PyTorch's native FlashAttention varlen API.
     Instead of using vLLM's FlashAttention kernel, this implementation takes the kernel

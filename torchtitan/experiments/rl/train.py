@@ -33,6 +33,7 @@ from torchtitan.config import ConfigManager, ParallelismConfig
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.logging import init_logger
 
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,7 @@ def spawn_proc_mesh(
 
 
 async def main():
+    init_logger()
     config = ConfigManager().parse_args()
     assert isinstance(config, Controller.Config)
     sl.init_structured_logger(

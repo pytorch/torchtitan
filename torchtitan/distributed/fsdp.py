@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -19,7 +20,9 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
@@ -38,9 +41,6 @@ def resolve_fsdp_mesh(
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
     """
-    assert (
-        parallel_dims.spmd_backend == "spmd_types"
-    ), "resolve_fsdp_mesh is only meaningful under spmd_types"
     storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
 
@@ -71,9 +71,6 @@ def resolve_sparse_fsdp_mesh(
     storage mesh + sparse DP axes. The FSDP axis is ``efsdp`` and
     ``dp_replicate`` is shared with the dense path.
     """
-    assert (
-        parallel_dims.spmd_backend == "spmd_types"
-    ), "resolve_sparse_fsdp_mesh is only meaningful under spmd_types"
     if not parallel_dims.ep_enabled:
         return None, None
     sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_STORAGE_AXES)
@@ -226,7 +223,7 @@ def apply_fsdp_to_decoder(
             strong enough to infer safely, and an explicit declaration
             avoids silent miscategorization when new mesh axes appear.
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
-            used by routed experts. ``None`` under partial_dtensor.
+            used by routed experts.
         enable_symm_mem (bool): Whether to enable symmetric-memory FSDP
             communication.
     """

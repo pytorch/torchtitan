@@ -102,8 +102,8 @@ diff.
 - **Shared experts:** additive — supported
 - **Attention:** MLA + Dynamic Sparse Attention (DSA) indexer — MLA supported via
   ShardingConfig; the DSA indexer is **not supported under TP** (its no_grad forward
-  uses scatter_/index ops needing local tensors; supporting it requires local_map
-  execution of the indexer). Runs under FSDP/EP without TP.
+  uses scatter_/index ops that do not yet have explicit local SPMD coverage).
+  Runs under FSDP/EP without TP.
 - **Differences from Titan:** dispatcher precision only
 
 ### Gemma-4-26B (gemma4_text)

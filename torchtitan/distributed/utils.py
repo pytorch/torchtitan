@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import os
 from abc import abstractmethod
@@ -23,56 +24,15 @@ from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
-
-
-_spmd_backend = "spmd_types"
-
-
-def set_spmd_backend(spmd_backend: str) -> None:
-    """Set the active SPMD backend for distributed runtime helpers."""
-    global _spmd_backend
-    _spmd_backend = spmd_backend
-
-
-def get_spmd_backend() -> str:
-    """Return the active SPMD backend."""
-    return _spmd_backend
-
-
-def check_dtensor_placements_match(
-    actual: tuple[Placement, ...],
-    expected: tuple[Placement, ...],
-    tensor_ndim: int,
-) -> bool:
-    """Compare DTensor placements, normalizing negative Shard dims to tensor rank."""
-    if len(actual) != len(expected):
-        return False
-
-    def normalize_dim(dim: int, ndim: int) -> int:
-        return dim + ndim if dim < 0 else dim
-
-    for actual_placement, expected_placement in zip(actual, expected, strict=True):
-        if isinstance(actual_placement, Shard) and isinstance(
-            expected_placement, Shard
-        ):
-            if normalize_dim(actual_placement.dim, tensor_ndim) != normalize_dim(
-                expected_placement.dim, tensor_ndim
-            ):
-                return False
-            continue
-
-        if actual_placement != expected_placement:
-            return False
-
-    return True
 
 
 def _dist_reduce(
@@ -103,21 +63,6 @@ def _dist_reduce_tensor(
 ) -> torch.Tensor:
     """Perform a distributed reduction without moving the result to the CPU."""
     needs_wait = False
-    if isinstance(x, DTensor):
-        # The loss is a DTensor only on the TP axis, so unwrap it to a plain
-        # tensor and let the reduction below run over ``mesh``.
-        assert all(p.is_replicate() or p.is_partial() for p in x.placements), (
-            f"_dist_reduce received a DTensor with unsupported placements "
-            f"{x.placements}; only Replicate/Partial are supported."
-        )
-        if extra_pg is not None:
-            raise ValueError(
-                "_dist_reduce does not support DTensor input combined with "
-                "extra_pg: pass a plain tensor when using extra_pg."
-            )
-        x = x.to_local()
-
-    # Plain tensor path.
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
         needs_wait = True
@@ -176,12 +121,13 @@ def set_determinism(
     distinct_seed_mesh_dims: list[str],
 ) -> None:
     """
-    Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
-    across dimensions denoted by `distinct_seed_mesh_dims`. An example use case is pipeline parallelism,
-    where we want to have the same seed across SPMD groups, but different seeds across PP groups.
+    Set the same distributed RNG seed for all axes in the world mesh, but use
+    different seeds across axes named by ``distinct_seed_mesh_dims``. For
+    example, pipeline stages should use different seeds while ranks within an
+    SPMD group use the same seed.
 
-    Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
-    and DTensor manages its own RNG tracker, but we could extend to support both if needed.
+    This uses PyTorch's DTensor RNG tracker because it provides mesh-aware RNG
+    offsets for sharded parameter initialization.
 
     Set Determinism flags for increased reproducibility with loss of performance.
 
@@ -210,7 +156,7 @@ def set_determinism(
 
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.common.attention import FlexAttention
+        from torchtitan.models.common.attention import FlexInnerAttention
 
         if torch.version.hip is not None:
             # Compiled ROCm flex attention is not deterministic.
@@ -218,17 +164,17 @@ def set_determinism(
             logger.info(
                 "Using eager (non-compiled) flex_attention for determinism on ROCm."
             )
-            FlexAttention._compiled_flex_attn = flex_attention
+            FlexInnerAttention._compiled_flex_attn = flex_attention
         else:
             # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
             # reproducibility, since the autotune results may not be deterministic. We disable
-            # autotune in-place on FlexAttention.inductor_configs (rather than recompiling with
+            # autotune in-place on FlexInnerAttention.inductor_configs (rather than recompiling with
             # no options) so the regional-inductor scoop configs are preserved.
-            FlexAttention.inductor_configs["max_autotune"] = False
-            FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
+            FlexInnerAttention.inductor_configs["max_autotune"] = False
+            FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
             # pyrefly: ignore [no-matching-overload]
-            FlexAttention._compiled_flex_attn = torch.compile(
-                flex_attention, options=FlexAttention.inductor_configs
+            FlexInnerAttention._compiled_flex_attn = torch.compile(
+                flex_attention, options=FlexInnerAttention.inductor_configs
             )
 
     if debug_config.detect_anomaly:
@@ -424,7 +370,7 @@ def get_spmd_context(
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
-            if parallel_dims is not None and parallel_dims.spmd_backend == "spmd_types":
+            if parallel_dims is not None:
                 if not parallel_dims._single_axis_meshes:
                     parallel_dims.build_mesh()
                 from torchtitan.distributed.spmd_types import (

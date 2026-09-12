@@ -19,11 +19,11 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
-    FlexAttention,
+    FlexInnerAttention,
     FusedQKVLinear,
     GQAttention,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_gemm import (
@@ -35,6 +35,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
+    MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
@@ -46,7 +47,6 @@ from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
@@ -78,25 +78,25 @@ def get_attention_config(
 
     Language models always use block_causal masking (the dataloaders always
     emit per-document positions), so every backend here is a masked attention
-    backend. ``ScaledDotProductAttention`` only supports a boolean ``is_causal``
+    backend. ``ScaledDotProductInnerAttention`` only supports a boolean ``is_causal``
     flag and cannot consume per-document positions, so it is not a valid
     language-model backend (it remains available for Flux, which builds it
     directly).
     """
     if backend == "flex":
-        return FlexAttention.Config()
+        return FlexInnerAttention.Config()
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
         if not has_cuda_capability(9, 0):
             raise ValueError(
-                "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+                "Flash backend of FlexInnerAttention is only supported on Hopper or Blackwell"
             )
-        return FlexAttention.Config(
+        return FlexInnerAttention.Config(
             block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
         )
     elif backend == "varlen":
-        return VarlenAttention.Config()
+        return VarlenInnerAttention.Config()
     elif backend == "sdpa":
         raise ValueError(
             "sdpa is no longer supported for language models; positions are "
@@ -319,8 +319,14 @@ def make_moe_config(
     routed_experts: RoutedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    if aux_loss_coeff is not None:
+        router = dataclasses.replace(
+            router,
+            aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=aux_loss_coeff),
+        )
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
@@ -339,8 +345,6 @@ def make_router_config(
     score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
     route_norm: bool = False,
     route_scale: float = 1.0,
-    num_expert_groups: int | None = None,
-    num_limited_groups: int | None = None,
     bias: bool = False,
 ) -> TokenChoiceTopKRouter.Config:
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
@@ -356,8 +360,6 @@ def make_router_config(
         score_func=score_func,
         route_norm=route_norm,
         route_scale=route_scale,
-        num_expert_groups=num_expert_groups,
-        num_limited_groups=num_limited_groups,
     )
 
 
@@ -378,7 +380,6 @@ def make_token_dispatcher_config(
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
-    - "minimal_async_ep": Uses MinimalAsyncEP for constrained DP>=EP
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -411,13 +412,6 @@ def make_token_dispatcher_config(
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
-    elif comm_backend == "minimal_async_ep":
-        return MinimalAsyncEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_dim=hidden_dim,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-        )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
@@ -426,7 +420,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep', 'minimal_async_ep'."
+            "Must be one of 'standard', 'deepep', or 'hybridep'."
         )
 
 

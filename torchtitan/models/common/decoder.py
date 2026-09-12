@@ -6,7 +6,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
@@ -20,11 +20,10 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
-    ScaledDotProductAttention,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -143,7 +142,6 @@ class Decoder(BaseModel):
             that case the training/debug setup is skipped.
             """
             from torchtitan.config import ParallelismConfig
-            from torchtitan.distributed.context_parallel import validate_cp_backend
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -160,18 +158,6 @@ class Decoder(BaseModel):
                 raise NotImplementedError(
                     "Weight tying is not supported with Pipeline Parallel."
                 )
-
-            if parallelism.context_parallel_degree > 1:
-                # ShardingConfig-based CP requires the spmd_types backend.
-                validate_cp_backend(parallelism)
-                if any(self.traverse(ScaledDotProductAttention.Config)) or any(
-                    self.traverse(VarlenAttention.Config)
-                ):
-                    raise NotImplementedError(
-                        "Context Parallel is not supported with "
-                        "ScaledDotProductAttention or VarlenAttention. "
-                        "Use FlexAttention or disable CP."
-                    )
 
             tp = parallelism.tensor_parallel_degree
             attention = self.first_attention
@@ -278,7 +264,7 @@ class Decoder(BaseModel):
     ) -> BlockMask:
         """Build a flex-attention BlockMask from mask_mods (ANDed together),
         respecting the config's block_size and batch-invariant mode."""
-        assert isinstance(attn_config.inner_attention, FlexAttention.Config)
+        assert isinstance(attn_config.inner_attention, FlexInnerAttention.Config)
         seq_len = positions.shape[0]
         return create_attention_mask(
             and_masks(*mask_mods),
@@ -317,40 +303,70 @@ class Decoder(BaseModel):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+    ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
-        # Function-local import avoids a circular import
-        # (context_parallel.api -> models.common -> decoder).
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
+        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
-            if isinstance(inner, (FlexAttention.Config, VarlenAttention.Config)):
-                batch["attention_masks"] = self.get_attention_masks(positions=positions)
+            if isinstance(
+                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
+            ):
+                batch["attention_masks"] = self.get_attention_masks(
+                    positions=positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
 
         input_sharding = decoder_input_sharding()
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            batch = self._cp_shard_inputs(
+                batch, input_sharding, parallel_dims, parallelism
             )
-        if parallelism.spmd_backend == "spmd_types":
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch
 
+    def _cp_shard_inputs(
+        self,
+        batch: dict[str, Any],
+        input_shardings: dict[str, Any],
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+    ) -> dict[str, Any]:
+        from torchtitan.models.common.cp_attention import CPInnerAttention
+
+        inner_attention = self.config.first_full_attention_backend
+        owner = cast(
+            "type[CPInnerAttention] | None",
+            inner_attention._owner if inner_attention is not None else None,
+        )
+        assert owner is not None and issubclass(owner, CPInnerAttention)
+        return owner.cp_shard(
+            batch,
+            input_shardings,
+            parallel_dims.get_mesh("cp"),
+            parallelism.context_parallel_load_balancer,
+            parallelism.context_parallel_ptrr_mask_key,
+        )
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> AttentionMasksType | None:
         attn_config = self.config.first_attention
         if attn_config is None:
@@ -358,12 +374,17 @@ class Decoder(BaseModel):
             # pipeline stage holding only linear-attention blocks) → no masks.
             return None
         inner_attn = attn_config.inner_attention
-        if isinstance(inner_attn, FlexAttention.Config):
+        if isinstance(inner_attn, FlexInnerAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)
-        elif isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
+        elif isinstance(inner_attn, VarlenInnerAttention.Config):
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
         else:
             raise TypeError(
-                f"Only VarlenAttention and FlexAttention support attention masks, "
+                f"Only VarlenInnerAttention and FlexInnerAttention support attention masks, "
                 f"got {type(inner_attn).__name__}"
             )

@@ -35,10 +35,9 @@ from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
-from torchtitan.distributed.utils import get_spmd_backend, set_batch_invariance
+from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.batch_invariance import (
     force_logprobs_fn_for_batch_invariance,
-    patch_bmm_for_batch_invariance,
 )
 from torchtitan.experiments.rl.models.vllm_registry import (
     InferenceParallelismConfig,
@@ -55,10 +54,10 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
     IntraGeneratorRouter,
 )
 from torchtitan.experiments.rl.types import Completion
-from torchtitan.models.common.attention import FlexAttention, VarlenAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.logging import init_logger
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
@@ -851,16 +850,12 @@ class VLLMGenerator(Actor, Configurable):
         attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
             attention_backend,
-            (VarlenAttention.Config, FlexAttention.Config),
+            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         set_batch_invariance(config.debug.batch_invariant)
         if config.debug.batch_invariant:
-            # batch_invariant_ops (via set_batch_invariance) covers
-            # mm/addmm/_log_softmax/mean but not bmm; the MoE router gate lowers
-            # to bmm in the vLLM inference graph, so override it generator-side.
-            patch_bmm_for_batch_invariance()
             # The vLLM v2 logprob Triton kernel bypasses the aten overrides above;
             # route it through trainer's function to match the trainer exactly.
             force_logprobs_fn_for_batch_invariance()
@@ -901,7 +896,7 @@ class VLLMGenerator(Actor, Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(attention_backend, FlexAttention.Config)
+                    if isinstance(attention_backend, FlexInnerAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),
@@ -1339,15 +1334,7 @@ class VLLMGenerator(Actor, Configurable):
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
         model_sd = model.model.state_dict()
-        if get_spmd_backend() == "spmd_types":
-            await self._get_spmd_state_dict(model_sd, model=model)
-        else:
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=model_sd,
-                strict=False,
-                direct_rdma=False,
-            )
+        await self._get_spmd_state_dict(model_sd, model=model)
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.

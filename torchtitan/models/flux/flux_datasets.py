@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -25,7 +26,9 @@ from torchtitan.components.data.dataset import (
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class FluxSample(TypedDict):
@@ -218,8 +221,8 @@ class FluxCollator(Collator):
 
     def __call__(self, rows: Sequence[FluxSample]) -> TrainerBatch:
         batch = default_collate(list(rows))
-        labels = batch.pop("image")
-        return batch, labels
+        batch["labels"] = batch.pop("image")
+        return batch
 
 
 DATASETS: dict[str, SingleDatasetConfig] = {

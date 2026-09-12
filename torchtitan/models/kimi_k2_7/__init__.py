@@ -14,13 +14,13 @@ from torchtitan.components.optimizer import (
     register_moe_load_balancing_hook,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import pipeline_vlm
+from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
+    PartialBiasRowwiseLinear,
     RMSNorm,
-    ScaledBiasRowwiseLinear,
     TransformerBlock,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -37,7 +37,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model
 from .parallelize import parallelize_kimi_k2_5
-from .qk_clip import QKClipFlexAttention, register_qk_clip_hook
+from .qk_clip import QKClipFlexInnerAttention, register_qk_clip_hook
 from .state_dict_adapter import KimiK25StateDictAdapter
 
 from .vision_encoder import (
@@ -109,10 +109,10 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _scaled_bias_rowwise_linear(
+def _partial_bias_rowwise_linear(
     in_features: int, out_features: int
-) -> ScaledBiasRowwiseLinear.Config:
-    return ScaledBiasRowwiseLinear.Config(
+) -> PartialBiasRowwiseLinear.Config:
+    return PartialBiasRowwiseLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -154,11 +154,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_scaled_bias_rowwise_linear(dim, dim),
+            proj=_partial_bias_rowwise_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
-            fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
+            fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
         ),
     )
 
@@ -184,15 +184,15 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_scaled_bias_rowwise_linear(merged_dim, text_hidden_size),
+            linear_2=_partial_bias_rowwise_linear(merged_dim, text_hidden_size),
         ),
     )
 
 
-def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexAttention.Config:
+def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Config:
     if attn_backend != "flex":
-        raise ValueError("Kimi QK clipping requires the FlexAttention backend.")
-    return QKClipFlexAttention.Config()
+        raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
+    return QKClipFlexInnerAttention.Config()
 
 
 def _register_optimizer_hooks(
@@ -326,8 +326,6 @@ def _moonlight_16b_a3b_config(
         num_shared_experts=2,
         router_top_k=6,
         router_score_func="sigmoid",
-        router_num_expert_groups=None,
-        router_num_limited_groups=None,
         router_route_scale=2.446,
         router_route_norm=True,
         attn_backend=attn_backend,
@@ -451,8 +449,6 @@ def _kimi_k2_5(
         num_shared_experts=num_shared_experts,
         router_top_k=8,
         router_score_func="sigmoid",
-        router_num_expert_groups=None,
-        router_num_limited_groups=None,
         router_route_scale=2.827,
         router_route_norm=True,
         attn_backend=attn_backend,
@@ -535,7 +531,10 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k2_5,
-        pipelining_fn=pipeline_vlm,
+        pipelining_fn=partial(
+            pipeline_with_first_stage_modules,
+            first_stage_module_fqns=("vision_encoder",),
+        ),
         post_optimizer_build_fn=_register_optimizer_hooks,
         state_dict_adapter=KimiK25StateDictAdapter,
     )

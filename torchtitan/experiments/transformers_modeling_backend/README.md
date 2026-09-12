@@ -2,7 +2,7 @@
 
 This enables HF transformers models to be trained with `4D parallelism + torch.compile`
 
-This backend requires `--parallelism.spmd_backend spmd_types`.
+This backend uses the TorchTitan SPMD type system.
 
 ## Quick start
 
@@ -48,7 +48,7 @@ This backend requires `--parallelism.spmd_backend spmd_types`.
 
 ### Attention
 
-Attention runs on **FlexAttention**. `attn_mask_type` selects the flex mask:
+Attention runs on **FlexInnerAttention**. `attn_mask_type` selects the flex mask:
 `causal` (plain causal) or `block_causal` (causal + same-document, for packed /
 SFT sequences).
 

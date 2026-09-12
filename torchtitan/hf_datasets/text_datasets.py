@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -22,7 +23,9 @@ from torchtitan.components.data.sources import (
 )
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _read_text(sample: dict[str, Any]) -> str:

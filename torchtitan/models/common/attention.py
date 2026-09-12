@@ -21,7 +21,6 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 from torch.distributed.tensor import DTensor, Replicate
-from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -43,7 +42,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -52,13 +51,14 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
-    "FlexAttention",
     "BaseQKVLinear",
+    "FlexInnerAttention",
     "FusedQKVLinear",
     "GQAttention",
+    "InnerAttention",
     "QKVLinear",
-    "ScaledDotProductAttention",
-    "VarlenAttention",
+    "ScaledDotProductInnerAttention",
+    "VarlenInnerAttention",
     "VarlenMetadata",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
@@ -112,21 +112,28 @@ def local_head_split(
     dp_shard_dim: int = 0,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     with spmd.local():
-        if use_spmd:
+        if spmd.is_type_checking():
             spmd.assert_type(t, input_type)
         out = t.view(*t.shape[:-1], -1, head_dim)
-        if use_spmd:
+        if spmd.is_type_checking():
             spmd.assert_type(out, output_type)
     return out
 
 
-class VarlenAttention(Module):
+class InnerAttention(Module):
+    """Base class for attention kernels used by outer attention modules."""
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        pass
+
+
+class VarlenInnerAttention(InnerAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
         window_size: tuple[int, int] = (-1, 0)
         """ window_size=(left, right) controls the attention window relative to each
             query position. 'left' is how many tokens before the query to attend to,
@@ -220,11 +227,11 @@ class VarlenAttention(Module):
         return out_transform(out_THV, lse_TH)
 
 
-class FlexAttention(Module):
-    """Inner attention using ``flex_attention`` with torch.compile and CP support.
+class FlexInnerAttention(InnerAttention):
+    """Inner attention using ``flex_attention`` with torch.compile.
 
     Query/key inputs use ``[T, H, K]`` and value inputs use ``[T, H, V]``.
-    The FlexAttention kernel requires a batch dimension, so inputs are adapted
+    The FlexInnerAttention kernel requires a batch dimension, so inputs are adapted
     to ``[1, H, T, K]`` and ``[1, H, T, V]`` only at the kernel boundary.
 
     Note:
@@ -233,7 +240,7 @@ class FlexAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
@@ -289,7 +296,7 @@ class FlexAttention(Module):
         return_aux: AuxRequest,
         kernel_options: dict,
     ):
-        """Run compiled FlexAttention outside SPMD typechecking.
+        """Run compiled FlexInnerAttention outside SPMD typechecking.
 
         Compiled regions are not currently compatible with SPMD typechecking, so
         the opaque kernel output is re-typed at the boundary instead of
@@ -301,7 +308,7 @@ class FlexAttention(Module):
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
-            out, aux = FlexAttention._compiled_flex_attn(
+            out, aux = FlexInnerAttention._compiled_flex_attn(
                 q,
                 k,
                 v,
@@ -312,7 +319,7 @@ class FlexAttention(Module):
                 return_aux=return_aux,
                 kernel_options=kernel_options,
             )
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             q_local = spmd.get_local_type(q)
             q_ps = spmd.get_partition_spec(q)
             spmd.assert_type(out, q_local, q_ps)
@@ -353,13 +360,13 @@ class FlexAttention(Module):
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
-        #    `FlexAttention._compiled_flex_attn` is correct.
+        #    `FlexInnerAttention._compiled_flex_attn` is correct.
         # Mark the flex region so that, when the enclosing model is compiled with
         # a non-inductor backend, regional_inductor scoops just this region into
         # an inductor sub-compile (see distributed/compile.py). A null context on
         # the default inductor / eager paths, so no dead metadata is emitted.
-        with maybe_regional_inductor(FlexAttention.inductor_configs):
-            out_1HTV, aux = FlexAttention.compiled_flex_attn(
+        with maybe_regional_inductor(FlexInnerAttention.inductor_configs):
+            out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
                 q_1HTK,
                 k_1HTK,
                 v_1HTV,
@@ -380,7 +387,7 @@ class FlexAttention(Module):
 
 # TODO: Verify whether SDPA support can be removed without losing performance
 # after folding: https://github.com/pytorch/torchtitan/pull/4218#pullrequestreview-4977638012
-class ScaledDotProductAttention(Module):
+class ScaledDotProductInnerAttention(InnerAttention):
     """Inner attention using ``F.scaled_dot_product_attention`` with CP support.
 
     ``forward()`` adapts Q/K from ``(B, L, H, K)`` to ``(B, H, L, K)`` and V
@@ -393,14 +400,14 @@ class ScaledDotProductAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         pass
 
     sdpa_backends: list[SDPBackend] = []
 
     def __init__(self, config: Config) -> None:
         if config is None:
-            config = ScaledDotProductAttention.Config()
+            config = ScaledDotProductInnerAttention.Config()
         super().__init__()
         if not self.sdpa_backends:
             self.sdpa_backends = [
@@ -423,7 +430,7 @@ class ScaledDotProductAttention(Module):
     ) -> torch.Tensor:
         if attention_masks is not None:
             raise ValueError(
-                "ScaledDotProductAttention does not support attention_masks; it "
+                "ScaledDotProductInnerAttention does not support attention_masks; it "
                 "only supports causal/non-causal attention via is_causal."
             )
         q_BHLK, k_BHLK, v_BHLV = (
@@ -592,6 +599,10 @@ def create_attention_mask(*args, **kwargs):
 
 def create_varlen_metadata_for_document(
     positions: torch.Tensor,
+    *,
+    padding_mask: torch.Tensor | None = None,
+    max_num_documents: int | None = None,
+    max_context_length: int | None = None,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -601,6 +612,16 @@ def create_varlen_metadata_for_document(
     Args:
         positions: Per-token position tensor with shape ``[T]``. Positions
             reset to 0 at each document start.
+        padding_mask: Per-token boolean tensor that is true for padding. This
+            distinguishes padding position resets from real document starts so
+            their fixed metadata capacity can be reserved separately.
+        max_num_documents: Upper bound on non-padding document segments in the
+            local token batch. When set, the device offsets have a fixed shape
+            as required for CUDA graph capture. Padding segments are reserved
+            separately when ``padding_mask`` is provided.
+        max_context_length: Maximum length of one document segment. Required
+            with ``max_num_documents`` so the fixed-shape metadata can avoid a
+            device-to-host synchronization.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -608,25 +629,69 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
-    doc_starts = (positions == 0).nonzero(as_tuple=True)[0].to(torch.int32)
-    packed_cu_seqlens = torch.cat(
-        [
-            doc_starts,
-            torch.tensor([num_tokens], dtype=torch.int32, device=device),
-        ]
-    )
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+
+    real_doc_starts = positions == 0
+    padding_doc_starts = None
+    if padding_mask is None:
+        is_doc_start = real_doc_starts
+    else:
+        padding_mask = padding_mask.to(torch.bool)
+        real_doc_starts = real_doc_starts & ~padding_mask
+        padding_doc_starts = (positions == 0) & padding_mask
+        is_doc_start = real_doc_starts | padding_doc_starts
+
+    if max_num_documents is not None:
+        if max_context_length is None:
+            raise ValueError(
+                "max_context_length is required when max_num_documents is set"
+            )
+
+        max_num_padding_segments = (
+            (num_tokens + max_context_length - 1) // max_context_length
+            if padding_mask is not None
+            else 0
+        )
+        max_num_segments = max_num_documents + max_num_padding_segments
+        num_slots = max_num_segments + 1
+        slot = torch.cumsum(is_doc_start, 0) - 1
+        scatter_index = torch.where(
+            is_doc_start & (slot < max_num_segments),
+            slot,
+            torch.full_like(slot, num_slots),
+        )
+        packed_cu_seqlens = torch.full(
+            (num_slots + 1,), num_tokens, dtype=torch.int32, device=device
+        )
+        packed_cu_seqlens.scatter_(
+            0,
+            scatter_index,
+            torch.arange(num_tokens, dtype=torch.int32, device=device),
+        )
+        torch._assert_async(real_doc_starts.sum() <= max_num_documents)
+        if padding_doc_starts is not None:
+            torch._assert_async(padding_doc_starts.sum() <= max_num_padding_segments)
+        packed_cu_seqlens = packed_cu_seqlens[:num_slots]
+        max_seqlen = max_context_length
+    else:
+        doc_starts = is_doc_start.nonzero(as_tuple=True)[0].to(torch.int32)
+        packed_cu_seqlens = torch.cat(
+            [
+                doc_starts,
+                torch.tensor([num_tokens], dtype=torch.int32, device=device),
+            ]
+        )
+        seq_lengths = torch.diff(packed_cu_seqlens)
+
+        if seq_lengths.numel() > 0:
+            # device to host sync but only done once per model forward
+            max_seqlen = int(seq_lengths.max().item())
+        else:
+            max_seqlen = 0
+
+    if spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
-    seq_lengths = torch.diff(packed_cu_seqlens)
-
-    if seq_lengths.numel() > 0:
-        # device to host sync but only done once per model forward
-        max_seqlen = int(seq_lengths.max().item())
-    else:
-        max_seqlen = 0
-
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
@@ -698,7 +763,7 @@ class QKVLinear(BaseQKVLinear):
             # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
             with spmd.local():
                 x = x.view(num_tokens, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                if spmd.is_type_checking():
                     spmd.assert_type(
                         x,
                         spmd.V,
@@ -766,43 +831,23 @@ class FusedQKVLinear(BaseQKVLinear):
         qkv = self.wqkv(x)
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     qkv,
                     spmd.V,
                     spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
                 )
 
-        hpk, hd = self.heads_per_kv, self.head_dim
-
-        def _split(t):
-            local_num_tokens = t.shape[0]
-            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
-            # split leaves xk/xv as strided views into the fused buffer; vLLM
-            # attention/KV-cache kernels read raw memory assuming a contiguous
-            # head-major layout, so materialize all three contiguously here.
-            return (
-                xq.reshape(local_num_tokens, -1, hd).contiguous(),
-                xk.reshape(local_num_tokens, -1, hd).contiguous(),
-                xv.reshape(local_num_tokens, -1, hd).contiguous(),
-            )
-
-        if isinstance(qkv, DTensor):
-            # TEMPORARY: run the split on local tensors so its backward (cat)
-            # does not mix DTensor and plain grads under CP+PP. The asymmetric
-            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
-            # cat() inconsistent grad types in PP's backward metadata inference.
-            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards tokens). TODO: remove once the partial_dtensor
-            # backend is gone.
-            _split = local_map(
-                _split,
-                out_placements=(qkv.placements,) * 3,
-                in_placements=(qkv.placements,),
-                in_grad_placements=(qkv.placements,),
-                device_mesh=qkv.device_mesh,
-            )
-        return _split(qkv)
+        local_num_tokens = qkv.shape[0]
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        # split leaves xk/xv as strided views into the fused buffer; vLLM
+        # attention/KV-cache kernels read raw memory assuming a contiguous
+        # head-major layout, so materialize all three contiguously here.
+        return (
+            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+        )
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
