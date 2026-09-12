@@ -9,8 +9,8 @@
 # Builds the flex debug model, runs a full-sequence forward as the reference,
 # then runs the same weights under CP with the input/positions/BlockMask sharded
 # on the sequence axis (as the trainer does). Reconstructs full logits in global
-# order (a global-index tensor rides through cp_shard to undo any load-balancer
-# permutation) and compares against the reference. Correct CP attention matches
+# order (a global-index tensor rides through CP input sharding to undo any
+# load-balancer permutation) and compares against the reference. Correct CP attention matches
 # to fp32 noise (rel < 1e-4); bf16 mixed precision masks this, so we force fp32.
 #
 # Run: torchrun --nproc_per_node=2 \
@@ -25,10 +25,15 @@ import torch.distributed as dist
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.context_parallel import cp_shard
+from torchtitan.distributed.context_parallel import cp_shard_inputs
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
+)
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    token_id_placement,
 )
 from torchtitan.tools import utils
 
@@ -141,14 +146,29 @@ def main():
     cp_mesh = parallel_dims.get_mesh("cp")
     full_mask_cp = cp_model.get_attention_masks(positions)
     gidx = torch.arange(num_tokens, device=device)
-    (loc_input, loc_pos, loc_gidx), loc_mask = cp_shard(
+    input_shardings = {
+        **decoder_input_sharding(),
+        "global_indices": token_id_placement(),
+    }
+    batch, load_balancer = cp_shard_inputs(
+        {
+            "input": input_ids,
+            "positions": positions,
+            "global_indices": gidx,
+            "attention_masks": full_mask_cp,
+        },
+        input_shardings,
         cp_mesh,
-        (input_ids, positions, gidx),
-        full_mask_cp,
-        load_balancer_type=balancer,
+        balancer,
     )
+    batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
+        batch, cp_mesh, load_balancer
+    )
+    loc_input = batch["input"]
+    loc_pos = batch["positions"]
+    loc_gidx = batch["global_indices"]
+    loc_mask = batch["attention_masks"]
     from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-    from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
     annotated = annotate_input_spmd_types(
         parallel_dims,

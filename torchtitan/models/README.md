@@ -36,7 +36,7 @@ The folder should be organized as follows
     - activation checkpointing
     - `torch.compile`
     - FSDP /  HSDP
-    - NOTE: language-model CP goes through `Decoder.preprocess_inputs` -> `prepare_context_parallel_input`. Ideally no extra work is needed to enable CP.
+    - NOTE: language-model CP goes through `Decoder.preprocess_inputs` -> `cp_shard_inputs`. Ideally no extra work is needed to enable CP.
 - `pipeline.py` (optional if model size is small)
   - apply PP
 - `__init__.py`

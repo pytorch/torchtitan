@@ -20,7 +20,10 @@ from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.models.flux.parallelize import parallelize_encoders
-from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
+from torchtitan.models.flux.sharding import (
+    annotate_flux_forward_inputs,
+    flux_input_sharding,
+)
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
@@ -231,21 +234,25 @@ class FluxTrainer(Trainer):
 
         # Apply CP sharding if enabled
         if self.parallel_dims.cp_enabled:
-            from torchtitan.distributed.context_parallel import cp_shard
+            from torchtitan.distributed.context_parallel import cp_shard_inputs
 
-            (
-                latents,
-                latent_pos_enc,
-                t5_encodings,
-                text_pos_enc,
-                target,
-            ), _ = cp_shard(
+            cp_inputs, _ = cp_shard_inputs(
+                {
+                    "img": latents,
+                    "img_ids": latent_pos_enc,
+                    "txt": t5_encodings,
+                    "txt_ids": text_pos_enc,
+                    "target": target,
+                },
+                flux_input_sharding(),
                 self.parallel_dims.get_mesh("cp"),
-                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                None,  # No attention masks for Flux
                 load_balancer_type=None,
-                input_seq_dims=1,
             )
+            latents = cp_inputs["img"]
+            latent_pos_enc = cp_inputs["img_ids"]
+            t5_encodings = cp_inputs["txt"]
+            text_pos_enc = cp_inputs["txt_ids"]
+            target = cp_inputs["target"]
 
         # Accumulate after CP sharding so the count reflects the actual
         # unique tokens this rank processes (not the full pre-split sequence).

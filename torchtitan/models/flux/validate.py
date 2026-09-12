@@ -29,6 +29,7 @@ from .flux_datasets import FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
+from .sharding import flux_input_sharding
 from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
@@ -272,21 +273,25 @@ class FluxValidator(Validator):
 
             # Apply CP sharding if enabled
             if parallel_dims.cp_enabled:
-                from torchtitan.distributed.context_parallel import cp_shard
+                from torchtitan.distributed.context_parallel import cp_shard_inputs
 
-                (
-                    latents,
-                    latent_pos_enc,
-                    t5_encodings,
-                    text_pos_enc,
-                    target,
-                ), _ = cp_shard(
+                cp_inputs, _ = cp_shard_inputs(
+                    {
+                        "img": latents,
+                        "img_ids": latent_pos_enc,
+                        "txt": t5_encodings,
+                        "txt_ids": text_pos_enc,
+                        "target": target,
+                    },
+                    flux_input_sharding(),
                     parallel_dims.get_mesh("cp"),
-                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                    None,  # No attention masks for Flux
                     load_balancer_type=None,
-                    input_seq_dims=1,
                 )
+                latents = cp_inputs["img"]
+                latent_pos_enc = cp_inputs["img_ids"]
+                t5_encodings = cp_inputs["txt"]
+                text_pos_enc = cp_inputs["txt_ids"]
+                target = cp_inputs["target"]
 
             with self.validation_context():
                 latent_noise_pred = model(
