@@ -24,6 +24,7 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
+    fused_grouped_experts_param_init,
     make_ffn_config,
     make_routed_experts_config,
 )
@@ -551,8 +552,8 @@ def _build_mtp_layers(
         if block_cfg.moe is not None:
             block_cfg.moe.router.gate.param_init = _depth_init(layer_id)
             block_cfg.moe.router.layer_id = layer_id
-            block_cfg.moe.routed_experts.inner_experts.param_init = _depth_experts_init(
-                layer_id
+            block_cfg.moe.routed_experts.inner_experts.param_init = (
+                fused_grouped_experts_param_init(_depth_experts_init(layer_id))
             )
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
