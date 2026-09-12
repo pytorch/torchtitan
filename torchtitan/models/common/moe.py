@@ -52,11 +52,7 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
-        activation_fn: ActivationFn.Config = field(
-            default_factory=lambda: ActivationFn.Config(
-                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
-            )
-        )
+        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -113,17 +109,8 @@ class GroupedExperts(Module):
 
         gate_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
         up_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E)
-        h_RF = self._activation(gate_RF, up_RF, offsets_E)
+        h_RF = self.activation_fn(gate_RF, up_RF)
         return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
-
-    def _activation(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        del offsets_E
-        return self.activation_fn(gate_RF, up_RF)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
