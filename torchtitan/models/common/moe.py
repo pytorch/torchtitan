@@ -175,19 +175,13 @@ class RoutedExperts(Module):
 
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
-        routed to top K experts based on the router scores.
-
-    Optionally supports node-limited (group-limited) routing where experts are divided into groups
-    (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
-    This reduces cross-node communication in distributed settings.
+    routed to top K experts based on the router scores.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
         gate: RouterGateLinear.Config
-        num_expert_groups: int | None = None  # must be a divisor of num_experts
-        num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
@@ -199,8 +193,6 @@ class TokenChoiceTopKRouter(Module):
         super().__init__()
         self.gate = config.gate.build()
         self.num_experts = config.num_experts
-        self.num_expert_groups = config.num_expert_groups
-        self.num_limited_groups = config.num_limited_groups
         self.top_k = config.top_k
         self.score_func = config.score_func
         self.route_norm = config.route_norm
@@ -227,48 +219,6 @@ class TokenChoiceTopKRouter(Module):
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
         return topk_expert_ids_TK, topk_scores_TK
 
-    def _get_node_limited_routing_scores(
-        self,
-        scores_for_choice_TE: torch.Tensor,
-    ) -> torch.Tensor:
-        """Select num_limited_groups groups based on group scores,
-        and set expert scores in non-selected groups as -inf.
-
-        Args:
-            scores_for_choice_TE: Router scores with expert_bias, shape ``(T, E)``.
-
-        Returns:
-            Router scores with shape ``(T, E)``.
-        """
-        if self.num_limited_groups is None:
-            raise ValueError(
-                "num_limited_groups must be set when num_expert_groups is set"
-            )
-        assert self.num_expert_groups is not None
-        if self.num_experts % self.num_expert_groups != 0:
-            raise ValueError(
-                f"num_experts ({self.num_experts}) must be divisible by num_expert_groups ({self.num_expert_groups})"
-            )
-        experts_per_group = self.num_experts // self.num_expert_groups
-        if experts_per_group < 2:
-            raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
-        scores_grouped = scores_for_choice_TE.unflatten(
-            -1, (self.num_expert_groups, experts_per_group)
-        )
-        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
-        group_scores = top2_scores_in_group.sum(dim=-1)
-        _, group_idx = torch.topk(
-            group_scores, k=self.num_limited_groups, dim=-1, sorted=False
-        )
-        group_mask = torch.ones_like(group_scores, dtype=torch.bool)
-        group_mask.scatter_(-1, group_idx, False)  # False = selected groups (keep)
-        # Mask out experts from non-selected groups
-        scores_for_choice_TE = scores_grouped.masked_fill(
-            group_mask.unsqueeze(-1), float("-inf")
-        ).flatten(-2)
-
-        return scores_for_choice_TE
-
     def _select_experts(
         self,
         scores_TE: torch.Tensor,
@@ -278,10 +228,6 @@ class TokenChoiceTopKRouter(Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
         return torch.topk(
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices

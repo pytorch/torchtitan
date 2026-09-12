@@ -23,7 +23,6 @@ from .mhc import HcHead, HcPost, HcPre
 
 if TYPE_CHECKING:
     from .attention import Attention
-    from .moe import DeepSeekV4MoE
     from .mtp import MTPBlock
 
 
@@ -32,10 +31,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        # Redeclared with the DeepSeek V4 specific types so sharding and MTP
-        # build helpers can access V4-only fields (e.g. router.layer_id).
         attention: "Attention.Config"  # pyrefly: ignore [bad-override]
-        moe: "DeepSeekV4MoE.Config | None" = None  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
