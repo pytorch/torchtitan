@@ -56,6 +56,35 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
     )
 
 
+def test_numerics_run_uses_seed_config(monkeypatch, tmp_path: Path) -> None:
+    captured_command = None
+
+    def seed_config():
+        return llama3_debugmodel()
+
+    def fake_run(command, **kwargs):
+        nonlocal captured_command
+        captured_command = command
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    golden_path = tmp_path / "golden.txt"
+    golden_path.write_text("# step loss\n1 1.0\n")
+    monkeypatch.setattr("tests.integration_tests.run_tests.subprocess.run", fake_run)
+    test = OverrideDefinitions(
+        configs=[llama3_debugmodel],
+        test_name="seed_config_test",
+        ngpu=1,
+        golden_numerics_path=str(golden_path),
+        seed_config=seed_config,
+    )
+
+    run_single_test(test, str(tmp_path))
+
+    assert captured_command is not None
+    assert f"--seed-module={seed_config.__module__}" in captured_command
+    assert f"--seed-config={seed_config.__name__}" in captured_command
+
+
 def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     config = llama3_debugmodel_fsdp2_tp2_pp2()
 

@@ -276,6 +276,14 @@ def run_single_test(
                 f"--test-ngpus={test_flavor.ngpu}",
                 result_arg,
             ]
+            if test_flavor.seed_config is not None:
+                seed_config = test_flavor.seed_config
+                command.extend(
+                    (
+                        f"--seed-module={seed_config.__module__}",
+                        f"--seed-config={seed_config.__name__}",
+                    )
+                )
             if not export_numerics:
                 command.append("--assert-equal")
             if use_fake_pg:
