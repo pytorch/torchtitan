@@ -16,7 +16,7 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
-    ScaledBiasRowwiseLinear,
+    PartialBiasRowwiseLinear,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config, make_ffn_config
@@ -251,10 +251,10 @@ def _vision_linear(in_features: int, out_features: int, *, bias: bool) -> Linear
     )
 
 
-def _vision_scaled_bias_rowwise_linear(
+def _vision_partial_bias_rowwise_linear(
     in_features: int, out_features: int
-) -> ScaledBiasRowwiseLinear.Config:
-    return ScaledBiasRowwiseLinear.Config(
+) -> PartialBiasRowwiseLinear.Config:
+    return PartialBiasRowwiseLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -307,14 +307,14 @@ def muse_glimmer_vision_encoder_config(
                 wq=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wk=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wv=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
-                proj=_vision_scaled_bias_rowwise_linear(
+                proj=_vision_partial_bias_rowwise_linear(
                     num_heads * head_dim, latent_dim
                 ),
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
                 fc1=_vision_linear(latent_dim, mlp_hidden, bias=True),
-                fc2=_vision_scaled_bias_rowwise_linear(mlp_hidden, latent_dim),
+                fc2=_vision_partial_bias_rowwise_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),
         ),

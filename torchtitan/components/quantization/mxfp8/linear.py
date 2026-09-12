@@ -26,7 +26,6 @@ from torchao.prototype.mx_formats.kernels import (
     triton_mx_block_rearrange,
 )
 
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -333,24 +332,6 @@ class MXFP8Linear(Linear):
                         f"got {name}={value}."
                     )
 
-        def build(self, **kwargs):
-            # The MXFP8 matmul is an opaque autograd function, so DTensor has
-            # no sharding strategy for it. Under partial_dtensor with TP,
-            # propagation reaches into the storage-free unsharded tensor and
-            # fails; making it work needs local_map plus hand-declared input
-            # and input-gradient placements. spmd_types instead annotates the
-            # function itself (see register_local_autograd_function above), so
-            # the stock Linear sharding config suffices there. Reject the
-            # backend rather than carry a second sharding path for it.
-            if get_spmd_backend() == "partial_dtensor":
-                raise ValueError(
-                    "MXFP8Linear requires parallelism.spmd_backend="
-                    "'spmd_types'; got 'partial_dtensor'. The MXFP8 matmul is "
-                    "an opaque autograd function with no DTensor sharding "
-                    "rule, so tensor parallelism cannot propagate through it."
-                )
-            return Linear.Config.build(self, **kwargs)
-
     def __init__(self, config: Config):
         super().__init__(config)
         self.input_activation_format_for_backward = (
@@ -366,9 +347,8 @@ class MXFP8Linear(Linear):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # Always a plain tensor: the weight is only re-wrapped as a DTensor on
-        # a non-data-parallel mesh under partial_dtensor, which Config.build
-        # rejects, and spmd_types carries TP and EP as annotations instead.
+        # Always a plain tensor: spmd_types carries TP and EP as annotations
+        # instead of wrapping the weight as a model-parallel DTensor.
         weight_NK = self.weight
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has

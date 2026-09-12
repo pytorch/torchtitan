@@ -429,19 +429,18 @@ class MuseGlimmerModel(Decoder):
             batch = self._cp_shard_inputs(
                 batch, input_sharding, parallel_dims, parallelism
             )
-        if parallelism.spmd_backend == "spmd_types":
-            if (
-                parallelism.enable_sequence_parallel
-                and parallel_dims.tp_enabled
-                and "vision_bank_indices_T" in batch
-            ):
-                batch["vision_bank_indices_T"] = spmd.shard(
-                    batch["vision_bank_indices_T"],
-                    parallel_dims.get_dense_tp_mesh().get_group(),
-                    src=spmd.I,
-                    dst=spmd.S(0),
-                )
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        if (
+            parallelism.enable_sequence_parallel
+            and parallel_dims.tp_enabled
+            and "vision_bank_indices_T" in batch
+        ):
+            batch["vision_bank_indices_T"] = spmd.shard(
+                batch["vision_bank_indices_T"],
+                parallel_dims.get_dense_tp_mesh().get_group(),
+                src=spmd.I,
+                dst=spmd.S(0),
+            )
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

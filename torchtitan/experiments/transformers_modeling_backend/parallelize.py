@@ -47,10 +47,10 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
     keys -- the BlockMask is Q-sharded / KV-full to match.
 
     This is the explicit-collective analogue of Titan's ``flex_cp_allgather``
-    path: the kernel runs nested inside the attention module's local_map region
+    path: the kernel runs nested inside the attention module's local SPMD region
     where the CP mesh dim is no longer visible to a declarative redistribute, so
     the gather is done here on local tensors. Called before ``model.parallelize``
-    so the wrap is captured inside the local_map wrapping.
+    so the wrap is captured inside the local SPMD wrapper.
     """
     import torch.distributed as dist
     from torch.distributed.tensor.experimental._context_parallel._attention import (
@@ -103,15 +103,8 @@ def parallelize_hf_transformers(
     4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
-    if parallel_dims.spmd_backend != "spmd_types":
-        raise ValueError(
-            "The Transformers modeling backend only supports "
-            "parallelism.spmd_backend='spmd_types'; "
-            f"got '{parallel_dims.spmd_backend}'."
-        )
-
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
-    # the flex kernel's local_map redistributes
+    # the flex kernel's local SPMD boundary redistributes
     # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel
     # in hf_sharding.py. The CP-sharded BlockMask is built and sharded on its Q
     # axis upstream (trainer, ptrr balancer). Note: the ptrr balancer requires
@@ -170,7 +163,7 @@ def parallelize_hf_transformers(
 
     # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
     # the CP axis (on the seq dim). Must run before model.parallelize so the
-    # wrap is captured inside the local_map region and operates on the local
+    # wrap is captured inside the local SPMD region and operates on the local
     # (already TP-head-sharded, CP-seq-sharded) tensors.
     if parallel_dims.cp_enabled:
         _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))

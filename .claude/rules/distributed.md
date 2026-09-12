@@ -24,8 +24,7 @@ every parallelism dimension. A fix for one configuration may break another.
 Include the parallelism configuration in bug reports and test descriptions.
 
 ## Model-Agnostic Code Lives Here
-Helper functions that apply to any model (e.g. `maybe_enable_async_tp`,
-`NoParallel`, tensor parallel utilities) belong in `torchtitan/distributed/`,
+Helper functions that apply to any model belong in `torchtitan/distributed/`,
 not in model-specific infrastructure files.
 
 ## Be Conservative with Changes

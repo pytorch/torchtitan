@@ -17,6 +17,7 @@ from torchtitan.experiments.graph_trainer.llama3 import (
 )
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
+    single_device_parallel_dims,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
@@ -85,6 +86,8 @@ def _measure_step(
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestGraphSACPeakMemory(unittest.TestCase):
     def setUp(self):
+        self.parallel_dims = self.enterContext(single_device_parallel_dims())
+
         _set_deterministic()
         model = _build_model(DEBUGMODEL)
         self.state_dict = {
@@ -107,6 +110,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             eager_model,
             llama3_registry(DEBUGMODEL).model,
             Trainer,
+            parallel_dims=self.parallel_dims,
         )
 
         traced_model = _build_model(DEBUGMODEL)
@@ -116,6 +120,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             llama3_registry(DEBUGMODEL).model,
             GraphTrainer,
             activation_checkpoint_mode="selective",
+            parallel_dims=self.parallel_dims,
         )
         # Use eager-compatible SAC policy (alternating mm save/recompute)
         # to match the eager AC path's memory behavior.
@@ -169,6 +174,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             eager_model,
             llama3_registry(DEBUGMODEL).model,
             Trainer,
+            parallel_dims=self.parallel_dims,
         )
 
         traced_model = _build_model(DEBUGMODEL)
@@ -178,6 +184,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
             llama3_registry(DEBUGMODEL).model,
             GraphTrainer,
             activation_checkpoint_mode="selective",
+            parallel_dims=self.parallel_dims,
         )
         traced_trainer.config.compile.memory_policy = "full"
 

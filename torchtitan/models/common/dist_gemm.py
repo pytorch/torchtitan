@@ -39,8 +39,6 @@ from torchtitan.distributed.linear import (
 )
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.distributed.utils import get_spmd_backend
-
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -75,8 +73,8 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
     unavailable during ``__init__`` and ``parallelize`` -- and reading it here
     means these modules need no ``parallelize`` override and hold no group state.
 
-    None means "run the stock projection": either no mesh context (non-spmd_types
-    caller) or TP is degree 1, in which case there is no collective to fuse.
+    None means "run the stock projection": either no mesh context or TP is degree
+    1, in which case there is no collective to fuse.
     """
     mesh = current_spmd_mesh()
     if mesh is None or "tp" not in (mesh.mesh_dim_names or ()):
@@ -93,14 +91,6 @@ def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
     from inside a module at runtime: under spmd_types an activation is a plain
     local tensor with no placements to inspect.
     """
-    backend = get_spmd_backend()
-    if backend != "spmd_types":
-        raise ValueError(
-            "tp_gemm_backend='dist_gemm' requires "
-            f"parallelism.spmd_backend='spmd_types', got {backend!r}. The fused "
-            "modules take and return plain local tensors; the DTensor backends are "
-            "being deprecated and are not supported."
-        )
     if not enable_sp:
         raise ValueError(
             "tp_gemm_backend='dist_gemm' requires "

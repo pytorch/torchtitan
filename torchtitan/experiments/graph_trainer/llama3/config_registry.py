@@ -50,8 +50,7 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
 
     The point of running dist-GEMM here rather than only under the eager trainer:
     GraphTrainer traces the whole model, so this is what proves the fused autograd
-    Functions survive tracing. Needs tensor_parallel_degree > 1 and CUDA; the base
-    config pins spmd_backend to spmd_types.
+    Functions survive tracing. Needs tensor_parallel_degree > 1 and CUDA.
     """
     config = to_graph_trainer_config(
         llama3_debugmodel_dist_gemm(),

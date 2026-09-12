@@ -19,7 +19,7 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.kimi_k3.model import KimiK3Model
@@ -64,20 +64,7 @@ def _set_inner_kda_sharding(inner_kda: Module.Config) -> None:
         },
         out_src_shardings=token_heads,
         out_dst_shardings=token_heads,
-        local_map=LocalMapConfig(
-            in_grad_placements=(
-                token_channels,
-                token_channels,
-                token_channels,
-                token_heads,
-                token_channels,
-                parameter,
-                parameter,
-                parameter,
-                parameter,
-                parameter,
-            ),
-        ),
+        local_spmd=True,
     )
 
 

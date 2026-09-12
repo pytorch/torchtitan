@@ -39,12 +39,7 @@ def parallelize_qwen3(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if (
-        parallelism.spmd_backend == "spmd_types"
-        or parallel_dims.tp_enabled
-        or parallel_dims.ep_enabled
-    ):
-        model.parallelize(parallel_dims)
+    model.parallelize(parallel_dims)
 
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
@@ -63,24 +58,8 @@ def parallelize_qwen3(
     if skip_dp:
         return model
 
-    if parallelism.spmd_backend == "spmd_types":
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-    else:
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
-        dp_mesh_dims = None
-        edp_mesh = None
-        edp_mesh_dims = None
-        if parallel_dims.ep_enabled:
-            edp_mesh_names = (
-                ["dp_replicate", "efsdp"]
-                if parallel_dims.dp_replicate_enabled
-                else ["efsdp"]
-            )
-            edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
 
     apply_fsdp_to_decoder(
         model,

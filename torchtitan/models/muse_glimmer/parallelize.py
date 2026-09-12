@@ -38,11 +38,6 @@ def parallelize_muse_glimmer(
     dump_folder: str,
     skip_dp: bool = False,
 ):
-    if parallelism.spmd_backend != "spmd_types":
-        raise NotImplementedError(
-            "Muse Glimmer only supports spmd_backend='spmd_types'; "
-            f"got '{parallelism.spmd_backend}'."
-        )
     # When the model owns the vision stack (multimodal flavor), the encoder +
     # adapter are submodules: TP is applied by ``model.parallelize`` (driven by
     # the sharding configs set in update_from_config), and AC/compile/FSDP are

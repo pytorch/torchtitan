@@ -22,7 +22,6 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     current_spmd_mesh,
 )
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexInnerAttention,
@@ -297,8 +296,7 @@ class MTPDecoder(Decoder):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        if parallelism.spmd_backend == "spmd_types":
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         main_tokens = batch.pop("input")
         main_labels = batch.pop("labels")
@@ -458,7 +456,7 @@ class MTPLoss(CrossEntropyLoss):
         mtp_weight = self.mtp_scale / num_mtp_layers
         main_loss, _ = super().__call__(pred[0], labels[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
                 mtp_loss,
                 src=spmd.R,
@@ -469,7 +467,7 @@ class MTPLoss(CrossEntropyLoss):
             mtp_loss = mtp_loss + depth_loss * mtp_weight
         loss = main_loss + mtp_loss
         if global_valid_tokens is not None:
-            if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
+            if current_spmd_mesh() is not None:
                 spmd.assert_type(
                     global_valid_tokens,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
