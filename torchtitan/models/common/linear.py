@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -131,15 +131,6 @@ class PartialBiasRowwiseLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         bias = self.bias
         assert bias is not None
-        if (
-            self._parallelized
-            and self._sharding_config is not None
-            and current_spmd_mesh() is None
-        ):
-            raise RuntimeError(
-                "PartialBiasRowwiseLinear requires an ambient DeviceMesh after "
-                "parallelize()."
-            )
         tp_group = spmd_mesh_group("tp")
         if tp_group is not None:
             bias = spmd.convert(

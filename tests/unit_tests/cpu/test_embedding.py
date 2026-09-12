@@ -23,7 +23,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestEmbeddingConfig(unittest.TestCase):
@@ -99,17 +98,6 @@ class TestEmbeddingConfig(unittest.TestCase):
         emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
-
-    def test_parallelized_forward_requires_ambient_mesh(self):
-        emb = Embedding.Config(
-            num_embeddings=100,
-            embedding_dim=32,
-            sharding_config=ShardingConfig(),
-        ).build()
-        emb._parallelized = True
-
-        with self.assertRaisesRegex(RuntimeError, "ambient DeviceMesh"):
-            emb(torch.tensor([1, 2, 3]))
 
 
 class TestEmbedding(DTensorTestBase):

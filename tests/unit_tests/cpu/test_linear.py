@@ -21,7 +21,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestLinear(unittest.TestCase):
@@ -160,18 +159,6 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
         actual = linear(input)
 
         torch.testing.assert_close(actual, expected)
-
-    def test_parallelized_forward_requires_ambient_mesh(self):
-        linear = PartialBiasRowwiseLinear.Config(
-            in_features=4,
-            out_features=2,
-            bias=True,
-            sharding_config=ShardingConfig(),
-        ).build()
-        linear._parallelized = True
-
-        with self.assertRaisesRegex(RuntimeError, "ambient DeviceMesh"):
-            linear(torch.randn(3, 4))
 
 
 class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):

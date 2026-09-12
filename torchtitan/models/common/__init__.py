@@ -72,7 +72,6 @@ __all__ = [
     "RMSNorm",
     "RoPE",
     "RouterGateLinear",
-    "PartialBiasRowwiseLinear",
     "ScaledDotProductInnerAttention",
     "SiLU",
     "TransformerBlock",
