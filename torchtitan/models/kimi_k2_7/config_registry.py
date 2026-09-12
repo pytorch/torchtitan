@@ -17,6 +17,7 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import (
+    AdamW,
     LRSchedulersContainer,
     OptimizersContainer,
     ParamGroupConfig,
@@ -28,6 +29,7 @@ from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
     ComputeLayout,
+    DistMuon,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -333,21 +335,6 @@ def _dist_muon_optimizer(
         "wo": owned,
     }
     num_layers = len(model_config.layers)
-    muon_kwargs = {
-        "lr": lr,
-        "weight_decay": 0.1,
-        "foreach": False,
-        # Kimi K2 uses 0.2 * sqrt(max(rows, columns))
-        # for shape-consistent AdamW-scale updates instead of Muon's original
-        # aspect-ratio scaling.
-        "adjust_lr_fn": "match_rms_adamw",
-    }
-    adamw_kwargs = {
-        "lr": lr,
-        "betas": (0.9, 0.95),
-        "eps": 1e-8,
-        "weight_decay": 0.1,
-    }
     expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
 
     def compute_shardings_for_layer(
@@ -446,23 +433,29 @@ def _dist_muon_optimizer(
         param_groups=[
             ParamGroupConfig(
                 pattern=muon_pattern,
-                optimizer_name="DistMuon",
-                optimizer_kwargs=muon_kwargs,
+                optimizer=DistMuon.Config(
+                    lr=lr,
+                    weight_decay=0.1,
+                    # Kimi K2 uses 0.2 * sqrt(max(rows, columns))
+                    # for shape-consistent AdamW-scale updates instead of
+                    # Muon's original aspect-ratio scaling.
+                    adjust_lr_fn="match_rms_adamw",
+                    compute_sharding_by_fqn=compute_sharding_by_fqn,
+                    bucket_configs=bucket_configs,
+                ),
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
             # and the vision tower.
             ParamGroupConfig(
                 pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs=adamw_kwargs,
+                optimizer=AdamW.Config(
+                    lr=lr,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.1,
+                ),
             ),
         ],
-        optimizer_factory_kwargs_by_name={
-            "DistMuon": {
-                "bucket_configs": bucket_configs,
-                "compute_sharding_by_fqn": compute_sharding_by_fqn,
-            }
-        },
     )
 
 
@@ -480,36 +473,39 @@ def _align_dist_muon_expert_compute_layouts(
     """
     # TODO: Remove this function once parallelism can no longer be overridden
     # from the CLI; the registry layouts are then already final.
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
-        return optimizer_config
-    compute_sharding_by_fqn = cast(
-        dict[str, ComputeLayout],
-        dist_muon_kwargs["compute_sharding_by_fqn"],
-    )
     per_expert = _per_expert_compute_layout(parallelism)
-    aligned_shardings = {}
     changed = False
-    for fqn, compute_layout in compute_sharding_by_fqn.items():
-        if ".moe.routed_experts.inner_experts." in fqn and compute_layout != per_expert:
-            aligned_shardings[fqn] = per_expert
-            changed = True
-        else:
-            aligned_shardings[fqn] = compute_layout
+    # Build a fresh list rather than assigning into the caller's: replace() is
+    # a shallow copy, so param_groups would otherwise be shared by reference.
+    aligned_param_groups = []
+    for param_group in optimizer_config.param_groups:
+        optimizer = param_group.optimizer
+        if not isinstance(optimizer, DistMuon.Config):
+            aligned_param_groups.append(param_group)
+            continue
+        compute_sharding_by_fqn = cast(
+            dict[str, ComputeLayout], optimizer.compute_sharding_by_fqn
+        )
+        aligned_shardings = {}
+        for fqn, compute_layout in compute_sharding_by_fqn.items():
+            if (
+                ".moe.routed_experts.inner_experts." in fqn
+                and compute_layout != per_expert
+            ):
+                aligned_shardings[fqn] = per_expert
+                changed = True
+            else:
+                aligned_shardings[fqn] = compute_layout
+        aligned_param_groups.append(
+            replace(
+                param_group,
+                optimizer=replace(optimizer, compute_sharding_by_fqn=aligned_shardings),
+            )
+        )
     if not changed:
         return optimizer_config
 
-    dist_muon_kwargs["compute_sharding_by_fqn"] = aligned_shardings
-    return replace(
-        optimizer_config,
-        optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
-    )
+    return replace(optimizer_config, param_groups=aligned_param_groups)
 
 
 @dataclass(kw_only=True, slots=True)
