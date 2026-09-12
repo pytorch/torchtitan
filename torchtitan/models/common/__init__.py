@@ -6,11 +6,9 @@
 
 from .activation import ActivationFn, SiTUGLU, SwiGLU
 from .attention import (
-    BaseQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
-    FusedQKVLinear,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -52,8 +50,7 @@ __all__ = [
     "FeedForward",
     "SigmoidGatedFeedForward",
     "FlexInnerAttention",
-    "BaseQKVLinear",
-    "FusedQKVLinear",
+    "QKVLinear",
     "GELU",
     "get_causal_mask_mod",
     "get_document_mask_mod",
@@ -68,7 +65,6 @@ __all__ = [
     "Linear",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
-    "QKVLinear",
     "RMSNorm",
     "RoPE",
     "RouterGateLinear",
