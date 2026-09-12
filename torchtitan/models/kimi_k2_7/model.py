@@ -16,6 +16,7 @@ import torch
 from torch import nn
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -115,11 +116,6 @@ class KimiK25Model(DeepSeekV3Model):
         max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
         padding_mask = batch.get("padding_mask", None)
@@ -137,13 +133,15 @@ class KimiK25Model(DeepSeekV3Model):
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            load_balancer: ContextParallelLoadBalancer = (
+                ContextParallelLoadBalancer.from_config(
+                    parallelism.context_parallel_load_balancer,
+                    input_shardings=input_sharding,
+                    cp_mesh=parallel_dims.get_mesh("cp"),
+                )
             )
+            batch = load_balancer.shard_inputs(batch)
+            batch = self._prepare_context_parallel_metadata(batch, load_balancer)
         batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")

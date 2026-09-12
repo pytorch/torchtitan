@@ -16,11 +16,15 @@ from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.model import FluxModel
 from torchtitan.models.flux.parallelize import parallelize_encoders
-from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
+from torchtitan.models.flux.sharding import (
+    annotate_flux_forward_inputs,
+    flux_input_sharding,
+)
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
@@ -40,6 +44,18 @@ class FluxTrainer(Trainer):
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
+
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if (
+                self.parallelism.context_parallel_degree > 1
+                and self.parallelism.context_parallel_load_balancer is not None
+            ):
+                raise ValueError(
+                    "Flux context parallelism only supports contiguous sharding "
+                    "because image and text inputs may have different sequence "
+                    "lengths. Set context_parallel_load_balancer to None."
+                )
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -227,21 +243,26 @@ class FluxTrainer(Trainer):
 
         # Apply CP sharding if enabled
         if self.parallel_dims.cp_enabled:
-            from torchtitan.distributed.context_parallel import cp_shard
-
-            (
-                latents,
-                latent_pos_enc,
-                t5_encodings,
-                text_pos_enc,
-                target,
-            ), _ = cp_shard(
-                self.parallel_dims.get_mesh("cp"),
-                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                None,  # No attention masks for Flux
-                load_balancer_type=None,
-                input_seq_dims=1,
+            cp_inputs = {
+                "img": latents,
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "target": target,
+            }
+            load_balancer: ContextParallelLoadBalancer = (
+                ContextParallelLoadBalancer.from_config(
+                    self.config.parallelism.context_parallel_load_balancer,
+                    input_shardings=flux_input_sharding(),
+                    cp_mesh=self.parallel_dims.get_mesh("cp"),
+                )
             )
+            cp_inputs = load_balancer.shard_inputs(cp_inputs)
+            latents = cp_inputs["img"]
+            latent_pos_enc = cp_inputs["img_ids"]
+            t5_encodings = cp_inputs["txt"]
+            text_pos_enc = cp_inputs["txt_ids"]
+            target = cp_inputs["target"]
 
         # Accumulate after CP sharding so the count reflects the actual
         # unique tokens this rank processes (not the full pre-split sequence).
