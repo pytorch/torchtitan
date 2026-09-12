@@ -31,7 +31,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
-from .parallelize import parallelize_kimi_k3
+from .parallelize import parallelize_kimi_k3, pipeline_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -471,14 +471,21 @@ def _kimi_k3_config(
     )
 
 
-def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
+def kimi_k3_full_attention_layers(num_layers: int) -> set[int]:
+    """Every fourth layer and the last: the (3 KDA + 1 MLA) pattern."""
+    return {i for i in range(num_layers) if i % 4 == 3} | {num_layers - 1}
+
+
+def _debugmodel(
+    attn_backend: str, moe_comm_backend: str, *, num_layers: int = 24
+) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
         dim=dim,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
-        num_layers=24,
-        full_attention_layers={3, 7, 11, 15, 19, 23},
+        num_layers=num_layers,
+        full_attention_layers=kimi_k3_full_attention_layers(num_layers),
         attn_res_block_size=12,
         num_heads=16,
         q_lora_rank=512,
@@ -515,7 +522,7 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
-        full_attention_layers=set(range(3, 92, 4)) | {92},
+        full_attention_layers=kimi_k3_full_attention_layers(93),
         attn_res_block_size=12,
         num_heads=96,
         q_lora_rank=1536,
@@ -547,6 +554,11 @@ def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
 
 kimi_k3_configs = {
     "debugmodel": (_debugmodel, 16384),
+    # Two blocks of 12 and the 93-layer model's partial block of 9 (93 =
+    # 7 x 12 + 9); 35 units with the embedding and the head, which no pipeline
+    # shape divides, so every split is uneven the way the real one is. Only the
+    # pipeline stress cell uses it; every other flavor keeps "debugmodel".
+    "debugmodel_33_layers": (partial(_debugmodel, num_layers=33), 16384),
     "Kimi-K3": (_kimi_k3, 262144),
 }
 
@@ -579,7 +591,7 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_kimi_k3,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_kimi_k3,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=KimiK3StateDictAdapter,
     )

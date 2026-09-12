@@ -519,6 +519,37 @@ class TestConfigManager(unittest.TestCase):
     def test_default_context_parallel_load_balancer(self):
         assert ParallelismConfig().context_parallel_load_balancer == "headtail"
 
+    def test_pipeline_split_is_given_one_way(self):
+        """The three knobs all describe the split; at most one at a time."""
+        ParallelismConfig(module_fqns_per_model_part=[["tok_embeddings"]])
+        ParallelismConfig(pipeline_parallel_layers_per_stage=2)
+        ParallelismConfig(pipeline_parallel_virtual_stages_per_rank=4)
+        pairs = [
+            dict(
+                module_fqns_per_model_part=[["tok_embeddings"]],
+                pipeline_parallel_layers_per_stage=2,
+            ),
+            dict(
+                module_fqns_per_model_part=[["tok_embeddings"]],
+                pipeline_parallel_virtual_stages_per_rank=4,
+            ),
+            dict(
+                pipeline_parallel_layers_per_stage=2,
+                pipeline_parallel_virtual_stages_per_rank=4,
+            ),
+        ]
+        for kwargs in pairs:
+            with pytest.raises(ValueError, match="describe the pipeline split"):
+                ParallelismConfig(**kwargs)
+
+    def test_virtual_stages_per_rank_is_positive(self):
+        """A stage count below one is not a split."""
+        for value in (0, -1):
+            with pytest.raises(
+                ValueError, match="virtual_stages_per_rank must be at least 1"
+            ):
+                ParallelismConfig(pipeline_parallel_virtual_stages_per_rank=value)
+
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""
         config_manager = ConfigManager()
