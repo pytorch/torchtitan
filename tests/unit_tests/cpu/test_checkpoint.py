@@ -452,10 +452,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertTrue(res)
         manager.close()
 
+    @mock.patch("torchtitan.components.checkpointer.base.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "load")
     def test_initial_load_path_used_when_folder_has_no_valid_checkpoints(
-        self, mock_load, mock_rank
+        self, mock_load, mock_rank, mock_logger
     ):
         initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
         os.makedirs(initial_load_path, exist_ok=True)
@@ -480,6 +481,7 @@ class TestCheckpointManager(unittest.TestCase):
         _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), initial_load_path)
         self.assertTrue(res)
+        mock_logger.warning.assert_not_called()
         manager.close()
 
     @mock.patch("torchtitan.components.checkpointer.base.logger")
@@ -520,11 +522,10 @@ class TestCheckpointManager(unittest.TestCase):
         _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
         mock_logger.warning.assert_called()
-        warning_text = " ".join(
-            str(arg) for call in mock_logger.warning.call_args_list for arg in call.args
-        )
-        self.assertRegex(warning_text, r"initial_load|ignored")
-        self.assertRegex(warning_text, r"folder|step")
+        fmt, *args = mock_logger.warning.call_args.args
+        rendered = fmt % tuple(args)
+        self.assertIn("initial_load", rendered)
+        self.assertIn("step 5", rendered)
         manager.close()
 
     @mock.patch("torchtitan.components.checkpointer.base.logger")
@@ -560,11 +561,10 @@ class TestCheckpointManager(unittest.TestCase):
         _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
         mock_logger.warning.assert_called()
-        warning_text = " ".join(
-            str(arg) for call in mock_logger.warning.call_args_list for arg in call.args
-        )
-        self.assertRegex(warning_text, r"initial_load|ignored")
-        self.assertRegex(warning_text, r"folder|step")
+        fmt, *args = mock_logger.warning.call_args.args
+        rendered = fmt % tuple(args)
+        self.assertIn("initial_load", rendered)
+        self.assertIn("step 5", rendered)
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
