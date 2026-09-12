@@ -215,18 +215,6 @@ class ParallelismConfig:
     layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
     """
 
-    pipeline_parallel_virtual_stages_per_rank: int | None = None
-    """
-    The number of (virtual) pipeline stages each rank holds, for looped schedules that want a
-    stage count the layer arithmetic cannot express. pipeline_parallel_layers_per_stage reaches a
-    stage count only as ceil(units / layers_per_stage), which for some models skips the count a
-    schedule needs: a 33-layer model is 35 units, and that expression takes 35, 18, 12, 9, 7, 6,
-    5, 4, 3, 2, 1 -- so four stages per rank on eight ranks is unreachable, while the split
-    generator itself is happy to produce 32 stages. This field states the count directly; the
-    total is pipeline_parallel_degree * this, so it is a multiple of the degree by construction.
-    Exclusive with pipeline_parallel_layers_per_stage and module_fqns_per_model_part.
-    """
-
     pipeline_parallel_schedule: str = "1F1B"
     """
     Specify the Pipeline Parallel schedule to use. The supported schedules are:
@@ -271,35 +259,14 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        split_knobs = [
-            name
-            for name, value in (
-                ("module_fqns_per_model_part", self.module_fqns_per_model_part),
-                (
-                    "pipeline_parallel_layers_per_stage",
-                    self.pipeline_parallel_layers_per_stage,
-                ),
-                (
-                    "pipeline_parallel_virtual_stages_per_rank",
-                    self.pipeline_parallel_virtual_stages_per_rank,
-                ),
-            )
-            if value is not None
-        ]
-        if len(split_knobs) > 1:
-            raise ValueError(
-                "These parallelism options all describe the pipeline split; give "
-                "at most one of them: "
-                + ", ".join(f"parallelism.{name}" for name in split_knobs)
-                + "."
-            )
         if (
-            self.pipeline_parallel_virtual_stages_per_rank is not None
-            and self.pipeline_parallel_virtual_stages_per_rank < 1
+            self.module_fqns_per_model_part is not None
+            and self.pipeline_parallel_layers_per_stage is not None
         ):
             raise ValueError(
-                "parallelism.pipeline_parallel_virtual_stages_per_rank must be "
-                "at least 1."
+                "parallelism.module_fqns_per_model_part and "
+                "parallelism.pipeline_parallel_layers_per_stage both describe the "
+                "pipeline split; give at most one of them."
             )
         if self.spmd_backend not in {"partial_dtensor", "spmd_types"}:
             raise ValueError(

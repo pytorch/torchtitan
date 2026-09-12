@@ -110,7 +110,6 @@ def test_pipeline_with_first_stage_modules_clears_the_consumed_split_knob(monkey
     assert spelled_out.module_fqns_per_model_part[0][0] == "vision_encoder"
     assert len(spelled_out.module_fqns_per_model_part) == 2
     assert spelled_out.pipeline_parallel_layers_per_stage is None
-    assert spelled_out.pipeline_parallel_virtual_stages_per_rank is None
 
 
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):

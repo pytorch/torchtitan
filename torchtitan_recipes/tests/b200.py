@@ -39,7 +39,6 @@ def kimi_k3_debugmodel_pp2_vp2() -> Trainer.Config:
 
     config = kimi_k3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_virtual_stages_per_rank = 2
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 4
     return config
@@ -49,17 +48,23 @@ def kimi_k3_debugmodel_pp8_vp4() -> Trainer.Config:
     # The stress cell, on a deeper model of its own: 35 units (33 layers, the
     # embedding and the head) over 32 stages, so the split is uneven and the
     # last stage holds the head alone. The depth travels with this recipe, not
-    # with the shared "debugmodel" flavor. The stage count is asked for per
-    # rank, since ceil(units / layers_per_stage) cannot reach 32 for 35 units.
-    # The split itself is core's, so the vision tower rides with the embedding
-    # on the first stage and the AttnRes aggregation with the head on the last.
+    # with the shared "debugmodel" flavor. No layers_per_stage reaches 32 stages
+    # for 35 units, so the recipe spells out core's split for that count, with
+    # the vision tower and the AttnRes aggregation where Kimi K3's entry pins them.
+    from torchtitan.distributed.pipeline_parallel import (
+        _generate_llm_fqn_per_model_part,
+    )
     from torchtitan.models.kimi_k3 import model_registry
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
     config.model_spec = model_registry("debugmodel_33_layers")
     config.parallelism.pipeline_parallel_degree = 8
-    config.parallelism.pipeline_parallel_virtual_stages_per_rank = 4
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 8
+    split = _generate_llm_fqn_per_model_part(
+        8 * 4, 33, last_stage_modules=("output_res_proj", "output_res_norm")
+    )
+    split[0].insert(0, "vision_encoder")
+    config.parallelism.module_fqns_per_model_part = split
     return config

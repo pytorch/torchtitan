@@ -165,13 +165,12 @@ def llm_split_with_pinned_modules(
     aggregate the whole model's output and must run where ``lm_head`` does).
     Neither counts as a layer, so the layer distribution is unchanged.
 
-    Returns the split, and a copy of ``parallelism`` that spells it out: the
-    fields that would otherwise derive one -- ``pipeline_parallel_layers_per_stage``
-    and ``pipeline_parallel_virtual_stages_per_rank`` -- are cleared, because
-    they have been read by now and ``pipeline_llm`` takes the explicit split in
-    preference to them. Clearing them here is also what keeps the config's
-    invariant that at most one field describes the split, so every caller that
-    spells a split out gets that right by construction.
+    Returns the split, and a copy of ``parallelism`` that spells it out:
+    ``pipeline_parallel_layers_per_stage``, which would otherwise derive one, is
+    cleared, because it has been read by now and ``pipeline_llm`` takes the
+    explicit split in preference to it. Clearing it here is also what keeps the
+    config's invariant that at most one field describes the split, so every
+    caller that spells a split out gets that right by construction.
 
     A caller passes the config on to ``pipeline_llm`` and may read the split
     for itself; ``pipeline_with_first_stage_modules`` is the common case,
@@ -199,7 +198,6 @@ def llm_split_with_pinned_modules(
         parallelism,
         module_fqns_per_model_part=fqn_per_part,
         pipeline_parallel_layers_per_stage=None,
-        pipeline_parallel_virtual_stages_per_rank=None,
     )
 
 
@@ -274,37 +272,8 @@ def _get_pipeline_metadata(
     input_weight = parallelism.pipeline_parallel_first_stage_less_layers
     output_weight = parallelism.pipeline_parallel_last_stage_less_layers
 
-    virtual_stages_per_rank = parallelism.pipeline_parallel_virtual_stages_per_rank
-
     # Calculate number of virtual stages
-    if virtual_stages_per_rank is not None:
-        # The stage count stated directly, for a shape the layer arithmetic
-        # below cannot reach. A multiple of the degree by construction.
-        num_virtual_stages = parallel_dims.pp * virtual_stages_per_rank
-        stages_per_rank = virtual_stages_per_rank
-        num_units = num_layers + input_weight + output_weight
-        if num_virtual_stages > num_units:
-            raise ValueError(
-                f"pipeline_parallel_virtual_stages_per_rank="
-                f"{virtual_stages_per_rank} over {parallel_dims.pp} ranks asks "
-                f"for {num_virtual_stages} stages, more than the "
-                f"{num_units} units this model splits into ({num_layers} "
-                f"layers, plus the weighted input and output modules). Stages "
-                f"would be left with nothing to run."
-            )
-        if is_single_stage_schedule and stages_per_rank != 1:
-            raise ValueError(
-                f"Single stage schedule requires exactly 1 stage per rank, but "
-                f"pipeline_parallel_virtual_stages_per_rank="
-                f"{stages_per_rank} was given."
-            )
-        if not is_single_stage_schedule and stages_per_rank < 2:
-            raise ValueError(
-                f"Multi-stage schedule requires at least 2 stages per rank, but "
-                f"pipeline_parallel_virtual_stages_per_rank="
-                f"{stages_per_rank} was given."
-            )
-    elif layers_per_stage is not None:
+    if layers_per_stage is not None:
 
         # Calculate number of virtual stages needed (using ceiling division)
         # This allows for unequal distribution where stages can differ by at most 1 layer

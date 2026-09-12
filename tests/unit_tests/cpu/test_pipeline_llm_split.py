@@ -4,14 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
 import unittest
 from dataclasses import dataclass
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,
-    _get_pipeline_metadata,
     llm_split_with_pinned_modules,
 )
 
@@ -91,43 +89,43 @@ class TestGenerateLLMFqnPerModelPart(unittest.TestCase):
             fqns[-1], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
         )
 
-    def test_the_stage_count_can_be_asked_for_per_rank(self):
-        """Four stages per rank on eight ranks, which no layers_per_stage
-        reaches for this unit count, and both ends carry their pinned modules.
-        """
-        parallelism = ParallelismConfig(
-            pipeline_parallel_degree=8,
-            pipeline_parallel_virtual_stages_per_rank=4,
-            pipeline_parallel_schedule="Interleaved1F1B",
-        )
-        reachable = {
-            math.ceil(35 / layers_per_stage) for layers_per_stage in range(1, 36)
-        }
-        self.assertNotIn(32, reachable)
-
-        num_virtual_stages = _get_pipeline_metadata(
-            _FakeParallelDims(pp=8), parallelism, _FakeModelConfig(num_layers=33)
-        )[0]
-        self.assertEqual(num_virtual_stages, 32)
-
+    def test_both_ends_carry_their_pinned_modules(self):
+        """Present first-stage modules lead stage 0 and the tail follows the head;
+        the config handed back spells the split out and drops the knob it read."""
         fqns, spelled_out = llm_split_with_pinned_modules(
             _FakeModelWithTower(),
-            parallel_dims=_FakeParallelDims(pp=8),
-            parallelism=parallelism,
-            model_config=_FakeModelConfig(num_layers=33),
+            parallel_dims=_FakeParallelDims(pp=2),
+            parallelism=ParallelismConfig(
+                pipeline_parallel_degree=2,
+                pipeline_parallel_layers_per_stage=3,
+                pipeline_parallel_schedule="Interleaved1F1B",
+            ),
+            model_config=_FakeModelConfig(num_layers=10),
             first_stage_module_fqns=("vision_encoder", "absent_module"),
             last_stage_module_fqns=("output_res_proj", "output_res_norm"),
         )
-        # The config it hands back spells the split out and carries no field
-        # that would derive one, so it survives the exclusivity check.
         self.assertEqual(spelled_out.module_fqns_per_model_part, fqns)
-        self.assertIsNone(spelled_out.pipeline_parallel_virtual_stages_per_rank)
         self.assertIsNone(spelled_out.pipeline_parallel_layers_per_stage)
+        self.assertEqual(len(fqns), 4)
+        self.assertEqual(sum(_layers_per_stage(fqns)), 10)
+        self.assertEqual(fqns[0][:2], ["vision_encoder", "tok_embeddings"])
+        self.assertEqual(
+            fqns[-1][-4:], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
+        )
+
+    def test_the_stress_cell_spells_out_core_split(self):
+        """pp8 x vp4 over 35 units: 32 uneven stages, both ends pinned."""
+        from torchtitan_recipes.tests.b200 import kimi_k3_debugmodel_pp8_vp4
+
+        parallelism = kimi_k3_debugmodel_pp8_vp4().parallelism
+        fqns = parallelism.module_fqns_per_model_part
+        assert fqns is not None
+        self.assertIsNone(parallelism.pipeline_parallel_layers_per_stage)
         self.assertEqual(len(fqns), 32)
         self.assertEqual(sum(_layers_per_stage(fqns)), 33)
         self.assertEqual(fqns[0][:2], ["vision_encoder", "tok_embeddings"])
         self.assertEqual(
-            fqns[31], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
+            fqns[-1], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
         )
 
     def test_the_shared_debug_model_keeps_its_depth(self):
@@ -141,39 +139,6 @@ class TestGenerateLLMFqnPerModelPart(unittest.TestCase):
         self.assertEqual(len(kimi_k3_debugmodel().model_spec.model.layers), 24)
         self.assertEqual(len(kimi_k3_debugmodel_pp2_vp2().model_spec.model.layers), 24)
         self.assertEqual(len(kimi_k3_debugmodel_pp8_vp4().model_spec.model.layers), 33)
-
-    def test_the_stage_count_is_validated(self):
-        """More stages than units, and a count the schedule refuses."""
-        with self.assertRaisesRegex(ValueError, "more than the"):
-            _get_pipeline_metadata(
-                _FakeParallelDims(pp=8),
-                ParallelismConfig(
-                    pipeline_parallel_degree=8,
-                    pipeline_parallel_virtual_stages_per_rank=8,
-                    pipeline_parallel_schedule="Interleaved1F1B",
-                ),
-                _FakeModelConfig(num_layers=33),
-            )
-        with self.assertRaisesRegex(ValueError, "exactly 1 stage per rank"):
-            _get_pipeline_metadata(
-                _FakeParallelDims(pp=8),
-                ParallelismConfig(
-                    pipeline_parallel_degree=8,
-                    pipeline_parallel_virtual_stages_per_rank=4,
-                    pipeline_parallel_schedule="1F1B",
-                ),
-                _FakeModelConfig(num_layers=33),
-            )
-        with self.assertRaisesRegex(ValueError, "at least 2 stages per rank"):
-            _get_pipeline_metadata(
-                _FakeParallelDims(pp=8),
-                ParallelismConfig(
-                    pipeline_parallel_degree=8,
-                    pipeline_parallel_virtual_stages_per_rank=1,
-                    pipeline_parallel_schedule="Interleaved1F1B",
-                ),
-                _FakeModelConfig(num_layers=33),
-            )
 
 
 if __name__ == "__main__":
