@@ -20,7 +20,15 @@ from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
-from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
+from torchtitan.models.common.token_dispatcher import (
+    _DeepEPRematDispatchOutput,
+    DeepEPTokenDispatcher,
+)
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -134,6 +142,82 @@ class _CountingGroupedExperts(GroupedExperts):
         else:
             self.num_w13_forwards += 1
         return A.float() @ weight_EOI[0].float().transpose(0, 1)
+
+
+class _CountingRoutedInnerExperts(Module):
+    """Small expert computation used to exercise dispatcher remat boundaries."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(4, 4))
+        self.num_forwards = 0
+
+    def forward(
+        self,
+        x_RD: torch.Tensor,
+        num_tokens_per_local_expert_e: torch.Tensor,
+    ) -> torch.Tensor:
+        self.num_forwards += 1
+        scale = num_tokens_per_local_expert_e.sum().to(x_RD.dtype)
+        return (x_RD @ self.weight) * scale
+
+
+class _CountingDeepEPTokenDispatcher(DeepEPTokenDispatcher):
+    """DeepEP-shaped dispatcher with tensor-only state and counted calls."""
+
+    def __init__(self):
+        self.num_dispatch_forwards = 0
+        self.num_combine_forwards = 0
+
+    def _dispatch_with_tensor_state(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> _DeepEPRematDispatchOutput:
+        del topk_expert_ids_TK, num_local_tokens_per_expert_E
+        self.num_dispatch_forwards += 1
+        num_tokens = x_TD.shape[0]
+        return _DeepEPRematDispatchOutput(
+            routed_input_RD=2 * x_TD,
+            num_tokens_per_local_expert_e=torch.tensor(
+                [num_tokens], device=x_TD.device
+            ),
+            handle_id=torch.tensor([1], dtype=torch.int64),
+            num_recv_tokens_scalar=torch.tensor(num_tokens, dtype=torch.int64),
+            permuted_indices_R=torch.arange(num_tokens, device=x_TD.device),
+            permuted_scores_R=topk_scores_TK.flatten(),
+            recv_scores_RK=None,
+        )
+
+    def _combine_with_tensor_state(
+        self,
+        routed_output_RD: torch.Tensor,
+        dispatch_output: _DeepEPRematDispatchOutput,
+    ) -> torch.Tensor:
+        self.num_combine_forwards += 1
+        assert dispatch_output.permuted_scores_R is not None
+        return routed_output_RD * dispatch_output.permuted_scores_R.unsqueeze(-1)
+
+
+class _RoutedExpertsBlock(Module):
+    def __init__(self):
+        super().__init__()
+        routed_experts = RoutedExperts.__new__(RoutedExperts)
+        Module.__init__(routed_experts)
+        routed_experts.inner_experts = _CountingRoutedInnerExperts()
+        routed_experts.token_dispatcher = _CountingDeepEPTokenDispatcher()
+        self.routed_experts = routed_experts
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        num_tokens = x_TD.shape[0]
+        return self.routed_experts(
+            x_TD,
+            torch.ones(num_tokens, 1, device=x_TD.device),
+            torch.zeros(num_tokens, 1, dtype=torch.int64, device=x_TD.device),
+            torch.tensor([num_tokens], device=x_TD.device),
+        ).sum()
 
 
 def _vision_inner_attention(
@@ -471,6 +555,46 @@ class TestRematRegions(unittest.TestCase):
                     ["grouped_experts.w13", "grouped_experts.w2"],
                 )
                 self.assertIsNotNone(x_RD.grad)
+
+    def test_deepep_communication_policy_controls_dispatch_and_combine(self):
+        for save_regions, expected_count in (
+            ([], 2),
+            (["routed_experts.ep_communication"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                baseline = _RematModel(_RoutedExpertsBlock())
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                actual = _run_forward_backward(remat_model, x_TD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
+                block = remat_model.layers["0"]
+                assert isinstance(block, _RoutedExpertsBlock)
+                dispatcher = block.routed_experts.token_dispatcher
+                assert isinstance(dispatcher, _CountingDeepEPTokenDispatcher)
+                self.assertEqual(dispatcher.num_dispatch_forwards, expected_count)
+                self.assertEqual(dispatcher.num_combine_forwards, expected_count)
+                self.assertEqual(block.routed_experts.inner_experts.num_forwards, 2)
+
+        trace_model = _RematModel(_RoutedExpertsBlock())
+        RegionAC.Config(save_regions=[]).build().apply(trace_model)
+        self.assertEqual(
+            _trace_region_names(lambda: trace_model(torch.randn(3, 4))),
+            [
+                "routed_experts.ep_communication.dispatch",
+                "routed_experts.ep_communication.combine",
+            ],
+        )
 
     def test_vision_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (

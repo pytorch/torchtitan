@@ -86,4 +86,11 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.qwen3_moe_deepep_region_ac_fsdp4_ep4],
+            test_descr="Qwen3 FSDP+DeepEP with RegionAC",
+            test_name="qwen3_fsdp+deepep_region_ac",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
     ]

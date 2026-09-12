@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, NamedTuple
 
 import spmd_types as spmd
 import torch
@@ -42,6 +42,18 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     permuted_indices: torch.Tensor  # for _unpermute
     input_splits: list[int]
     output_splits: list[int]
+
+
+class _AllToAllRematDispatchOutput(NamedTuple):
+    """Tensor-only standard AllToAll state that can cross a remat boundary."""
+
+    routed_input_RD: torch.Tensor  # noqa: N815
+    num_tokens_per_local_expert_e: torch.Tensor
+    token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
+    topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
+    permuted_indices_R: torch.Tensor  # noqa: N815
+    input_splits_EP: torch.Tensor  # noqa: N815
+    output_splits_EP: torch.Tensor  # noqa: N815
 
 
 class LocalTokenDispatcher(Configurable):
@@ -492,6 +504,54 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
+    def _dispatch_with_tensor_state(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> _AllToAllRematDispatchOutput:
+        """Run complete AllToAll dispatch and expose its metadata as tensors."""
+        routed_input_RD, num_tokens_per_local_expert_e, metadata = self.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        assert isinstance(metadata, AllToAllDispatchMetadata)
+        return _AllToAllRematDispatchOutput(
+            routed_input_RD=routed_input_RD,
+            num_tokens_per_local_expert_e=num_tokens_per_local_expert_e,
+            token_indices_experts_sorted_N=metadata.token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=metadata.topk_scores_experts_sorted_N,
+            permuted_indices_R=metadata.permuted_indices,
+            input_splits_EP=torch.tensor(
+                metadata.input_splits, dtype=torch.int64, device="cpu"
+            ),
+            output_splits_EP=torch.tensor(
+                metadata.output_splits, dtype=torch.int64, device="cpu"
+            ),
+        )
+
+    def _combine_with_tensor_state(
+        self,
+        routed_output_RD: torch.Tensor,
+        dispatch_output: _AllToAllRematDispatchOutput,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run complete AllToAll combine from tensor-only dispatch state."""
+        metadata = AllToAllDispatchMetadata(
+            token_indices_experts_sorted_N=(
+                dispatch_output.token_indices_experts_sorted_N
+            ),
+            topk_scores_experts_sorted_N=(dispatch_output.topk_scores_experts_sorted_N),
+            input_shape=dispatch_output.routed_input_RD.shape,
+            permuted_indices=dispatch_output.permuted_indices_R,
+            input_splits=dispatch_output.input_splits_EP.tolist(),
+            output_splits=dispatch_output.output_splits_EP.tolist(),
+        )
+        return self.combine(routed_output_RD, metadata, x_TD)
+
     def _permute(
         self,
         routed_input_RD,
@@ -772,6 +832,18 @@ class EPDispatchMetadata:
     state: object  # Backend-specific dispatch state.
 
 
+class _DeepEPRematDispatchOutput(NamedTuple):
+    """Tensor-only DeepEP dispatch state that can cross a remat boundary."""
+
+    routed_input_RD: torch.Tensor  # noqa: N815
+    num_tokens_per_local_expert_e: torch.Tensor
+    handle_id: torch.Tensor
+    num_recv_tokens_scalar: torch.Tensor
+    permuted_indices_R: torch.Tensor | None  # noqa: N815
+    permuted_scores_R: torch.Tensor | None  # noqa: N815
+    recv_scores_RK: torch.Tensor | None  # noqa: N815
+
+
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
 
@@ -860,6 +932,56 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
         metadata = EPDispatchMetadata(state=state)
         return hidden_states_RD, num_global_tokens_per_local_expert_e, metadata
+
+    def _dispatch_with_tensor_state(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> _DeepEPRematDispatchOutput:
+        """Run complete DeepEP dispatch and expose its state as tensors."""
+        hidden_states_RD, num_tokens_per_local_expert_e, metadata = self.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        state = cast(Any, metadata.state)
+        return _DeepEPRematDispatchOutput(
+            routed_input_RD=hidden_states_RD,
+            num_tokens_per_local_expert_e=num_tokens_per_local_expert_e,
+            handle_id=state.handle_id,
+            num_recv_tokens_scalar=state.handle_id.new_tensor(state.num_recv_tokens),
+            permuted_indices_R=state.permuted_indices,
+            permuted_scores_R=state.permuted_scores,
+            recv_scores_RK=state.recv_scores,
+        )
+
+    def _combine_with_tensor_state(
+        self,
+        routed_output_RD: torch.Tensor,
+        dispatch_output: _DeepEPRematDispatchOutput,
+    ) -> torch.Tensor:
+        """Run complete DeepEP combine from tensor-only dispatch state."""
+        del self
+        from torchtitan.distributed.deepep.deepep import (
+            combine_tokens,
+            DispatchState,
+            sync_combine,
+        )
+
+        state = DispatchState(
+            handle_id=dispatch_output.handle_id,
+            num_recv_tokens=int(dispatch_output.num_recv_tokens_scalar.item()),
+            cudagraphable=dispatch_output.permuted_indices_R is None,
+            permuted_indices=dispatch_output.permuted_indices_R,
+            permuted_scores=dispatch_output.permuted_scores_R,
+            recv_scores=dispatch_output.recv_scores_RK,
+        )
+        combined_TD = combine_tokens(routed_output_RD, state)
+        sync_combine()
+        return combined_TD
 
     # pyrefly: ignore [bad-override]
     def combine(

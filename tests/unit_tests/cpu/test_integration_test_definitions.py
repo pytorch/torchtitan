@@ -94,6 +94,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "fsdp_symm_mem",
         "hsdp+cp+compile+float8",
         "qwen3_fsdp+deepep",
+        "qwen3_fsdp+deepep_region_ac",
     }
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
@@ -114,6 +115,7 @@ def test_specialized_moe_backends_have_ep_coverage() -> None:
         "deepseek_v3_fsdp+cp+tp+minimal_async_ep",
         "deepseek_v3_fsdp+hybridep+compile",
         "qwen3_fsdp+deepep",
+        "qwen3_fsdp+deepep_region_ac",
     }
     h100_model_tests = [
         test for test in build_h100_tests_list() if test.test_name in specialized_names
